@@ -8,11 +8,23 @@ import pytest
 
 from tests.group_support import publish, recordings
 from tests.test_group_preparation import seed
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as file_backed_store,
+    native_sql_calls, without_query_timing,
+)
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.rec import group_discovery, group_preparation, group_versions
 from yt_playlist.repos import group_publication
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # These committed-prefix cases do not construct an HTTP app.
+    pass
 
 
 @pytest.fixture(scope='module')

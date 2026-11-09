@@ -4,10 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_preparation_input
+from tests.store_fixture_support import without_query_timing
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recipe_memberships as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input', 'without_query_timing')
 
 
 LISTS = {'artists': ['Known artist', 'Unadmitted artist', 'Known artist'],

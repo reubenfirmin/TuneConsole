@@ -1,7 +1,7 @@
 """Account setup, validation and reauthentication messages."""
 from urllib.parse import parse_qs, urlsplit
 from tests.home_fixture_support import without_metadata_providers
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,8 +11,20 @@ from tests.setup_support import _FakeRuntime
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
-    with bounded_consumer_schema(()) as schema:
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
         yield schema
+
+
+@pytest.fixture(autouse=True)
+def setup_routes_only(monkeypatch):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, setup, taste
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, setup, taste)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
 
 def test_home_format_setting_is_in_setup_and_persists(

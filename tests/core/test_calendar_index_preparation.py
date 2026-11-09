@@ -6,12 +6,26 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.publication_fixture_support import installed
 from tests.repos.test_foreign_calendar_batches import stamp
-from yt_playlist.core import destination_schema, listening, listening_calendar
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as file_backed_store,
+    publication_consumer_reads, without_query_timing,
+)
+from yt_playlist.core import destination_schema, listening, listening_calendar, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import calendar_indexes as indexes
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    # Calendar rows require real guarded SQL, independently of genre vocabulary.
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'))) as schema:
+        yield schema
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +100,8 @@ def test_empty_index_install_bounded_build_and_explicit_dynamic_selection(instal
     with pytest.raises(MigrationError,match='reconciled preparation'):
         indexes.publish(store.conn,revision=job.progress(store.conn).input_revision)
     before = Store(store._db_path)
-    try:
+    with closing(before.conn), schema_inspection.reuse_tables(before.conn):
+        before.conn.execute('PRAGMA synchronous=OFF')
         before.init_schema(defer_metadata=True)
         assert not indexes.selected(before.conn)
         progress = finish(store.conn)
@@ -105,8 +120,6 @@ def test_empty_index_install_bounded_build_and_explicit_dynamic_selection(instal
         assert any(indexes.OBSERVATIONS+'_scope' in detail and all(field+'=?' in detail
                    for field in ('account_id','unresolved_subject_key','source_day','timezone')) for detail in plan),'\n'.join(plan)
         regular.validate(before.conn)
-    finally:
-        before.conn.close()
 
 
 def test_published_lookups_follow_continuing_writes_resolution_and_source_removal(store):
@@ -169,7 +182,8 @@ def test_failed_copy_does_not_block_ddl_and_reopened_retry_is_idempotent(file_ba
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     reopened = Store(store._db_path)
-    try:
+    with closing(reopened.conn), schema_inspection.reuse_tables(reopened.conn):
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         with pytest.raises(MigrationError,match='retry explicitly'):
             indexes.job(reopened.conn).step(reopened.conn)
         indexes.job(reopened.conn).step(reopened.conn,retry=True)
@@ -177,8 +191,6 @@ def test_failed_copy_does_not_block_ddl_and_reopened_retry_is_idempotent(file_ba
         assert_lookup_rows(reopened.conn)
         indexes.publish(reopened.conn,revision=progress.input_revision)
         assert indexes.selected(reopened.conn)
-    finally:
-        reopened.conn.close()
 
 
 def test_interrupted_publication_and_source_transaction_roll_back_together(store):

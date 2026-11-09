@@ -5,11 +5,14 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store, numbered_store as installed
+from tests.store_fixture_support import numbered_store, numbered_store as installed, preparation_ddl_connection, publication_preparation_input
 from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recommendation_reports as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 VALUE = {'at': 98, 'schema': 2, 'watermark': 'captured-watermark', 'report_id': 'paid-report',
@@ -106,10 +109,10 @@ def test_file_work_releases_snapshot_and_rejects_concurrent_replacement(installe
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_disk_failure_interruption_and_restart_keep_committed_reports(installed, monkeypatch):
+def test_disk_failure_interruption_and_restart_keep_committed_reports(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     raw = seed(store)
-    conn = store.conn
+    conn = preparation_ddl_connection
     preparation.JOB.install(conn)
     checkpoint = preparation.JOB.step(conn, batch_size=1)
     publish = files.publish

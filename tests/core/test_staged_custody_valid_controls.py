@@ -1,5 +1,4 @@
 """A restored rejection input must publish before any corruption is applied."""
-from functools import partial
 import json
 from pathlib import Path
 
@@ -72,7 +71,7 @@ def test_restored_rejection_input_can_publish_valid_original(
         surface = 'tv_pool'
         originals, revision = staged_custody(
             installed, ('tv', surface, 'aliases'),
-            partial(cases.rejection_inputs, surface=surface, with_aliases=True))
+            lambda source: cases.rejection_inputs(source, source.conn, surface=surface, with_aliases=True))
         owner = cases.publication.SOURCES[surface]
         assert owner.selected(store.conn) is None
         owner.publish(store.conn, revision=revision)

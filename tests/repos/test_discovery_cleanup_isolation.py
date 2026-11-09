@@ -27,8 +27,25 @@ from yt_playlist.core import discovery_cache_policy, discovery_provenance
 from yt_playlist.core.proposal_codec import encode_proposals
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
 
 DAY = 86400
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Repository cleanup never starts the application web workers."""
+
+
+@pytest.fixture(autouse=True)
+def query_diagnostics(without_query_timing):
+    """Keep actual SQL/snapshot concurrency without slow-query reporting."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
 
 
 @pytest.fixture(scope='module')

@@ -1,18 +1,26 @@
 """Genre endpoints must escape style clusters and remain reversible during playback."""
 from copy import deepcopy
+from contextlib import closing
 
 import numpy as np
 import pytest
 
 from tests.radio_session_support import controlled_radio_checkpoints, poc, play
+from tests.genre_catalog_support import bound_shipped_catalog
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import genre_identity, schema_inspection
+from yt_playlist.core.store import Store
 from yt_playlist.controllers.genres import Genres
-from yt_playlist.rec import embedding_vectors as embed, musical_character, radio_tuning
+from yt_playlist.rec import embedding_vectors as embed, measurement, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, GENRE_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_genres import GenrePolicy, genre
 from yt_playlist.web import radio_session
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -28,12 +36,36 @@ def isolated_genre_evidence_home(tmp_path_factory):
 
 
 @pytest.fixture
-def store(tmp_path, radio_genre_template, monkeypatch):
-    with radio_genre_template.open(tmp_path / 'radio-genres.db') as source:
-        source._fixture_genre_pools = deepcopy(radio_genre_template.result)
-        source._fixture_radio_pool = [track for rows in source._fixture_genre_pools.values() for track in rows]
+def store(tmp_path, genre_schema, monkeypatch):
+    source = Store(tmp_path / 'radio-genres.db')
+    with closing(source.conn), schema_inspection.reuse_tables(source.conn):
+        initialize_consumer(source, genre_schema)
+        source.conn.execute('PRAGMA synchronous=NORMAL')
+        source.conn.execute('PRAGMA wal_autocheckpoint=0')
         with reuse_reporting_reader(source, monkeypatch):
+            # Genre selection consumes completed policies. Keep all nine modes,
+            # 108 subjects and their actual SQL/files without exporting and
+            # restoring a second copy of this private candidate input.
+            with monkeypatch.context() as patch:
+                patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                              ('genre-input', {'schema': 4, 'algorithm': 'genre-input'}))
+                source._fixture_genre_pools = seed_genre_pools(source)
+            source._fixture_radio_pool = [track for rows in source._fixture_genre_pools.values() for track in rows]
             yield source
+
+
+@pytest.fixture(scope='module')
+def genre_schema():
+    # Keep the shipped aliases and shared Electronic/Synthwave family. The
+    # remaining catalog is unrelated to these nine modes and 108 recordings.
+    with bounded_consumer_schema(()) as schema:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_shipped_catalog(patch, {'electronic', 'synthwave', 'jazz', 'rock', 'ambient'})
+            schema.execute('PRAGMA query_only=OFF')
+            with schema:
+                genre_identity.seed_catalog(schema)
+            schema.execute('PRAGMA query_only=ON')
+        yield schema
 
 
 @pytest.fixture
@@ -41,10 +73,10 @@ def genre_pools(store):
     return store._fixture_genre_pools
 
 
-@pytest.fixture(scope='module')
-def genre_evidence(radio_genre_template):
-    source = radio_genre_template.source
-    tracks = [track for rows in radio_genre_template.result.values() for track in rows]
+@pytest.fixture
+def genre_evidence(store):
+    source = store
+    tracks = source._fixture_radio_pool
     labels = {track['genre'] for track in tracks}
     axes = source.genres.feature_axes(labels)
     axes.update(source.genres.feature_axes({axis for pair in axes.values() for axis in pair if axis}))
@@ -58,9 +90,8 @@ def prepared_genre_inputs(store, genre_evidence, monkeypatch):
 
 
 def prepare_genre_controller(store, genre_evidence, monkeypatch):
-    # The two controller scenarios change playback and tuning, with fixed
-    # taxonomy. Keep actual selection/pinning and use completed lower-layer
-    # meanings; the candidate scenarios below retain real taxonomy reads.
+    # These scenarios change playback, tuning and candidates against fixed
+    # taxonomy. Keep actual selection/pinning with completed lower-layer reads.
     axes, details, profiles = genre_evidence
     original = Genres.feature_axes
 
@@ -122,7 +153,8 @@ def candidates(store, theme, **values):
 
 
 @pytest.mark.parametrize("energy", [0, .5, 1])
-def test_eclectic_actively_changes_genre_beyond_nearest_clusters(store, genre_pools, monkeypatch, energy):
+def test_eclectic_actively_changes_genre_beyond_nearest_clusters(
+        store, genre_pools, monkeypatch, energy, prepared_genre_inputs):
     c = candidates(store, 0, comfort=1, energy=energy)
     seed = genre_pools["1"][0]
     assert all(genre_pools[mid][0]["genre"] == "Electronic" for mid in c.neighbours["1"])

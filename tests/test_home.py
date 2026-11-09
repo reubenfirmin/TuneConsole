@@ -5,18 +5,21 @@ from fastapi.testclient import TestClient
 
 from tests.home_fixture_support import home_page_bytecode, home_pages_only, publish_menu, without_metadata_providers
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, reuse_reporting_reader,
+)
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
 
-pytestmark = pytest.mark.usefixtures('home_pages_only', 'without_metadata_providers')
+pytestmark = pytest.mark.usefixtures('home_pages_only', 'without_metadata_providers', 'native_sql_calls')
 
 
 @pytest.fixture(scope='module')
 def home_page_schema():
-    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'))) as schema:
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno')),
+                                 snapshot_guards=False) as schema:
         yield schema
 
 
@@ -29,10 +32,12 @@ def store(request, tmp_path, home_page_schema, monkeypatch):
     schema = request.getfixturevalue('_pristine_current_schema') if full_catalog else home_page_schema
     database = Store(tmp_path / 'home-pages.db')
     with closing(database.conn):
-        initialize_consumer(database, schema)
-        database.conn.execute('PRAGMA synchronous=NORMAL')
+        # These pages consume admitted SQL; snapshot races and power-loss
+        # durability belong below their rendering and navigation boundary.
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, schema, snapshot_guards=False)
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(database, monkeypatch):
+        with mock_snapshot_coordinator(database, monkeypatch), reuse_reporting_reader(database, monkeypatch):
             yield database
 
 
@@ -179,7 +184,7 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
     # onboarding alone does not establish earlier listening or complete setup.
     assert not client.get('/home/growth').json()['ready_areas']['rediscover']
     assert 'id="onboarding-feed"' in client.get('/').text
-    publish_personal_mix(store, tracks_per_card=1)
+    publish_personal_mix(store)
     from tests.home_fixture_support import returning_listener
     returning_listener(store, 'mixes', now=1000)
     assert client.get('/home/growth').json()['ready_areas']['rediscover']

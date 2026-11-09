@@ -1,19 +1,28 @@
 """Real SQL for bounded ranks, private leases, publication and shared lifetime."""
 from dataclasses import replace
+from contextlib import closing
 import sqlite3
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database
+from tests.core.test_compact_groups_migration import apply as compact_groups, historical_groups
+from tests.genre_catalog_support import bound_catalog
+from tests.repos.test_compact_group_publication import (
+    bounded_compact_group_template as compact_group_template,
+)
 from tests.repos.test_group_retention import drain, enable
-from tests.store_fixture_support import reuse_reporting_reader
-from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
+from tests.store_fixture_support import reuse_reporting_reader, without_query_timing
+from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools, schema_inspection
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import v073_recommendation_publications as migration
+from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.migrations.runner import Context
+from yt_playlist.core.store import Store
 from yt_playlist.repos import group_retention, recommendation_publication as publication
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 def test_recommendation_input_keeps_compact_groups_and_read_only_custody(compact_group_template):
@@ -25,10 +34,33 @@ def test_recommendation_input_keeps_compact_groups_and_read_only_custody(compact
 
 
 @pytest.fixture
-def recommendations(database):
-    store, _ = database
-    initialize_recommendations(store)
-    return store
+def recommendations(tmp_path, recommendation_predecessor):
+    # Build one actual populated input. A template Store, file restore and
+    # intermediate v72 revision guards add no publication obligation here.
+    path = tmp_path / 'recommendations.db'
+    with historical_groups(path, recommendation_predecessor) as conn:
+        compact_groups(conn)
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        initialize_recommendations(store)
+        assert store.taste_groups.head_generation() == 'second'
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+        yield store
+
+
+@pytest.fixture(scope='module')
+def recommendation_predecessor():
+    # Retired v69 tables are needed by the real v70 conversion. Replay that
+    # complete predecessor instead of assembling a modern schema projection.
+    with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as source:
+        bound_catalog(patch, entries=(('house', 'House'),))
+        source.execute('PRAGMA foreign_keys=ON')
+        runner.migrate(source, registry=registry.MIGRATIONS[:69])
+        source.execute('PRAGMA query_only=ON')
+        yield source
 
 
 def initialize_recommendations(store):

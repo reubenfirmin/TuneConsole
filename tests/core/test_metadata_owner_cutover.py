@@ -8,12 +8,21 @@ import time
 
 import pytest
 
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import catalog, metadata_deliveries, metadata_native
 from yt_playlist.core.migrations import current, migrate, registry, regular, v080_metadata_evidence as migration
 from yt_playlist.core.migrations.runner import Context, MigrationError
 from yt_playlist.core.store import Store
 from yt_playlist.core.storage_maintenance import StorageMaintenance
 from yt_playlist.providers.base import MetadataObservation
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These startup and maintenance workers run without an HTTP application."""
 
 
 @pytest.fixture
@@ -71,6 +80,7 @@ def convert(store):
         return migration.convert_legacy(store.conn)
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_startup_retains_metadata_owners_and_binds_installed_revision_triggers(predecessor, monkeypatch):
     store = predecessor
     entry, _, _ = seed(store)
@@ -81,6 +91,7 @@ def test_startup_retains_metadata_owners_and_binds_installed_revision_triggers(p
     monkeypatch.setattr(migration, 'convert_legacy', checked_conversion)
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema()
         assert reopened._schema_compatibility and not reopened.activity_paused
         assert reopened.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 79
@@ -187,12 +198,14 @@ def test_suspended_regular_ddl_keeps_predecessor_writable(predecessor, monkeypat
         reopened.conn.close()
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_failed_regular_ddl_does_not_pause_or_automatically_retry(predecessor, monkeypatch):
     from yt_playlist.core.migrations import regular
     store = predecessor
     entry, _, _ = seed(store)
     before = dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone())
     reopened = Store(store._db_path)
+    reopened.conn.execute('PRAGMA synchronous=OFF')
     reopened.init_schema(defer_metadata=True)
     maintenance = StorageMaintenance(reopened)
     original = regular.CHANGES
@@ -235,9 +248,11 @@ def test_failed_regular_ddl_does_not_pause_or_automatically_retry(predecessor, m
         resumed.conn.close()
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_pre_cutover_snapshot_cannot_publish_after_background_commit(predecessor):
     seed(predecessor)
     reopened = Store(predecessor._db_path)
+    reopened.conn.execute('PRAGMA synchronous=OFF')
     reopened.init_schema(defer_metadata=True)
     maintenance = StorageMaintenance(reopened)
     published = []

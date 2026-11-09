@@ -5,8 +5,9 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    numbered_store as installed, preparation_ddl_connection, publication_consumer_reads,
+)
 from yt_playlist.core import radio_provenance, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import radio_origins as preparation
@@ -56,7 +57,7 @@ def seed(store):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_original_list_scalar_null_blank_and_repeated_origins_remain_exact(installed):
+def test_original_list_scalar_null_blank_and_repeated_origins_remain_exact(installed, preparation_ddl_connection):
     store, _ = installed
     conn = store.conn
     original = seed(store)
@@ -77,7 +78,7 @@ def test_original_list_scalar_null_blank_and_repeated_origins_remain_exact(insta
     assert radio_provenance.ids(conn) == ['shared', 'LM', 'missing']
     assert files.collect_orphans(conn) == 0
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(conn)
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

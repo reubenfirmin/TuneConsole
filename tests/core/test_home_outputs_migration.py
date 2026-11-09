@@ -6,12 +6,21 @@ import sqlite3
 import pytest
 
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input
+from tests.store_fixture_support import install_numbered_input, without_query_timing
+from yt_playlist.core import schema_inspection
 from yt_playlist.core import home_outputs as owner, json_cache, recommendation_outputs as files
 from yt_playlist.core.migrations import migrate, registry, v091_home_outputs
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
 from yt_playlist.core.db_revisions import Revisions
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Display storage tests have no HTTP app or periodic worker."""
 
 
 @pytest.fixture(scope='module')
@@ -30,11 +39,13 @@ def predecessor(tmp_path, request, home_predecessor_schema, monkeypatch):
     bound_catalog(monkeypatch)
     store = Store(tmp_path / 'home.db')
     request.addfinalizer(store.conn.close)
+    store.conn.execute('PRAGMA synchronous=OFF')
     store.conn.execute('PRAGMA journal_mode=WAL')
     home_predecessor_schema.backup(store.conn)
     store._bind_repositories()
     store._snapshot_revisions = Revisions(store.conn)
-    yield store
+    with schema_inspection.reuse_tables(store.conn):
+        yield store
 
 
 def upgrade(store):
@@ -52,7 +63,7 @@ def large_display_input(home_predecessor_schema, tmp_path_factory):
     store._bind_repositories()
     store._snapshot_revisions = Revisions(store.conn)
     value = {'schema': 2, 'generation': 'original-generation', 'context': {'artifact': 'missing-artifact'},
-             'menus': {'wheelhouse': [{'title': 'été' * (files.MAX_BYTES // 13 + 1)}], 'explore': []}}
+             'menus': {'wheelhouse': [{'title': 'été' * 400000}], 'explore': []}}
     raw = json.dumps(value)
     with store.conn.atomic():
         store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('adaptive_group_preview', raw, None))

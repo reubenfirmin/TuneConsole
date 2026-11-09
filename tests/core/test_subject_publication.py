@@ -6,12 +6,16 @@ import sqlite3
 import pytest
 
 from tests.core.test_listening_preparation import connect, finish, populated
-from tests.core.test_predecessor_writes import consumer_installed as guarded_installed
-from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads
+from tests.store_fixture_support import guarded_numbered_store as guarded_installed
+from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads, publication_preparation_input
+from tests.store_fixture_support import native_sql_calls, preparation_ddl_connection, without_query_timing
 from yt_playlist.core import entity_names
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_subjects as preparation, subject_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +55,8 @@ def test_preopened_and_new_readers_match_native_precision_and_subjects(guarded_i
     store.history.record_history_plays(other, 1704672000, ['song 0|artist', 'outside|unknown'], source_timezone='UTC')
     preopened, native = Store(store._db_path), Store(tmp_path / 'native.db')
     try:
+        preopened.conn.execute('PRAGMA synchronous=OFF')
+        native.conn.execute('PRAGMA synchronous=OFF')
         preopened.init_schema(defer_metadata=True)
         store.conn.backup(native.conn)
         runner.migrate(native.conn, registry=registry.MIGRATIONS)
@@ -92,7 +98,7 @@ def test_preopened_and_new_readers_match_native_precision_and_subjects(guarded_i
 
 @pytest.mark.parametrize('installed', [79, 99], indirect=True)
 def test_continuing_capture_and_source_removal_withdraw_and_reconcile(
-        installed, publication_consumer_reads):
+        installed, publication_consumer_reads, preparation_ddl_connection):
     store, _ = installed
     account = populated(store)
     with connect(store) as job:
@@ -122,7 +128,7 @@ def test_continuing_capture_and_source_removal_withdraw_and_reconcile(
         with pytest.raises(sqlite3.IntegrityError, match='future cleanup'):
             job.execute('DELETE FROM '+publication.table('events')+' WHERE stage=?', (identity,))
         job.rollback()
-        regular.migrate(job)
+        regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -194,6 +200,7 @@ def test_independent_source_check_rejects_incomplete_or_wrong_preparation(instal
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
+@pytest.mark.usefixtures('publication_preparation_input')
 def test_interrupted_batch_keeps_checkpoint_and_can_resume_after_reopen(installed):
     store, _ = installed
     populated(store)
@@ -219,7 +226,9 @@ def test_interrupted_batch_keeps_checkpoint_and_can_resume_after_reopen(installe
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_slow_verification_allows_real_capture_and_rejects_stale_selection(installed, monkeypatch):
+@pytest.mark.usefixtures('publication_preparation_input')
+def test_slow_verification_allows_real_capture_and_rejects_stale_selection(
+        installed, monkeypatch, preparation_ddl_connection):
     from concurrent.futures import ThreadPoolExecutor
     import threading
     store, _ = installed
@@ -242,7 +251,7 @@ def test_slow_verification_allows_real_capture_and_rejects_stale_selection(insta
         assert entered.wait(3)
         try:
             store.history.record_play_event(account, 'during|verification', None, 1706000000, source_timezone='UTC')
-            regular.migrate(store.conn)
+            regular.migrate(preparation_ddl_connection)
         finally:
             release.set()
         with pytest.raises(MigrationError, match='reconciled preparation|changed during verification'):
@@ -253,6 +262,7 @@ def test_slow_verification_allows_real_capture_and_rejects_stale_selection(insta
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
+@pytest.mark.usefixtures('publication_preparation_input')
 def test_oversized_source_fails_durably_without_blocking_regular_schema(installed):
     store, _ = installed
     populated(store)

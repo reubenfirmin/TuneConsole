@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 from yt_playlist.rec import choice_evidence
 
 
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.usefixtures('without_metadata_providers')
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     # Album controls read the two actual genres represented by this catalog.
-    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno')), snapshot_guards=False) as schema:
         yield schema
 
 

@@ -1,9 +1,28 @@
 """Bound SQLite work as the library grows; wall-clock limits hide quadratic joins."""
 import datetime as dt
+
+import pytest
+
+from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
 from yt_playlist.core.activity import interrupt_query
 from yt_playlist.core.albums import observe
 from yt_playlist.core.artists import ensure
 from yt_playlist.core import listening
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # SQL work bounds do not need an HTTP application or background workers.
+    pass
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 def test_library_reads_do_not_rescan_history_or_containers_per_song(store):

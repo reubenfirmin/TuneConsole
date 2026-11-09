@@ -136,7 +136,7 @@ def test_stale_worker_mixes_survive_new_dislikes_until_replaced(store, prepared)
     assert [p['tracks'] for p in result.protos] == [p['tracks'] for p in first.protos]
 
 
-@pytest.mark.usefixtures('returning_vibe_listener')
+@pytest.mark.usefixtures('returning_vibe_listener', 'cached_menu_schema')
 def test_vibe_fresh_reuses_prepared_recipe_inputs(store, monkeypatch):
     from yt_playlist.rec import recipes, vibe_pools
 

@@ -8,6 +8,7 @@ import pytest
 
 from tests.core.test_road_trip_draft_preparation import recipe, seed
 from tests.store_fixture_support import guarded_numbered_store as installed, publication_consumer_reads
+from tests.store_fixture_support import numbered_store as unadmitted_installed, native_sql_calls, preparation_ddl_connection
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import draft_publication as publication, road_trip_drafts as preparation
 from yt_playlist.core.store import Store
@@ -37,13 +38,13 @@ def stage(conn, size=128, *, worker_size=128):
     pytest.fail('Draft map did not finish bounded fixture')
 
 
-def rejection_inputs(store):
+def rejection_inputs(store, conn):
     identity, raw = seed(store)
     owner = publication.OWNER
-    owner.worker.install(store.conn)
+    owner.worker.install(conn)
     for _ in range(20):
-        if owner.worker.step(store.conn).status == 'prepared':
-            assert owner.selected(store.conn) is None
+        if owner.worker.step(conn).status == 'prepared':
+            assert owner.selected(conn) is None
             return identity, raw
     pytest.fail('Draft preparation did not finish bounded rejection prefix')
 
@@ -103,32 +104,33 @@ def test_empty_map_and_numeric_cursor_keep_latest_recipe_eligibility(installed):
     assert all('SCAN' not in row[-1] for row in query)
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['time', 'revision', 'reference', 'missing', 'extra', 'original'])
-def test_incorrect_draft_fields_members_or_original_cannot_publish(installed, failure):
-    store, _ = installed
-    identity, raw = rejection_inputs(store)
+def test_incorrect_draft_fields_members_or_original_cannot_publish(unadmitted_installed, preparation_ddl_connection, failure):
+    store, _ = unadmitted_installed
+    conn = preparation_ddl_connection
+    identity, raw = rejection_inputs(store, conn)
     owner = publication.OWNER
-    with store.conn:
+    with conn:
         if failure == 'time':
-            store.conn.execute('UPDATE '+preparation.HEAD+' SET updated_at=12')
+            conn.execute('UPDATE '+preparation.HEAD+' SET updated_at=12')
         elif failure == 'revision':
-            store.conn.execute('UPDATE '+preparation.HEAD+" SET source_revision='wrong'")
+            conn.execute('UPDATE '+preparation.HEAD+" SET source_revision='wrong'")
         elif failure == 'reference':
-            store.conn.execute('UPDATE '+preparation.ITEMS+" SET entry_id=NULL,recording_id=NULL,unresolved_reason='unadmitted_video'")
+            conn.execute('UPDATE '+preparation.ITEMS+" SET entry_id=NULL,recording_id=NULL,unresolved_reason='unadmitted_video'")
         elif failure == 'missing':
-            store.conn.execute('DELETE FROM '+preparation.ITEMS+" WHERE selection_state='picked' AND position=1")
+            conn.execute('DELETE FROM '+preparation.ITEMS+" WHERE selection_state='picked' AND position=1")
         elif failure == 'extra':
-            store.conn.execute('INSERT INTO '+preparation.ITEMS+
+            conn.execute('INSERT INTO '+preparation.ITEMS+
                 " SELECT recipe_id,generation,'picked',99,'extra',NULL,NULL,'unadmitted_video' FROM "+preparation.HEAD)
         else:
-            Path(store.conn.execute('SELECT filename FROM '+preparation.PARTS+' LIMIT 1').fetchone()[0]).write_bytes(b'corrupt')
-    selected = owner.step(store.conn).id
+            Path(conn.execute('SELECT filename FROM '+preparation.PARTS+' LIMIT 1').fetchone()[0]).write_bytes(b'corrupt')
+    selected = owner.step(conn).id
     with pytest.raises((MigrationError, ValueError, OSError)):
-        owner.publish(store.conn, stage=selected)
-    assert owner.selected(store.conn) is None
+        owner.publish(conn, stage=selected)
+    assert owner.selected(conn) is None
     assert store.road_trip.get_road_trip_draft(identity) == json.loads(raw)
-    regular.migrate(store.conn)
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -234,7 +236,8 @@ def test_full_selection_budget_retains_order_and_repeated_uploads(installed):
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(installed):
+def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(
+        installed, native_sql_calls, preparation_ddl_connection):
     store, _ = installed
     identity, raw = seed(store)
     owner = publication.OWNER
@@ -242,7 +245,7 @@ def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(installed
     owner.publish(store.conn, stage=selected)
     Path(store.conn.execute('SELECT filename FROM '+preparation.PARTS+' LIMIT 1').fetchone()[0]).unlink()
     store.init_schema(defer_metadata=True)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     publication.repair(store.conn, identity)
     owner.publish(store.conn, stage=selected)
     assert owner.value(store.conn, selected, identity) == raw
@@ -256,5 +259,5 @@ def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(installed
         replace(owner.worker, prepare=fail).step(store.conn, retry=True)
     failed = owner.worker.progress(store.conn)
     assert failed.status == 'failed'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert owner.worker.progress(store.conn) == failed

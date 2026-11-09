@@ -8,7 +8,10 @@ import pytest
 
 from tests.store_fixture_support import guarded_numbered_store as installed
 from tests.core.test_collection_document_preparation import finish, seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    native_sql_calls,
+    numbered_store as unadmitted_installed, preparation_ddl_connection, publication_consumer_reads,
+)
 from yt_playlist.core import entity_names, spotify_job_state
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import collection_documents as preparation, import_publication as publication
@@ -90,10 +93,10 @@ def test_account_field_presence_and_unresolved_identity_do_not_admit_accounts(in
     assert before == list(map(tuple, store.conn.execute('SELECT * FROM main.identities')))
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields', 'account', 'recovery', 'original', 'plan'])
-def test_unverified_fields_or_files_never_select_a_report(installed, failure):
-    store, _ = installed
+def test_unverified_fields_or_files_never_select_a_report(unadmitted_installed, failure, preparation_ddl_connection):
+    store, _ = unadmitted_installed
     raw, revision = rejection_inputs(store)
     header = publication.OWNER.capture(store.conn)
     with store.conn:
@@ -109,7 +112,7 @@ def test_unverified_fields_or_files_never_select_a_report(installed, failure):
         publication.OWNER.publish(store.conn, revision=revision)
     assert publication.OWNER.selected(store.conn) is None
     assert store.settings.get_setting(spotify_job_state.KEY) == raw
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -169,7 +172,8 @@ def test_real_import_worker_keeps_account_spelling_and_reconciles_continuing_upd
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_file_explicit_recovery_failure_keeps_regular_ddl_independent(installed):
+def test_missing_file_explicit_recovery_failure_keeps_regular_ddl_independent(
+        installed, native_sql_calls, preparation_ddl_connection):
     store, _ = installed
     _, raw, _, _ = seed(store)
     owner = publication.OWNER
@@ -183,7 +187,7 @@ def test_missing_file_explicit_recovery_failure_keeps_regular_ddl_independent(in
     before = owner.worker.progress(store.conn)
     assert before.status == 'failed'
     store.init_schema(defer_metadata=True)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert owner.worker.progress(store.conn) == before
     with pytest.raises(MigrationError, match='retry explicitly'):
         owner.worker.step(store.conn)

@@ -1,5 +1,6 @@
 """Enrichment jobs, page reconnection and provider fallbacks."""
-from contextlib import closing
+from contextlib import closing, nullcontext
+from copy import copy
 import urllib.error
 
 import pytest
@@ -8,17 +9,18 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.web_support import _client
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, native_sql_calls
 from yt_playlist.core.store import Store
 
 pytestmark = pytest.mark.usefixtures('canonical_genre_matcher')
 
 
 @pytest.fixture
-def discogs_store(monkeypatch):
+def discogs_store(monkeypatch, native_sql_calls):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import playlists
+    from yt_playlist.core import schema_inspection
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [playlists.build(ctx)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
@@ -26,9 +28,16 @@ def discogs_store(monkeypatch):
                ('electronic', 'Electronic'), ('classical', 'Classical'))
     with bounded_consumer_schema(entries) as schema:
         database = Store(':memory:')
-        with closing(database.conn):
+        with closing(database.conn), schema_inspection.reuse_tables(database.conn):
+            database.conn.execute('PRAGMA synchronous=OFF')
             initialize_consumer(database, schema)
             bound_catalog(monkeypatch, entries=entries)
+            # Reporting consumes this private writer's real SQL. Reader-pool
+            # admission and database backup are below the enrichment workflow.
+            reader = copy(database)
+            reader._read_only = True
+            reader._bind_repositories()
+            monkeypatch.setattr(database, 'read_view', lambda **kwargs: nullcontext(reader))
             yield database
 
 

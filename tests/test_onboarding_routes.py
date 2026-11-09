@@ -1,9 +1,13 @@
 import json
-from contextlib import closing
+from contextlib import closing, ExitStack
+import sys
 from tests.derived_rating_support import seed_dislike, seed_like
-from tests.home_fixture_support import home_page_bytecode, home_pages_only, without_metadata_providers
+from tests.home_fixture_support import home_page_bytecode, home_pages_only, home_routes_only, without_metadata_providers
 from tests.test_growth_readiness import readiness_policy
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, uncontended_file_consumer_store as store,
+    reuse_reporting_reader, without_query_timing,
+)
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,40 +16,37 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
-pytestmark = pytest.mark.usefixtures('home_pages_only', 'without_metadata_providers', 'readiness_policy')
-
-
-@pytest.fixture
-def onboarding_routes(monkeypatch, home_pages_only):
-    from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, playlists
-
-    # Keep actual onboarding, format selection and the generated playlist page.
-    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, home, playlists)])
+pytestmark = pytest.mark.usefixtures(
+    'home_pages_only', 'without_metadata_providers', 'readiness_policy', 'without_query_timing')
 
 
 @pytest.fixture(scope='module')
-def onboarding_schema():
-    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'))) as schema:
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz')), snapshot_guards=False) as schema:
         yield schema
 
 
-@pytest.fixture
-def store(tmp_path, onboarding_schema, monkeypatch):
-    database = Store(tmp_path / 'onboarding-routes.db')
-    with closing(database.conn):
-        initialize_consumer(database, onboarding_schema)
-        database.conn.execute('PRAGMA synchronous=OFF')
-        database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(database, monkeypatch):
-            yield database
+@pytest.fixture(autouse=True)
+def client_lifecycle(request, monkeypatch):
+    if 'store' not in request.fixturenames:
+        yield
+        return
+    request.getfixturevalue('store')
+    make_client = _client
+    with ExitStack() as clients:
+        def managed_client(database):
+            remote, client = make_client(database)
+            return remote, clients.enter_context(client)
+
+        monkeypatch.setattr(sys.modules[__name__], '_client', managed_client)
+        yield
 
 
 def _client(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     fake = FakeClient()
-    return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0),
+    return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0,
+                                       background_work=False),
                             base_url="http://127.0.0.1")
 
 
@@ -77,7 +78,7 @@ def test_saved_album_starter_arrives_without_tracks_or_training(store):
     assert store.rec_model.rec_content_vectors_count() == 0
 
 
-def test_album_starter_can_use_familiar_artists_but_not_incomplete_imports(store, onboarding_routes):
+def test_album_starter_can_use_familiar_artists_but_not_incomplete_imports(store, home_routes_only):
     from yt_playlist.core import albums
     from tests.conftest import seed_catalog_track
 
@@ -194,7 +195,7 @@ def test_overlong_starter_has_an_actionable_length_error_without_remote_writes(
     assert store.rec_query.tracks_total() == 0
 
 
-def test_home_shows_onboarding_when_thin(store, onboarding_routes):
+def test_home_shows_onboarding_when_thin(store, home_routes_only):
     _synced_thin(store)
     _, c = _client(store)
     html = c.get("/").text
@@ -241,7 +242,7 @@ def test_onboard_done_dismisses(store):
     assert store.settings.get_setting("onboard_dismissed") == "1"
 
 
-def test_first_mix_polls_until_verified_songs_arrive(store, onboarding_routes):
+def test_first_mix_polls_until_verified_songs_arrive(store, home_routes_only):
     from yt_playlist.library.sync import sync_identity
     from tests.conftest import _track
 
@@ -346,11 +347,11 @@ def test_import_details_remain_available_after_restart(store):
 
 
 @pytest.mark.parametrize("outcome", ["partial", "skipped", "failed"])
-def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, outcome, onboarding_routes):
+def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, outcome, home_routes_only):
     from tests.onboarding_support import publish_personal_mix
 
     _, client = _client(store)
-    publish_personal_mix(store)
+    publish_personal_mix(store, tracks_per_card=1)
     store.rec_proposals.put_proposals('listening_choices', {
         'home_format': {'episodes': {'mixes': 1}}}, 1000)
     store.settings.set_setting("last_sync_at", "1000")
@@ -555,14 +556,19 @@ def test_empty_or_invalid_historical_offers_do_not_complete_setup(
         store.conn.close()
 
 
-def test_snapshot_readiness_does_not_write_setup_completion(store):
-    from tests.onboarding_support import publish_personal_mix
-    from tests.test_growth_journey import early_journey
-    from yt_playlist.rec import onboarding
+def test_snapshot_readiness_does_not_write_setup_completion(store, monkeypatch):
+    from yt_playlist.core.db_revisions import Revisions
+    from yt_playlist.rec import account_growth, onboarding
 
+    # This case owns the actual read-only snapshot and its completion fence.
+    store._snapshot_revisions = Revisions(store.conn)
+    monkeypatch.delattr(store, 'read_snapshot')
     store.settings.set_setting('last_sync_at', '1000')
-    early_journey(store)
-    publish_personal_mix(store)
+    # Completion consumes the growth result. Real readiness and predecessor
+    # progression have their own owners in test_growth_readiness/journey.
+    # Keep the read-only snapshot and durable completion write real here.
+    monkeypatch.setattr(account_growth, 'view', lambda *_: {
+        'ready_formats': {'mixes': True, 'albums': False}})
     with store.read_snapshot() as snapshot:
         assert not onboarding.initial_setup_pending(snapshot.store, 1000)
     assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
@@ -605,7 +611,7 @@ def test_imported_likes_and_dismissal_cannot_open_an_empty_home(store):
 
 
 @pytest.mark.parametrize("with_mode", [False, True])
-def test_unusable_prepared_offers_do_not_end_setup(store, with_mode, onboarding_routes):
+def test_unusable_prepared_offers_do_not_end_setup(store, with_mode, home_routes_only):
     import numpy as np
     from tests.home_fixture_support import publish_menu
     from yt_playlist.rec import home_cache, onboarding
@@ -615,7 +621,7 @@ def test_unusable_prepared_offers_do_not_end_setup(store, with_mode, onboarding_
     if with_mode:
         store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [],
             "centroid": np.array([1.0]), "size": 5, "rep_keys": []}], [], 1000)
-    publish_menu(store, count=3, surface='home_tuned')
+    publish_menu(store, count=3, tracks_per_card=1, surface='home_tuned')
     assert not onboarding.prepared_mixes_ready(store, 1000)
     assert onboarding.initial_setup_pending(store, 1000)
     assert not client.get("/home/onboard/status").json()["setup"]["complete"]
@@ -624,7 +630,8 @@ def test_unusable_prepared_offers_do_not_end_setup(store, with_mode, onboarding_
     assert not onboarding.prepared_mixes_ready(store, 1000)
     assert onboarding.initial_setup_pending(store, 1000)
     assert not client.get("/home/onboard/status").json()["setup"]["complete"]
-    payload = publish_menu(store, prefix='complete', surface='home_tuned')
+    # Four distinct playable offers remain ready after one song is disliked.
+    payload = publish_menu(store, prefix='complete', tracks_per_card=2, surface='home_tuned')
     assert onboarding.prepared_mixes_ready(store, 1000)
     track = payload['menus'][0]['protos'][0]['tracks'][0]
     seed_dislike(store, track['key'], until=None, now=1000)

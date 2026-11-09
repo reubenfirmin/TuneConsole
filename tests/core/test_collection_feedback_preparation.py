@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_preparation_input
 from yt_playlist.core import account_auth_state, album_feedback_storage, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_feedback as preparation
@@ -12,6 +12,9 @@ from yt_playlist.core.store import Store
 
 
 JOBS = (preparation.FEEDBACK_JOB, preparation.AUTH_JOB)
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +57,7 @@ def seed(store):
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 def test_independent_jobs_keep_exact_source_judgments_accounts_and_unknowns(installed, preparation_ddl_connection):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     original = seed(store)
     for job in JOBS:
         job.install(conn)

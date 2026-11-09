@@ -5,12 +5,15 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as admitted_installed
-from tests.publication_timing_support import publication_costs
-from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_preparation_input
+from tests.store_fixture_support import without_query_timing
 from yt_playlist.core import group_evidence, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import home_outputs as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -72,9 +75,9 @@ def home_inputs(installed):
 
 @pytest.mark.parametrize('installed', [79, 90], indirect=True)
 def test_exact_display_parts_policies_and_existing_evidence_roots_are_additive(
-        installed, home_inputs, publication_costs):
+        installed, preparation_ddl_connection, home_inputs):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     original = home_inputs
     roots = root_rows(conn)
     preparation.JOB.install(conn)
@@ -224,13 +227,13 @@ def test_real_group_and_recommendation_publications_keep_their_original_retentio
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_oversized_root_fails_without_truncation_or_releasing_the_source(installed):
+def test_oversized_root_fails_without_truncation_or_releasing_the_source(installed, preparation_ddl_connection):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     store.rec_proposals.put_proposals('home_prepared', {}, 1)
     raw = 'x' * (preparation.ROOT_BYTES + 1)
-    with conn.atomic():
-        group_evidence.retain_unknown_context(conn, 'prepared', 'proposal:home_prepared:context', raw, 'missing_context', 1)
+    with store.conn.atomic():
+        group_evidence.retain_unknown_context(store.conn, 'prepared', 'proposal:home_prepared:context', raw, 'missing_context', 1)
     preparation.JOB.install(conn)
     finish(preparation.JOB, conn)
     preparation.ROOT_JOB.install(conn)
@@ -302,13 +305,14 @@ def test_interrupt_and_disk_failure_preserve_checkpoint_until_explicit_retry(ins
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
 @pytest.mark.parametrize('raw', ['{', '{"schema":true}', '{"generation":12}', '{"value":NaN}'])
-def test_invalid_display_fails_durably_without_blocking_regular_ddl(installed, raw):
+def test_invalid_display_fails_durably_without_blocking_regular_ddl(installed, preparation_ddl_connection, raw):
     store, _ = installed
-    with store.conn:
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?, ?, 1)', ('home_prepared', raw))
-    preparation.JOB.install(store.conn)
+    conn = preparation_ddl_connection
+    with conn:
+        conn.execute('INSERT INTO rec_proposals VALUES (?, ?, 1)', ('home_prepared', raw))
+    preparation.JOB.install(conn)
     with pytest.raises((MigrationError, ValueError)):
-        finish(preparation.JOB, store.conn)
-    assert preparation.JOB.progress(store.conn).status == 'failed'
-    assert store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='home_prepared'").fetchone()[0] == raw
-    regular.migrate(store.conn)
+        finish(preparation.JOB, conn)
+    assert preparation.JOB.progress(conn).status == 'failed'
+    assert conn.execute("SELECT payload FROM rec_proposals WHERE surface='home_prepared'").fetchone()[0] == raw
+    regular.migrate(conn)

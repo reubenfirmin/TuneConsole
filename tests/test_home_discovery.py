@@ -10,10 +10,13 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_page_bytecode, publish_cards, returning_listener, without_metadata_providers
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, native_sql_calls
 from yt_playlist.core.recommendation_invalidation import clear_model_display
 from yt_playlist.rec import discover, fresh_pool, home_cards, home_prepared, home_vibe, surfaces
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
 
 
 @pytest.fixture(scope='module')

@@ -1,9 +1,9 @@
 """Home preparation finishes its captured inputs without holding UI locks."""
 import asyncio
+from copy import copy
 from tests.derived_rating_support import seed_dislike
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
-from copy import deepcopy
 import logging
 import sqlite3
 import threading
@@ -12,13 +12,24 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
-from tests.prepared_fixture_support import prepared_template, roots
+from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.rec.rec_worker import RecWorker
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These worker and publication checks construct no HTTP application."""
 
 
 @pytest.fixture(scope="module")
@@ -34,33 +45,31 @@ def isolation_template(isolation_schema):
 
 
 @pytest.fixture(params=["memory", "file"])
-def database(request, tmp_path, isolation_schema, isolation_template, ranking_inputs, monkeypatch):
+def database(request, tmp_path, isolation_schema, ranking_inputs, monkeypatch, native_sql_calls):
     path = ":memory:" if request.param == "memory" else tmp_path / "state.db"
-    with isolation_template.open(path) as store:
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        # Retain transactions, snapshots and files in this disposable input.
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, isolation_schema)
         if request.param == 'file':
             # Preserve actual WAL commits/readers without a passive checkpoint
             # after every pool row. Checkpoint policy has independent owners.
             store.conn.execute('PRAGMA wal_autocheckpoint=0')
-        store._isolation_saved_heads = deepcopy(isolation_template.result)
+        else:
+            # Reporting reads consume current rows; their reader admission is
+            # below these tests. Keep preparation's separate, real read_snapshot.
+            reader = copy(store)
+            reader._read_only = True
+            reader._bind_repositories()
+            monkeypatch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
         reporting = reuse_reporting_reader(store, monkeypatch) if request.param == 'file' else nullcontext()
         with reporting:
-            assert store._isolation_saved_heads == isolation_template.result
-            assert all(head is not original for head, original in zip(
-                store._isolation_saved_heads, isolation_template.result, strict=True))
-            _assert_content_inputs(store, isolation_template.source)
+            # Seed this private input directly. Capturing a template, exporting
+            # its files and restoring it repeated setup below the publication
+            # and concurrent-write behavior these cases exercise.
+            _seed(store)
             _saved(store)
-            destinations = roots(store.conn)
-            copied = 0
-            for name, source in isolation_template.files.items():
-                destination = destinations[name]
-                assert destination != source
-                for path in source.rglob("*"):
-                    if path.is_file():
-                        private = destination / path.relative_to(source)
-                        assert private.read_bytes() == path.read_bytes()
-                        assert not private.samefile(path)
-                        copied += 1
-            assert copied
             yield store
 
 
@@ -72,7 +81,7 @@ def ranking_inputs(monkeypatch):
     actual model vectors, bucketing, temporal membership, policy capture, typed
     file staging and SQL heads while racing the captured work with UI writes.
     """
-    from yt_playlist.rec import ppr
+    from yt_playlist import rec
 
     def pools(reader, now, limit):
         library = surfaces.ForYouItem('Song', 'Artist', None, 'video', None, 0,
@@ -84,15 +93,16 @@ def ranking_inputs(monkeypatch):
 
     monkeypatch.setattr(mode_surfaces, '_rank_pools', pools)
     monkeypatch.setattr(mode_surfaces.vibe_pools, 'prepare', lambda *args, **kwargs: None)
-    monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {1: ['song|artist']})
+    monkeypatch.setattr(rec, 'ppr', SimpleNamespace(
+        mode_rankings=lambda *args, **kwargs: {1: ['song|artist']}), raising=False)
 
 
 @pytest.fixture
-def _worker_store(tmp_path, isolation_schema):
-    store = Store(tmp_path / "state.db")
+def _worker_store(tmp_path):
+    # The worker control retains actual fresh startup as well as real seeding.
+    store = Store(tmp_path / 'state.db')
     with closing(store.conn):
-        store.conn.execute('PRAGMA synchronous=OFF')
-        initialize_consumer(store, isolation_schema)
+        store.init_schema()
         yield store
 
 
@@ -107,8 +117,14 @@ def _seed(store):
     fresh = {'key': 'fresh|new artist', 'video_id': 'fresh', 'title': 'Fresh',
              'artist': 'New artist', 'genre': 'House'}
     seed_publication_subjects(store, [fresh], discoveries=[fresh['key']])
-    publish_bundles(store, {'all': {'wheelhouse': [{'key': keys[0], 'video_id': 'video',
-        'title': 'Song', 'artist': 'Artist', 'genre': 'House'}]}}, 1, fresh=[fresh])
+    # The initial saved publication is a lower input to these replacement and
+    # rollback tests. Policy calculation under test runs after this fixture.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                      ('isolation-input', {'schema': 4, 'algorithm': 'isolation-input'}))
+        with schema_inspection.reuse_tables(store.conn):
+            publish_bundles(store, {'all': {'wheelhouse': [{'key': keys[0], 'video_id': 'video',
+                'title': 'Song', 'artist': 'Artist', 'genre': 'House'}]}}, 1, fresh=[fresh])
     store._isolation_saved_heads = store.recommendations.heads()
     return store._isolation_saved_heads
 

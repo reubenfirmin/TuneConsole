@@ -6,7 +6,13 @@ import threading
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, guarded_numbered_store as guarded_installed, publication_consumer_reads
+from tests.store_fixture_support import (
+    numbered_store as installed,
+    guarded_numbered_store as guarded_installed,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    without_query_timing,
+)
 from tests.core.test_discovery_owner_preparation import seed
 from tests.core.test_discovery_artist_publication import ready as artist_ready
 from yt_playlist.core import artists, collection_recovery
@@ -15,7 +21,7 @@ from yt_playlist.core.preparation import discovery_publication as publication, d
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -23,10 +29,8 @@ def disable_periodic_library_sync():
     """Publication owners do not construct an HTTP application."""
 
 
-def prepare(conn):
+def prepare_subjects(conn):
     owner = publication.owner(conn)
-    artifact, stage = artist_ready(conn)
-    artifact.publish(conn, stage=stage)
     for job in owner.jobs:
         job.install(conn)
         for _ in range(500):
@@ -37,13 +41,24 @@ def prepare(conn):
     return owner
 
 
-def ready(conn, size=16):
-    owner = prepare(conn)
+def prepare(conn):
+    artifact, stage = artist_ready(conn)
+    artifact.publish(conn, stage=stage)
+    return prepare_subjects(conn)
+
+
+def stage_discovery(conn, size=16):
+    owner = publication.owner(conn)
     for _ in range(500):
         stage = owner.step(conn, batch_size=size)
         if stage.complete:
             return owner, stage.id
     pytest.fail('Discovery subject fixture did not stage')
+
+
+def ready(conn, size=16):
+    prepare(conn)
+    return stage_discovery(conn, size=size)
 
 
 def read(conn, owner, stage, name):
@@ -252,34 +267,35 @@ def test_canonical_artist_collision_preserves_first_metadata_last_explanation_an
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('damage', ['clock', 'identity', 'original', 'missing', 'classification'])
-def test_independent_publication_check_rejects_damaged_preparation(installed, damage):
+def test_independent_publication_check_rejects_damaged_preparation(installed, preparation_ddl_connection, damage):
     store, _ = installed
+    conn = preparation_ddl_connection
     _, aid, _, _ = seed(store)
-    with store.conn:
-        store.conn.execute("INSERT INTO main.genre_classification_legacy(artist_id,raw_label,resolution_reason) VALUES (?,'Captured','unknown_genre')", (aid,))
-    owner = prepare(store.conn)
-    with store.conn:
+    with conn:
+        conn.execute("INSERT INTO main.genre_classification_legacy(artist_id,raw_label,resolution_reason) VALUES (?,'Captured','unknown_genre')", (aid,))
+    owner = prepare(conn)
+    with conn:
         if damage == 'clock':
-            store.conn.execute('UPDATE '+preparation.SOURCES+' SET first_found_at=999')
+            conn.execute('UPDATE '+preparation.SOURCES+' SET first_found_at=999')
         elif damage == 'identity':
-            store.conn.execute('UPDATE '+preparation.IMPRESSIONS+' SET artist_id=999 WHERE artist_id IS NOT NULL')
+            conn.execute('UPDATE '+preparation.IMPRESSIONS+' SET artist_id=999 WHERE artist_id IS NOT NULL')
         elif damage == 'original':
-            store.conn.execute('UPDATE '+preparation.ORIGINALS+" SET snapshot=json_set(snapshot,'$.scanned_at',999) WHERE source_owner='artist_scans'")
+            conn.execute('UPDATE '+preparation.ORIGINALS+" SET snapshot=json_set(snapshot,'$.scanned_at',999) WHERE source_owner='artist_scans'")
         elif damage == 'missing':
-            store.conn.execute('DELETE FROM '+preparation.SOURCES)
+            conn.execute('DELETE FROM '+preparation.SOURCES)
         else:
-            store.conn.execute('UPDATE '+preparation.CLASSIFICATIONS+" SET raw_label='Altered'")
+            conn.execute('UPDATE '+preparation.CLASSIFICATIONS+" SET raw_label='Altered'")
     for _ in range(20):
-        stage = owner.step(store.conn)
+        stage = owner.step(conn)
         if stage.complete:
             break
     assert stage.complete
     with pytest.raises(MigrationError, match='differs|omits'):
-        owner.publish(store.conn, stage=stage.id)
-    assert owner.selected(store.conn) is None
-    assert not store.conn.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
+        owner.publish(conn, stage=stage.id)
+    assert owner.selected(conn) is None
+    assert not conn.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
     assert store.discovery.get_discovered_artists()[0]['offered_count'] == 9
-    regular.migrate(store.conn)
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -336,7 +352,8 @@ def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_pu
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_slow_verification_leaves_real_writes_and_regular_migrations_available(installed, monkeypatch):
+def test_slow_verification_leaves_real_writes_and_regular_migrations_available(
+        installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     _, aid, _, _ = seed(store)
     owner, stage = ready(store.conn)
@@ -358,7 +375,7 @@ def test_slow_verification_leaves_real_writes_and_regular_migrations_available(i
         try:
             assert entered.wait(15)
             store.discovery.record_discovery_impressions('artist', ['@artist:'+str(aid)], 'actual-writer', 9)
-            regular.migrate(store.conn)
+            regular.migrate(preparation_ddl_connection)
         finally:
             release.set()
         task.result(timeout=15)
@@ -367,7 +384,8 @@ def test_slow_verification_leaves_real_writes_and_regular_migrations_available(i
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_repeated_stage_schema_validation_does_not_reserve_writer(installed, monkeypatch):
+def test_repeated_stage_schema_validation_does_not_reserve_writer(
+        installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     _, aid, _, _ = seed(store)
     owner, stage = ready(store.conn)
@@ -394,7 +412,7 @@ def test_repeated_stage_schema_validation_does_not_reserve_writer(installed, mon
             # WAL permits both of these writers while schema inspection owns
             # only a reader. The previous BEGIN IMMEDIATE blocked them here.
             store.discovery.record_discovery_impressions('artist', ['@artist:'+str(aid)], 'during-schema-check', 9)
-            regular.migrate(store.conn)
+            regular.migrate(preparation_ddl_connection)
         finally:
             release.set()
         task.result(timeout=15)

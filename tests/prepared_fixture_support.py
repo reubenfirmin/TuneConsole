@@ -92,16 +92,20 @@ def roots(conn):
 
 def coordinates(conn, *, logical=()):
     result = []
-    for table, in conn.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+    # Filter in SQLite rather than returning every column through the diagnostic
+    # cursor and issuing a separate PRAGMA for every unrelated owner.
+    fields = conn.execute("SELECT owners.name, fields.name FROM main.sqlite_schema AS owners "
+        "CROSS JOIN pragma_table_info(owners.name, 'main') AS fields "
+        "WHERE owners.type='table' AND owners.name NOT LIKE 'sqlite_%' "
+        "AND (fields.name='filename' OR substr(fields.name,-9)='_filename')").fetchall()
+    for table, column in fields:
         quoted = '"' + table.replace('"', '""') + '"'
-        for column in conn.execute(f'PRAGMA table_info({quoted})'):
-            if column[1] == 'filename' or column[1].endswith('_filename'):
-                field = '"' + column[1].replace('"', '""') + '"'
-                for filename, in conn.execute(f'SELECT DISTINCT {field} FROM {quoted} WHERE {field} IS NOT NULL'):
-                    if (table, column[1]) in logical:
-                        assert not Path(filename).is_absolute(), (table, column[1], filename)
-                        continue
-                    result.append((quoted, field, filename))
+        field = '"' + column.replace('"', '""') + '"'
+        for filename, in conn.execute(f'SELECT DISTINCT {field} FROM main.{quoted} WHERE {field} IS NOT NULL'):
+            if (table, column) in logical:
+                assert not Path(filename).is_absolute(), (table, column, filename)
+                continue
+            result.append((quoted, field, filename))
     return result
 
 
@@ -137,7 +141,7 @@ class PreparedTemplate:
         try:
             # Private consumers require real commit visibility and rollback;
             # host power-loss durability is outside this fixture's contract.
-            target.conn.execute('PRAGMA synchronous=NORMAL')
+            target.conn.execute('PRAGMA synchronous=OFF')
             self.restore(target)
             for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
                 setattr(target, name, getattr(self.source, name))
@@ -332,6 +336,9 @@ def historical_template(pristine, seed, *, database, logical_coordinates=(), sch
             patch.delenv('DEEPSEEK_API_KEY', raising=False)
             source = Store(database)
             resources.callback(source.conn.close)
+            # Historical fixture inputs keep real commits, recovery files and
+            # reopen behavior; host power-loss durability is not their subject.
+            source.conn.execute('PRAGMA synchronous=OFF')
             if completed is None:
                 pristine.backup(source.conn)
                 source._bind_repositories()
@@ -372,7 +379,7 @@ def prepared_template(pristine, seed, *, database=None, defer_metadata=False):
             source = Store(':memory:' if database is None else database)
             resources.callback(source.conn.close)
             if database is not None:
-                source.conn.execute('PRAGMA synchronous=NORMAL')
+                source.conn.execute('PRAGMA synchronous=OFF')
             if isinstance(pristine, PristineSchema) and not defer_metadata:
                 # The session builder supplies exact shipped empty SQL below
                 # startup admission. Bind this private consumer like store

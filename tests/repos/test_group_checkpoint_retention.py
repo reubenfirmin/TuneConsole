@@ -6,9 +6,28 @@ import pytest
 
 from tests.group_support import publish, recordings
 from tests.repos.test_group_retention import drain, enable
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as file_backed_store,
+    without_query_timing,
+)
 from yt_playlist.core import group_preparation_state, group_retention_progress
 from yt_playlist.core import group_reads as group_queries
 from yt_playlist.repos import group_retention
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # Checkpoint retention does not start the web app or periodic workers.
+    pass
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('pop', 'Pop'), ('house', 'House'))) as schema:
+        yield schema
 
 
 @pytest.mark.parametrize('durable', [False, True])

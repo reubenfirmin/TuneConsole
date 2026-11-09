@@ -8,9 +8,10 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.genre_catalog_support import bound_catalog
+from tests.regular_schema_support import register_independent_ddl
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, install_numbered_input
 from yt_playlist.core import schema_definition as current
-from yt_playlist.core.migrations import registry, runner
+from yt_playlist.core.migrations import registry, regular, runner
 from yt_playlist.core.migrations.audit import audit
 from yt_playlist.core.storage_maintenance import StorageMaintenance
 from yt_playlist.core.store import Store
@@ -293,13 +294,15 @@ def test_audit_interruption_preserves_writes_history_and_revisions(installed_lib
 
 
 @pytest.mark.parametrize('version', [81, current.VERSION])
-def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(installed_library, version, request):
+def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(installed_library, version, monkeypatch):
     from yt_playlist.providers import genres
     from yt_playlist.util import genre_catalog
     from yt_playlist.web.app import create_app
 
     path = installed_library(version)
     with closing(sqlite3.connect(path)) as setup, setup:
+        if version < current.VERSION:
+            register_independent_ddl(monkeypatch, setup)
         setup.execute("INSERT OR REPLACE INTO settings VALUES ('genre_catalog_revision','previous')")
         if version < 85:
             setup.execute("INSERT INTO genre_whitelist(name) VALUES ('Jazz')")
@@ -337,7 +340,7 @@ def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(in
 
 
 def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(
-        tmp_path, caplog, installed_library):
+        tmp_path, caplog, installed_library, monkeypatch):
     """An independent schema writer never starts the frozen bulk conversions."""
     import hashlib
     import json
@@ -368,6 +371,8 @@ def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(
     path = installed_library(84)
     setup = sqlite3.connect(path)
     try:
+        change = register_independent_ddl(monkeypatch, setup)
+        regular_history = [(entry.version, entry.name) for entry in regular.CHANGES]
         with setup:
             setup.execute("INSERT INTO genre_whitelist(name) VALUES ('Jazz')")
             setup.execute("INSERT INTO settings VALUES ('upgrade-preserved','original')")
@@ -422,7 +427,7 @@ def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(
         assert 'genre_whitelist' in store._snapshot_revisions.tables
         assert 'genre_preferences' not in store._snapshot_revisions.tables
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
-        assert store.conn.execute('SELECT version FROM schema_changes').fetchone()[0] == 1
+        assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == regular_history
         assert store.conn.execute('SELECT * FROM independent_preparation_ddl').fetchall() == []
         report['installed_owners_retained'] = True
         # The schema guard conservatively rejects work captured before any DDL.

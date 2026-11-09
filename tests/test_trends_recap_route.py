@@ -10,9 +10,13 @@ from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from yt_playlist.rec.recap_details import slides
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_page_bytecode, returning_listener
+from tests.home_fixture_support import home_page_bytecode, returning_listener, without_metadata_providers
 from tests.onboarding_support import publish_personal_mix
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, without_query_timing
+from yt_playlist.core import schema_inspection
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'without_metadata_providers')
 
 
 @pytest.fixture(scope='session')
@@ -137,6 +141,7 @@ def _client(_pristine_current_schema):
             store = Store(":memory:")
             resources.callback(store.conn.close)
             initialize_consumer(store, _pristine_current_schema)
+            resources.enter_context(schema_inspection.reuse_tables(store.conn))
             app = _recap_app(store, story, synced=synced, now_fn=now_fn)
             client = resources.enter_context(TestClient(app, base_url="http://127.0.0.1"))
             return client, store

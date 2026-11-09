@@ -19,8 +19,12 @@ from yt_playlist.web.app import create_app
 from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient, _track
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +55,7 @@ def store(tmp_path, road_trip_schema, monkeypatch):
         initialize_consumer(database, road_trip_schema)
         database.conn.execute('PRAGMA synchronous=NORMAL')
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(database, monkeypatch):
+        with reuse_reporting_reader(database, monkeypatch), schema_inspection.reuse_tables(database.conn):
             yield database
     finally:
         database.conn.close()

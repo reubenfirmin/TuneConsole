@@ -1,15 +1,25 @@
 """Genre publication proves exact coverage without changing installed writers."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 import sqlite3
 import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.store_fixture_support import numbered_store
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.genre_catalog_support import bound_shipped_catalog, use_shipped_catalog
+from tests.regular_schema_support import register_independent_ddl
+from tests.store_fixture_support import (
+    native_sql_calls,
+    numbered_store,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    publication_preparation_input,
+    publication_schema_inspections,
+)
 from yt_playlist.core import albums, genre_classifications, genre_identity
-from yt_playlist.core.migrations import MigrationError, regular
+from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import genre_classifications as preparation, genre_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
@@ -18,6 +28,20 @@ from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Publication tests do not construct the HTTP application."""
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'publication_schema_inspections', 'publication_preparation_input')
+
+
+@pytest.fixture(autouse=True)
+def publication_vocabulary(request, monkeypatch):
+    """Keep shipped aliases beneath classification and publication checks."""
+    fixture = next((name for name in ('installed', 'numbered_store')
+                    if name in request.fixturenames), None)
+    if fixture is not None:
+        request.getfixturevalue(fixture)
+        use_shipped_catalog(monkeypatch)
+        bound_shipped_catalog(monkeypatch, ('drum bass', 'synth pop', 'jazz', 'rock'))
 
 
 @pytest.mark.parametrize('version', [79, 85])
@@ -65,6 +89,7 @@ def test_selection_keeps_null_blank_ambiguity_and_all_originals_with_pinned_read
     before = {owner: list(map(tuple, conn.execute('SELECT * FROM main.'+owner))) for owner in preparation.JOB.keys}
     other = Store(store._db_path)
     try:
+        other.conn.execute('PRAGMA synchronous=OFF')
         other.init_schema(defer_metadata=True)
         with other.read_snapshot() as snapshot:
             pinned = snapshot.store
@@ -103,7 +128,7 @@ def test_selection_keeps_null_blank_ambiguity_and_all_originals_with_pinned_read
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_continuing_label_and_reference_writes_withdraw_and_reconcile(installed):
+def test_continuing_label_and_reference_writes_withdraw_and_reconcile(installed, publication_consumer_reads):
     store, _ = installed
     seed(store)
     conn = store.conn
@@ -186,7 +211,7 @@ def test_genre_and_canonical_discovery_selections_compose(installed):
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
 @pytest.mark.parametrize('damage', ['typed', 'raw', 'missing'])
-def test_independent_verification_rejects_preparation_damage(installed, damage):
+def test_independent_verification_rejects_preparation_damage(installed, damage, publication_consumer_reads):
     store, _ = installed
     seed(store)
     conn = store.conn
@@ -208,7 +233,7 @@ def test_independent_verification_rejects_preparation_damage(installed, damage):
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_interrupted_batch_resume_and_final_fence_rejects_late_writer(installed, monkeypatch):
+def test_interrupted_batch_resume_and_final_fence_rejects_late_writer(installed, monkeypatch, publication_consumer_reads):
     store, _ = installed
     seed(store)
     conn = store.conn
@@ -243,8 +268,10 @@ def test_interrupted_batch_resume_and_final_fence_rejects_late_writer(installed,
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
-def test_slow_verification_keeps_writes_and_regular_admission_available(installed, monkeypatch):
+def test_slow_verification_keeps_writes_and_regular_admission_available(
+        installed, monkeypatch, publication_consumer_reads, preparation_ddl_connection):
     store, _ = installed
+    register_independent_ddl(monkeypatch, store.conn)
     seed(store)
     stage = ready(store.conn)
     entered, release = threading.Event(), threading.Event()
@@ -268,7 +295,7 @@ def test_slow_verification_keeps_writes_and_regular_admission_available(installe
             assert entered.wait(15)
             with store.conn:
                 genre_classifications.write(store.conn, 'recordings', 1, 'Concurrent edit')
-            regular.migrate(store.conn)
+            regular.migrate(preparation_ddl_connection)
         finally:
             release.set()
         task.result(timeout=15)
@@ -293,3 +320,21 @@ def test_oversized_source_fails_durably_and_regular_schema_remains_independent(n
     preparation.JOB.step(conn, retry=True)
     stage = ready(conn)
     publication.publish(conn, identity=stage)
+
+
+@pytest.mark.parametrize('numbered_store', [79, 85], indirect=True)
+def test_native_takeover_preserves_retained_selection_inputs(numbered_store, tmp_path):
+    store, _ = numbered_store
+    seed(store)
+    stage = ready(store.conn)
+    publication.publish(store.conn, identity=stage)
+    rows = list(map(tuple, store.conn.execute('SELECT * FROM '+publication.table('rows'))))
+    with closing(sqlite3.connect(tmp_path/'native.db')) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA synchronous=OFF')
+        store.conn.backup(conn)
+        runner.migrate(conn, registry=registry.MIGRATIONS[:86])
+        regular.migrate(conn)
+        assert publication.selected(conn) is None
+        assert list(map(tuple, conn.execute('SELECT * FROM '+publication.table('rows')))) == rows

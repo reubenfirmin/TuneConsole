@@ -1,4 +1,6 @@
 """Small published Home menus for tests of consumers, not preparation."""
+import logging
+
 import pytest
 
 from tests.recommendation_support import seed_publication_subjects
@@ -6,6 +8,11 @@ from tests.store_fixture_support import initialize_consumer
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_cache, home_cards, home_prepared
+
+
+def service(store):
+    """Real card service without importing HTTP tests or the web lifecycle."""
+    return home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
 
 
 @pytest.fixture
@@ -24,6 +31,21 @@ def install_home_routes(monkeypatch):
                         lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+
+
+@pytest.fixture
+def home_control_routes(monkeypatch, home_routes_only):
+    """Construct the real card/control routes and their application lifecycle."""
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, home_board, home_discovery, home_tuning
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    def build(ctx):
+        views = HomeViews(ctx)
+        return [app_update.build(ctx), home_board.build(ctx, views), home_tuning.build(ctx, views),
+                home_discovery.build(ctx, views)]
+
+    monkeypatch.setattr(webapp, 'build_all', build)
 
 
 @pytest.fixture(scope='module')

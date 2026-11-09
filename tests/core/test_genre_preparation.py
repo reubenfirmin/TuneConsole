@@ -1,13 +1,51 @@
 """Retained label owners keep serving while bounded genre staging reconciles."""
+from contextlib import closing
 from dataclasses import replace
 import json
+import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from yt_playlist.core import albums, genre_identity
-from yt_playlist.core.migrations import MigrationError, regular
+from tests.genre_catalog_support import bound_shipped_catalog
+from tests.regular_schema_support import register_independent_ddl
+from tests.store_fixture_support import install_numbered_input, without_query_timing
+from yt_playlist.core import albums, genre_identity, schema_inspection
+from yt_playlist.core.db_revisions import Revisions
+from yt_playlist.core.migrations import MigrationError, regular, runner
 from yt_playlist.core.preparation.genre_classifications import JOB
+from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Genre preparation does not construct the HTTP application."""
+
+
+@pytest.fixture
+def installed(request, tmp_path, monkeypatch):
+    """Real predecessor SQL and shipped labels beneath the preparation worker."""
+    version = request.param
+    bound_shipped_catalog(monkeypatch, ('drum bass', 'synth pop', 'jazz', 'rock'))
+    store = Store(tmp_path / 'genres.db')
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        install_numbered_input(store.conn, version)
+        store._schema_compatibility = True
+        store._bind_repositories()
+        store._snapshot_revisions = Revisions(store.conn)
+        assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        register_independent_ddl(monkeypatch, store.conn)
+        yield store, version
+        assert store.conn.execute('SELECT id FROM independent_preparation_ddl').fetchall() == []
+        # Validate the physical installed layout independently of serving TEMP
+        # views, which intentionally expose the newer repository interface.
+        with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+            reader.row_factory = sqlite3.Row
+            runner.validate_version(reader, version)
+            assert not reader.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def finish(conn):

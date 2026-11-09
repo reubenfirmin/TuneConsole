@@ -8,13 +8,18 @@ import pytest
 
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, without_query_timing,
+)
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
-from yt_playlist.core import embedding_files
+from yt_playlist.core import embedding_files, schema_inspection
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import daily_model_selection as daily, model_selection, model_setup
 from yt_playlist.util.matching import identity_key
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -31,8 +36,16 @@ def _pristine_current_schema():
 
 
 @pytest.fixture
-def library(store, monkeypatch, daily_library_template):
-    return _library(store, monkeypatch, daily_library_template)
+def library(store, monkeypatch, request):
+    if 'daily_library_template' in request.fixturenames:
+        return _library(store, monkeypatch, request.getfixturevalue('daily_library_template'))
+    return configured_library(store, monkeypatch, _seed_library(store, _seed_catalog(store)))
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as database:
+        yield database
 
 
 @pytest.fixture(scope='module')
@@ -83,6 +96,10 @@ def _seed_library(store, value):
 
 def _library(store, monkeypatch, template):
     value = template.restore(store)
+    return configured_library(store, monkeypatch, value)
+
+
+def configured_library(store, monkeypatch, value):
     keys = value['keys']
     monkeypatch.setattr(model_setup, 'CONFIGS', [('svd', 2), ('svd', 3)])
     calls = []
@@ -214,10 +231,15 @@ def test_insufficient_activity_skips_all_fits(library):
 ])
 def test_initial_insufficient_attempt_does_not_require_another_30_plays(
         store, monkeypatch, initial_targets, new_targets, expected,
-        daily_catalog_template, file_backed_store, _pristine_current_schema):
-    value = daily_catalog_template.restore(store)
+        request, _pristine_current_schema):
+    if (initial_targets, new_targets) == (26, 24):
+        daily_catalog_template = request.getfixturevalue('daily_catalog_template')
+        value = daily_catalog_template.restore(store)
+    else:
+        value = _seed_catalog(store)
     now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
     if (initial_targets, new_targets) == (26, 24):
+        file_backed_store = request.getfixturevalue('file_backed_store')
         sibling = daily_catalog_template.restore(file_backed_store)
         with prepared_template(_pristine_current_schema, _seed_catalog) as fresh:
             producer = fresh.source
@@ -377,21 +399,26 @@ def test_changed_historical_inputs_discard_mixed_candidate_results(library):
     assert [dim for dim, _, _ in library['calls']] == [2, 2]
 
 
-def test_file_database_reopen_resumes_completed_candidate(file_backed_store, monkeypatch, daily_library_template):
+def test_file_database_reopen_resumes_completed_candidate(file_backed_store, monkeypatch):
     # Reopen the real installed database together with its external vectors.
     # A SQL-only backup of the memory fixture leaves those files behind.
-    library = _library(file_backed_store, monkeypatch, daily_library_template)
+    library = configured_library(file_backed_store, monkeypatch,
+                                 _seed_library(file_backed_store, _seed_catalog(file_backed_store)))
     path = file_backed_store._db_path
     file_backed_store.conn.close()
     first = Store(path)
-    first.init_schema()
+    first.conn.execute('PRAGMA synchronous=OFF')
+    with schema_inspection.reuse_tables(first.conn):
+        first.init_schema()
     try:
         run = daily.maintain(first, library['now'])
         assert len(run['_evaluations']) == 1
     finally:
         first.conn.close()
     reopened = Store(path)
-    reopened.init_schema()
+    reopened.conn.execute('PRAGMA synchronous=OFF')
+    with schema_inspection.reuse_tables(reopened.conn):
+        reopened.init_schema()
     try:
         library['store'] = reopened
         model_selection.recover_interrupted(reopened)

@@ -6,10 +6,13 @@ import numpy as np
 import pytest
 
 from tests.repos.test_album_aliases import OLD, ALIAS, release
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
 from yt_playlist.core.store import Store
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.rec import choice_evidence, scoring
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)

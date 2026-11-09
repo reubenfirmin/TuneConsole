@@ -1,16 +1,21 @@
 """Genre groups repair in the worker, without sync, provider access or request-time fitting."""
 import logging
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
 
-from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed,
+from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed, measurement,
                              model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes)
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+)
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
 
 
 @pytest.fixture(autouse=True)
@@ -61,7 +66,7 @@ def store(tmp_path, worker_schema, monkeypatch):
         # These tests own worker scheduling and saved model/candidate repair.
         # Concurrent snapshot validation has its own tests; model fitting,
         # real SQL and typed publication remain live beneath this collaborator.
-        with mock_snapshot_coordinator(database, monkeypatch):
+        with mock_snapshot_coordinator(database, monkeypatch), schema_inspection.reuse_tables(database.conn):
             yield database
     finally:
         database.conn.close()
@@ -72,41 +77,6 @@ def library(store, request, record_property):
     tracks = _seed_library(store, per_genre=getattr(request, 'param', 27))
     record_property('library_tracks', len(tracks))
     return tracks
-
-
-@pytest.fixture(autouse=True)
-def worker_phase_costs(monkeypatch, record_property):
-    from functools import wraps
-
-    costs, lock = {}, threading.Lock()
-    def timed(name, operation):
-        @wraps(operation)
-        def call(*args, **kwargs):
-            wall, cpu = time.monotonic(), time.thread_time()
-            try:
-                return operation(*args, **kwargs)
-            finally:
-                elapsed = time.monotonic() - wall, time.thread_time() - cpu
-                with lock:
-                    values = costs.setdefault(name, [0, 0.0, 0.0])
-                    values[0] += 1
-                    values[1] += elapsed[0]
-                    values[2] += elapsed[1]
-        return call
-
-    for owner, attribute, name in (
-            (rec_worker.RecWorker, '_do_mode_refresh', 'worker_repair'),
-            (model_refresh, 'rebuild', 'model_refresh'),
-            (mode_surfaces, 'prepare_bundles', 'bundle_preparation'),
-            (mode_surfaces, '_calculate_bundles', 'ranking'),
-            (mode_surfaces, '_publish_typed_bundles', 'typed_publication')):
-        monkeypatch.setattr(owner, attribute, timed(name, getattr(owner, attribute)))
-    yield
-    with lock:
-        for name, (calls, wall, cpu) in costs.items():
-            record_property(name + '_calls', calls)
-            record_property(name + '_wall_seconds', wall)
-            record_property(name + '_thread_cpu_seconds', cpu)
 
 
 def _worker(store):
@@ -208,6 +178,8 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
     # Discovery encoding and the subsequent worker's ranking remain real.
     with monkeypatch.context() as initial:
         initial.setattr(mode_surfaces, '_calculate_bundles', lambda *args: ({}, []))
+        initial.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                        ('startup-input', {'schema': 4, 'algorithm': 'startup-input'}))
         mode_surfaces.prepare_bundles(store, 1000)
     discoveries = [{'key': f'new {i}|new artist {i}', 'video_id': f'v{i}',
         'title': f'New {i}', 'artist': f'New artist {i}', 'genre': 'Jazz', 'year': '2020'}

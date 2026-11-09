@@ -7,12 +7,21 @@ import sqlite3
 import pytest
 
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input
+from tests.store_fixture_support import install_numbered_input, without_query_timing
+from yt_playlist.core import schema_inspection
 from yt_playlist.core import listening_outputs as owner, recommendation_outputs as files
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import migrate, registry, v090_listening_outputs
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Listening storage tests run directly without the HTTP application."""
 
 
 def bundle(label='one'):
@@ -44,6 +53,7 @@ def predecessor(tmp_path, listening_predecessor_schema, record_property, monkeyp
     bound_catalog(monkeypatch)
     store = Store(tmp_path / 'listening.db')
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         began = time.perf_counter()
         template = listening_predecessor_schema
         record_property('legacy_prefix_seconds', time.perf_counter() - began)
@@ -53,7 +63,8 @@ def predecessor(tmp_path, listening_predecessor_schema, record_property, monkeyp
         store._bind_repositories()
         assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 89
         record_property('legacy_clone_seconds', time.perf_counter() - began)
-        yield store
+        with schema_inspection.reuse_tables(store.conn):
+            yield store
     finally:
         store.conn.close()
 

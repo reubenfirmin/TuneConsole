@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import publication_consumer_reads, without_query_timing
 from yt_playlist.core import albums, album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import frozen_shares as audit
@@ -14,7 +14,7 @@ from yt_playlist.core.store import Store
 
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -80,42 +80,44 @@ def test_guard_precedes_audit_and_exact_empty_repeated_unknown_choices_survive(i
 
 @pytest.mark.parametrize('installed',[104],indirect=True)
 @pytest.mark.parametrize('corruption',['append','missing','reordered'])
-def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(installed,corruption,monkeypatch):
-    store, _ = installed
-    frozen = capture(store.conn)
-    with store.conn:
+def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(
+        installed, corruption, monkeypatch, preparation_ddl_connection):
+    conn = preparation_ddl_connection
+    frozen = capture(conn)
+    with conn:
         if corruption == 'append':
-            store.conn.execute('INSERT INTO main.album_share_items SELECT snapshot_id,3,tracklist_id,occurrence_id,entry_id,raw_source_ref '
+            conn.execute('INSERT INTO main.album_share_items SELECT snapshot_id,3,tracklist_id,occurrence_id,entry_id,raw_source_ref '
                                'FROM main.album_share_items WHERE snapshot_id=? AND position=0',(frozen,))
         else:
-            extra = store.conn.execute('INSERT INTO main.album_share_snapshots(album_id,tracklist_id,captured_provider_id,title,created_at) '
+            extra = conn.execute('INSERT INTO main.album_share_snapshots(album_id,tracklist_id,captured_provider_id,title,created_at) '
                 "SELECT album_id,tracklist_id,captured_provider_id,'Partial',created_at FROM main.album_share_snapshots WHERE id=?",(frozen,)).lastrowid
-            store.conn.execute('INSERT INTO main.album_share_items SELECT ?, '+('position' if corruption == 'missing' else '2-position')+
+            conn.execute('INSERT INTO main.album_share_items SELECT ?, '+('position' if corruption == 'missing' else '2-position')+
                 ',tracklist_id,occurrence_id,entry_id,raw_source_ref FROM main.album_share_items WHERE snapshot_id=?'+
                 (' AND position<2' if corruption == 'missing' else ''),(extra,frozen))
-    before = sources(store.conn)
-    audit.JOB.install(store.conn)
-    finish(store.conn)
+    before = sources(conn)
+    audit.JOB.install(conn)
+    finish(conn)
     with pytest.raises(MigrationError,match='changed membership; original rows retained'):
-        audit.verify(store.conn)
-    assert_originals(store.conn)
-    assert sources(store.conn) == before
-    progress = audit.JOB.progress(store.conn)
+        audit.verify(conn)
+    assert_originals(conn)
+    assert sources(conn) == before
+    progress = audit.JOB.progress(conn)
     def install(conn,context):
         conn.execute('CREATE TABLE independent_share_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_share_ddl'").fetchone()
     monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_share_ddl',install,validate)))
-    regular.migrate(store.conn)
-    assert audit.JOB.progress(store.conn) == progress
-    capture(store.conn,('later',),title='Usable continuing writer')
-    finish(store.conn)
+    regular.migrate(preparation_ddl_connection)
+    assert audit.JOB.progress(conn) == progress
+    capture(conn,('later',),title='Usable continuing writer')
+    finish(conn)
     with pytest.raises(MigrationError,match='changed membership'):
-        audit.verify(store.conn)
+        audit.verify(conn)
 
 
 @pytest.mark.parametrize('installed',[104],indirect=True)
-def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exact(installed,monkeypatch):
+def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exact(
+        installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     capture(store.conn,tuple('video-'+str(index) for index in range(1040)))
     before = sources(store.conn)
@@ -138,7 +140,7 @@ def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exa
     def validate(conn):
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_failed_share_ddl'").fetchone()
     monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_failed_share_ddl',install,validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert audit.JOB.progress(store.conn) == failed
     reopened = Store(store._db_path)
     try:

@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import asdict
 import json
 import logging
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -15,11 +16,13 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import FakeClient
+from tests.genre_catalog_support import bound_catalog
 from tests.group_support import publish as publish_groups, recordings as grouped_recordings
-from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener
+from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener, service
 from tests.home_prepared_support import publication_inputs as controlled_publication_inputs, seed
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (bounded_consumer_schema, initialize_consumer,
+                                         mock_snapshot_coordinator, reuse_reporting_reader)
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, home_cache, home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, surfaces
@@ -27,25 +30,80 @@ from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 
 
-@pytest.fixture(scope='module')
-def cached_menu_schema():
-    entries = (('jazz', 'Jazz'), ('techno', 'Techno'), ('classical', 'Classical'),
+MENU_GENRES = (('jazz', 'Jazz'), ('techno', 'Techno'), ('classical', 'Classical'),
                ('ambient', 'Ambient'), ('trance', 'Trance'), ('indie rock', 'Indie Rock'),
                ('house', 'House'))
-    with bounded_consumer_schema(entries) as schema:
+
+
+@pytest.fixture(scope='module')
+def cached_menu_schema():
+    with bounded_consumer_schema(MENU_GENRES) as schema:
         yield schema
+
+
+@pytest.fixture
+def menu_publication_store(tmp_path, cached_menu_schema, monkeypatch):
+    """Private real publication/reopen SQL without unrelated taxonomy input."""
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+
+    # These synchronous publication consumers keep real files, SQLite and
+    # transactions. Per-query handle admission/diagnostics are lower owners.
+    for operation in ('execute', 'executemany'):
+        monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
+    database = Store(tmp_path / 'published-home.db')
+    with closing(database.conn):
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, cached_menu_schema)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+@pytest.fixture(scope='module')
+def uncontended_menu_schema():
+    with bounded_consumer_schema(MENU_GENRES, snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def uncontended_menu_store(tmp_path, uncontended_menu_schema, monkeypatch):
+    """Real menu SQL/files below successful snapshot coordination.
+
+    These consumers own lossless publication, failed file replacement and
+    feedback projection. Source-change races have separate guarded owners.
+    The large-menu case still performs actual startup admission on disk reopen.
+    """
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+
+    # Keep the completed vocabulary bounded during real reopen too. Startup
+    # otherwise imports the full unrelated taxonomy into this seven-genre input.
+    bound_catalog(monkeypatch, entries=MENU_GENRES)
+    for operation in ('execute', 'executemany'):
+        monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
+    database = Store(tmp_path / 'menu.db')
+    with closing(database.conn):
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, uncontended_menu_schema, snapshot_guards=False)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with mock_snapshot_coordinator(database, monkeypatch):
+            yield database
 
 
 @pytest.fixture
 def store(request, tmp_path, monkeypatch):
     # Consumer menus use only six genres, independently of ranking inputs.
     with ExitStack() as resources:
-        if {'cached_menu', 'publication_inputs', 'catalog_import'} & set(request.fixturenames):
+        if {'cached_menu', 'cached_menu_schema', 'publication_inputs', 'catalog_import', 'metadata_import'} & set(request.fixturenames):
+            bound_catalog(monkeypatch, entries=MENU_GENRES)
+            if 'cached_menu' in request.fixturenames:
+                # Completed-menu consumers keep real cache SQL and files. SQL
+                # handle admission is independent of their frozen-choice contract.
+                request.getfixturevalue('native_sql_calls')
             store = Store(tmp_path / 'cached-home.db')
             resources.callback(store.conn.close)
-            store.conn.execute('PRAGMA synchronous=NORMAL')
+            store.conn.execute('PRAGMA synchronous=OFF')
             initialize_consumer(store, request.getfixturevalue('cached_menu_schema'))
-            # Keep durable WAL commits; checkpoint scheduling has its own owners
+            # Keep real WAL commits; checkpoint scheduling has its own owners
             # in core/test_publication_checkpoint, below these Home boundaries.
             store.conn.execute('PRAGMA wal_autocheckpoint=0')
             resources.enter_context(reuse_reporting_reader(store, monkeypatch))
@@ -69,6 +127,14 @@ def catalog_import(store):
 
 
 @pytest.fixture
+def metadata_import(store):
+    """Four genuinely imported songs for the metadata/publication race."""
+    for i in range(4):
+        store.tracks.upsert_track(f'import-{i}', f'Song {i}', f'Artist {i}', None, None)
+    return store
+
+
+@pytest.fixture
 def home_inputs(store):
     """Private catalog/profile inputs; the test still performs Home preparation."""
     return store
@@ -84,9 +150,15 @@ def prepared(store, home_prepared_template):
 @pytest.fixture
 def cached_home_http(monkeypatch, home_routes_only):
     """Keep actual HTTP rendering without unrelated route/provider setup."""
+    from fastapi import APIRouter
     from yt_playlist.providers import genres
+    from yt_playlist.web.routes import home_artist_start, home_generation, home_growth, home_onboarding, home_tv
 
     monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+    # Keep Home's actual document composition, card/control/discovery routes,
+    # and middleware. These consumers do not request the other feature routes.
+    for module in (home_artist_start, home_generation, home_growth, home_onboarding, home_tv):
+        monkeypatch.setattr(module, 'build', lambda ctx: APIRouter())
     client_type = TestClient
     with ExitStack() as clients:
         monkeypatch.setattr(__name__ + '.TestClient',
@@ -120,6 +192,11 @@ def publication_inputs(store, monkeypatch):
 
 
 @pytest.fixture
+def menu_publication_inputs(uncontended_menu_store, monkeypatch):
+    return controlled_publication_inputs(uncontended_menu_store, monkeypatch)
+
+
+@pytest.fixture
 def publication_prepared(publication_inputs, one_menu_per_attempt):
     payload = home_prepared.prepare_mixes(publication_inputs.store, 1000)
     assert home_prepared._valid(payload)
@@ -147,11 +224,8 @@ def one_menu_per_attempt(monkeypatch):
     return clock
 
 
-def service(store):
-    return home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
-
-
-def test_capacity_projection_preserves_worker_menu_after_feedback(store):
+def test_capacity_projection_preserves_worker_menu_after_feedback(uncontended_menu_store):
+    store = uncontended_menu_store
     prepared = publish_menu(store, tracks_per_card=1)
     for proto in prepared['menus'][0]['protos']:
         proto['tracks'][0]['musical'] = {'captured_features': [0.2, 0.7, 0.1]}
@@ -481,10 +555,10 @@ def test_initial_import_can_offer_catalog_mix_before_tags_or_models(catalog_impo
     assert next(p for p in result.protos if p['lane'] == 'explore')['tracks'] == catalog['tracks']
 
 
-def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_to_finish(catalog_import, monkeypatch):
+def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_to_finish(metadata_import, monkeypatch):
     from yt_playlist.core import catalog
 
-    store = catalog_import
+    store = metadata_import
     entries = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
     assert len(entries) == 4
     assert mode_surfaces.prepare_bundles(store, 1000)
@@ -963,11 +1037,13 @@ def test_feedback_changes_the_next_choice_and_tracks_can_repeat(store, prepared)
 
 
 def test_cache_rebuild_and_restart_preserve_evidence_and_experiment_identity(
-        store, publication_prepared, one_menu_per_attempt):
+        uncontended_menu_store, menu_publication_inputs, one_menu_per_attempt):
     # Identity needs a displayed offer and real rebuild, below independent rankers.
+    store = uncontended_menu_store
     path = store._db_path
     try:
-        before = publication_prepared
+        before = home_prepared.prepare_mixes(store, 1000)
+        assert home_prepared._valid(before)
         offer = home_prepared.cards(store, before, 1000, service(store))
         stats = store.modes.impression_counts()
         ids = {p["experiment_id"] for p in offer.protos}
@@ -981,9 +1057,9 @@ def test_cache_rebuild_and_restart_preserve_evidence_and_experiment_identity(
         store.conn.close()
     reopened = Store(path)
     try:
-        # Startup schema admission has its own owners. This checks actual reopen
-        # and retrieval of the committed menu, identities and exposure evidence.
-        reopened.init_schema(defer_metadata=True)
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        # Keep actual startup and retrieval of committed menus and evidence.
+        reopened.init_schema()
         after = home_prepared.load(reopened, 1002)
         assert after and reopened.modes.impression_counts() == stats
         assert after == rebuilt
@@ -1142,13 +1218,15 @@ def test_small_preparation_batches_accumulate_alternatives_across_attempts(publi
                for menu in payload['menus'] for proto in menu['protos'])
 
 
-def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed_store, monkeypatch):
+def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(uncontended_menu_store, monkeypatch):
     from yt_playlist.core import home_outputs, json_cache, policy_config
     from yt_playlist.rec import musical_character
 
-    store = file_backed_store
+    store = uncontended_menu_store
     path = store._db_path
-    controlled_publication_inputs(store, monkeypatch)
+    # The producer's catalog/modes stay fixed across all twelve alternatives.
+    # Resolve their options once below the real accumulation/file boundary.
+    controlled_publication_inputs(store, monkeypatch, stable_options=True)
     policy, base = policy_config.pack({'schema': 4, 'ranker': 'controlled-menu'}, 1000)
     store.rec_ledger.record_prepared_policies([policy], [base])
     clock, expected = [100.], {}
@@ -1210,7 +1288,9 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
         store.conn.close()
 
     reopened = Store(path)
-    reopened.init_schema()
+    # Match ordinary disk startup: admit the real schema and revision guards
+    # without auditing unrelated metadata before serving the retained menu.
+    reopened.init_schema(defer_metadata=True)
     try:
         assert home_prepared.load(reopened, 1001) == payload
         offer = home_prepared.cards(reopened, payload, 1001, service(reopened), record=False)
@@ -1222,11 +1302,11 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
 
 
 def test_failed_menu_file_replacement_preserves_last_good_publication(
-        publication_inputs, one_menu_per_attempt, monkeypatch):
+        menu_publication_inputs, one_menu_per_attempt, monkeypatch):
     # Failure retention does not require twelve multi-megabyte alternatives.
     # The large-document owner above checks exact accumulation and disk reopen;
     # test_capacity_projection_preserves_worker_menu_after_feedback owns feedback.
-    store = publication_inputs.store
+    store = menu_publication_inputs.store
     previous = home_prepared.prepare_mixes(store, 1000)
     assert previous and previous['menus'][0]['protos']
     original = home_cache.encoded(store, home_prepared.SURFACE)

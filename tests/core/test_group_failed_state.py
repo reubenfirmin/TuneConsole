@@ -11,9 +11,12 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.group_support import recordings
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input, without_query_timing
 from tests.test_group_preparation import seed
-from yt_playlist.core import entity_names, group_progress
+from yt_playlist.core import entity_names, group_progress, schema_inspection
 from yt_playlist.core.activity import Activity
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import checkpoint_publication as publication, model_checkpoints as preparation
 from yt_playlist.core.store import Store
@@ -22,16 +25,36 @@ from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
 
 
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Grouping progress checks do not construct an HTTP application."""
+
+
+@pytest.fixture(autouse=True)
+def group_vocabulary(monkeypatch):
+    bound_catalog(monkeypatch, entries=(('pop', 'Pop'), ('rock', 'Rock'), ('jazz', 'Jazz')))
+
+
 @contextmanager
-def installed(path, version, template=None):
+def installed(path, version, *, admit=True):
     store = Store(path)
     try:
-        if template is not None:
-            template.backup(store.conn)
-        elif version != 107:
-            runner.migrate(store.conn, registry=registry.MIGRATIONS[:version])
-        store.init_schema(defer_metadata=True)
-        yield store
+        store.conn.execute('PRAGMA synchronous=OFF')
+        install_numbered_input(store.conn, version)
+        with schema_inspection.reuse_tables(store.conn):
+            if admit:
+                store.init_schema(defer_metadata=True)
+            else:
+                store.conn.execute('PRAGMA journal_mode=WAL')
+                store._schema_compatibility = version < 103
+                store._rebuild_source_version = None
+                store._schema_recovery_pending = False
+                store._bind_repositories()
+                store._snapshot_revisions = Revisions(store.conn)
+            yield store
     finally:
         store.conn.close()
 
@@ -47,23 +70,20 @@ def current_group_store(tmp_path):
 
 
 @pytest.fixture
-def pre_group_store(tmp_path, _pristine_installed_schema):
-    store = Store(tmp_path / 'pre-group-progress.db')
-    try:
-        _pristine_installed_schema(107).backup(store.conn)
+def pre_group_store(tmp_path):
+    with installed(tmp_path / 'pre-group-progress.db', 107, admit=False) as store:
         # A genuine installed prefix before regular change 2 adopted progress.
         regular.migrate(store.conn, changes=regular.CHANGES[:1])
         store._bind_repositories()
         yield store
-    finally:
-        store.conn.close()
 
 
 @pytest.mark.parametrize('version', [93, 107])
 def test_real_worker_records_failure_and_recovers_on_retry(
-        tmp_path, monkeypatch, version, _pristine_installed_schema, _pristine_current_schema):
-    template = _pristine_current_schema if version == 107 else _pristine_installed_schema(version)
-    with installed(tmp_path / 'worker.db', version, template) as store:
+        tmp_path, monkeypatch, version):
+    # Startup admission is below this worker/error-handler boundary. Keep its
+    # real WAL, revision guards, twelve inputs and generation publication.
+    with installed(tmp_path / 'worker.db', version, admit=False) as store:
         seed(store, recordings([('Pop', 12, .2)]))
         before = history(store.conn)
         now = [1234]
@@ -93,11 +113,10 @@ def test_real_worker_records_failure_and_recovers_on_retry(
 
 
 @pytest.mark.parametrize('admitted', [False, True])
-def test_explicit_conversion_retains_failed_phase_without_rewriting_frozen_schema(tmp_path, admitted, _pristine_installed_schema):
-    with installed(tmp_path / 'conversion.db', 93, _pristine_installed_schema(93)) as store:
+def test_explicit_conversion_retains_failed_phase_without_rewriting_frozen_schema(tmp_path, admitted):
+    with installed(tmp_path / 'conversion.db', 93) as store:
         if admitted:
-            # This owner exercises progress adoption, regular change 2.
-            regular.migrate(store.conn, changes=regular.CHANGES[:2])
+            regular.migrate(store.conn)
         before = history(store.conn)
         group_preparation.report(store, 'failed', -123.5, reason='original failure')
         entity_names.clear_predecessor_reads(store.conn)
@@ -120,7 +139,7 @@ def test_native_adoption_keeps_old_sql_writers_and_rollback_compatible(pre_group
     with store.conn:
         store.conn.execute("INSERT INTO group_preparation_state(singleton,phase,reported_at,reason) VALUES (1,'ready',10,'old')")
     before = history(store.conn)
-    regular.migrate(store.conn, changes=regular.CHANGES[:2])
+    regular.migrate(store.conn)
     assert group_preparation.status(store) == {'phase': 'ready', 'at': 10, 'reason': 'old'}
     group_preparation.report(store, 'failed', 20, reason='new failure')
     with closing(sqlite3.connect(store._db_path)) as old_writer, old_writer:
@@ -139,8 +158,8 @@ def test_native_adoption_keeps_old_sql_writers_and_rollback_compatible(pre_group
     assert history(store.conn) == before
 
 
-def test_old_prepared_and_published_progress_can_upgrade_without_rewriting_generations(tmp_path, _pristine_installed_schema):
-    with installed(tmp_path / 'publication.db', 93, _pristine_installed_schema(93)) as store:
+def test_old_prepared_and_published_progress_can_upgrade_without_rewriting_generations(tmp_path):
+    with installed(tmp_path / 'publication.db', 93) as store:
         key = group_preparation.PROGRESS
         original = json.dumps({'phase': 'deferred', 'at': 10, 'reason': 'original'}, indent=2)
         store.settings.set_setting(key, original)
@@ -195,8 +214,8 @@ def test_old_prepared_and_published_progress_can_upgrade_without_rewriting_gener
             reopened.conn.close()
 
 
-def test_unknown_phase_keeps_original_on_preparation_and_conversion_failure(tmp_path, _pristine_installed_schema):
-    with installed(tmp_path / 'invalid.db', 93, _pristine_installed_schema(93)) as store:
+def test_unknown_phase_keeps_original_on_preparation_and_conversion_failure(tmp_path):
+    with installed(tmp_path / 'invalid.db', 93) as store:
         raw = '{"phase":"unknown","at":1234,"reason":"retain me"}'
         store.settings.set_setting(group_preparation.PROGRESS, raw)
         job = preparation.JOBS['group-checkpoints']

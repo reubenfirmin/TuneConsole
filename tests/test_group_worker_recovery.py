@@ -6,9 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from tests.group_support import recordings
-from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_home_prepared import one_menu_per_attempt
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+)
 from tests.test_group_preparation import seed
 from tests.test_mode_refresh_worker import scheduled
 from yt_playlist.core import schema_inspection
@@ -19,6 +20,9 @@ from yt_playlist.rec import (album_choices, album_notes, choice_evidence, group_
 from yt_playlist.rec.worker_queue import Job
 
 
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """These explicit worker turns do not start the HTTP app's periodic sync."""
@@ -26,24 +30,21 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def worker_schema():
-    with bounded_consumer_schema(entries=(('house', 'House'),)) as schema:
+    with bounded_consumer_schema(entries=(('house', 'House'),), snapshot_guards=False) as schema:
         yield schema
 
 
 @pytest.fixture
-def store(worker_schema, request):
-    database = Store(':memory:')
+def store(worker_schema, tmp_path, monkeypatch):
+    database = Store(tmp_path / 'recovery.db')
     try:
+        database.conn.execute('PRAGMA synchronous=OFF')
         with schema_inspection.reuse_tables(database.conn):
-            if 'previous_groups' in request.fixturenames:
-                template = request.getfixturevalue('previous_group_input')
-                database._fixture_previous_groups = template.restore(database)
-                for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
-                    setattr(database, name, getattr(template.source, name))
-                database._bind_repositories()
-            else:
-                initialize_consumer(database, worker_schema)
-            yield database
+            initialize_consumer(database, worker_schema, snapshot_guards=False)
+            # Queue recovery owns persistence failures and real group/Home
+            # publication. Snapshot conflict detection has separate owners.
+            with mock_snapshot_coordinator(database, monkeypatch):
+                yield database
     finally:
         database.conn.close()
 
@@ -58,12 +59,6 @@ def test_worker_recovery_schema_keeps_real_history_and_readonly_input(worker_sch
     assert worker_schema.execute('SELECT key, name FROM genre_catalog').fetchall() == [('house', 'House')]
 
 
-def test_worker_recovery_store_has_private_revision_guards(store):
-    assert store._snapshot_revisions.conn is store.conn
-    assert store.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-    assert [tuple(row) for row in store.conn.execute('SELECT key, name FROM genre_catalog')] == [('house', 'House')]
-
-
 def prepare_previous_groups(store):
     seed(store, recordings([('House', 3, .1)]))
     assert group_preparation.Preparation(store).step(1000)
@@ -74,34 +69,16 @@ def prepare_previous_groups(store):
     return previous
 
 
-@pytest.fixture(scope='module')
-def previous_group_input(worker_schema):
-    with prepared_template(worker_schema, prepare_previous_groups) as template:
-        yield template
-
-
-def test_worker_recovery_input_keeps_actual_published_groups_and_preview(previous_group_input):
-    source = previous_group_input.source
-    previous, preview, progress = previous_group_input.result
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.taste_groups.head(members=True) == previous
-    assert previous['groups'] and sum(len(group['members']) for group in previous['groups']) == 3
-    assert source.rec_proposals.get_proposals(group_serving.SURFACE) == preview
-    assert group_preparation.status(source) == progress
-    assert group_serving.view(source)['generation'] == previous['generation']
-    assert group_preparation.Preparation(source).due(1100)
-    assert source.conn.execute('SELECT count(*) FROM rec_musical_profiles').fetchone()[0] == 4
-    assert source.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-
-
 @pytest.fixture
 def previous_groups(store):
-    return store._fixture_previous_groups
+    return prepare_previous_groups(store)
 
 
 @pytest.fixture
-def completed_home_inputs(monkeypatch):
+def completed_home_inputs(scheduled, monkeypatch):
     """Recovery owns real Home publication, independent of albums and diagnostics."""
+    # The shared queue fixture stubs Home. This workflow owns its real publisher.
+    monkeypatch.delattr(scheduled[0].tasks, 'home')
     monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: True)
     monkeypatch.setattr(choice_evidence, 'prepare_context', lambda *args, **kwargs: True)
     monkeypatch.setattr(choice_evidence, 'refresh_report', lambda *args, **kwargs: {})
@@ -120,21 +97,6 @@ def completed_home_inputs(monkeypatch):
 @pytest.mark.parametrize('failure', ['initial-progress-write', 'yield-report-write'])
 def test_group_progress_storage_failure_retries_and_runs_real_home(
         scheduled, previous_groups, completed_home_inputs, one_menu_per_attempt, monkeypatch, caplog, failure):
-    exercise_group_recovery(scheduled, previous_groups, monkeypatch, caplog, failure,
-                            failed_turns=1, real_home=True)
-
-
-@pytest.mark.parametrize('failure', ['initial-progress-write', 'yield-report-write'])
-def test_group_progress_storage_failure_doubles_backoff_and_rejects_early_turns(
-        scheduled, previous_groups, monkeypatch, caplog, failure):
-    # Queue/backoff behavior consumes Home as a lower dependency. The test above
-    # retains the actual Home publisher after this same storage failure.
-    monkeypatch.setattr(scheduled[0].tasks, 'home', lambda: False)
-    exercise_group_recovery(scheduled, previous_groups, monkeypatch, caplog, failure,
-                            failed_turns=2, real_home=False)
-
-
-def exercise_group_recovery(scheduled, previous_groups, monkeypatch, caplog, failure, *, failed_turns, real_home):
     worker, targets = scheduled
     store = worker.ctx.store
     previous, preview, progress = previous_groups
@@ -166,9 +128,7 @@ def exercise_group_recovery(scheduled, previous_groups, monkeypatch, caplog, fai
 
     def prepare_home():
         result = home()
-        homes.append(worker.ctx.now_fn())
-        if real_home:
-            assert store.rec_proposals.get_proposals(home_prepared.SURFACE)['built_at'] == homes[-1]
+        homes.append(store.rec_proposals.get_proposals(home_prepared.SURFACE))
         return result
 
     monkeypatch.setattr(store.settings, 'set_setting', storage_full)
@@ -176,7 +136,7 @@ def exercise_group_recovery(scheduled, previous_groups, monkeypatch, caplog, fai
     monkeypatch.setattr(worker.tasks, 'home', prepare_home)
     state = worker.jobs.retry[Job.GROUPS]
     expected = ['preparing', 'failed'] if failure == 'initial-progress-write' else ['deferred']
-    for count, delay in ((1, 60), (2, 120))[:failed_turns]:
+    for count, delay in ((1, 60), (2, 120)):
         worker._schedule(full=False, groups=True)
         assert len(targets) == 1
         targets.pop()()
@@ -184,7 +144,7 @@ def exercise_group_recovery(scheduled, previous_groups, monkeypatch, caplog, fai
         assert state.dirty and state.failures == count
         assert state.retry_at == clock[0] + delay
         assert attempts == expected * count
-        assert len(homes) == count and homes[-1] == worker.ctx.now_fn()
+        assert len(homes) == count and homes[-1]['built_at'] == worker.ctx.now_fn()
         assert store.taste_groups.head(members=True) == previous
         assert store.rec_proposals.get_proposals(group_serving.SURFACE) == preview
         assert group_preparation.status(store) == progress
@@ -206,8 +166,8 @@ def exercise_group_recovery(scheduled, previous_groups, monkeypatch, caplog, fai
     worker.trigger_home_refresh(force=True)
     assert len(targets) == 1
     targets.pop()()
-    assert len(steps) == failed_turns + 1 and len(homes) >= failed_turns + 1
-    assert homes[-1] == worker.ctx.now_fn()
+    assert len(steps) == 3 and len(homes) >= 3
+    assert homes[-1]['built_at'] == worker.ctx.now_fn()
     assert group_preparation.status(store)['phase'] == 'ready'
     assert not state.dirty and state.failures == 0
     assert not worker._running and not worker.work.active and not targets
@@ -277,11 +237,3 @@ def test_unexpected_worker_exit_releases_ownership_and_retains_arrivals(schedule
     targets.pop()()
     assert calls == ['home', 'groups']
     assert not worker._running and not worker.jobs and not worker.work.active
-
-
-def test_worker_recovery_input_releases_its_published_files_and_sql(previous_group_input):
-    source = previous_group_input.source
-    assert not source.conn.in_transaction
-    source.conn.close()
-    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-        source.conn.execute('SELECT 1')

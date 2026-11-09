@@ -4,9 +4,28 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.rec import measurement, scorecard
 from yt_playlist.repos.discovery import DiscoveryRepo
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture
+def store(file_consumer_store, monkeypatch):
+    # Trace consumers read real SQL/files through one unpinned reporting
+    # connection. Reader-pool admission has separate owners.
+    with reuse_reporting_reader(file_consumer_store, monkeypatch):
+        yield file_consumer_store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # Measurement storage does not start the HTTP app or periodic workers.
+    pass
 
 
 @pytest.fixture(scope='module')

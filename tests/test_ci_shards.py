@@ -30,6 +30,22 @@ def test_duration_balance_keeps_files_together_and_automatically_assigns_new_cas
     assert sum(loads) == 280  # unknown cases use measured median per-case time (50s)
 
 
+def test_removed_consumers_do_not_erase_measured_module_setup_from_the_plan():
+    # A rewrite can retain a costly shared workflow with fewer assertions.
+    # Its clean whole-file measurement remains the available cost evidence.
+    nodes = ['retained.py::test_original', 'other.py::test_a', 'other.py::test_b']
+    times = {'retained.py': {'seconds': 100, 'cases': 50},
+             'other.py': {'seconds': 60, 'cases': 2}}
+    owners, loads = partition(nodes, times, 2)
+    assert owners == {'retained.py': 1, 'other.py': 2}
+    assert loads == [100, 60]
+    assert owners == partition(list(reversed(nodes)), times, 2)[0]
+    expanded = [f'retained.py::test_case[{i}]' for i in range(100)] + nodes[1:]
+    expanded_owners, expanded_loads = partition(expanded, times, 2)
+    assert expanded_owners == owners
+    assert expanded_loads == [200, 60]
+
+
 @pytest.mark.parametrize("suite", ["unit", "browser"])
 def test_retained_measured_timings_balance_four_whole_file_groups(suite):
     baseline = json.loads(BASELINE.read_text())

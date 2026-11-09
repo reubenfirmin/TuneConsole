@@ -3,10 +3,13 @@ import pytest
 
 from tests import model_support
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, without_query_timing
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import album_choices, choice_evidence, embedding_vectors, rec_params, scoring, taste_viz
 from yt_playlist.rec.taste_context import PlaylistTaste
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)

@@ -4,9 +4,19 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.store_fixture_support import (
+    numbered_store as installed, preparation_ddl_connection, publication_consumer_reads,
+)
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import taste_axes as preparation
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Taste preparation runs directly without HTTP startup."""
 
 
 def seed(store):
@@ -40,7 +50,7 @@ def finish(conn):
 
 
 @pytest.mark.parametrize('installed', [79, 87], indirect=True)
-def test_exact_sources_and_configured_conflicts_survive_bounded_copy(installed):
+def test_exact_sources_and_configured_conflicts_survive_bounded_copy(installed, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     conn = store.conn
@@ -48,7 +58,7 @@ def test_exact_sources_and_configured_conflicts_survive_bounded_copy(installed):
     preparation.JOB.install(conn)
     first = preparation.JOB.step(conn, batch_size=2)
     assert first.processed == 2 and first.prepared_revision is None
-    regular.migrate(conn)
+    regular.migrate(preparation_ddl_connection)
     finish(conn)
     assert source(conn) == original
     assert conn.execute('SELECT count(*) FROM prepared_taste_rows').fetchone()[0] == 11
@@ -112,7 +122,7 @@ def test_family_priority_unknowns_and_reference_reconciliation(installed):
 
 
 @pytest.mark.parametrize('installed', [87], indirect=True)
-def test_interruption_and_invalid_batch_preserve_prefix_until_explicit_retry(installed):
+def test_interruption_and_invalid_batch_preserve_prefix_until_explicit_retry(installed, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     conn = store.conn
@@ -131,7 +141,7 @@ def test_interruption_and_invalid_batch_preserve_prefix_until_explicit_retry(ins
         finish(conn)
     assert preparation.JOB.progress(conn).status == 'failed'
     assert conn.execute('SELECT count(*) FROM prepared_taste_rows').fetchone()[0] == 2
-    regular.migrate(conn)
+    regular.migrate(preparation_ddl_connection)
     with conn:
         conn.execute("UPDATE rec_lean SET axis='genre:known' WHERE axis=''")
     with pytest.raises(MigrationError, match='retry explicitly'):

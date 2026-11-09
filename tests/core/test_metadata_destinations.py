@@ -10,9 +10,29 @@ from tests.core.test_metadata_owner_cutover import predecessor, seed
 from tests.core.test_metadata_preparation import finish
 from tests.metadata_provenance_support import metadata_provenance
 from tests.core.test_metadata_publication import publish as read_publication
+from tests.store_fixture_support import native_sql_calls
 from yt_playlist.core import catalog
 from yt_playlist.core.migrations import MigrationError, regular, migrate, registry
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_destinations as publication
+
+
+@pytest.fixture
+def admitted_preparation_input(predecessor, monkeypatch):
+    """Completed numbered admission below real metadata preparation and DDL.
+
+    Keep live history checks and every regular change. Explicit native upgrades
+    and Store reopens in this module retain their own admission checks.
+    """
+    from yt_playlist.core.preparation import rows
+
+    for owner in (rows, regular):
+        validate = owner.validate_version
+
+        def admitted(conn, *args, _validate=validate, **kwargs):
+            if conn is not predecessor.conn:
+                return _validate(conn, *args, **kwargs)
+
+        monkeypatch.setattr(owner, 'validate_version', admitted)
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +50,7 @@ def stage(conn):
     pytest.fail('Metadata destinations did not finish')
 
 
+@pytest.mark.usefixtures('admitted_preparation_input', 'native_sql_calls')
 def test_files_typed_observations_and_explicit_unresolved_selection_preserve_choices(
         predecessor):
     store,conn = predecessor,predecessor.conn
@@ -92,6 +113,7 @@ def test_files_typed_observations_and_explicit_unresolved_selection_preserve_cho
     regular.migrate(conn)
 
 
+@pytest.mark.usefixtures('admitted_preparation_input', 'native_sql_calls')
 def test_failed_file_batch_is_durable_and_retry_resumes_without_duplicates(predecessor,monkeypatch):
     conn = predecessor.conn
     seed(predecessor)
@@ -121,6 +143,7 @@ def test_failed_file_batch_is_durable_and_retry_resumes_without_duplicates(prede
         'SELECT count(*) FROM '+preparation.TABLE).fetchone()[0]
 
 
+@pytest.mark.usefixtures('admitted_preparation_input', 'native_sql_calls')
 def test_unknown_active_choice_is_retained_as_failed_input_without_selection(
         predecessor):
     conn = predecessor.conn
@@ -210,6 +233,7 @@ def test_native_upgrade_and_restart_keep_selected_files_and_prefer_native_owners
         reopened.conn.close()
 
 
+@pytest.mark.usefixtures('admitted_preparation_input', 'native_sql_calls')
 def test_file_failure_and_racing_source_never_select_incomplete_destinations(predecessor,monkeypatch):
     conn = predecessor.conn
     seed(predecessor)

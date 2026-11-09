@@ -26,8 +26,10 @@ from tests.home_fixture_support import returning_listener, without_metadata_prov
 from tests.onboarding_support import publish_personal_mix
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
-from tests.store_fixture_support import bounded_consumer_schema
-from yt_playlist.core import fao
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, without_query_timing,
+)
+from yt_playlist.core import fao, schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceLedger
 from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE, StorageMaintenance
@@ -41,6 +43,9 @@ from yt_playlist.rec.worker_queue import Job
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
 from yt_playlist.repos import group_queries
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 EVIDENCE_GENRES = (('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz'))
@@ -189,8 +194,15 @@ def historical_evidence_template(_pristine_installed_schema, tmp_path_factory):
 @pytest.fixture
 def library(request, tmp_path):
     historical = getattr(request, 'param', None) == 94
-    name = 'historical_evidence_template' if historical else 'evidence_template'
-    with request.getfixturevalue(name).open(tmp_path / 'evidence.db') as store:
+    if historical:
+        with request.getfixturevalue('historical_evidence_template').open(tmp_path / 'evidence.db') as store:
+            yield store
+        return
+    # Recovery consumes one populated private library. Template isolation has
+    # its own owner; ordinary consumers need no intermediate SQL/file copy.
+    schema = request.getfixturevalue('_pristine_current_schema')
+    with _file_consumer_store(tmp_path, schema) as store:
+        seed_evidence_library(store)
         yield store
 
 
@@ -323,7 +335,9 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(library,
     # A new Store and worker reconstruct intent from committed state, without
     # inheriting an iterator, cache, old thread or old retry timestamp.
     reopened = Store(path)
-    reopened.init_schema()
+    reopened.conn.execute('PRAGMA synchronous=OFF')
+    with schema_inspection.reuse_tables(reopened.conn):
+        reopened.init_schema()
     worker = recovery_worker(reopened, 11)
     assert not reopened.activity_paused
     scheduled = []
@@ -579,7 +593,9 @@ def test_repeated_cutoffs_commit_checkpoints_and_resume_beyond_the_prefix_after_
             if turn == 2:
                 assert store.settings.get_setting(choice_retention.AFTER)
                 reopened = Store(library._db_path)
-                reopened.init_schema()
+                reopened.conn.execute('PRAGMA synchronous=OFF')
+                with schema_inspection.reuse_tables(reopened.conn):
+                    reopened.init_schema()
                 store = reopened
             if count == len(original):
                 break
@@ -677,7 +693,9 @@ def test_process_interruption_releases_publication_and_restart_finishes_recovery
         assert process.returncode == (130 if termination == signal.SIGINT else -signal.SIGKILL), stderr
         reopened = Store(library._db_path)
         try:
-            reopened.init_schema()
+            reopened.conn.execute('PRAGMA synchronous=OFF')
+            with schema_inspection.reuse_tables(reopened.conn):
+                reopened.init_schema()
             worker = recovery_worker(reopened, 100)
             try:
                 assert not reopened.activity_paused

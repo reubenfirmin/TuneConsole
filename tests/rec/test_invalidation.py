@@ -122,10 +122,22 @@ def _identity_inputs(store, *, current):
 
 
 @pytest.fixture(scope='module')
-def upgraded_identity_template(identity_journey):
-    source = identity_journey['source']
-    source.init_schema(defer_metadata=True)
-    return capture_template(source, identity_journey['original'])
+def upgraded_identity_template(_pristine_installed_schema, tmp_path_factory):
+    # A consumer selected alone must not depend on the journey tests having
+    # advanced their shared v33 input first. Keep this conversion private so
+    # selecting consumers before edge owners cannot advance those owners either.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('completed-identity-home')))
+        bound_catalog(patch)
+        source = Store(tmp_path_factory.mktemp('completed-identity') / 'installed.db')
+        with closing(source.conn):
+            _pristine_installed_schema(33).backup(source.conn)
+            source.conn.execute('PRAGMA journal_mode=WAL')
+            source.conn.execute('PRAGMA synchronous=OFF')
+            original = _identity_inputs(source, current=False)
+            runner.migrate(source.conn, registry=registry.MIGRATIONS)
+            source.init_schema(defer_metadata=True)
+            yield capture_template(source, original)
 
 
 def test_completed_identity_upgrade_keeps_private_read_only_admission(upgraded_identity_template):

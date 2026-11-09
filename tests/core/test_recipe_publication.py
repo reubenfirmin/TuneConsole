@@ -7,7 +7,10 @@ import threading
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, guarded_numbered_store as guarded_installed, publication_consumer_reads
+from tests.store_fixture_support import (
+    numbered_store as installed, guarded_numbered_store as guarded_installed,
+    preparation_ddl_connection, publication_consumer_reads, without_query_timing,
+)
 from tests.core.test_recipe_membership_preparation import seed, finish, head
 from yt_playlist.core import recipe_memberships
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -19,7 +22,7 @@ LISTS = {'artists':['Known artist','Unadmitted artist','Unadmitted artist'],
          'genres':['Known','Unadmitted genre'], 'blacklist_genres':['Known']}
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +84,7 @@ def test_selected_membership_matches_native_and_keeps_sources_and_pinned_reads(g
 
 
 @pytest.mark.parametrize('installed',[88],indirect=True)
-def test_duplicate_resolved_identity_stops_selection_without_losing_ordered_intent(installed):
+def test_duplicate_resolved_identity_stops_selection_without_losing_ordered_intent(installed, preparation_ddl_connection):
     store,_=installed
     original=seed(store)
     stage=ready(store.conn)
@@ -89,7 +92,7 @@ def test_duplicate_resolved_identity_stops_selection_without_losing_ordered_inte
         publication.OWNER.publish(store.conn,stage=stage)
     assert publication.OWNER.selected(store.conn) is None
     assert store.road_trip.get_road_trip_recipe(1)['artists']==json.loads(original['artists'])
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.read_original(head(store.conn))==original
 
 
@@ -122,7 +125,7 @@ def test_compatible_replacement_reference_edit_and_delete_withdraw_and_reconcile
 
 @pytest.mark.parametrize('installed',[88],indirect=True)
 @pytest.mark.parametrize('damage',['wrong','missing','extra'])
-def test_independent_verification_rejects_bad_prepared_members(installed,damage):
+def test_independent_verification_rejects_bad_prepared_members(installed,preparation_ddl_connection,damage):
     store,_=installed
     seed(store,LISTS)
     preparation.JOB.install(store.conn)
@@ -138,17 +141,17 @@ def test_independent_verification_rejects_bad_prepared_members(installed,damage)
     with pytest.raises(MigrationError,match='differs|extra'):
         publication.OWNER.publish(store.conn,stage=stage)
     assert publication.OWNER.selected(store.conn) is None
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed',[79],indirect=True)
-def test_missing_original_repair_and_failed_preparation_do_not_block_regular_schema(installed):
+def test_missing_original_repair_and_failed_preparation_do_not_block_regular_schema(installed, preparation_ddl_connection):
     store,_=installed
     seed(store,LISTS)
     stage=ready(store.conn)
     captured=head(store.conn)
     Path(captured['filename']).unlink()
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     with pytest.raises(FileNotFoundError):
         publication.OWNER.publish(store.conn,stage=stage)
     publication.repair(store.conn,1)
@@ -158,13 +161,13 @@ def test_missing_original_repair_and_failed_preparation_do_not_block_regular_sch
     with pytest.raises(MigrationError,match='lists of nonblank'):
         preparation.JOB.step(store.conn)
     failed=preparation.JOB.progress(store.conn)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.JOB.progress(store.conn)==failed and failed.status=='failed'
     assert publication.OWNER.selected(store.conn) is None
 
 
 @pytest.mark.parametrize('installed',[88],indirect=True)
-def test_slow_file_check_allows_compatible_write_and_fences_stale_selection(installed,monkeypatch):
+def test_slow_file_check_allows_compatible_write_and_fences_stale_selection(installed,preparation_ddl_connection,monkeypatch):
     store,_=installed
     seed(store,LISTS)
     stage=ready(store.conn)
@@ -185,7 +188,7 @@ def test_slow_file_check_allows_compatible_write_and_fences_stale_selection(inst
         try:
             assert entered.wait(15)
             store.road_trip.save_road_trip_recipe(1,'Concurrent',50,[],[],90,30)
-            regular.migrate(store.conn)
+            regular.migrate(preparation_ddl_connection)
         finally:
             release.set()
         with pytest.raises(MigrationError,match='differs|changed|reconciled'):

@@ -6,10 +6,14 @@ import threading
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import (
+    numbered_store as installed, preparation_ddl_connection, without_query_timing,
+)
 from yt_playlist.core.migrations import regular
 from yt_playlist.core.preparation import (choice_publication, conflict_publication, demand_publication, discovery_artist_publication, discovery_checkpoint_publication,
     genre_preference_publication, genre_publication, home_publication, library_sync_publication, metadata_destinations, metadata_publication, recipe_publication, subject_publication, taste_publication)
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -20,7 +24,7 @@ def disable_periodic_library_sync():
 @pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('family', ['artist', 'listening', 'home', 'checkpoints', 'document', 'genre', 'preferences', 'recipes', 'demand', 'taste', 'choice', 'conflicts', 'metadata', 'metadata_destinations'])
 def test_existing_schema_validation_allows_serving_writes_and_regular_ddl(
-        installed, family, monkeypatch):
+        installed, family, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     conn = store.conn
     if family in ('genre','preferences','demand','taste','metadata','metadata_destinations'):
@@ -70,7 +74,7 @@ def test_existing_schema_validation_allows_serving_writes_and_regular_ddl(
         try:
             assert entered.wait(15)
             store.settings.set_setting('publication-concurrency-evidence', 'ordinary writer')
-            regular.migrate(conn)
+            regular.migrate(preparation_ddl_connection)
         finally:
             release.set()
         task.result(timeout=15)

@@ -48,34 +48,35 @@ def seed(store):
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 def test_typed_fields_exact_originals_and_unknown_generation_without_admission(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
+    conn = preparation_ddl_connection
     sources = seed(store)
     for job in preparation.JOBS.values():
-        job.install(store.conn)
-        finish(job, store.conn)
-    basis = store.conn.execute('SELECT * FROM prepared_content_basis_checkpoint').fetchone()
+        job.install(conn)
+        finish(job, conn)
+    basis = conn.execute('SELECT * FROM prepared_content_basis_checkpoint').fetchone()
     assert (basis['serial'], basis['rows'], basis['has_modes'], basis['mode_count'], basis['mode_min_members'],
             basis['mode_match_threshold'], basis['has_phases'], basis['bytes_encoding'], basis['bytes_clustering'],
             basis['bytes_publication']) == (42, 123, 1, 4, 3, .4, 1, 123, None, 45)
-    full = store.conn.execute('SELECT * FROM prepared_content_full_checkpoint').fetchone()
+    full = conn.execute('SELECT * FROM prepared_content_full_checkpoint').fetchone()
     assert full['at'] is None and full['restore_run'] == '0004' and full['has_config'] == 1
-    fit = store.conn.execute('SELECT * FROM prepared_content_fit_checkpoint').fetchone()
+    fit = conn.execute('SELECT * FROM prepared_content_fit_checkpoint').fetchone()
     assert (fit['state'], fit['attempts'], fit['bytes_clustering'], fit['max_rows']) == ('deferred', 2, 345, 99)
-    group = store.conn.execute('SELECT * FROM prepared_group_generation_checkpoint').fetchone()
+    group = conn.execute('SELECT * FROM prepared_group_generation_checkpoint').fetchone()
     assert (group['recorded_generation'], group['generation_id'], group['unresolved_reason'], group['input_serial'],
             group['checkpoint_at']) == ('not-admitted', None, 'missing_generation', 99, 109)
-    assert store.conn.execute('SELECT count(*) FROM group_generations').fetchone()[0] == 0
-    assert store.conn.execute('SELECT expires_at FROM prepared_candidate_expiry_checkpoint').fetchone()[0] == 123.5
+    assert conn.execute('SELECT count(*) FROM group_generations').fetchone()[0] == 0
+    assert conn.execute('SELECT expires_at FROM prepared_candidate_expiry_checkpoint').fetchone()[0] == 123.5
     actual = {}
     for name in preparation.SOURCES:
-        actual.update(store.conn.execute('SELECT source,raw_value FROM ' + collection_controls.originals(name)))
+        actual.update(conn.execute('SELECT source,raw_value FROM ' + collection_controls.originals(name)))
     assert actual == {key: value for key, value in sources.items() if key != 'rec_vibe_version'}
     with reuse_reporting_reader(store, monkeypatch):
         assert all(store.settings.get_setting(key) == value for key, value in sources.items())
-    assert not content_preparation_state.available(store.conn)
-    assert not group_preparation_state.available(store.conn)
-    assert not ranking_checkpoints.available(store.conn)
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(preparation_ddl_connection)
+    assert not content_preparation_state.available(conn)
+    assert not group_preparation_state.available(conn)
+    assert not ranking_checkpoints.available(conn)
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -195,11 +196,12 @@ def test_null_blank_then_removed_sources_keep_their_exact_original(installed, na
 ])
 def test_invalid_or_oversized_inputs_fail_durably_without_changing_settings(installed, preparation_ddl_connection, name, key, raw):
     store, _ = installed
+    conn = preparation_ddl_connection
     store.settings.set_setting(key, raw)
     job = preparation.JOBS[name]
-    job.install(store.conn)
+    job.install(conn)
     with pytest.raises(ValueError):
-        finish(job, store.conn)
-    assert job.progress(store.conn).status == 'failed'
+        finish(job, conn)
+    assert job.progress(conn).status == 'failed'
     assert store.settings.get_setting(key) == raw
-    regular.migrate(preparation_ddl_connection)
+    regular.migrate(conn)

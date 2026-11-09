@@ -7,7 +7,11 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import (
+    numbered_store as installed,
+    preparation_ddl_connection,
+    publication_preparation_input,
+)
 from tests.test_tv_stream import video
 from yt_playlist.core import tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -64,6 +68,7 @@ def aliases(conn):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+@pytest.mark.usefixtures('publication_preparation_input')
 def test_all_five_jobs_retain_exact_shapes_clocks_and_reference_custody(installed, preparation_ddl_connection):
     store, _ = installed
     conn = preparation_ddl_connection
@@ -212,6 +217,7 @@ def test_file_work_has_no_transaction_and_rejects_concurrent_source_edit(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_preparation_input')
 def test_interruption_missing_file_failed_job_new_regular_ddl_and_reopened_retry(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     seed(store)

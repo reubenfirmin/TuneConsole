@@ -8,10 +8,17 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as store,
+    reuse_reporting_reader, without_query_timing,
+)
 from tests.repos.test_album_aliases import OLD, ALIAS, release
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.rec import choice_evidence, choice_learning, rec_params, scoring
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
 
 DAY = 86400
 START = 1_700_000_000
@@ -30,7 +37,7 @@ def _pristine_current_schema():
 
 
 @pytest.fixture
-def store(choice_catalogs, first, tmp_path, monkeypatch):
+def copied_choice_store(choice_catalogs, first, tmp_path, monkeypatch):
     directory = tmp_path / 'album-choice'
     directory.mkdir()
     with choice_catalogs(first).open(directory / 'library.db') as database:
@@ -89,9 +96,11 @@ def choice_catalogs(_pristine_current_schema):
 
 
 @pytest.fixture
-def choice_catalog(store, choice_catalogs, first):
-    # The Store already owns one complete private copy, including retained files.
-    return deepcopy(choice_catalogs(first).result)
+def choice_catalog(store, first, monkeypatch):
+    # Ordinary choice consumers need one seeded private library. The copy
+    # isolation owner below separately retains the template and both copies.
+    use_existing_album_tracks(store, monkeypatch)
+    return seed_choice_catalog(store, first)
 
 
 @pytest.fixture
@@ -102,10 +111,12 @@ def other_choice_store(choice_catalogs, first, tmp_path):
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])
 def test_choice_catalog_copies_keep_models_payloads_and_aliases_private(
-        store, other_choice_store, first, choice_catalogs, choice_catalog):
+        copied_choice_store, other_choice_store, first, choice_catalogs):
     from tests.prepared_fixture_support import roots
 
     template = choice_catalogs(first)
+    store = copied_choice_store
+    choice_catalog = deepcopy(template.result)
     second = ALIAS if first == OLD else OLD
     other_catalog = deepcopy(template.result)
     assert choice_catalog == other_catalog == template.result

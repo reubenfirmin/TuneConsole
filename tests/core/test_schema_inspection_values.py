@@ -27,9 +27,17 @@ def test_named_definitions_observe_only_current_main_schema_and_allow_quoted_nam
 def test_named_definitions_keep_first_matching_object_when_trigger_and_table_share_a_name():
     with closing(sqlite3.connect(':memory:')) as conn:
         sql = 'CREATE TABLE shared(value INTEGER)'
+        trigger = 'CREATE TRIGGER shared AFTER INSERT ON shared BEGIN SELECT 1; END'
         conn.execute(sql)
-        conn.execute('CREATE TRIGGER shared AFTER INSERT ON shared BEGIN SELECT 1; END')
-        assert schema_inspection.definitions(conn, ['shared']) == {'shared': sql}
+        conn.execute(trigger)
+        conn.execute('BEGIN')
+        with schema_inspection.reuse_objects(conn):
+            assert schema_inspection.definitions(conn, ['shared']) == {'shared': sql}
+            # Full-contract validation keeps its last-match behavior. Sharing
+            # a catalog must not discard a same-named trigger or change admission.
+            assert [tuple(row) for row in schema_inspection.catalog_rows(conn)] == [
+                ('shared', 'table', sql), ('shared', 'trigger', trigger)]
+        conn.rollback()
 
 
 def test_catalog_observations_end_before_rollback_and_schema_version_reuse():
@@ -136,6 +144,9 @@ def test_nested_sessions_reuse_only_their_connection_and_restore_the_parent():
     with closing(sqlite3.connect(':memory:')) as first, closing(sqlite3.connect(':memory:')) as other:
         for conn in (first, other):
             conn.execute(definition)
+        other.execute('ALTER TABLE example ADD COLUMN other_only INTEGER')
+        other_definition = other.execute("SELECT sql FROM sqlite_schema WHERE name='example'").fetchone()[0]
+        other_expected = schema_definition._inspect_table(other, 'example', other_definition)
         statements = []
         first.set_trace_callback(statements.append)
         with schema_inspection.reuse_tables(first) as outer:
@@ -148,7 +159,12 @@ def test_nested_sessions_reuse_only_their_connection_and_restore_the_parent():
             with schema_inspection.reuse_tables(other) as independent:
                 assert independent is not outer
                 independent.refresh()
-                assert schema_definition._table(other, 'example', definition) == expected
+                assert schema_definition._table(other, 'example', other_definition) == other_expected
+                assert schema_definition._table(first, 'example', definition) == expected
+                with schema_inspection.reuse_tables(first) as reentered:
+                    assert reentered is outer
+                    assert schema_definition._table(first, 'example', definition) == expected
+                assert schema_definition._table(other, 'example', other_definition) == other_expected
             assert schema_definition._table(first, 'example', definition) == expected
             assert statements.count('PRAGMA main.table_xinfo("example")') == 1
         with schema_inspection.reuse_tables(first) as later:

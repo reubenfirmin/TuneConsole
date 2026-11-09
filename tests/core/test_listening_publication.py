@@ -7,10 +7,13 @@ import time
 import pytest
 
 from tests.core.test_listening_output_preparation import chunk, head, seed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.publication_timing_support import publication_costs
 from tests.store_fixture_support import (
-    guarded_numbered_store as installed,
+    guarded_numbered_store,
+    numbered_store as unadmitted_installed,
     preparation_ddl_connection,
+    publication_preparation_input,
     publication_schema_inspections,
 )
 from yt_playlist.core import recommendation_outputs as files
@@ -19,7 +22,7 @@ from yt_playlist.core.preparation import listening_outputs as preparation, liste
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
+pytestmark = pytest.mark.usefixtures('publication_schema_inspections', 'publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)
@@ -79,33 +82,34 @@ def test_preopened_readers_use_exact_verified_files_and_match_native(installed, 
         native.conn.close()
 
 
-@pytest.mark.parametrize('installed', [89], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [89], indirect=True)
 @pytest.mark.parametrize('failure', ['field','time','reference','missing-reference','original','file','omitted'])
 def test_incorrect_headers_references_files_and_source_coverage_cannot_publish(
-        installed, failure, preparation_ddl_connection):
-    store, _ = installed
+        unadmitted_installed, failure, preparation_ddl_connection):
+    store, _ = unadmitted_installed
+    conn = preparation_ddl_connection
     seed(store)
-    prepared(store.conn)
-    with store.conn:
+    prepared(conn)
+    with conn:
         if failure == 'field':
-            store.conn.execute("UPDATE prepared_listening_output_generations SET timezone='other' WHERE surface='listening_analytics'")
+            conn.execute("UPDATE prepared_listening_output_generations SET timezone='other' WHERE surface='listening_analytics'")
         elif failure == 'time':
-            store.conn.execute('UPDATE prepared_listening_output_generations SET source_at=0')
+            conn.execute('UPDATE prepared_listening_output_generations SET source_at=0')
         elif failure == 'reference':
-            store.conn.execute('UPDATE prepared_listening_chunk_references SET encoded_bytes=1 WHERE position=0')
+            conn.execute('UPDATE prepared_listening_chunk_references SET encoded_bytes=1 WHERE position=0')
         elif failure == 'missing-reference':
-            store.conn.execute('DELETE FROM prepared_listening_chunk_references WHERE position=0')
+            conn.execute('DELETE FROM prepared_listening_chunk_references WHERE position=0')
         elif failure == 'original':
-            Path(head(store.conn)['filename']).write_text('{}')
+            Path(head(conn)['filename']).write_text('{}')
         elif failure == 'file':
-            Path(head(store.conn)['filename']).unlink()
+            Path(head(conn)['filename']).unlink()
         else:
-            store.conn.execute("DELETE FROM prepared_listening_output_heads WHERE surface='listening_edition'")
-    stage = mapped(store.conn)
+            conn.execute("DELETE FROM prepared_listening_output_heads WHERE surface='listening_edition'")
+    stage = mapped(conn)
     with pytest.raises((MigrationError, ValueError, OSError)):
-        publication.OWNER.publish(store.conn, stage=stage.id)
-    assert publication.OWNER.selected(store.conn) is None
-    regular.migrate(preparation_ddl_connection)
+        publication.OWNER.publish(conn, stage=stage.id)
+    assert publication.OWNER.selected(conn) is None
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
@@ -275,9 +279,9 @@ def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_inde
     assert store.rec_proposals.get_proposals('listening_edition') == {'text':'New'}
 
 
-@pytest.mark.parametrize('installed', [89], indirect=True)
-def test_native_upgrade_preserves_files_and_requires_retained_custody_guards(installed):
-    store, _ = installed
+@pytest.mark.parametrize('guarded_numbered_store', [89], indirect=True)
+def test_native_upgrade_preserves_files_and_requires_retained_custody_guards(guarded_numbered_store):
+    store, _ = guarded_numbered_store
     path = store._db_path
     try:
         store.init_schema(defer_metadata=True)

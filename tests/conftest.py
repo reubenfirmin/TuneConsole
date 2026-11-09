@@ -7,7 +7,7 @@ from contextlib import ExitStack, closing
 import pytest
 from tests.compaction_fixture_support import compaction_inputs
 from tests.genre_catalog_support import use_shipped_catalog
-from tests.store_fixture_support import consumer_schema, initialize_consumer
+from tests.store_fixture_support import consumer_schema, initialize_consumer, native_sql_calls
 from yt_playlist.core.store import Store
 
 
@@ -474,7 +474,7 @@ def _bounded_installed_schema(tmp_path_factory):
                     source.execute('PRAGMA query_only=ON')
                     store = Store(root / f'{version}.db')
                     resources.callback(store.conn.close)
-                    store.conn.execute('PRAGMA synchronous=NORMAL')
+                    store.conn.execute('PRAGMA synchronous=OFF')
                     initialize_consumer(store, source, compatibility=version < len(registry.MIGRATIONS))
                     templates[version] = capture_template(store, None)
                     assert templates[version].source.conn.execute(
@@ -720,14 +720,17 @@ def compact_group_template(tmp_path_factory, _pristine_installed_schema):
 @pytest.fixture
 def consumer_store(_pristine_current_schema, request):
     """Create owned empty consumers; populated reopens still use real admission."""
-    def create(path=":memory:"):
+    def create(path=":memory:", *, snapshot_guards=True):
         started = time.perf_counter()
         target = Store(path)
         request.addfinalizer(target.conn.close)
         try:
+            # Disposable consumers require real commits and restart visibility,
+            # without host power-loss durability for their private input files.
+            target.conn.execute('PRAGMA synchronous=OFF')
             assert not target.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' LIMIT 1").fetchone(), \
                 'Consumer templates are only for a new empty Store; populated reopens need init_schema()'
-            initialize_consumer(target, _pristine_current_schema)
+            initialize_consumer(target, _pristine_current_schema, snapshot_guards=snapshot_guards)
         finally:
             request.node.user_properties.append(('consumer_initialization_seconds', time.perf_counter() - started))
         return target

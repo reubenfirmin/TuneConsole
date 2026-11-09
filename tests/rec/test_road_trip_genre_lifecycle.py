@@ -4,9 +4,33 @@ import json
 import pytest
 
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 from yt_playlist.core.store import Store
 from yt_playlist.rec import road_trip
+
+
+GENRES = (('jazz', 'Jazz'), ('synth pop', 'Synth Pop'))
+pytestmark = pytest.mark.usefixtures('road_trip_vocabulary', 'native_sql_calls')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(GENRES, snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def road_trip_vocabulary(monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    # Both genre identities and live family edits remain real. Full catalog
+    # curation is below the recipe/draft/restart workflow under test.
+    bound_catalog(monkeypatch, entries=GENRES)
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    """These recipe/draft tests never create the HTTP app or its workers."""
 
 
 def _song(store, video, genre):
@@ -32,9 +56,10 @@ def _assert_blend(state, order, banned):
 @pytest.mark.parametrize('legacy',[False,True],ids=['captured','legacy-draft'])
 def test_current_family_survives_finalize_reload_and_single_slot_reroll(tmp_path,genre,legacy,consumer_store):
     path = tmp_path/'trip.db'
-    store = consumer_store(path)
+    store = consumer_store(path, snapshot_guards=False)
     try:
         store.accounts.upsert_account('Main','unused.json',None,True)
+        store.genres.configure_catalog()
         for video in ('a','b','c'):
             _song(store,video,genre)
         if genre=='Synth Pop':
@@ -53,6 +78,7 @@ def test_current_family_survives_finalize_reload_and_single_slot_reroll(tmp_path
         store.road_trip.save_road_trip_draft(recipe_id,state,1000)
         store.conn.close()
         store = Store(path)
+        store.conn.execute('PRAGMA synchronous=OFF')
         store.init_schema()
         state = road_trip.normalized(store.road_trip.get_road_trip_draft(recipe_id),store,1001)
         _assert_blend(state,order,[])

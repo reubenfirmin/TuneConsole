@@ -8,7 +8,7 @@ import pytest
 from tests.store_fixture_support import numbered_store as installed
 from tests.store_fixture_support import guarded_numbered_store as guarded_installed
 from tests.core.test_radio_origin_preparation import finish, head, seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import publication_consumer_reads, preparation_ddl_connection
 from yt_playlist.core import radio_provenance
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import radio_origin_publication as publication, radio_origins as preparation
@@ -113,28 +113,29 @@ def test_remember_reserves_writer_before_reading_selected_predecessor(installed,
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
 @pytest.mark.parametrize('failure',['file','missing-file','fields','member'])
-def test_incomplete_or_corrupt_preparation_keeps_installed_origins(installed,failure):
+def test_incomplete_or_corrupt_preparation_keeps_installed_origins(installed,preparation_ddl_connection,failure):
     store,_ = installed
+    conn = preparation_ddl_connection
     original = seed(store)
-    revision = prepare(store.conn)
+    revision = prepare(conn)
     if failure in ('file','missing-file'):
-        path = Path(store.conn.execute('SELECT filename FROM '+preparation.PARTS+' LIMIT 1').fetchone()[0])
+        path = Path(conn.execute('SELECT filename FROM '+preparation.PARTS+' LIMIT 1').fetchone()[0])
         if failure == 'file':
             path.write_bytes(b'corrupt')
         else:
             path.unlink()
     else:
-        with store.conn:
+        with conn:
             if failure == 'fields':
-                store.conn.execute('UPDATE '+preparation.HEAD+' SET item_count=item_count+1')
+                conn.execute('UPDATE '+preparation.HEAD+' SET item_count=item_count+1')
             else:
-                store.conn.execute('DELETE FROM '+preparation.ORIGINS+' WHERE position=1')
+                conn.execute('DELETE FROM '+preparation.ORIGINS+' WHERE position=1')
     with pytest.raises((MigrationError,ValueError,OSError)):
-        publication.publish(store.conn,revision=revision)
-    assert publication.selected(store.conn) is None
+        publication.publish(conn,revision=revision)
+    assert publication.selected(conn) is None
     assert radio_provenance.ids(store.conn) == ['shared','LM','missing']
     assert {key:store.settings.get_setting(key) for key in original} == original
-    regular.migrate(store.conn)
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)

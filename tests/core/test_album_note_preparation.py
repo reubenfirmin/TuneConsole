@@ -5,11 +5,14 @@ from pathlib import Path
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from tests.store_fixture_support import numbered_store
+from tests.store_fixture_support import numbered_store, preparation_ddl_connection, publication_preparation_input
 from yt_playlist.core import albums, recommendation_outputs
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import album_notes as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 NOTES = {'release': {'description': 'Paid result: exact prose', 'links': [{'url': 'https://example.org'}]},
@@ -125,29 +128,30 @@ def test_file_publication_runs_without_transaction_and_rejects_stale_source(inst
         second.conn.close()
 
 
-@pytest.mark.parametrize('installed', [83], indirect=True)
+@pytest.mark.parametrize('numbered_store', [83], indirect=True)
 def test_restart_and_explicit_file_failure_recovery_preserve_prior_batches(
-        installed, monkeypatch):
-    store, _ = installed
+        numbered_store, preparation_ddl_connection, monkeypatch):
+    store, _ = numbered_store
+    conn = preparation_ddl_connection
     raw = seed(store)
-    preparation.JOB.install(store.conn)
-    checkpoint = preparation.JOB.step(store.conn, batch_size=1)
+    preparation.JOB.install(conn)
+    checkpoint = preparation.JOB.step(conn, batch_size=1)
     publish = recommendation_outputs.publish
     def interrupted(*args):
-        assert not store.conn.in_transaction
+        assert not conn.in_transaction
         raise KeyboardInterrupt('controlled interruption')
     monkeypatch.setattr(recommendation_outputs, 'publish', interrupted)
     with pytest.raises(KeyboardInterrupt):
-        preparation.JOB.step(store.conn, batch_size=1)
-    assert preparation.JOB.progress(store.conn) == checkpoint
+        preparation.JOB.step(conn, batch_size=1)
+    assert preparation.JOB.progress(conn) == checkpoint
     def disk_failure(*args):
-        assert not store.conn.in_transaction
+        assert not conn.in_transaction
         raise OSError('controlled disk failure')
     monkeypatch.setattr(recommendation_outputs, 'publish', disk_failure)
     with pytest.raises(OSError, match='controlled disk failure'):
-        preparation.JOB.step(store.conn, batch_size=1)
-    assert preparation.JOB.progress(store.conn).status == 'failed'
-    regular.migrate(store.conn)
+        preparation.JOB.step(conn, batch_size=1)
+    assert preparation.JOB.progress(conn).status == 'failed'
+    regular.migrate(conn)
     assert store.rec_proposals.get_proposals(preparation.SURFACE) == NOTES
     monkeypatch.setattr(recommendation_outputs, 'publish', publish)
     reopened = Store(store._db_path)

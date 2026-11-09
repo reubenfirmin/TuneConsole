@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store, numbered_store as installed
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core import collection_recovery, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import road_trip_drafts as preparation
@@ -46,10 +46,10 @@ def seed(store):
     return identity, raw
 
 
-@pytest.mark.parametrize('numbered_store', [79, 93], indirect=True)
-def test_exact_decisions_repetitions_unknowns_and_authority_survive_preparation(numbered_store):
-    store, _ = numbered_store
-    conn = store.conn
+@pytest.mark.parametrize('installed', [79, 93], indirect=True)
+def test_exact_decisions_repetitions_unknowns_and_authority_survive_preparation(installed, preparation_ddl_connection):
+    store, _ = installed
+    conn = preparation_ddl_connection
     identity, raw = seed(store)
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=2).processed == 2
@@ -236,13 +236,14 @@ def test_interruption_and_disk_failure_keep_prior_checkpoint_for_explicit_retry(
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('value', [[], {'picks': None}, {'banned': ['']}, {'picks': [3]}, {'value': float('inf')}])
-def test_invalid_draft_fails_durably_without_blocking_regular_ddl(installed, value):
+def test_invalid_draft_fails_durably_without_blocking_regular_ddl(installed, preparation_ddl_connection, value):
     store, _ = installed
+    conn = preparation_ddl_connection
     identity = recipe(store)
     store.road_trip.save_road_trip_draft(identity, value, 1)
-    preparation.JOB.install(store.conn)
+    preparation.JOB.install(conn)
     with pytest.raises(ValueError):
-        finish(store.conn)
-    assert preparation.JOB.progress(store.conn).status == 'failed'
+        finish(conn)
+    assert preparation.JOB.progress(conn).status == 'failed'
     assert store.road_trip.get_road_trip_draft(identity) == value
-    regular.migrate(store.conn)
+    regular.migrate(conn)

@@ -5,29 +5,24 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_library_sync_preparation import finish, head, seed
-from tests.store_fixture_support import publication_consumer_reads
-from yt_playlist.core import schema_inspection, sync_state
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed, preparation_ddl_connection,
+    native_sql_calls, publication_consumer_reads, without_query_timing,
+)
+from yt_playlist.core import sync_state
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import library_sync as preparation, library_sync_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.library import sync_outcomes
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Sync SQL and file publication do not start the HTTP lifecycle."""
-
-
-def test_long_report_input_keeps_installed_history_and_snapshot_guards(_bounded_installed_schema):
-    source = _bounded_installed_schema(93).source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def prepare(conn, owner):
@@ -128,7 +123,7 @@ def test_continuing_result_stamp_and_reference_writes_withdraw_independently(ins
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('name', tuple(publication.OWNERS))
-def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, name):
+def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, name, preparation_ddl_connection):
     store, _ = installed
     for owner in publication.OWNERS.values():
         owner.publish(store.conn, revision=prepare(store.conn, owner))
@@ -142,7 +137,7 @@ def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, n
         finish(owner.worker, store.conn, size=3)
     failed = owner.worker.progress(store.conn)
     assert failed.status == 'failed'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert owner.worker.progress(store.conn) == failed
     other = next(value for value in publication.OWNERS.values() if value is not owner)
     assert other.selected(store.conn) == 0
@@ -238,55 +233,26 @@ def test_stamp_publication_rollback_immutable_custody_and_same_original_reconcil
     assert store.settings.get_setting('last_sync_at') == ' 10.50 '
 
 
-@pytest.fixture(scope='module')
-def long_report(_bounded_installed_schema, tmp_path_factory):
-    template = _bounded_installed_schema(93)
-    path = tmp_path_factory.mktemp('long-library-sync-report')/'source.db'
-    with template.open(path) as store, schema_inspection.reuse_tables(store.conn):
-        value = json.loads(seed(store))
-        value['accounts']['1']['resources']['playlists']['items'] = {
-            'unseen-'+str(number):{'status':'partial', 'last_attempt_at':9007199254740993, 'cursor':'same'}
-            for number in range(2000)}
-        raw = json.dumps(value)
-        store.settings.set_setting(sync_state.KEY, raw)
-        yield dict(store=store, value=value, raw=raw)
-
-
-def test_long_report_source_keeps_two_thousand_distinct_unresolved_items_and_exact_clocks(long_report):
-    items = long_report['value']['accounts']['1']['resources']['playlists']['items']
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_long_report_repeated_reference_queries_and_missing_file_retry(installed):
+    store, _ = installed
+    value = json.loads(seed(store))
+    items = value['accounts']['1']['resources']['playlists']['items'] = {
+        'unseen-'+str(number):{'status':'partial', 'last_attempt_at':9007199254740993, 'cursor':'same'}
+        for number in range(2000)}
+    raw = json.dumps(value)
+    store.settings.set_setting(sync_state.KEY, raw)
     assert set(items) == {'unseen-'+str(number) for number in range(2000)}
     assert all(item['last_attempt_at'] == 9007199254740993 for item in items.values())
-    assert long_report['store'].settings.get_setting(sync_state.KEY) == long_report['raw']
-
-
-@pytest.fixture(scope='module')
-def prepared_long_report(long_report):
-    long_report['revision'] = prepare(long_report['store'].conn, publication.RESULT)
-    return long_report
-
-
-def test_long_report_preparation_retains_every_unresolved_reference(prepared_long_report):
-    conn = prepared_long_report['store'].conn
+    revision = prepare(store.conn, publication.RESULT)
+    conn = store.conn
     assert conn.execute('SELECT count(*) FROM '+preparation.CURSORS+
         " WHERE raw_playlist_id LIKE 'unseen-%' AND unresolved_scope_reason='missing_scope'").fetchone()[0] == 2000
-    assert preparation.read_original(conn, head(conn)) == prepared_long_report['raw']
+    assert preparation.read_original(conn, head(conn)) == raw
     assert publication.RESULT.selected(conn) is None
-
-
-@pytest.fixture(scope='module')
-def published_long_report(prepared_long_report):
-    state = prepared_long_report
-    publication.RESULT.publish(state['store'].conn, revision=state['revision'])
-    return state
-
-
-def test_long_report_publication_selects_the_actual_prepared_revision(published_long_report):
-    assert publication.RESULT.selected(published_long_report['store'].conn) == published_long_report['revision']
-
-
-def test_long_report_repeated_reference_queries_and_missing_file_retry(published_long_report):
-    store = published_long_report['store']
-    assert sync_state.read(store.conn) == published_long_report['value']
+    publication.RESULT.publish(conn, revision=revision)
+    assert publication.RESULT.selected(conn) == revision
+    assert sync_state.read(conn) == value
     with pytest.raises(sqlite3.IntegrityError, match='retained'):
         with store.conn:
             store.conn.execute('DELETE FROM '+preparation.CURSORS)
@@ -294,4 +260,4 @@ def test_long_report_repeated_reference_queries_and_missing_file_retry(published
     with pytest.raises(FileNotFoundError):
         sync_state.read(store.conn)
     preparation.RESULT_JOB.step(store.conn, retry=True)
-    assert store.settings.get_setting(sync_state.KEY) == published_long_report['raw']
+    assert store.settings.get_setting(sync_state.KEY) == raw

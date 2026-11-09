@@ -6,16 +6,17 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.core.test_predecessor_writes import consumer_installed as template_installed
 from tests.prepared_fixture_support import assert_upgrade_phase, coordinates, custody_predecessor, custody_upgrade_cases
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.publication_fixture_support import installed
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads, without_query_timing
 from yt_playlist.core import action_backup_files, collection_recovery, fao, policy_documents, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import action_ledger as preparation
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture
@@ -23,9 +24,9 @@ def disable_periodic_library_sync():
     pass
 
 
-@pytest.mark.parametrize('installed', [79, 93, 97], indirect=True)
-def test_action_ledger_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
+@pytest.mark.parametrize('template_installed', [79, 93, 97], indirect=True)
+def test_action_ledger_input_keeps_admitted_history_and_private_guards(template_installed):
+    assert_installed_consumer_input(*template_installed)
 
 
 def finish(conn, size=128):

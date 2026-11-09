@@ -1,6 +1,7 @@
 """Detached repository results below compact and full-profile Vibe selection."""
 from contextlib import nullcontext
 from copy import deepcopy
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -55,7 +56,8 @@ def vibe_selection():
         lanes[lane] = []
         for index in range(count):
             key = f'{lane}-{index}'
-            by_key[key] = profiles[index % 2 == 0]
+            by_key[key] = deepcopy(profiles[index % 2 == 0])
+            by_key[key]['source_versions'] = [sha256(key.encode()).hexdigest()]
             lanes[lane].append({'key': key, 'video_id': key, 'title': key,
                 'artist': f'{lane} artist {index}', 'genre': 'Jazz', 'score': .8, 'duration_s': None,
                 '_radio_fresh': lane == 'fresh', 'musical': musical_character.compact(by_key[key])})

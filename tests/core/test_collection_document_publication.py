@@ -7,15 +7,16 @@ from time import perf_counter
 
 import pytest
 
-from tests.store_fixture_support import guarded_numbered_store as installed
+from tests.publication_fixture_support import installed, installed_reader
+from tests.store_fixture_support import numbered_store as unadmitted_installed
 from tests.core.test_collection_document_preparation import seed
-from tests.store_fixture_support import publication_consumer_reads, preparation_ddl_connection
+from tests.store_fixture_support import native_sql_calls, publication_consumer_reads, preparation_ddl_connection, without_query_timing
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_documents as preparation, collection_document_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -42,12 +43,10 @@ def stage(owner, conn, size=128):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 96], indirect=True)
-def test_preopened_and_reopened_readers_find_exact_documents_and_timestamps(installed):
+def test_preopened_and_reopened_readers_find_exact_documents_and_timestamps(installed, monkeypatch):
     store, _ = installed
     _, _, recipe, canvas = seed(store)
-    other = Store(store._db_path)
-    try:
-        other.init_schema(defer_metadata=True)
+    with installed_reader(store._db_path, monkeypatch) as other:
         for owner in publication.OWNERS.values():
             identity = stage(owner, store.conn)
             owner.publish(store.conn, stage=identity)
@@ -57,15 +56,9 @@ def test_preopened_and_reopened_readers_find_exact_documents_and_timestamps(inst
         assert other.playlist_recipes.get_recipe_created_ats() == {'PLAYLIST':3}
         assert other.playlist_recipes.get_recipe('missing') is None
         regular.validate(other.conn)
-    finally:
-        other.conn.close()
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema(defer_metadata=True)
+    with installed_reader(store._db_path, monkeypatch) as reopened:
         assert reopened.playlist_recipes.get_recipe('PLAYLIST') == recipe
         assert reopened.playlist_recipes.get_cluster_canvas('PLAYLIST') == canvas
-    finally:
-        reopened.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -141,10 +134,10 @@ def test_mapping_is_bounded_resumable_and_restarts_after_intervening_source_writ
     assert owner.value(store.conn, first.id, 'canvas-0000') == 'state 0'
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_canvas_default_mapping_batch_stops_at_128_real_prepared_documents(installed, record_property):
-    store, _ = installed
-    conn = store.conn
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
+def test_canvas_default_mapping_batch_stops_at_128_real_prepared_documents(unadmitted_installed, preparation_ddl_connection, record_property):
+    store, _ = unadmitted_installed
+    conn = preparation_ddl_connection
     began = perf_counter()
     for index in range(129):
         store.playlist_recipes.set_cluster_canvas(f'boundary-{index:04d}', 'state '+str(index), index)
@@ -190,33 +183,34 @@ def test_partial_map_interruption_rolls_back_cursor_links_and_custody(installed)
     assert store.playlist_recipes.get_cluster_canvas('b') == 'b'
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['metadata', 'facet', 'extra', 'original', 'recovery', 'plan'])
 def test_unverified_fields_members_or_files_cannot_select_saved_documents(
-        installed, failure, preparation_ddl_connection):
-    store, _ = installed
+        unadmitted_installed, failure, preparation_ddl_connection):
+    store, _ = unadmitted_installed
+    conn = preparation_ddl_connection
     seed(store)
     owner = publication.OWNERS['recipes']
-    prepare(owner, store.conn)
-    header = preparation.head(store.conn, 'recipes', 'PLAYLIST')
-    with store.conn:
+    prepare(owner, conn)
+    header = preparation.head(conn, 'recipes', 'PLAYLIST')
+    with conn:
         if failure == 'metadata':
-            store.conn.execute('UPDATE '+owner.header+" SET media='video'")
+            conn.execute('UPDATE '+owner.header+" SET media='video'")
         elif failure == 'facet':
-            store.conn.execute('UPDATE '+preparation.table('recipes', 'facets')+" SET captured_value='changed' WHERE kind='genre'")
+            conn.execute('UPDATE '+preparation.table('recipes', 'facets')+" SET captured_value='changed' WHERE kind='genre'")
         elif failure == 'extra':
-            store.conn.execute('INSERT INTO '+preparation.table('recipes', 'facets')+
+            conn.execute('INSERT INTO '+preparation.table('recipes', 'facets')+
                 " SELECT source,preparation_revision,kind,99,captured_value,axis_digest,axis_ref,axis_kind,genre_key,family_key,value,resolution_reason FROM "+
                 preparation.table('recipes', 'facets')+" WHERE kind='genre' AND position=0")
         else:
-            filename = (header[failure+'_filename'] if failure != 'original' else store.conn.execute(
+            filename = (header[failure+'_filename'] if failure != 'original' else conn.execute(
                 'SELECT filename FROM '+preparation.table('recipes', 'parts')+' LIMIT 1').fetchone()[0])
             Path(filename).write_bytes(b'corrupt')
-    identity = owner.step(store.conn).id
+    identity = owner.step(conn).id
     with pytest.raises((MigrationError, ValueError, OSError)):
-        owner.publish(store.conn, stage=identity)
-    assert owner.selected(store.conn) is None
-    regular.migrate(preparation_ddl_connection)
+        owner.publish(conn, stage=identity)
+    assert owner.selected(conn) is None
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

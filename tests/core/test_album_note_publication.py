@@ -7,14 +7,26 @@ import pytest
 
 from tests.core.test_album_note_preparation import NOTES, finish, header, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import publication_schema_inspections
+from tests.regular_schema_support import register_independent_ddl
+from tests.store_fixture_support import numbered_store as unadmitted_installed
+from tests.store_fixture_support import (
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    publication_preparation_input,
+    publication_schema_inspections,
+)
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_notes as preparation, album_note_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
+pytestmark = pytest.mark.usefixtures('publication_schema_inspections', 'publication_preparation_input')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Album-note publication does not construct the HTTP application."""
 
 
 def test_frozen_native_upgrade_keeps_retained_files_and_guard_validation(tmp_path, _pristine_installed_schema):
@@ -51,7 +63,7 @@ def prepared(conn):
 
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
-def test_held_menu_poll_keeps_visible_demand_with_published_notes(installed):
+def test_held_menu_poll_keeps_visible_demand_with_published_notes(installed, publication_consumer_reads):
     from starlette.testclient import TestClient
     import uvloop
     from tests.test_album_web import _client
@@ -84,7 +96,7 @@ def test_held_menu_poll_keeps_visible_demand_with_published_notes(installed):
 
 
 @pytest.mark.parametrize('installed', [79,83], indirect=True)
-def test_preopened_readers_select_verified_files_and_match_native_outputs(installed, tmp_path):
+def test_preopened_readers_select_verified_files_and_match_native_outputs(installed, tmp_path, publication_consumer_reads):
     store, version = installed
     raw = seed(store)
     preopened, native = Store(store._db_path), Store(tmp_path/'native.db')
@@ -117,30 +129,38 @@ def test_preopened_readers_select_verified_files_and_match_native_outputs(instal
         preopened.conn.close()
 
 
-@pytest.mark.parametrize('installed', [83], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [83], indirect=True)
 @pytest.mark.parametrize('failure', ['field','reference','extra','omitted','time','original','file'])
-def test_incorrect_files_headers_references_or_coverage_cannot_publish(installed, failure):
-    store, _ = installed
-    seed(store)
-    revision = prepared(store.conn)
-    with store.conn:
+def test_incorrect_files_headers_references_or_coverage_cannot_publish(
+        unadmitted_installed, failure, preparation_ddl_connection):
+    store, _ = unadmitted_installed
+    conn = preparation_ddl_connection
+    # This owner verifies the SQL/file publication proof. Snapshot readers,
+    # native upgrades and startup admission have separate real owners below.
+    raw = seed(store)
+    history = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
+    revision = prepared(conn)
+    with conn:
         if failure == 'field':
-            store.conn.execute("UPDATE prepared_album_note_files SET browse_id='other' WHERE position=0")
+            conn.execute("UPDATE prepared_album_note_files SET browse_id='other' WHERE position=0")
         elif failure == 'reference':
-            store.conn.execute("UPDATE prepared_album_note_files SET album_provider_id=NULL,unresolved_reason='missing' WHERE position=0")
+            conn.execute("UPDATE prepared_album_note_files SET album_provider_id=NULL,unresolved_reason='missing' WHERE position=0")
         elif failure == 'extra':
-            store.conn.execute("INSERT INTO prepared_album_note_files SELECT generation,5,'extra',NULL,'missing',filename,digest,byte_size FROM prepared_album_note_files LIMIT 1")
+            conn.execute("INSERT INTO prepared_album_note_files SELECT generation,5,'extra',NULL,'missing',filename,digest,byte_size FROM prepared_album_note_files LIMIT 1")
         elif failure == 'omitted':
-            store.conn.execute('DELETE FROM prepared_album_note_files WHERE position=0')
+            conn.execute('DELETE FROM prepared_album_note_files WHERE position=0')
         elif failure == 'time':
-            store.conn.execute('UPDATE prepared_album_note_generations SET built_at=0')
+            conn.execute('UPDATE prepared_album_note_generations SET built_at=0')
         elif failure == 'original':
-            Path(header(store.conn)['filename']).write_text('{}')
+            Path(header(conn)['filename']).write_text('{}')
         elif failure == 'file':
-            Path(store.conn.execute('SELECT filename FROM prepared_album_note_files LIMIT 1').fetchone()[0]).unlink()
+            Path(conn.execute('SELECT filename FROM prepared_album_note_files LIMIT 1').fetchone()[0]).unlink()
     with pytest.raises((MigrationError, ValueError, OSError)):
-        publication.publish(store.conn, revision=revision)
-    assert publication.selected(store.conn) is None
+        publication.publish(conn, revision=revision)
+    assert publication.selected(conn) is None
+    assert conn.execute("SELECT payload FROM rec_proposals WHERE surface='album_notes'").fetchone()[0] == raw
+    assert list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
@@ -185,7 +205,7 @@ def test_large_map_resume_snapshot_real_writer_and_custody(installed):
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
 @pytest.mark.parametrize('when', ['during','after','empty-after'])
-def test_continuing_sources_and_reference_races_reject_stale_publication(installed, when, monkeypatch):
+def test_continuing_sources_and_reference_races_reject_stale_publication(installed, when, monkeypatch, publication_consumer_reads):
     store, _ = installed
     if when != 'empty-after':
         seed(store)
@@ -222,7 +242,8 @@ def test_continuing_sources_and_reference_races_reject_stale_publication(install
 
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
-def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_ddl(installed, monkeypatch):
+def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_ddl(
+        installed, monkeypatch, publication_consumer_reads, preparation_ddl_connection):
     store, _ = installed
     raw = seed(store)
     revision = prepared(store.conn)
@@ -254,12 +275,8 @@ def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_
     with pytest.raises(OSError, match='controlled note file failure'):
         preparation.JOB.step(store.conn)
     failed = preparation.JOB.progress(store.conn)
-    def install(conn, context):
-        conn.execute('CREATE TABLE independent_note_publication(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_note_publication'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_note_publication',install,validate)))
-    regular.migrate(store.conn)
+    register_independent_ddl(monkeypatch, store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.JOB.progress(store.conn) == failed
     with pytest.raises(MigrationError, match='retry explicitly'):
         preparation.JOB.step(store.conn)
@@ -271,7 +288,7 @@ def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
 @pytest.mark.parametrize('value', [None,{}])
-def test_absent_and_empty_sources_select_native_empty_output_without_losing_presence(installed, value):
+def test_absent_and_empty_sources_select_native_empty_output_without_losing_presence(installed, value, publication_consumer_reads):
     store, _ = installed
     if value is not None:
         seed(store, value)

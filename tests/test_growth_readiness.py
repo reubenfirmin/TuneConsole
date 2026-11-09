@@ -192,7 +192,8 @@ def vibe_menu_inputs(store, *, lane_count=8, fresh_count=48, comfort_count=36, a
     return lanes, audio_inputs
 
 
-def publish_vibe_menus(store, *, lane_count=16, fresh_count=48, comfort_count=36):
+def publish_vibe_menus(store, *, lane_count=16, fresh_count=48, comfort_count=36,
+                       genre_reserves=True):
     from tests.musical_support import prepare_profiles
     from yt_playlist.core import artists, metadata
 
@@ -209,7 +210,7 @@ def publish_vibe_menus(store, *, lane_count=16, fresh_count=48, comfort_count=36
                 metadata.select(store.conn, entries[key], field, value, 'fixture')
     prepare_profiles(store)
     bundle = {'all': lanes, '_meta': {'comfort_pool': comfort_count}}
-    publish_bundles(store, bundle, vibes=True)
+    publish_bundles(store, bundle, vibes=True, genre_reserves=genre_reserves)
     return lanes
 
 
@@ -256,6 +257,29 @@ def vibe_menus(completed_vibe_menus):
     return completed_vibe_menus
 
 
+@pytest.fixture
+def measured_readiness_worker(store, monkeypatch):
+    import sqlite3
+
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+    from yt_playlist.rec import vibe_joint_preparation
+
+    # This owner changes a recording's own measured support through the real
+    # worker. Admission/training of optional statistical models is a lower
+    # collaborator; no model is admitted in this controlled catalog.
+    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
+    for module in (vibe_preparation.audio_vibe_cruise, vibe_preparation.audio_vibe_release,
+                   vibe_preparation.audio_vibe_relax, vibe_preparation.audio_vibe_uplift,
+                   vibe_preparation.audio_vibe_energize, vibe_preparation.audio_vibe_focus,
+                   vibe_preparation.audio_vibe_model):
+        monkeypatch.setattr(module, 'identity', lambda: 'readiness-unconfigured-model')
+    # This synchronous private database has no compactor or competing query
+    # thread. Keep native SQLite execution, constraints and transactions while
+    # excluding per-row timing and handle admission below the worker contract.
+    for operation in ('execute', 'executemany'):
+        monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
+
+
 def test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions(store, vibe_menus):
     from yt_playlist.rec import home_vibe, vibe_pools
 
@@ -299,12 +323,15 @@ def test_worker_readiness_reads_compact_output_and_one_live_eligibility_batch(st
     assert len(calls) == 1
 
 
+@pytest.mark.usefixtures('measured_readiness_worker')
 def test_readiness_follows_normal_worker_updates_between_menu_publications(store):
     from yt_playlist.core import metadata_evidence
     from yt_playlist.rec import home_vibe, musical_preparation, vibe_pools
     from yt_playlist.rec.progressive import Preparation
 
-    lanes = publish_vibe_menus(store)
+    # These checks serve all presets without a genre filter. Genre-specific
+    # copies do not contribute to the measured-support/readiness transition.
+    lanes = publish_vibe_menus(store, genre_reserves=False)
     entries = [store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
                                  (item['key'],)).fetchone()[0]
                for tracks in lanes.values() for item in tracks]
@@ -347,13 +374,15 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     update_inputs(withdraw=False)
     check(False)
     # Withdrawn support must fail even while the old menu is retained.
-    publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True)
+    publish_bundles(store, {'all': lanes, '_meta': {'comfort_pool': 36}},
+                    vibes=True, genre_reserves=False)
     check(False)
     update_inputs(withdraw=True)
     # Restored evidence revalidates the retained menu immediately, without
     # waiting for an unrelated complete recommendation publication.
     check(True)
-    publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True)
+    publish_bundles(store, {'all': lanes, '_meta': {'comfort_pool': 36}},
+                    vibes=True, genre_reserves=False)
     check(True)
 
 

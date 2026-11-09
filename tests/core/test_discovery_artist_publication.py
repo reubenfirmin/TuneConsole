@@ -14,11 +14,15 @@ from tests.store_fixture_support import (
     numbered_store as installed,
     preparation_ddl_connection,
     publication_consumer_reads,
+    without_query_timing,
 )
 from yt_playlist.core import schema_inspection, collection_recovery, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_artists as preparation, discovery_artist_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -215,7 +219,7 @@ def test_missing_files_regular_admission_and_explicit_unchanged_source_repair(in
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
-def test_slow_verification_allows_real_writer_and_independent_ddl(installed, monkeypatch):
+def test_slow_verification_allows_real_writer_and_independent_ddl(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     seed(store)
     owner, stage = ready(store.conn)
@@ -237,7 +241,7 @@ def test_slow_verification_allows_real_writer_and_independent_ddl(installed, mon
         try:
             assert entered.wait(15)
             store.discovery.record_artist_image(store.conn.execute('SELECT artist_id FROM main.discovered_artists').fetchone()[0], 'real.jpg', 100)
-            regular.migrate(store.conn)
+            regular.migrate(preparation_ddl_connection)
         finally:
             release.set()
         task.result(timeout=15)

@@ -6,14 +6,16 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads
+from tests.store_fixture_support import (
+    numbered_store as installed, preparation_ddl_connection, publication_consumer_reads, without_query_timing,
+)
 from yt_playlist.core import collection_recovery, playlist_recipe_state, policy_documents, recommendation_outputs as files, spotify_job_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_documents as preparation
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +54,7 @@ def facets(conn, scope='PLAYLIST'):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 96], indirect=True)
-def test_sources_exact_known_account_facets_repetitions_and_verbatim_canvas(installed):
+def test_sources_exact_known_account_facets_repetitions_and_verbatim_canvas(installed, preparation_ddl_connection):
     store, version = installed
     job_value, raw, recipe, canvas = seed(store)
     axes = list(map(tuple, store.conn.execute('SELECT * FROM taste_axes'))) if version >= 88 else None
@@ -82,7 +84,7 @@ def test_sources_exact_known_account_facets_repetitions_and_verbatim_canvas(inst
     if axes is not None:
         assert axes == list(map(tuple, store.conn.execute('SELECT * FROM taste_axes')))
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [79, 96], indirect=True)
@@ -173,7 +175,7 @@ def test_continuing_job_account_and_document_writes_reject_stale_plans(installed
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interruption_missing_plan_retry_and_independent_regular_change(installed, monkeypatch):
+def test_interruption_missing_plan_retry_and_independent_regular_change(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     seed(store)
     job = preparation.JOBS['recipes']
@@ -194,7 +196,7 @@ def test_interruption_missing_plan_retry_and_independent_regular_change(installe
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_document_ddl'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_document_ddl', install, validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert job.progress(store.conn) == failed
     independent = preparation.JOBS['canvases']
     independent.install(store.conn)

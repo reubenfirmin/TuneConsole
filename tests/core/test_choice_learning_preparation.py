@@ -5,7 +5,11 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import guarded_numbered_store as guarded_installed, numbered_store as installed
+from tests.store_fixture_support import (
+    guarded_numbered_store as guarded_installed,
+    numbered_store as installed,
+    preparation_ddl_connection,
+)
 from yt_playlist.core import choice_learning_state as learning, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import choice_learning as preparation
@@ -58,27 +62,28 @@ def originals():
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_prepared_mix_descriptor_survives_installed_learning_projection(installed, monkeypatch):
+def test_prepared_mix_descriptor_survives_installed_learning_projection(installed, preparation_ddl_connection):
     from yt_playlist.core import mix_choices
     store, _ = installed
-    regular.migrate(store.conn)
-    with store.conn:
-        descriptor = mix_choices.descriptor(store.conn, {'genres':['House'], 'label':'Stay close'})
+    conn = preparation_ddl_connection
+    regular.migrate(conn)
+    with conn:
+        descriptor = mix_choices.descriptor(conn, {'genres':['House'], 'label':'Stay close'})
         value = {'contexts':[{'format':'mixes','descriptor_id':descriptor,'keys':[],
                              'feature':None,'mode_id':None,'at':10,'days':1}]}
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,10)', ('choice_interests',json.dumps(value)))
-    preparation.JOB.install(store.conn)
-    finish(store.conn)
+        conn.execute('INSERT INTO rec_proposals VALUES (?,?,10)', ('choice_interests',json.dumps(value)))
+    preparation.JOB.install(conn)
+    finish(conn)
     assert store.rec_proposals.get_proposals('choice_interests') == value
-    assert store.conn.execute('SELECT descriptor_id FROM prepared_choice_interest_mix_descriptors').fetchone()[0] == descriptor
-    assert mix_choices.collect_dictionary(store.conn) == 0
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    assert conn.execute('SELECT descriptor_id FROM prepared_choice_interest_mix_descriptors').fetchone()[0] == descriptor
+    assert mix_choices.collect_dictionary(conn) == 0
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [79, 92], indirect=True)
-def test_exact_originals_and_typed_relations_preserve_installed_authority(installed):
+def test_exact_originals_and_typed_relations_preserve_installed_authority(installed, preparation_ddl_connection):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     original = seed(store)
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=1).processed == 1
@@ -156,9 +161,9 @@ def test_nested_relations_checkpoint_individual_members(installed, surface, valu
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_source_and_reference_changes_reconcile_without_pinning_mutable_owners(installed):
+def test_source_and_reference_changes_reconcile_without_pinning_mutable_owners(installed, preparation_ddl_connection):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     original = seed(store)
     preparation.JOB.install(conn)
     finish(conn)
@@ -284,18 +289,19 @@ def test_partial_source_replacement_and_interrupted_final_head_preserve_prior_ge
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_whitespace_in_original_counts_toward_the_byte_budget(installed):
+def test_whitespace_in_original_counts_toward_the_byte_budget(installed, preparation_ddl_connection):
     store, _ = installed
+    conn = preparation_ddl_connection
     raw = '{}' + ' ' * learning.MAX_BYTES
-    with store.conn:
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,1)', ('choice_bandit', raw))
-    preparation.JOB.install(store.conn)
+    with conn:
+        conn.execute('INSERT INTO rec_proposals VALUES (?,?,1)', ('choice_bandit', raw))
+    preparation.JOB.install(conn)
     with pytest.raises(MigrationError, match='exceeds its preparation byte budget'):
-        finish(store.conn)
-    assert preparation.JOB.progress(store.conn).status == 'failed'
-    assert not store.conn.execute(f'SELECT 1 FROM {preparation.PUBLICATIONS}').fetchone()
-    assert store.conn.execute("SELECT length(payload) FROM rec_proposals WHERE surface='choice_bandit'").fetchone()[0] == len(raw)
-    regular.migrate(store.conn)
+        finish(conn)
+    assert preparation.JOB.progress(conn).status == 'failed'
+    assert not conn.execute(f'SELECT 1 FROM {preparation.PUBLICATIONS}').fetchone()
+    assert conn.execute("SELECT length(payload) FROM rec_proposals WHERE surface='choice_bandit'").fetchone()[0] == len(raw)
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
@@ -305,13 +311,14 @@ def test_whitespace_in_original_counts_toward_the_byte_budget(installed):
     ('choice_interests', '{"parameters":{"open":null}}'),
     ('group_choice_bandit', '{"rows":[{"menus":["repeat","repeat"]}]}'),
 ])
-def test_invalid_numerical_or_ambiguous_relations_fail_without_changing_source(installed, surface, raw):
+def test_invalid_numerical_or_ambiguous_relations_fail_without_changing_source(installed, preparation_ddl_connection, surface, raw):
     store, _ = installed
-    with store.conn:
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,1)', (surface, raw))
-    preparation.JOB.install(store.conn)
+    conn = preparation_ddl_connection
+    with conn:
+        conn.execute('INSERT INTO rec_proposals VALUES (?,?,1)', (surface, raw))
+    preparation.JOB.install(conn)
     with pytest.raises((ValueError, sqlite3.IntegrityError)):
-        finish(store.conn)
-    assert preparation.JOB.progress(store.conn).status == 'failed'
-    assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
-    regular.migrate(store.conn)
+        finish(conn)
+    assert preparation.JOB.progress(conn).status == 'failed'
+    assert conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
+    regular.migrate(conn)

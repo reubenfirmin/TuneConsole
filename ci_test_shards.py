@@ -95,7 +95,10 @@ def partition(nodeids, durations, count=2):
     estimates = {}
     for name, cases in files.items():
         measured = durations.get(name)
-        estimates[name] = (float(measured["seconds"]) * len(cases) / measured["cases"]
+        # Removing consumers does not remove a module's fixture construction
+        # or retained workflow. Keep its measured whole-file cost until a clean
+        # run replaces it; still account for growth beyond the measured cases.
+        estimates[name] = (float(measured["seconds"]) * max(1, len(cases) / measured["cases"])
                            if measured and measured["cases"] else unknown_case * len(cases))
         if not math.isfinite(estimates[name]) or estimates[name] < 0:
             raise ValueError(f"Invalid duration estimate for {name}")

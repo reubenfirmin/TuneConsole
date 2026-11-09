@@ -17,6 +17,61 @@ from yt_playlist.core.activity import Activity
 from yt_playlist.rec.rec_worker import RecWorker
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # SQL consumers never construct the web application. HTTP owners below
+    # explicitly pass background_work=False to their actual application.
+    """Avoid importing the web lifecycle for comparison calculations."""
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    from tests.store_fixture_support import bounded_consumer_schema
+
+    # Attribution consumes these completed catalog genres. Catalog curation
+    # and admission are below its real policy, evidence and serving writes.
+    labels = ('Jazz', 'Techno', 'Classical', 'Ambient', 'Trance', 'Indie Rock', 'House')
+    with bounded_consumer_schema(tuple((label.casefold().replace(' ', '_'), label)
+                                      for label in labels)) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def tuning_schema():
+    from tests.store_fixture_support import bounded_consumer_schema
+
+    labels = ('Jazz', 'Techno', 'Classical', 'Ambient', 'Trance', 'Indie Rock')
+    with bounded_consumer_schema(tuple((label.casefold().replace(' ', '_'), label)
+                                      for label in labels), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(request, tmp_path, monkeypatch):
+    if 'home_tuning_trial' not in request.fixturenames:
+        yield request.getfixturevalue('store')
+        return
+    import sqlite3
+    from tests.store_fixture_support import initialize_consumer, reuse_reporting_reader
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+    from yt_playlist.core.store import Store
+
+    # Attribution keeps its actual policy/evidence/choice SQL and files.
+    # Diagnostic clocks and snapshot conflict detection are lower contracts
+    # for this synchronous consumer of completed producer output.
+    for operation in ('execute', 'executemany'):
+        monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
+    database = Store(tmp_path / 'tuning.db')
+    try:
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, request.getfixturevalue('tuning_schema'), snapshot_guards=False)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+    finally:
+        database.conn.close()
+
+
 def _remove_trial(store):
     if store._model_comparison_state:
         store.conn.execute('DELETE FROM model_comparison_plan')
@@ -489,7 +544,7 @@ def test_album_readiness_does_not_publish_paired_assignments(paired_album_store,
 
 
 def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window(store, prepared_trial):
-    from tests.rec.test_home_prepared import service
+    from tests.home_fixture_support import service
     from yt_playlist.rec import album_choices, home_prepared
     trial, normal = prepared_trial
     selected = product.assignment(store, 'mixes', 'window', 1000)
@@ -591,7 +646,7 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(menu_
 def home_tuning_trial(store, monkeypatch, steering):
     from tests.home_prepared_support import publication_inputs
     from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning
-    from tests.rec.test_home_prepared import service
+    from tests.home_fixture_support import service
 
     # Comparison attribution consumes completed menus. Ranking, profiles,
     # discovery/revisit summaries and earned Vibe access have separate owners;
@@ -627,7 +682,7 @@ def home_tuning_trial(store, monkeypatch, steering):
 @pytest.mark.parametrize('steering', ['include', 'avoid', 'vibe', 'vibe_change', 'vibe_reset',
                                     'vibe_expire', 'breadth', 'lean'])
 def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribution(store, home_tuning_trial, steering):
-    from tests.rec.test_home_prepared import service
+    from tests.home_fixture_support import service
     from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning, rec_params
     from yt_playlist.util import genre_map
 

@@ -8,12 +8,13 @@ from fastapi.testclient import TestClient
 from yt_playlist.rec import home_cards, home_prepared, journeys, mode_surfaces
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
-from tests.home_fixture_support import home_routes_only, prepared_client, publish_cards, publish_menu, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
+from tests.home_fixture_support import home_control_routes, home_routes_only, prepared_client, publish_cards, publish_menu, without_metadata_providers
 from tests.mode_fixtures import seed_modes
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_control_routes', 'without_metadata_providers',
+                                    'native_sql_calls')
 
 
 @pytest.fixture(scope='session')
@@ -61,7 +62,13 @@ def _seed_bundles(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = items(f"{surf}h", "house")
         payload["2"][surf] = items(f"{surf}t", "techno")
-    seed_bundle_subjects(store, payload)
+    # All 160 original candidates remain. Consume completed catalog ingestion
+    # without replaying metadata delivery and artist inference for every row.
+    subjects = [item for bucket in payload.values() for items in bucket.values() for item in items]
+    seed_publication_subjects(store,
+        [{**item, 'video_id': 'v' if index == 0 else 'fixture-' + item['key']}
+         for index, item in enumerate(subjects)],
+        discoveries=[item['key'] for bucket in payload.values() for item in bucket['fresh']])
     publish_bundles(store, payload, 1.0)
     return payload
 
@@ -125,11 +132,22 @@ def test_mix_choice_capture_failure_keeps_playable_cards_and_logs(
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
 
 
+def _publish_mode_menu(store, now):
+    # HTTP consumers use the full original pools and actual card completion.
+    # Enumerating every alternative menu belongs to worker preparation tests.
+    cards = mode_surfaces.assemble_cards(store, now, 0)
+    protos = [home_cards._complete_card(store, card, now, 0, None, None) for card in cards]
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, [], [], 0, None)
+    publish_cards(store, result, now)
+    return cards
+
+
 def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store):
     from html import unescape
     from yt_playlist.rec import choice_evidence
-    seed_modes(store, 1, 2)
-    publish_menu(store, count=2, mode_ids=(1, 2))
+    _seed_bundles(store)
+    _publish_mode_menu(store, 1000)
     with prepared_client(store, background_work=False) as client:
         first = client.get('/home/cards')
         match = re.search(r'hx-vals=\'([^\']*opportunity_id[^\']*)\'', first.text)
@@ -178,19 +196,15 @@ def test_mode_card_recipe_carries_a_journey(store):
 
 
 def test_fresh_mode_card_recipe_retains_lane(store):
-    seed_modes(store, 1)
-    tracks = [{'key': f'fresh {i}|artist {i}', 'video_id': f'fresh-{i}', 'title': f'Fresh {i}',
-               'artist': f'Artist {i}', 'genre': 'house'} for i in range(6)]
-    seed_publication_subjects(store, tracks)
-    publish_bundles(store, {'1': {'fresh': tracks}, '_meta': {'full_pools': True}}, 1)
+    bundles = _seed_bundles(store)
+    publish_bundles(store, {
+        **{mid: {'fresh': bucket['fresh']} for mid, bucket in bundles.items()},
+        '_meta': {'full_pools': True},
+    }, 1)
     # Preserve real mode selection, recipe completion and HTTP serialization.
     # Preparing every Home menu is a separate worker obligation.
-    cards = mode_surfaces.assemble_cards(store, 1, 0)
-    assert len(cards) == 1 and cards[0]['lane'] == 'fresh'
-    proto = home_cards._complete_card(store, cards[0], 1, 0, None, None)
-    result = home_cards.CardsResult([proto], [{'proto': proto, 'pool': None}],
-                                   None, None, [], [], 0, None)
-    publish_cards(store, result, 1)
+    cards = _publish_mode_menu(store, 1)
+    assert cards and all(card['lane'] == 'fresh' for card in cards)
     with prepared_client(store, now=1, background_work=False) as client:
         response = client.get("/home/cards")
     assert response.status_code == 200

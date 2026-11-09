@@ -19,6 +19,11 @@ from tests.live_server import LiveServer
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These native protocol servers own their app and start no web workers."""
+
+
 @pytest.mark.parametrize('phase', ['pace', 'deadline', 'setup', 'teardown', 'interrupt'])
 def test_protocol_drains_admitted_http_before_storage_and_capture_close(
         tmp_path, monkeypatch, capsys, request, phase):

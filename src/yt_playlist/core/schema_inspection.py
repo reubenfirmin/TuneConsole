@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-_SESSION = ContextVar('schema_table_inspections', default=None)
+_SESSION = ContextVar('schema_table_inspections', default=())
 _OBJECTS = ContextVar('schema_validation_objects', default=None)
 
 
@@ -21,6 +21,14 @@ def objects(conn, names=None):
     return _objects(conn, names)
 
 
+def catalog_rows(conn):
+    """Keep every main-schema object, including names shared by tables and triggers."""
+    snapshot = _OBJECTS.get()
+    if snapshot is not None and snapshot[0] is conn:
+        return snapshot[2]
+    return tuple(conn.execute('SELECT name,type,sql FROM main.sqlite_schema').fetchall())
+
+
 @contextmanager
 def reuse_objects(conn):
     """Share catalog reads only during one read-only, pinned validation.
@@ -33,7 +41,8 @@ def reuse_objects(conn):
     if not conn.in_transaction or snapshot is not None and snapshot[0] is conn:
         yield
         return
-    token = _OBJECTS.set((conn, _objects(conn)))
+    rows = catalog_rows(conn)
+    token = _OBJECTS.set((conn, _named_objects(rows), rows))
     try:
         yield
     finally:
@@ -41,14 +50,18 @@ def reuse_objects(conn):
 
 
 def _objects(conn, names=None):
-    sql, parameters = 'SELECT name,type,sql FROM main.sqlite_schema', ()
-    if names is not None:
-        parameters = tuple(dict.fromkeys(names))
-        if not parameters:
-            return {}
-        sql += ' WHERE name IN (' + ','.join('?' for _ in parameters) + ')'
+    if names is None:
+        return _named_objects(catalog_rows(conn))
+    parameters = tuple(dict.fromkeys(names))
+    if not parameters:
+        return {}
+    sql = 'SELECT name,type,sql FROM main.sqlite_schema WHERE name IN (' + ','.join('?' for _ in parameters) + ')'
+    return _named_objects(conn.execute(sql, parameters).fetchall())
+
+
+def _named_objects(rows):
     result = {}
-    for name, kind, definition in conn.execute(sql, parameters).fetchall():
+    for name, kind, definition in rows:
         result.setdefault(name, (kind, definition))
     return result
 
@@ -72,21 +85,27 @@ class TableInspections:
 def reuse_tables(conn):
     # Nested admission/worker checks belong to the caller's bounded session.
     # Transaction entry still refreshes data_version before reusing observations.
-    session = _SESSION.get()
-    if session is not None and session.conn is conn:
+    sessions = _SESSION.get()
+    session = _table_session(conn)
+    if session is not None:
         yield session
         return
     session = TableInspections(conn)
-    token = _SESSION.set(session)
+    token = _SESSION.set((*sessions, session))
     try:
         yield session
     finally:
         _SESSION.reset(token)
 
 
+def _table_session(conn):
+    # Interleaved readers retain their own observations until their scope ends.
+    return next((session for session in reversed(_SESSION.get()) if session.conn is conn), None)
+
+
 def table(conn, name, sql, inspect):
-    session = _SESSION.get()
-    if session is None or session.conn is not conn:
+    session = _table_session(conn)
+    if session is None:
         return inspect()
     previous = session.tables.get(name)
     if previous is not None and previous[0] == sql:

@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_consumer_reads
 from tests.core.test_taste_controls_migration import decision
 from yt_playlist.core import collection_recovery, policy_documents, recommendation_outputs as files, taste_control_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -54,7 +54,7 @@ def members(conn, source, suffix, columns='*'):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 95], indirect=True)
-def test_three_jobs_keep_exact_settings_ordered_evidence_and_unadmitted_references(installed):
+def test_three_jobs_keep_exact_settings_ordered_evidence_and_unadmitted_references(installed, preparation_ddl_connection):
     store, version = installed
     values, originals = seed(store)
     axes = list(map(tuple, store.conn.execute('SELECT * FROM taste_axes'))) if version >= 88 else None
@@ -89,7 +89,7 @@ def test_three_jobs_keep_exact_settings_ordered_evidence_and_unadmitted_referenc
     if axes is not None:
         assert axes == list(map(tuple, store.conn.execute('SELECT * FROM taste_axes')))
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [79, 95], indirect=True)
@@ -181,7 +181,7 @@ def test_source_and_catalog_writes_during_file_work_reject_stale_plan(installed,
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_interruption_explicit_retry_and_independent_regular_ddl(installed, monkeypatch):
+def test_failure_interruption_explicit_retry_and_independent_regular_ddl(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     seed(store)
     job, independent = preparation.JOBS['baseline'], preparation.JOBS['decisions']
@@ -205,7 +205,7 @@ def test_failure_interruption_explicit_retry_and_independent_regular_ddl(install
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_taste_ddl'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_taste_ddl', install, validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert job.progress(store.conn) == failed
     finish(independent, store.conn)
     reopened = Store(store._db_path)

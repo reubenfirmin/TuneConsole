@@ -8,10 +8,17 @@ import threading
 import pytest
 
 from tests.genre_catalog_support import bound_shipped_catalog, use_shipped_catalog
-from tests.store_fixture_support import numbered_store as installed
+from tests.regular_schema_support import register_independent_ddl
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed, preparation_ddl_connection,
+    publication_consumer_reads, without_query_timing,
+)
 from yt_playlist.core import genre_identity
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import genre_preferences as preparation, genre_preference_publication as publication
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +31,14 @@ def preference_vocabulary(installed, monkeypatch):
     """Keep the shipped identities and aliases used by the original cases."""
     use_shipped_catalog(monkeypatch)
     bound_shipped_catalog(monkeypatch, ('drum bass', 'rock'))
+
+
+@pytest.fixture
+def independent_ddl(installed, monkeypatch, preparation_ddl_connection):
+    """Keep real pending DDL below the publication/regular-schema boundary."""
+    store, _ = installed
+    register_independent_ddl(monkeypatch, store.conn)
+    return preparation_ddl_connection
 
 
 def seed(store, *, custom=False):
@@ -102,7 +117,7 @@ def test_never_introduced_defaults_stay_absent(installed,seed_marker):
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_ambiguity_stops_selection_and_compatible_edits_reconcile(installed):
+def test_ambiguity_stops_selection_and_compatible_edits_reconcile(installed, independent_ddl):
     store, _ = installed
     seed(store)
     with store.conn:
@@ -111,7 +126,7 @@ def test_ambiguity_stops_selection_and_compatible_edits_reconcile(installed):
     with pytest.raises(MigrationError,match='ambiguity repair'):
         publication.step(store.conn)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
+    regular.migrate(independent_ddl)
     with store.conn:
         store.conn.execute("DELETE FROM genre_alias WHERE label_key='ambiguous'")
     stage = ready(store.conn)
@@ -132,7 +147,7 @@ def test_ambiguity_stops_selection_and_compatible_edits_reconcile(installed):
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
 @pytest.mark.parametrize('damage',['choice','default','missing'])
-def test_independent_verification_rejects_wrong_or_missing_preparation(installed,damage):
+def test_independent_verification_rejects_wrong_or_missing_preparation(installed,damage,independent_ddl):
     store, _ = installed
     seed(store)
     prepare(store.conn)
@@ -147,17 +162,17 @@ def test_independent_verification_rejects_wrong_or_missing_preparation(installed
     with pytest.raises(MigrationError,match='differs|missing|extra'):
         publication.publish(store.conn,identity=stage)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
+    regular.migrate(independent_ddl)
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_missing_file_admission_repair_and_failed_preparation_are_independent(installed):
+def test_missing_file_admission_repair_and_failed_preparation_are_independent(installed, independent_ddl):
     store, _ = installed
     seed(store)
     stage = ready(store.conn)
     header = json.loads(publication.stage(store.conn,stage).baseline)
     Path(header['filename']).unlink()
-    regular.migrate(store.conn)
+    regular.migrate(independent_ddl)
     with pytest.raises(FileNotFoundError):
         publication.publish(store.conn,identity=stage)
     publication.repair_baseline(store.conn)
@@ -167,7 +182,7 @@ def test_missing_file_admission_repair_and_failed_preparation_are_independent(in
         preparation.DEFAULTS.step(store.conn)
     failed = preparation.DEFAULTS.progress(store.conn)
     assert failed.status=='failed' and publication.selected(store.conn) is None
-    regular.migrate(store.conn)
+    regular.migrate(independent_ddl)
     assert preparation.DEFAULTS.progress(store.conn)==failed
     store.settings.set_setting('genre_defaults','["Rock"]')
     preparation.DEFAULTS.step(store.conn,batch_size=2,retry=True)
@@ -212,7 +227,7 @@ def test_interrupted_staging_and_late_write_cannot_select_stale_generation(insta
 
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
-def test_slow_file_verification_leaves_serving_writes_and_regular_ddl_available(installed,monkeypatch):
+def test_slow_file_verification_leaves_serving_writes_and_regular_ddl_available(installed,monkeypatch,independent_ddl):
     store, _ = installed
     seed(store)
     stage=ready(store.conn)
@@ -233,7 +248,7 @@ def test_slow_file_verification_leaves_serving_writes_and_regular_ddl_available(
         try:
             assert entered.wait(15)
             store.genres.add_genre('Rock')
-            regular.migrate(store.conn)
+            regular.migrate(independent_ddl)
         finally:
             release.set()
         with pytest.raises(MigrationError,match='differs|changed|require reconciled'):

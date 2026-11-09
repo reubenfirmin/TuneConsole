@@ -5,34 +5,24 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_collection_feedback_preparation import finish, head, seed
+from tests.publication_fixture_support import installed, installed_reader
+from tests.regular_schema_support import register_independent_ddl
 from tests.store_fixture_support import (
-    preparation_ddl_connection, publication_consumer_reads, reuse_reporting_reader,
+    preparation_ddl_connection, publication_consumer_reads,
+    without_query_timing,
 )
 from yt_playlist.core import account_auth_state, album_feedback_storage
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import collection_feedback as preparation, collection_feedback_publication as publication
-from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Publication exercises SQL and files without starting the HTTP app."""
-
-
-@pytest.fixture(autouse=True)
-def preparation_admission(monkeypatch):
-    from yt_playlist.core.preparation import rows
-
-    # These cases own publication's SQL, custody and source fences. The input
-    # fixture supplies the installed schema; preparation/admission tests own
-    # rejecting invalid base layouts. Keep installation of the real preparation
-    # tables and triggers, and keep explicit Store reopens fully admitted.
-    monkeypatch.setattr(rows, 'validate_version', lambda *args, **kwargs: None)
 
 
 @pytest.fixture
@@ -43,14 +33,7 @@ def independent_ddl(installed, monkeypatch):
     assert regular.validate(store.conn) == 0
     assert not store.conn.execute(
         "SELECT 1 FROM sqlite_schema WHERE name='independent_preparation_ddl'").fetchone()
-    change = regular.Change(
-        1, 'independent_preparation_ddl',
-        lambda conn, context: conn.execute('CREATE TABLE independent_preparation_ddl (id INTEGER)'),
-        lambda conn: conn.execute('SELECT id FROM independent_preparation_ddl LIMIT 0'),
-    )
-    # This owns independent DDL during damaged preparation. Other regular
-    # changes and registry upgrades have their own migration tests.
-    monkeypatch.setattr(regular, 'CHANGES', (change,))
+    register_independent_ddl(monkeypatch, store.conn)
 
 
 def prepare(conn, owner):
@@ -62,30 +45,22 @@ def prepare(conn, owner):
 def test_preopened_and_reopened_runtime_readers_keep_exact_originals(installed, monkeypatch):
     store, _ = installed
     original = seed(store)
-    other = Store(store._db_path)
-    try:
-        other.init_schema(defer_metadata=True)
+    with installed_reader(store._db_path, monkeypatch) as other:
         for owner in publication.OWNERS.values():
             revision = prepare(store.conn, owner)
             owner.publish(store.conn, revision=revision)
             owner.publish(store.conn, revision=revision)
             assert owner.selected(other.conn) == revision
-        with reuse_reporting_reader(other, monkeypatch):
-            assert {key:other.settings.get_setting(key) for key in original} == original
+        assert {key:other.settings.get_setting(key) for key in original} == original
         assert album_feedback_storage.original(other.conn) == json.loads(original['album_feedback'])
         assert not album_feedback_storage.available(other.conn)
         assert not account_auth_state.available(other.conn)
         regular.validate(other.conn)
-    finally:
-        other.conn.close()
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema(defer_metadata=True)
-        with reuse_reporting_reader(reopened, monkeypatch):
-            assert {key:reopened.settings.get_setting(key) for key in original} == original
+
+    with installed_reader(store._db_path, monkeypatch) as reopened:
+        assert {key:reopened.settings.get_setting(key) for key in original} == original
         assert album_feedback_storage.original(reopened.conn) == json.loads(original['album_feedback'])
-    finally:
-        reopened.conn.close()
+
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -125,29 +100,30 @@ def test_writes_references_and_deletions_withdraw_only_the_affected_owner(instal
 def test_unverified_originals_and_typed_rows_cannot_be_selected(
         installed, name, failure, independent_ddl, preparation_ddl_connection):
     store, _ = installed
+    conn = preparation_ddl_connection
     original = seed(store)
     owner = publication.OWNERS[name]
-    revision = prepare(store.conn, owner)
+    revision = prepare(conn, owner)
     header, parts, _ = preparation.tables(owner.source)
     members = preparation.RESPONSES if name == 'album-feedback' else preparation.AUTH
     if failure in ('file', 'missing-file'):
-        path = Path(store.conn.execute('SELECT filename FROM '+parts+' LIMIT 1').fetchone()[0])
+        path = Path(conn.execute('SELECT filename FROM '+parts+' LIMIT 1').fetchone()[0])
         path.write_bytes(b'corrupt') if failure == 'file' else path.unlink()
     else:
-        with store.conn:
+        with conn:
             if failure == 'header':
-                store.conn.execute('UPDATE '+header+' SET item_count=item_count+1')
+                conn.execute('UPDATE '+header+' SET item_count=item_count+1')
             elif failure == 'member':
-                store.conn.execute('DELETE FROM '+members+' WHERE position=1')
+                conn.execute('DELETE FROM '+members+' WHERE position=1')
             elif name == 'album-feedback':
-                store.conn.execute('UPDATE '+members+" SET album_id=NULL,unresolved_reason='missing_album' WHERE position=0")
+                conn.execute('UPDATE '+members+" SET album_id=NULL,unresolved_reason='missing_album' WHERE position=0")
             else:
-                store.conn.execute('UPDATE '+members+' SET account_id=NULL,unresolved_account_id=1 WHERE position=0')
+                conn.execute('UPDATE '+members+' SET account_id=NULL,unresolved_account_id=1 WHERE position=0')
     with pytest.raises((MigrationError, ValueError, OSError)):
-        owner.publish(store.conn, revision=revision)
-    assert owner.selected(store.conn) is None
+        owner.publish(conn, revision=revision)
+    assert owner.selected(conn) is None
     assert store.settings.get_setting(owner.source) == original[owner.source]
-    regular.migrate(preparation_ddl_connection)
+    regular.migrate(conn)
     assert store.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
 
 

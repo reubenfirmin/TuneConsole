@@ -80,7 +80,7 @@ def consumer_installed(request, tmp_path, monkeypatch, _bounded_installed_schema
     try:
         # These consumers verify SQL transactions and publication files, not
         # survival of SQLite commits across a machine power failure.
-        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA synchronous=OFF')
         template = _bounded_installed_schema(version)
         template.restore(store)
         store._fixture_installed_template = template

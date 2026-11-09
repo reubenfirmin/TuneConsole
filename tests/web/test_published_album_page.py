@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, without_query_timing
 from yt_playlist.core import albums, artists, catalog
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.library.album_catalog import remember_album
@@ -17,20 +17,17 @@ from yt_playlist.web.app import create_app
 from yt_playlist.util.matching import identity_key
 
 
-pytestmark = pytest.mark.usefixtures('album_routes', 'without_metadata_providers')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'album_routes', 'without_metadata_providers')
 
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     with bounded_consumer_schema(()) as schema:
+        assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert schema._revision_script
+        assert not schema.execute('SELECT 1 FROM album_track_occurrences').fetchone()
+        assert not schema.execute('PRAGMA foreign_key_check').fetchone()
         yield schema
-
-
-def test_album_page_input_keeps_empty_occurrences_and_real_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('SELECT 1 FROM album_track_occurrences').fetchone()
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture

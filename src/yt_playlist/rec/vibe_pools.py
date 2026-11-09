@@ -36,13 +36,10 @@ class _Catalog:
         return self
 
 
-def _reserve(items, preset, limit=POOL_LIMIT):
-    """Cap after fit, reserving room beyond one prolific artist's discography."""
+def _reserve(items, limit=POOL_LIMIT):
+    """Cap ranked items, reserving room beyond one prolific artist's discography."""
     artists, result = Counter(), []
-    def priority(item):
-        check_cancellable_work()
-        return home_vibe.order_key(item, preset)
-    for item in sorted(items, key=priority):
+    for item in items:
         check_cancellable_work()
         artist = normalize(item.get('artist') or '')
         if artist and artists[artist] >= 8:
@@ -83,22 +80,30 @@ def prepare(store, bundles, now, policies):
     for preset in home_vibe.PRESETS:
         menus[preset] = {}
         genre_menus[preset] = {}
+        def priority(item):
+            check_cancellable_work()
+            return home_vibe.order_key(item, preset)
         for lane in (*_LABELS, *band_pools):
             candidates = {item['key']: item for item in band_pools.get(lane, pools.get(lane, []))}
             if lane in ('wheelhouse', 'explore'):
                 # A strong musical match remains reachable when ordinary taste
                 # neighborhoods did not admit it to this particular lane.
                 candidates = {**{key: {**item, 'score': None} for key, item in library.items()}, **candidates}
-            menus[preset][lane] = policies.stamp(_reserve(list(candidates.values()), preset),
+            ranked = sorted(candidates.values(), key=priority)
+            menus[preset][lane] = policies.stamp(_reserve(ranked),
                                                  f'{home_vibe.VERSION}:{preset}:{lane}')
-            families = {}
-            for item in candidates.values():
+            # Keep the input's family encounter order for stable selection ties.
+            families = {family: [] for item in candidates.values()
+                        if (family := axes.get(item.get('genre'), ('', None))[0])}
+            # Each family's order is the same stable order as the whole lane.
+            # Retain all ranked candidates before applying either reserve cap.
+            for item in ranked:
                 check_cancellable_work()
                 genre = item.get('genre')
                 family = axes.get(genre, ('', None))[0]
                 if family:
-                    families.setdefault(family, []).append(item)
-            genre_menus[preset][lane] = {family: policies.stamp(_reserve(items, preset, GENRE_RESERVE),
+                    families[family].append(item)
+            genre_menus[preset][lane] = {family: policies.stamp(_reserve(items, GENRE_RESERVE),
                 f'{home_vibe.VERSION}:{preset}:{lane}:{family}') for family, items in families.items()}
     bundles['_vibes'] = {'version': home_vibe.VERSION, 'profile_version': musical_character.VERSION,
                          'pools': menus, 'genres': genre_menus}

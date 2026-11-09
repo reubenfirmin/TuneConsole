@@ -4,11 +4,31 @@ import time
 
 import pytest
 from tests.metadata_provenance_support import metadata_provenance
+from tests.store_fixture_support import (
+    bounded_consumer_schema,
+    file_consumer_store as file_backed_store,
+    without_query_timing,
+)
 
 from yt_playlist.core import catalog, fao, metadata_legacy, metadata_native, metadata_runtime, metadata_runtime_files
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.preparation import metadata_runtime as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Metadata conversion does not construct the HTTP application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    """Keep real metadata owners and guards with only the vocabulary used here."""
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'))) as schema:
+        yield schema
 
 
 def seeded(store):

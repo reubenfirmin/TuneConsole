@@ -58,6 +58,19 @@ def owner(candidate):
 
 
 def prepare(pool_key, policy_version, group_version_id, input_fingerprint, purpose, candidates):
+    return _prepare(pool_key, policy_version, group_version_id, input_fingerprint, purpose, candidates)[0]
+
+
+def validate(pool):
+    """Verify the complete content and return its encoded size for plan admission."""
+    actual, size = _prepare(pool.pool_key, pool.policy_version, pool.group_version_id,
+                            pool.input_fingerprint, pool.purpose, pool.candidates)
+    if actual != pool:
+        raise ValueError('Recommendation pool content identity changed')
+    return size
+
+
+def _prepare(pool_key, policy_version, group_version_id, input_fingerprint, purpose, candidates):
     if (not isinstance(pool_key, str) or not pool_key or len(pool_key.encode()) > 1024
             or not isinstance(policy_version, str) or not policy_version or len(policy_version.encode()) > 1024
             or group_version_id is not None and (type(group_version_id) is not int or group_version_id < 1)
@@ -85,8 +98,9 @@ def prepare(pool_key, policy_version, group_version_id, input_fingerprint, purpo
         if used > MAX_POOL_BYTES or len(normalized) > MAX_CANDIDATES:
             raise ValueError('Recommendation pool exceeds its admitted membership budget')
     value = Pool(pool_key, policy_version, group_version_id, input_fingerprint, purpose, tuple(normalized), '')
-    return Pool(pool_key, policy_version, group_version_id, input_fingerprint, purpose,
-                value.candidates, group_content.digest(rows(value)))
+    prepared = Pool(pool_key, policy_version, group_version_id, input_fingerprint, purpose,
+                    value.candidates, group_content.digest(rows(value)))
+    return prepared, used + len(header(value))
 
 
 def stored_rows(conn, pool_id):

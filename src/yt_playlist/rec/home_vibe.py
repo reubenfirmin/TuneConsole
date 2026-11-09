@@ -136,8 +136,11 @@ def affinity(item, preset, profiles=None):
 
 def heuristic_affinity(profile, preset):
     """The original fixed-denominator fallback, also used during preparation."""
+    weights = PRESETS[preset]["weights"]
+    if not profile:
+        return .5
     total = evidence = 0.0
-    for name, weight in PRESETS[preset]["weights"].items():
+    for name, weight in weights.items():
         value, support = musical_character.dimension({'musical': profile}, name)
         if value is not None:
             # Intensity already contains conservative shrinkage. A midpoint

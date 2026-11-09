@@ -5,16 +5,16 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_taste_control_preparation import finish, members, seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.publication_fixture_support import installed, installed_reader
+from tests.store_fixture_support import preparation_ddl_connection, publication_consumer_reads, without_query_timing
 from yt_playlist.core import collection_recovery, experiment_decision_state, recommendation_outputs as files, taste_control_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import taste_controls as preparation, taste_control_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -35,14 +35,12 @@ def prepare(conn, owner):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 95], indirect=True)
-def test_preopened_and_reopened_readers_use_exact_controls_and_keep_unknowns(installed):
+def test_preopened_and_reopened_readers_use_exact_controls_and_keep_unknowns(installed, monkeypatch):
     store, _ = installed
     values, originals = seed(store)
     before = {table:list(map(tuple, store.conn.execute('SELECT * FROM '+table)))
               for table in ('recordings', 'genre_catalog')}
-    other = Store(store._db_path)
-    try:
-        other.init_schema(defer_metadata=True)
+    with installed_reader(store._db_path, monkeypatch) as other:
         for owner in publication.OWNERS.values():
             owner.publish(store.conn, revision=prepare(store.conn, owner))
             assert owner.selected(other.conn) == 0
@@ -50,16 +48,12 @@ def test_preopened_and_reopened_readers_use_exact_controls_and_keep_unknowns(ins
         assert not taste_control_state.available(other.conn)
         assert not experiment_decision_state.available(other.conn)
         regular.validate(other.conn)
-    finally:
-        other.conn.close()
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema(defer_metadata=True)
+
+    with installed_reader(store._db_path, monkeypatch) as reopened:
         assert {key:reopened.settings.get_setting(key) for key in originals} == originals
         assert before == {table:list(map(tuple, reopened.conn.execute('SELECT * FROM '+table))) for table in before}
         assert members(reopened.conn, preparation.BASELINE, 'entries')[1]['unresolved_key'] == 'unknown:1'
-    finally:
-        reopened.conn.close()
+
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -195,26 +189,28 @@ def test_independent_writes_withdraw_selection_and_preserve_pinned_snapshots(ins
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('file_kind', ['original', 'plan', 'recovery'])
-def test_missing_retained_files_require_explicit_retry_without_mutating_published_rows(installed, file_kind):
+def test_missing_retained_files_require_explicit_retry_without_mutating_published_rows(
+        installed, file_kind, preparation_ddl_connection):
     store, _ = installed
+    conn = preparation_ddl_connection
     _, originals = seed(store)
     owner = publication.OWNERS['baseline']
-    revision = prepare(store.conn, owner)
-    owner.publish(store.conn, revision=revision)
-    header = preparation.head(store.conn, owner.source)
-    filename = (members(store.conn, owner.source, 'parts')[0]['filename'] if file_kind == 'original'
+    revision = prepare(conn, owner)
+    owner.publish(conn, revision=revision)
+    header = preparation.head(conn, owner.source)
+    filename = (members(conn, owner.source, 'parts')[0]['filename'] if file_kind == 'original'
                 else header[file_kind+'_filename'])
     Path(filename).unlink()
     with pytest.raises(FileNotFoundError):
-        owner.publish(store.conn, revision=revision)
-    assert owner.worker.progress(store.conn).status == 'prepared'
-    regular.migrate(store.conn)
-    owner.worker.step(store.conn, retry=True)
-    owner.publish(store.conn, revision=revision)
+        owner.publish(conn, revision=revision)
+    assert owner.worker.progress(conn).status == 'prepared'
+    regular.migrate(conn)
+    owner.worker.step(conn, retry=True)
+    owner.publish(conn, revision=revision)
     assert store.settings.get_setting(owner.source) == originals[owner.source]
     with pytest.raises(sqlite3.IntegrityError, match='retained'):
-        with store.conn:
-            store.conn.execute('DELETE FROM prepared_taste_comparison_entries')
+        with conn:
+            conn.execute('DELETE FROM prepared_taste_comparison_entries')
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)

@@ -1,5 +1,5 @@
 """Verified checkpoint runtime selection remains compatible with live writers."""
-from contextlib import closing
+from contextlib import closing, nullcontext
 import json
 import sqlite3
 
@@ -7,9 +7,10 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_model_checkpoint_preparation import seed
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.group_support import publish as publish_groups
-from yt_playlist.core import content_preparation_state, group_preparation_state, ranking_checkpoints
+from tests.publication_fixture_support import installed, installed_reader
+from tests.store_fixture_support import publication_consumer_reads, without_query_timing
+from yt_playlist.core import content_preparation_state, group_preparation_state, ranking_checkpoints, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import checkpoint_publication as publication, model_checkpoints as preparation
 from yt_playlist.core.store import Store
@@ -18,6 +19,14 @@ from yt_playlist.rec import group_preparation
 
 OWNERS = {'content-checkpoints': content_preparation_state, 'group-checkpoints': group_preparation_state,
           'candidate-checkpoints': ranking_checkpoints}
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Checkpoint publication does not construct the HTTP application."""
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -44,43 +53,39 @@ def prepare(store, name):
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 @pytest.mark.parametrize('name', tuple(preparation.JOBS))
-def test_existing_and_reopened_readers_match_the_historical_runtime(installed, name, tmp_path):
+def test_existing_and_reopened_readers_match_the_historical_runtime(installed, name, tmp_path, monkeypatch):
     store, _ = installed
     sources = seed(store)
-    expected = Store(tmp_path / 'historical-checkpoints.db')
-    other = Store(store._db_path)
-    try:
-        store.conn.backup(expected.conn)
-        runner.migrate(expected.conn, registry=registry.MIGRATIONS[:94])
-        other.init_schema(defer_metadata=True)
-        revision = prepare(store, name)
-        publication.publish(store.conn, name, revision=revision)
-        publication.publish(store.conn, name, revision=revision)
-        assert publication.selected(other.conn, name) == revision
-        job = preparation.JOBS[name]
-        served = {}
-        for key in preparation.SOURCES[job.name]:
-            value = other.settings.get_setting(key)
-            served[key] = value
-            historical = OWNERS[name].get(expected.conn, key)
-            if key in preparation.CONTENT or key in preparation.GROUP[:2]:
-                assert json.loads(value) == json.loads(historical)
-            else:
-                assert value == historical
-        assert other.settings.get_setting('rec_vibe_version') == sources['rec_vibe_version']
-        assert dict(store.conn.execute(f'SELECT source,raw_value FROM {publication.ORIGINALS} WHERE name=?', (name,))) == {
-            key: sources[key] for key in preparation.SOURCES[job.name]}
-        regular.validate(other.conn)
-    finally:
-        other.conn.close()
-        expected.conn.close()
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema(defer_metadata=True)
+    # The comparison owns the real registered upgrade and native SQL reads;
+    # Store diagnostics and repositories are below that migration boundary.
+    with closing(sqlite3.connect(tmp_path / 'historical-checkpoints.db')) as expected, schema_inspection.reuse_tables(expected):
+        expected.row_factory = sqlite3.Row
+        expected.execute('PRAGMA foreign_keys=ON')
+        expected.execute('PRAGMA synchronous=OFF')
+        store.conn.backup(expected)
+        runner.migrate(expected, registry=registry.MIGRATIONS[:94])
+        with installed_reader(store._db_path, monkeypatch) as other:
+            revision = prepare(store, name)
+            publication.publish(store.conn, name, revision=revision)
+            publication.publish(store.conn, name, revision=revision)
+            assert publication.selected(other.conn, name) == revision
+            job = preparation.JOBS[name]
+            served = {}
+            for key in preparation.SOURCES[job.name]:
+                value = other.settings.get_setting(key)
+                served[key] = value
+                historical = OWNERS[name].get(expected, key)
+                if key in preparation.CONTENT or key in preparation.GROUP[:2]:
+                    assert json.loads(value) == json.loads(historical)
+                else:
+                    assert value == historical
+            assert other.settings.get_setting('rec_vibe_version') == sources['rec_vibe_version']
+            assert dict(store.conn.execute(f'SELECT source,raw_value FROM {publication.ORIGINALS} WHERE name=?', (name,))) == {
+                key: sources[key] for key in preparation.SOURCES[job.name]}
+            regular.validate(other.conn)
+    with installed_reader(store._db_path, monkeypatch) as reopened:
         assert publication.selected(reopened.conn, name) == revision
         assert {key: reopened.settings.get_setting(key) for key in served} == served
-    finally:
-        reopened.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -136,25 +141,19 @@ def test_direct_group_checkpoint_writes_and_reference_changes_keep_the_proof_coh
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('reopen', [False, True])
-def test_group_worker_can_publish_after_checkpoint_installation(installed, reopen):
+def test_group_worker_can_publish_after_checkpoint_installation(installed, reopen, monkeypatch):
     from tests.group_support import recordings
     from tests.test_group_preparation import seed as seed_corpus
     original, _ = installed
     seed(original)
     seed_corpus(original, recordings([('Pop', 12, .2)]))
     publication.publish(original.conn, 'group-checkpoints', revision=prepare(original, 'group-checkpoints'))
-    store = Store(original._db_path) if reopen else original
-    try:
-        if reopen:
-            store.init_schema(defer_metadata=True)
+    with installed_reader(original._db_path, monkeypatch) if reopen else nullcontext(original) as store:
         worker = group_preparation.Preparation(store)
         assert worker.step(200)
         head = store.taste_groups.head()
         assert json.loads(store.settings.get_setting('rec_group_shadow_checkpoint'))['generation'] == head['generation']
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        if reopen:
-            store.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

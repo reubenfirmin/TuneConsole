@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 
@@ -81,19 +80,17 @@ def test_populated_catalog_conversion_preserves_values_and_evidence(catalog_inpu
 
 
 @pytest.mark.parametrize('catalog_input', [(102, 103)], indirect=True)
-def test_populated_catalog_account_cutover_preserves_rows(catalog_input, monkeypatch):
-    from yt_playlist.core.migrations import v103_entity_names
-
+def test_populated_catalog_account_cutover_preserves_rows(catalog_input):
     conn, _path, _source, target = catalog_input
     tables = ('playlists', 'playlist_scopes', 'playlist_membership_refs', 'play_events',
               'listening_observations', 'recordings', 'catalog_entries', 'rec_feedback')
     before = {name: list(map(tuple, conn.execute(f'SELECT * FROM "{name}"'))) for name in tables}
-    restore = Mock()
-    monkeypatch.setattr(v103_entity_names, 'restore_programs', restore)
+    original = legacy_evidence.original(conn, 'recommendation', 'taste_modes', '1')
     migrate(conn, registry=MIGRATIONS[:target], clock=lambda: 1.)
-    restore.assert_called_once()
-    # The restoration owner installs and validates every canonical program.
-    # This owner retains actual account/scope renames and populated row IDs.
+    # Keep program restoration in the same real rename. A separate completed
+    # renamed input cannot establish that this populated cutover restored it.
+    validate_version(conn, target)
+    assert legacy_evidence.original(conn, 'recommendation', 'taste_modes', '1') == original
     assert list(conn.execute('SELECT * FROM accounts'))
     assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='identities'").fetchone()
     for name in tables:

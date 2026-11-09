@@ -4,12 +4,15 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_preparation_input
 from yt_playlist.core import entity_names, recommendation_outputs as files, sync_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import library_sync as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.library import sync_outcomes
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)
@@ -48,9 +51,9 @@ def seed(store):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_exact_report_resources_stamps_and_unresolved_owners_remain_retained(installed):
+def test_exact_report_resources_stamps_and_unresolved_owners_remain_retained(installed, preparation_ddl_connection):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     raw = seed(store)
     scopes_before = conn.execute('SELECT count(*) FROM main.playlist_scopes').fetchone()[0]
     for job in (preparation.RESULT_JOB, preparation.STAMP_JOB):
@@ -205,7 +208,7 @@ def test_file_work_allows_concurrent_source_update_and_rejects_stale_copy(instal
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_retry(
-        installed, monkeypatch):
+        installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     conn = store.conn
     raw = seed(store)
@@ -227,7 +230,7 @@ def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_
     monkeypatch.setattr(files, 'publish', failed)
     with pytest.raises(OSError, match='controlled sync disk failure'):
         job.step(conn)
-    regular.migrate(conn)
+    regular.migrate(preparation_ddl_connection)
     assert finish(preparation.STAMP_JOB, conn).status == 'prepared'
     monkeypatch.setattr(files, 'publish', publish)
     reopened = Store(store._db_path)
@@ -250,13 +253,14 @@ def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_
     ('last_sync_at', 'Infinity'), ('last_sync_outcome', 'running'),
 ])
 def test_invalid_sync_input_fails_durably_and_retains_authoritative_source(
-        installed, source, raw):
+        installed, preparation_ddl_connection, source, raw):
     store, _ = installed
+    conn = preparation_ddl_connection
     store.settings.set_setting(source, raw)
     job = preparation.RESULT_JOB if source == 'library_sync_state' else preparation.STAMP_JOB
-    job.install(store.conn)
+    job.install(conn)
     with pytest.raises(ValueError):
-        finish(job, store.conn)
-    assert job.progress(store.conn).status == 'failed'
+        finish(job, conn)
+    assert job.progress(conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
-    regular.migrate(store.conn)
+    regular.migrate(conn)

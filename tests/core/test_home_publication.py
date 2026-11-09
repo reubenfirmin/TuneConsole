@@ -10,14 +10,16 @@ import time
 import pytest
 
 from tests.core.test_home_output_preparation import seed, root_rows
-from tests.store_fixture_support import guarded_numbered_store as installed, publication_consumer_reads
+from tests.store_fixture_support import guarded_numbered_store as installed, preparation_ddl_connection, publication_consumer_reads
+from tests.store_fixture_support import numbered_store as unadmitted_installed
+from tests.store_fixture_support import publication_preparation_input
 from yt_playlist.core import group_evidence, recommendation_custody
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import home_outputs as preparation, home_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +62,7 @@ def real_roots(store):
 
 
 @pytest.mark.parametrize('installed', [79, 90], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(installed):
     store, _ = installed
     originals = seed(store)
@@ -97,41 +100,43 @@ def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(
         other.conn.close()
 
 
-@pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [90], indirect=True)
 @pytest.mark.parametrize('failure', ['metadata', 'file', 'policy', 'extra_policy', 'root', 'root_original', 'missing_root', 'missing_output'])
-def test_missing_or_incorrect_documents_and_custody_cannot_publish(installed, failure):
-    store, _ = installed
+def test_missing_or_incorrect_documents_and_custody_cannot_publish(unadmitted_installed, preparation_ddl_connection, failure):
+    store, _ = unadmitted_installed
+    conn = preparation_ddl_connection
     seed(store)
-    prepare(store.conn)
-    with store.conn:
+    prepare(conn)
+    with conn:
         if failure == 'metadata':
-            store.conn.execute('UPDATE '+preparation.HEAD+' SET mix_regions=99')
+            conn.execute('UPDATE '+preparation.HEAD+' SET mix_regions=99')
         elif failure == 'file':
-            store.conn.execute('UPDATE '+preparation.PARTS+" SET filename='/missing'")
+            conn.execute('UPDATE '+preparation.PARTS+" SET filename='/missing'")
         elif failure == 'policy':
-            store.conn.execute('DELETE FROM '+preparation.POLICIES)
+            conn.execute('DELETE FROM '+preparation.POLICIES)
         elif failure == 'extra_policy':
-            store.conn.execute('INSERT INTO '+preparation.POLICIES+
+            conn.execute('INSERT INTO '+preparation.POLICIES+
                 " SELECT surface,generation,'invented',NULL,'missing_policy' FROM "+preparation.HEAD+' LIMIT 1')
         elif failure == 'root':
-            store.conn.execute('UPDATE '+preparation.ROOTS+" SET source_context='invented'")
+            conn.execute('UPDATE '+preparation.ROOTS+" SET source_context='invented'")
         elif failure == 'root_original':
-            store.conn.execute('UPDATE '+preparation.ORIGINALS+" SET source_snapshot='{}'")
+            conn.execute('UPDATE '+preparation.ORIGINALS+" SET source_snapshot='{}'")
         elif failure == 'missing_root':
-            store.conn.execute('DELETE FROM '+preparation.ROOTS)
+            conn.execute('DELETE FROM '+preparation.ROOTS)
         elif failure == 'missing_output':
-            store.conn.execute('DELETE FROM '+preparation.CURRENT)
+            conn.execute('DELETE FROM '+preparation.CURRENT)
     for _ in range(100):
-        stage = publication.OWNER.step(store.conn)
+        stage = publication.OWNER.step(conn)
         if stage.complete:
             break
     with pytest.raises((MigrationError, OSError, ValueError)):
-        publication.OWNER.publish(store.conn, stage=stage.id)
-    assert publication.OWNER.selected(store.conn) is None
-    regular.migrate(store.conn)
+        publication.OWNER.publish(conn, stage=stage.id)
+    assert publication.OWNER.selected(conn) is None
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_continuing_writes_withdraw_selection_and_keep_real_retention_pins(installed):
     store, _ = installed
     originals = seed(store)
@@ -160,6 +165,7 @@ def test_continuing_writes_withdraw_selection_and_keep_real_retention_pins(insta
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_interrupted_publication_and_source_race_cannot_select_partial_state(installed, monkeypatch):
     store, _ = installed
     seed(store)
@@ -189,6 +195,7 @@ def test_interrupted_publication_and_source_race_cannot_select_partial_state(ins
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(
         installed, publication_consumer_reads):
     store, _ = installed
@@ -225,6 +232,7 @@ def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_interrupted_root_copy_resumes_from_another_connection(installed):
     store, _ = installed
     seed(store)
@@ -261,6 +269,7 @@ def test_interrupted_root_copy_resumes_from_another_connection(installed):
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installed, monkeypatch):
     store, _ = installed
     seed(store)
@@ -303,6 +312,7 @@ def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installe
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_native_upgrade_preserves_archives_and_prefers_native_writes(installed, tmp_path):
     store, _ = installed
     originals = seed(store)

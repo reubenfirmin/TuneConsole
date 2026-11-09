@@ -4,11 +4,17 @@ import sqlite3
 import pytest
 
 from tests.store_fixture_support import guarded_numbered_store as installed
+from tests.store_fixture_support import numbered_store as unadmitted_installed
+from tests.store_fixture_support import preparation_ddl_connection, publication_consumer_reads
+from tests.store_fixture_support import without_query_timing
 from tests.core.test_taste_axis_preparation import seed, source, finish
 from yt_playlist.core import taste_axes
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import taste_axes as preparation, taste_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -95,9 +101,9 @@ def test_selected_folds_match_native_and_preserve_exact_contributions(installed,
         native.conn.close()
 
 
-@pytest.mark.parametrize('installed',[87],indirect=True)
-def test_competing_configured_values_block_selection_without_losing_history(installed):
-    store,_ = installed
+@pytest.mark.parametrize('unadmitted_installed',[87],indirect=True)
+def test_competing_configured_values_block_selection_without_losing_history(unadmitted_installed, preparation_ddl_connection):
+    store,_ = unadmitted_installed
     seed(store)
     original = source(store.conn)
     identity = ready(store.conn)
@@ -105,7 +111,7 @@ def test_competing_configured_values_block_selection_without_losing_history(inst
         publication.publish(store.conn,identity=identity)
     assert publication.selected(store.conn) is None
     assert source(store.conn)==original
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed',[79,87],indirect=True)
@@ -185,34 +191,35 @@ def test_current_reference_and_unseen_source_aliases_are_used_for_writes(install
     assert list(map(tuple,store.conn.execute('SELECT axis,weight FROM rec_weights')))==[('genre:  NÉU ALIAS  ',1.9)]
 
 
-@pytest.mark.parametrize('installed',[87],indirect=True)
+@pytest.mark.parametrize('unadmitted_installed',[87],indirect=True)
 @pytest.mark.parametrize('damage',['value','axis','missing'])
-def test_independent_source_and_identity_verification_rejects_damage(installed,damage):
-    store,_ = installed
+def test_independent_source_and_identity_verification_rejects_damage(unadmitted_installed,preparation_ddl_connection,damage):
+    store,_ = unadmitted_installed
+    conn = preparation_ddl_connection
     reconciled_seed(store)
-    preparation.JOB.install(store.conn)
-    finish(store.conn)
-    with store.conn:
+    preparation.JOB.install(conn)
+    finish(conn)
+    with conn:
         if damage=='value':
-            store.conn.execute("UPDATE prepared_taste_rows SET weight=2.9 WHERE owner='rec_weights'")
+            conn.execute("UPDATE prepared_taste_rows SET weight=2.9 WHERE owner='rec_weights'")
         elif damage=='axis':
-            store.conn.execute("UPDATE prepared_taste_axis_keys SET genre_key='wrong' WHERE kind='genre'")
+            conn.execute("UPDATE prepared_taste_axis_keys SET genre_key='wrong' WHERE kind='genre'")
         else:
-            store.conn.execute("DELETE FROM prepared_taste_rows WHERE owner='rec_weights'")
+            conn.execute("DELETE FROM prepared_taste_rows WHERE owner='rec_weights'")
     for _ in range(20):
-        current = publication.step(store.conn)
+        current = publication.step(conn)
         if current.complete:
             break
     with pytest.raises(MigrationError,match='differs|missing or extra'):
-        publication.publish(store.conn,identity=current.id)
-    assert publication.selected(store.conn) is None
+        publication.publish(conn,identity=current.id)
+    assert publication.selected(conn) is None
     assert store.rec_model.weight_records()['genre:Known alias']['weight']==1.4
-    regular.migrate(store.conn)
+    regular.migrate(conn)
 
 
-@pytest.mark.parametrize('installed',[87],indirect=True)
-def test_interruption_stale_publication_and_failed_retry_leave_old_sources_usable(installed,monkeypatch):
-    store,_ = installed
+@pytest.mark.parametrize('unadmitted_installed',[87],indirect=True)
+def test_interruption_stale_publication_and_failed_retry_leave_old_sources_usable(unadmitted_installed,monkeypatch,preparation_ddl_connection):
+    store,_ = unadmitted_installed
     reconciled_seed(store)
     preparation.JOB.install(store.conn)
     finish(store.conn)
@@ -246,7 +253,7 @@ def test_interruption_stale_publication_and_failed_retry_leave_old_sources_usabl
             publication.publish(store.conn,identity=current.id)
     assert publication.selected(store.conn) is None
     assert store.rec_model.weight_records()['genre:Known alias']['weight']==2.3
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     first = ready(store.conn)
     publication.publish(store.conn,identity=first)
     with store.conn:
@@ -254,7 +261,7 @@ def test_interruption_stale_publication_and_failed_retry_leave_old_sources_usabl
     with pytest.raises(ValueError,match='taste axis'):
         finish(store.conn)
     assert preparation.JOB.progress(store.conn).status=='failed'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     with store.conn:
         store.conn.execute("UPDATE rec_lean SET axis='genre:Known alias' WHERE axis=''")
     preparation.JOB.step(store.conn,retry=True)
@@ -292,9 +299,9 @@ def test_family_precedence_unknowns_and_new_empty_bootstrap(installed,tmp_path):
         fresh.conn.close()
 
 
-@pytest.mark.parametrize('installed',[87],indirect=True)
-def test_distinct_family_and_genre_identity_cannot_hide_each_other_at_api_boundary(installed):
-    store,_ = installed
+@pytest.mark.parametrize('unadmitted_installed',[87],indirect=True)
+def test_distinct_family_and_genre_identity_cannot_hide_each_other_at_api_boundary(unadmitted_installed,preparation_ddl_connection):
+    store,_ = unadmitted_installed
     with store.conn:
         store.conn.execute("INSERT INTO genre_family VALUES ('shared','Shared')")
         store.conn.execute("INSERT INTO genre_catalog(key,name,source) VALUES ('shared','Specific shared genre','custom')")
@@ -319,4 +326,4 @@ def test_distinct_family_and_genre_identity_cannot_hide_each_other_at_api_bounda
     with pytest.raises(MigrationError,match='Distinct taste identities'):
         publication.publish(store.conn,identity=current)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)

@@ -11,7 +11,7 @@ from tests.test_audio_vibes import sample
 from tests.genre_catalog_support import bound_shipped_catalog
 from tests.prepared_fixture_support import capture_template, historical_template, prepared_template
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
 from yt_playlist.core import catalog, fao, vibe_provenance
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.db_writes import atomic_write
@@ -20,6 +20,9 @@ from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, musical_character, musical_preparation, vibe_prediction as policy
 from yt_playlist.rec import vibe_preparation, vibe_joint_model as joint, vibe_joint_preparation
 from yt_playlist.rec.progressive import Budget, Preparation
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(scope='module')

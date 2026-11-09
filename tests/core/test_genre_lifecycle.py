@@ -2,11 +2,14 @@
 import pytest
 
 from tests.genre_catalog_support import bound_shipped_catalog
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
-from yt_playlist.core import audio_vibe_metadata, genre_classifications, genre_identity, metadata
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
+from yt_playlist.core import audio_vibe_metadata, genre_classifications, genre_identity, metadata, schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.providers import genres
 from yt_playlist.rec import album_choices, content_model, group_similarity, radio_genres, transient
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +33,7 @@ def store(genre_schema, monkeypatch, tmp_path):
         initialize_consumer(database, genre_schema)
         with database.conn:
             genre_identity.seed_catalog(database.conn)
-        with reuse_reporting_reader(database, monkeypatch):
+        with schema_inspection.reuse_tables(database.conn), reuse_reporting_reader(database, monkeypatch):
             yield database
     finally:
         database.conn.close()

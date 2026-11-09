@@ -6,8 +6,8 @@ import shutil
 import pytest
 
 from tests.genre_catalog_support import bound_shipped_catalog
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
-from yt_playlist.core import catalog, metadata_runtime
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
+from yt_playlist.core import catalog, metadata_runtime, schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.preparation import metadata_runtime as runtime_preparation
 from yt_playlist.core.store import Store
@@ -18,9 +18,21 @@ from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 from yt_playlist.controllers.musical_profiles import MusicalProfiles
 
 
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Profile workers do not construct an HTTP application."""
+
+
 @pytest.fixture(scope='module')
 def profile_schema():
     with bounded_consumer_schema(()) as schema:
+        assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert schema._revision_script
+        assert not schema.execute('SELECT 1 FROM rec_musical_profiles').fetchone()
+        assert not schema.execute('PRAGMA foreign_key_check').fetchone()
         yield schema
 
 
@@ -37,13 +49,6 @@ def completed_vibe_producer(monkeypatch):
     monkeypatch.setattr(vibe_preparation, 'recording_steps', recording_steps)
 
 
-def test_profile_input_keeps_real_sql_guards_without_prepared_profiles(profile_schema):
-    assert profile_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert profile_schema._revision_script
-    assert not profile_schema.execute('SELECT 1 FROM rec_musical_profiles').fetchone()
-    assert not profile_schema.execute('PRAGMA foreign_key_check').fetchone()
-
-
 @pytest.fixture
 def store(profile_schema, tmp_path, monkeypatch):
     from yt_playlist.core import genre_identity
@@ -56,7 +61,7 @@ def store(profile_schema, tmp_path, monkeypatch):
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
         with database.conn:
             genre_identity.seed_catalog(database.conn)
-        with reuse_reporting_reader(database, monkeypatch):
+        with reuse_reporting_reader(database, monkeypatch), schema_inspection.reuse_tables(database.conn):
             yield database
     finally:
         database.conn.close()
@@ -259,10 +264,11 @@ def test_file_backed_format_cutover_preserves_last_good_and_retries(store, tmp_p
     reopened = Store(path)
     try:
         reopened.conn.execute('PRAGMA synchronous=NORMAL')
-        reopened.init_schema()
+        with schema_inspection.reuse_tables(reopened.conn):
+            reopened.init_schema()
         assert metadata_runtime.active(reopened.conn)
         assert get(reopened) == previous
-        with reuse_reporting_reader(reopened, monkeypatch):
+        with reuse_reporting_reader(reopened, monkeypatch), schema_inspection.reuse_tables(reopened.conn):
             drain(reopened)
             assert get(reopened)['intensity']['value'] > .5
             observe(reopened, tid, [{'name': 'Ambient'}], run='after-cutover', now=11)
@@ -372,8 +378,9 @@ def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(stor
     store = Store(path)
     try:
         store.conn.execute('PRAGMA synchronous=NORMAL')
-        store.init_schema()
-        with reuse_reporting_reader(store, monkeypatch):
+        with schema_inspection.reuse_tables(store.conn):
+            store.init_schema()
+        with reuse_reporting_reader(store, monkeypatch), schema_inspection.reuse_tables(store.conn):
             drain(store)
             assert get(store)['intensity']['value'] is None
             with store.conn:

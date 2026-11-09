@@ -7,18 +7,20 @@ import sqlite3
 import pytest
 
 from tests.core.test_append_operation_preparation import seed
+from tests.publication_fixture_support import installed, installed_reader
 from tests.store_fixture_support import (
-    guarded_numbered_store as guarded_installed,
-    numbered_store as installed,
+    native_sql_calls,
+    numbered_store as unadmitted_installed,
+    preparation_ddl_connection,
     publication_consumer_reads,
+    without_query_timing,
 )
 from yt_playlist.core import collection_recovery, radio_storage
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import append_operations as preparation, append_publication as publication
 from yt_playlist.core.store import Store
 
-
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -47,13 +49,12 @@ def stage(owner, conn):
 
 @pytest.mark.parametrize('installed', [79, 93, 94, 96, 97], indirect=True)
 @pytest.mark.parametrize('append', [False, True])
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_preopened_runtime_readers_keep_exact_operation_state_and_revision(installed, append, monkeypatch):
     store, version = installed
     # Each fixture owner commits before the independent reader opens.
     names, sources, recipe, state = seed(store, version, append=append)
-    other = Store(store._db_path)
-    try:
-        other.init_schema(defer_metadata=True)
+    with installed_reader(store._db_path, monkeypatch) as other:
         for name, source in zip(names, sources):
             owner = publication.OWNERS[name]
             identity = stage(owner, store.conn)
@@ -74,53 +75,51 @@ def test_preopened_runtime_readers_keep_exact_operation_state_and_revision(insta
         assert seen == ['tv-append', 'radio-session']
         regular.validate(other.conn)
         assert not other.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='tv_append_intents'").fetchone()
-    finally:
-        other.conn.close()
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema(defer_metadata=True)
+
+    with installed_reader(store._db_path, monkeypatch) as reopened:
         assert reopened.playlist_recipes.get_recipe('TV') == recipe
         actual, revision = radio_storage.load(reopened.conn)
         assert actual == state
         assert revision == (('episode', 1) if version >= 94 else None)
-    finally:
-        reopened.conn.close()
+
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['header', 'member', 'extra', 'omitted', 'recovery', 'original', 'plan'])
-def test_incorrect_operation_state_members_coverage_or_files_cannot_publish(installed, failure):
+def test_incorrect_operation_state_members_coverage_or_files_cannot_publish(installed, preparation_ddl_connection, failure):
     store, version = installed
+    conn = preparation_ddl_connection
     names, sources, _, _ = seed(store, version)
     name, source = names[1], sources[1]
     owner = publication.OWNERS[name]
-    prepare(owner, store.conn)
-    header = preparation.head(store.conn, name, source)
+    prepare(owner, conn)
+    header = preparation.head(conn, name, source)
     items = preparation.table(name, 'items')
-    with store.conn:
+    with conn:
         if failure == 'header':
-            store.conn.execute('UPDATE '+owner.header+" SET receipt_handle_snapshot='different'")
+            conn.execute('UPDATE '+owner.header+" SET receipt_handle_snapshot='different'")
         elif failure == 'member':
-            store.conn.execute('UPDATE '+items+" SET video_id_snapshot='different' WHERE role='allowed'")
+            conn.execute('UPDATE '+items+" SET video_id_snapshot='different' WHERE role='allowed'")
         elif failure == 'extra':
-            store.conn.execute('INSERT INTO '+items+' SELECT source,preparation_revision,role,list_position,99,video_id_snapshot FROM '+items+
+            conn.execute('INSERT INTO '+items+' SELECT source,preparation_revision,role,list_position,99,video_id_snapshot FROM '+items+
                 " WHERE role='confirmed' AND position=0")
         elif failure == 'omitted':
-            store.conn.execute('DELETE FROM '+owner.current)
+            conn.execute('DELETE FROM '+owner.current)
         else:
-            filename = (header[failure+'_filename'] if failure != 'original' else store.conn.execute(
+            filename = (header[failure+'_filename'] if failure != 'original' else conn.execute(
                 'SELECT filename FROM '+preparation.table(name, 'parts')+' LIMIT 1').fetchone()[0])
             Path(filename).write_bytes(b'corrupt')
-    identity = owner.step(store.conn).id
+    identity = owner.step(conn).id
     with pytest.raises((MigrationError, ValueError, OSError)):
-        owner.publish(store.conn, stage=identity)
-    assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
+        owner.publish(conn, stage=identity)
+    assert owner.selected(conn) is None
+    regular.migrate(conn)
 
 
-@pytest.mark.parametrize('guarded_installed', [93, 97], indirect=True)
-def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations(guarded_installed):
-    store, version = guarded_installed
+@pytest.mark.parametrize('installed', [93, 97], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
+def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations(installed):
+    store, version = installed
     names, sources, recipe, state = seed(store, version, count=8192)
     originals, identities = {}, {}
     for name, source in zip(names, sources):
@@ -160,6 +159,7 @@ def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_race_and_interrupted_publication_do_not_select_mixed_operations(installed):
     store, version = installed
     names, sources, _, _ = seed(store, version)
@@ -187,9 +187,13 @@ def test_race_and_interrupted_publication_do_not_select_mixed_operations(install
     owner.publish(store.conn, stage=identity)
 
 
-@pytest.mark.parametrize('installed', [93, 97], indirect=True)
-def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(installed, monkeypatch):
-    store, version = installed
+@pytest.mark.parametrize('unadmitted_installed', [93, 97], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
+def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(
+        unadmitted_installed, monkeypatch, preparation_ddl_connection, native_sql_calls):
+    # The explicit startup below installs actual guards. Initial snapshots
+    # are not used while creating and corrupting these retained append files.
+    store, version = unadmitted_installed
     names, sources, recipe, _ = seed(store, version)
     name, source = names[0], sources[0]
     owner = publication.OWNERS[name]
@@ -202,7 +206,7 @@ def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(
     with pytest.raises(OSError):
         store.playlist_recipes.get_recipe('TV')
     store.init_schema(defer_metadata=True)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     publication.repair(name, store.conn, source)
     owner.publish(store.conn, stage=identity)
     assert store.playlist_recipes.get_recipe('TV') == recipe
@@ -220,7 +224,7 @@ def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
         'independent_append_publication_ddl', independent,
         lambda conn: conn.execute('SELECT * FROM independent_append_publication_ddl LIMIT 0'))))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert owner.worker.progress(store.conn) == failed
     monkeypatch.setattr(preparation, 'recovery', publish)
     with pytest.raises(MigrationError, match='retry explicitly'):
@@ -230,6 +234,7 @@ def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_duplicate_video_metadata_and_optional_presence_are_not_collapsed(installed):
     store, version = installed
     names, sources, recipe, state = seed(store, version)
@@ -245,6 +250,7 @@ def test_duplicate_video_metadata_and_optional_presence_are_not_collapsed(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_frozen_owner_replacement_retires_old_selections_and_native_ops_keep_archives(installed, tmp_path):
     store, version = installed
     names, sources, recipe, state = seed(store, version, append=True)

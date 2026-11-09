@@ -6,17 +6,17 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
-from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
+from tests.publication_fixture_support import installed
+from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader, without_query_timing
 from tests import file_custody_support as fixture_files
 from yt_playlist.core import fao, preparation_files as recovery, schema_inspection
 from yt_playlist.core.preparation import document_plan
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture
@@ -158,7 +158,7 @@ def selected_reads(selected_inputs, monkeypatch):
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('compressed', [False, True], ids=['plain', 'compressed'])
-def test_preparation_relocation_preserves_file_age(installed, tmp_path, compressed):
+def test_preparation_relocation_preserves_file_age(installed, tmp_path, compressed, monkeypatch):
     producer, _ = installed
     root, read, selected = selected_owner(producer, 'documents')
     expected, selection = read(producer), selected(producer.conn)
@@ -180,13 +180,17 @@ def test_preparation_relocation_preserves_file_age(installed, tmp_path, compress
         copied = fao.read(export_root / entry['relative_filename']).info
         assert (copied.mtime_ns, copied.ctime_ns) == clocks[entry['reference'][0]]
     candidate = Store(tmp_path / 'relocated.db')
+    candidate.conn.execute('PRAGMA synchronous=OFF')
     producer.conn.backup(candidate.conn)
-    candidate.init_schema(defer_metadata=True)
+    with schema_inspection.reuse_tables(candidate.conn):
+        candidate.init_schema(defer_metadata=True)
     hidden = root.with_name(root.name + '-unavailable')
     root.rename(hidden)
     try:
         recovery.restore(candidate.conn, manifest)
-        assert read(candidate) == expected
+        with (reuse_reporting_reader(candidate, monkeypatch) as reader,
+              schema_inspection.reuse_tables(reader.conn)):
+            assert read(candidate) == expected
         assert selected(candidate.conn) == selection
         originals = {(entry['table'], tuple(entry['keys'].items()), tuple(entry['columns'])):
                      clocks[entry['reference'][0]] for entry in recovery.references(producer.conn)}
@@ -249,7 +253,8 @@ def test_selected_files_read_exactly_without_producer(selected_reads, tmp_path, 
             fixture_files.restore_files(candidate.conn, report['manifests'])
         with schema_inspection.reuse_tables(candidate.conn):
             candidate.init_schema(defer_metadata=True)
-            with reuse_reporting_reader(candidate, monkeypatch):
+            with (reuse_reporting_reader(candidate, monkeypatch) as reader,
+                  schema_inspection.reuse_tables(reader.conn)):
                 assert {kind: read(candidate) for kind, (_root, read, _selected) in owners.items()} == expected
         assert {kind: selected(candidate.conn) for kind, (_root, _read, selected) in owners.items()} == selection
         assert_sql_custody(candidate.conn, custody, original=original)
@@ -557,28 +562,30 @@ def test_unfinished_nested_plans_and_backups_resume_without_producer(installed, 
     hidden = root.with_name(root.name + '-unavailable')
     root.rename(hidden)
     try:
-        if original:
-            fixture_files.restore_files(candidate.conn, report['manifests'])
-        candidate.init_schema(defer_metadata=True)
-        assert_sql_custody(candidate.conn, custody, original=original)
-        for owner in recovery.references(candidate.conn):
-            assert Path(owner['reference'][0]).is_relative_to(path.with_name(path.name + '.preparation'))
-            recovery._read(owner['reference'])
-        for job in jobs:
-            for _ in range(100):
-                if job.step(candidate.conn, batch_size=2).status == 'prepared':
-                    break
-            else:
-                pytest.fail('Recovered preparation did not finish: ' + job.name)
-        for owner in recovery.references(candidate.conn):
-            assert Path(owner['reference'][0]).is_relative_to(path.with_name(path.name + '.preparation'))
-            recovery._read(owner['reference'])
-        if kind == 'ranked':
-            # Relocation must preserve capture for later real policy changes.
-            revisions = [job.progress(candidate.conn).input_revision for job in jobs]
-            candidate.rec_ledger.record_serving_policy('later-policy', {'algorithm': 'changed'}, 2)
-            assert [job.progress(candidate.conn).input_revision for job in jobs] == [value + 1 for value in revisions]
-        assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
+        candidate.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(candidate.conn):
+            if original:
+                fixture_files.restore_files(candidate.conn, report['manifests'])
+            candidate.init_schema(defer_metadata=True)
+            assert_sql_custody(candidate.conn, custody, original=original)
+            for owner in recovery.references(candidate.conn):
+                assert Path(owner['reference'][0]).is_relative_to(path.with_name(path.name + '.preparation'))
+                recovery._read(owner['reference'])
+            for job in jobs:
+                for _ in range(100):
+                    if job.step(candidate.conn, batch_size=2).status == 'prepared':
+                        break
+                else:
+                    pytest.fail('Recovered preparation did not finish: ' + job.name)
+            for owner in recovery.references(candidate.conn):
+                assert Path(owner['reference'][0]).is_relative_to(path.with_name(path.name + '.preparation'))
+                recovery._read(owner['reference'])
+            if kind == 'ranked':
+                # Relocation must preserve capture for later real policy changes.
+                revisions = [job.progress(candidate.conn).input_revision for job in jobs]
+                candidate.rec_ledger.record_serving_policy('later-policy', {'algorithm': 'changed'}, 2)
+                assert [job.progress(candidate.conn).input_revision for job in jobs] == [value + 1 for value in revisions]
+            assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         candidate.conn.close()
         hidden.rename(root)

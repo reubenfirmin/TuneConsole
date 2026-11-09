@@ -3,9 +3,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, _track
-from tests.store_fixture_support import file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 from tests.metadata_provenance_support import metadata_provenance
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Song actions consume catalog identities and metadata, independently of
+    # the shipped vocabulary and snapshot admission machinery.
+    with bounded_consumer_schema((('electronic', 'Electronic'), ('art-pop', 'Art Pop'),
+                                  ('jazz', 'Jazz'), ('ambient', 'Ambient')),
+                                 snapshot_guards=False) as schema:
+        yield schema
 
 
 SONG = {"video_id": "new-song", "title": "A song's <title>", "artist": "Artist & Friends",
@@ -30,7 +43,7 @@ def seed_song_actions(store):
     }})
     other = FakeClient()
     clients = {main_id: main, other_id: other}
-    app = create_app(store, lambda: clients, now_fn=lambda: 100.0)
+    app = create_app(store, lambda: clients, now_fn=lambda: 100.0, background_work=False)
     return {"app": app, "main": main, "other": other, "main_id": main_id,
             "source": source, "destination": destination, "system": system, "offline": offline,
             "clients": clients, "store": store}

@@ -3,14 +3,19 @@ import numpy as np
 import pytest
 
 from yt_playlist.controllers.genres import Genres
-from yt_playlist.rec import radio_tuning
+from yt_playlist.rec import measurement, radio_tuning
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.util.matching import identity_key
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -37,8 +42,9 @@ def store(spacing_schema, tmp_path, monkeypatch):
     source = Store(tmp_path / 'spacing.db')
     try:
         initialize_consumer(source, spacing_schema)
+        source.conn.execute('PRAGMA synchronous=NORMAL')
         source.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(source, monkeypatch):
+        with schema_inspection.reuse_tables(source.conn), reuse_reporting_reader(source, monkeypatch):
             yield source
     finally:
         source.conn.close()
@@ -83,7 +89,12 @@ def prepare(store, groups):
     seed_publication_subjects(store, [{**track, 'album': '', 'year': '2002', 'duration_s': 200}
                                      for tracks in pools for track in tracks])
     store.modes.replace_modes(modes, [], 1)
-    publish_bundles(store, bundles)
+    # Spacing consumes a completed candidate policy; model fingerprinting is
+    # below the history and artist-selection behavior exercised here.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                      ('spacing-input', {'schema': 4, 'algorithm': 'spacing-input'}))
+        publish_bundles(store, bundles)
     return pools
 
 
@@ -108,8 +119,8 @@ def test_artist_spacing_input_keeps_all_repeated_artists_and_published_candidate
 
 
 @pytest.fixture
-def spacing_library(store, spacing_template):
-    return spacing_template.restore(store)
+def spacing_library(store):
+    return prepare(store, [[f'Artist {i % 9}' for i in range(54)]])
 
 
 def candidates(store, **controls):

@@ -1,5 +1,6 @@
 """Compare frozen heldouts with actual preparation before target observations exist."""
 from copy import deepcopy
+from contextlib import closing
 import hashlib
 import json
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from experiments.audio_lab_tools.pooling import vibe_pooling_labels as categoric
 from tests.conftest import seed_catalog_track
 from tests.rec.test_musical_preparation import observe
 from tests.rec.test_vibe_prediction import track
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.controllers.vibe_evaluation import VibeEvaluation
 from yt_playlist.core import catalog, db_handles, file_collection, profile_files
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
@@ -19,6 +21,43 @@ from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, musical_preparation, musical_profiles, vibe_joint_preparation
 from yt_playlist.rec import vibe_prediction, vibe_preparation
 from yt_playlist.rec import vibe_evaluation
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Capture owns source filtering, immutable files and reader lifetimes. Its
+    # controlled catalog needs these three genres, rather than full taxonomy
+    # admission. Capture below owns its real read snapshot and file leases;
+    # successful source preparation is a lower collaborator.
+    with bounded_consumer_schema((('psybient', 'Psybient'), ('ambient', 'Ambient'),
+                                  ('doom-metal', 'Doom Metal')), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema, monkeypatch):
+    import sqlite3
+
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+    from yt_playlist.core.store import Store
+
+    # Per-statement diagnostics/admission are below this synchronous private
+    # capture. Native SQLite still owns SQL, constraints and transactions.
+    for operation in ('execute', 'executemany'):
+        monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
+    database = Store(tmp_path / 'masked-capture.db')
+    with closing(database.conn):
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, _pristine_current_schema, snapshot_guards=False)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        yield database
+
+
+def prepare_source(store, monkeypatch):
+    # Release the completed lower preparation reader before capture. Capture
+    # itself must acquire and release its real database/file leases.
+    with monkeypatch.context() as patch, mock_snapshot_coordinator(store, patch):
+        return musical_preparation.source_step(store, 1000)
 
 
 def bucket(value):
@@ -161,9 +200,9 @@ def test_source_profile_budget_deferral_preserves_pending_and_retries(file_backe
         return source_profile(source)
     with monkeypatch.context() as patch:
         patch.setattr(musical_preparation.profiles, 'source_profile', defer_once)
-        assert not musical_preparation.source_step(store, 1000)
+        assert not prepare_source(store, monkeypatch)
     assert deferred and store.musical_profiles.pending() == pending
-    assert musical_preparation.source_step(store, 1000)
+    assert prepare_source(store, monkeypatch)
     assert store.musical_profiles.pending() is None
     profile = profile_files.read(store.conn, 'source', pending)
     assert json.loads(profile)['scope'] == 'artist'
@@ -188,7 +227,7 @@ def test_masked_capture_filters_before_source_slots_and_never_reads_target_files
         masked_source, monkeypatch, scope):
     store, target, alternate, recording, key = masked_source
     observe(store, target, [{'name': 'Ambient'}], scope=scope, entity='allowed-description')
-    assert musical_preparation.source_step(store, 1000)
+    assert prepare_source(store, monkeypatch)
     before = vibe_evaluation.evaluation_profile_inputs(store.conn, [recording])[str(recording)]
     assert [source['scope'] for source in before['sources']] == [scope]
     assert before['truncated'] is False
@@ -261,17 +300,21 @@ def test_masked_capture_rejects_relational_overflow_without_reading_source_files
                         [{'recording': recording}])
     monkeypatch.setattr(profile_files, 'read', lambda *_args, **_kwargs:
                         pytest.fail('Overflow capture read an unprepared source body'))
-    state = list(store.conn.iterdump())
+    # Freeze opens its own database connection. Any committed write through
+    # that connection changes data_version, even a later commit restoring the
+    # old rows. Own-connection writes are caught by total_changes as well.
+    state = (store.conn.execute('PRAGMA main.data_version').fetchone()[0], store.conn.total_changes)
     rejected = tmp_path / 'overflow-plan.json'
     with pytest.raises(WorkBudgetExceeded, match='source links exceed bounded admission'):
         evaluation.freeze(store._db_path, rejected)
-    assert not rejected.exists() and list(store.conn.iterdump()) == state
+    assert not rejected.exists()
+    assert (store.conn.execute('PRAGMA main.data_version').fetchone()[0], store.conn.total_changes) == state
 
 
 def test_masked_snapshot_holds_database_and_file_lifetimes_until_capture_finishes(masked_source, monkeypatch):
     store, target, _alternate, recording, _key = masked_source
     observe(store, target, [{'name': 'Ambient'}], scope='artist', entity='allowed-description')
-    assert musical_preparation.source_step(store, 1000)
+    assert prepare_source(store, monkeypatch)
     expected = vibe_evaluation.evaluation_profile_inputs(store.conn, [recording])
     database, root = store._db_path, profile_files.directory(store.conn)
     store.conn.close()

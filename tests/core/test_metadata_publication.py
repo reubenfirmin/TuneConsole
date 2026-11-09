@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor as metadata_predecessor, seed
-from tests.core.test_metadata_preparation import finish
+from tests.core.test_metadata_preparation import finish, preparation_worker
 from yt_playlist.core import catalog, genre_identity, metadata
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_publication as publication
@@ -35,11 +35,11 @@ def publish(conn):
     pytest.fail('Metadata publication did not finish')
 
 
-def rejection_inputs(store):
+def rejection_inputs(store, conn):
     seed(store)
-    preparation.JOB.install(store.conn)
-    finish(store.conn)
-    assert publication.selected(store.conn) is None
+    preparation.JOB.install(conn)
+    finish(conn)
+    assert publication.selected(conn) is None
 
 
 def test_selected_sources_keep_exact_values_and_operational_reads_use_typed_fields(predecessor):
@@ -116,9 +116,9 @@ def test_continuing_provider_choice_reference_and_delete_updates_withdraw_select
     "DELETE FROM prepared_metadata_evidence WHERE owner='entry_field_choices'",
 ])
 def test_corrupt_preparation_is_not_publishable_and_regular_schema_remains_independent(
-        predecessor, damage):
-    conn = predecessor.conn
-    rejection_inputs(predecessor)
+        predecessor, preparation_worker, damage):
+    conn = preparation_worker
+    rejection_inputs(predecessor, conn)
     with conn:
         conn.execute(damage)
     with pytest.raises(MigrationError,match='differ|missing|extra'):
@@ -154,8 +154,8 @@ def test_stale_verification_and_interrupted_selection_preserve_owner(predecessor
 @pytest.mark.parametrize('owner,column', [('metadata_findings','value_json'),('enrichment_log','value'),
     ('metadata_decisions','legacy_ref'),('enrichment_provider_state','error')])
 def test_all_source_payloads_are_clipped_before_transfer_and_fail_without_truncation(
-        predecessor, owner, column):
-    conn = predecessor.conn
+        predecessor, preparation_worker, owner, column):
+    conn = preparation_worker
     seed(predecessor)
     raw = 'x'*(preparation.MAX_SOURCE_BYTES+1)
     keys = preparation.KEYS[owner]

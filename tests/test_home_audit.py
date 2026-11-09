@@ -9,15 +9,15 @@ from yt_playlist.rec import home_audit
 from yt_playlist.rec.surfaces import ForYouItem
 from yt_playlist.rec import home_cards as home
 from tests.home_fixture_support import home_routes_only, prepared_client, publish_menu, without_metadata_providers
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'native_sql_calls')
 
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     with bounded_consumer_schema((('jazz', 'Jazz'), ('britpop', 'Britpop'), ('techno', 'Techno'),
-                                  ('house', 'House'))) as schema:
+                                  ('house', 'House')), snapshot_guards=False) as schema:
         yield schema
 
 

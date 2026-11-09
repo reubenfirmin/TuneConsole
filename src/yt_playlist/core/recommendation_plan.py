@@ -121,11 +121,7 @@ def validate(plan, *, allow_unobserved=False):
         pool = slot.pool
         selections.add((slot.surface, pool.content_digest))
         if pool.content_digest not in distinct:
-            actual = pools.prepare(pool.pool_key, pool.policy_version, pool.group_version_id,
-                                   pool.input_fingerprint, pool.purpose, pool.candidates)
-            if actual != pool:
-                raise ValueError('Recommendation pool content identity changed')
-            used += sum(len(row) for row in pools.rows(pool))
+            used += pools.validate(pool)
             distinct[pool.content_digest] = pool
         elif distinct[pool.content_digest] != pool:
             raise ValueError('Conflicting recommendation pool content identity')

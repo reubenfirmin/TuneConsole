@@ -1,13 +1,49 @@
 """Prepared-region upgrades and metadata enrichment during playback."""
+from contextlib import closing
 from types import SimpleNamespace
 from tests.enrichment_support import seed_enrichment
+import sqlite3
 import threading
 
 import pytest
 from yt_playlist.web import radio_session
 from yt_playlist.rec.radio_directions import RadioDirections
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import play, radio_controller
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import file_consumer_store, without_query_timing
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'native_sql_calls')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    """These controllers never construct the HTTP app or its periodic workers."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    from tests.store_fixture_support import bounded_consumer_schema
+
+    genres = (('ambient', 'Ambient'), ('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'))
+    with bounded_consumer_schema(genres) as schema:
+        yield schema
+
+
+@pytest.fixture
+def poc(monkeypatch, file_consumer_store):
+    from tests.recommendation_support import seed_publication_subjects
+    from yt_playlist.util.matching import identity_key
+
+    # Recovery consumes completed catalog rows; ingestion has its own owners.
+    # Keep all 32 subjects, actual SQL, revision guards and published files.
+    pool = [{'video_id': f'v{i}', 'title': f'Song {i}', 'artist': f'Artist {i}'}
+            for i in range(1, 33)]
+    for track in pool:
+        track['key'] = identity_key(track['title'], track['artist'])
+    seed_publication_subjects(file_consumer_store, pool)
+    with radio_controller(monkeypatch, file_consumer_store, pool) as state:
+        yield state
 
 
 @pytest.mark.parametrize('paused,ready', [(True, True), (False, False), (True, False)])
@@ -40,7 +76,6 @@ def test_heartbeat_preparation_waits_until_maintenance_finishes(poc, monkeypatch
 @pytest.mark.parametrize('reader_first', [False, True])
 def test_prepared_reader_retires_its_lease_before_database_close(file_backed_store, reader_first):
     from yt_playlist.core import group_documents
-    from yt_playlist.core.store import Store
     from yt_playlist.rec.stored_radio import PreparedRadio
 
     store = file_backed_store
@@ -61,11 +96,9 @@ def test_prepared_reader_retires_its_lease_before_database_close(file_backed_sto
     reader.close()
     reader.close()
     assert not reader._lifetime.alive
-    reopened = Store.open_current(store._db_path)
-    try:
-        assert not reopened.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
-    finally:
-        reopened.conn.close()
+    # Inspect the persisted rows before any startup repair can clean up leases.
+    with closing(sqlite3.connect(store._db_path)) as reopened:
+        assert not reopened.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
 
 
 def prepare_radio_styles(controller, pool, monkeypatch):

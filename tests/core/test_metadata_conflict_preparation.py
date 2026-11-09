@@ -13,6 +13,11 @@ from yt_playlist.core.preparation import metadata_conflicts as preparation
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Conflict preparation has no HTTP application or periodic worker."""
+
+
 def seed(store, candidates=None, *, resolved=1, selected='130', field='bpm', snapshot=True,
          video_id='video', title='Song'):
     entry = store.tracks.upsert_track(video_id, title, 'Artist', None, 200)

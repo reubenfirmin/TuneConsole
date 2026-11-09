@@ -11,11 +11,18 @@ from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.preparation import metadata_evidence as preparation
 
 from tests.core.test_metadata_owner_cutover import predecessor, seed
+from tests.store_fixture_support import preparation_connection
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Metadata preparation exercises real SQL without HTTP startup."""
+
+
+@pytest.fixture
+def preparation_worker(predecessor):
+    with preparation_connection(predecessor) as conn:
+        yield conn
 
 
 def finish(conn):
@@ -26,21 +33,22 @@ def finish(conn):
     pytest.fail('Finite metadata fixture did not finish')
 
 
-def test_durable_metadata_copy_preserves_choices_and_reconciles_composite_keys(predecessor):
+def test_durable_metadata_copy_preserves_choices_and_reconciles_composite_keys(predecessor, preparation_worker):
     store = predecessor
+    conn = preparation_worker
     entry, _, _ = seed(store)
     job = preparation.JOB
-    before = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
-    job.install(store.conn)
-    job.step(store.conn, batch_size=2)
+    before = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
+    job.install(conn)
+    job.step(conn, batch_size=2)
     # These edits occur behind the already-copied cursor. SQLite's writer
     # journals durable logical keys, including composite keys without row IDs.
     choose_field(store, entry, 'genre', 'Blues')
     with store.conn:
         catalog.choose_field(store.conn, entry, 'bpm', '', 'user')
-    regular.migrate(store.conn)
-    finish(store.conn)
-    staged = {row['field']:dict(row) for row in store.conn.execute(
+    regular.migrate(conn)
+    finish(conn)
+    staged = {row['field']:dict(row) for row in conn.execute(
         f"SELECT * FROM {preparation.TABLE} WHERE owner='entry_field_choices'")}
     assert staged['genre']['text_value'] == 'Blues'
     assert staged['bpm']['value_kind'] == 'blank'
@@ -48,45 +56,46 @@ def test_durable_metadata_copy_preserves_choices_and_reconciles_composite_keys(p
     assert staged['genre']['field_scope'] == 'legacy_item'
     assert staged['genre']['recording_id'] is None
     for owner, keys in preparation.KEYS.items():
-        originals = {tuple(row[k] for k in keys):dict(row) for row in store.conn.execute('SELECT * FROM '+owner)}
+        originals = {tuple(row[k] for k in keys):dict(row) for row in conn.execute('SELECT * FROM '+owner)}
         copies = {tuple(json.loads(row['source_key'])):json.loads(row['source_snapshot'])
-                  for row in store.conn.execute(f'SELECT * FROM {preparation.TABLE} WHERE owner=?', (owner,))}
+                  for row in conn.execute(f'SELECT * FROM {preparation.TABLE} WHERE owner=?', (owner,))}
         assert copies == originals
-    assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == before
-    assert not store.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_observations'").fetchone()
+    assert list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == before
+    assert not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_observations'").fetchone()
     assert store.tracks.get_track_enrichment(entry)[0] == 'Blues'
     # Delete and recreate an existing composite key after preparation.
     with store.conn:
         store.conn.execute("DELETE FROM entry_field_choices WHERE entry_id=? AND field='genre'", (entry,))
         store.conn.execute("INSERT INTO entry_field_choices VALUES (?,'genre','null','user')", (entry,))
-    assert job.progress(store.conn).prepared_revision is None
-    finish(store.conn)
-    row = store.conn.execute(f"SELECT value_kind,text_value FROM {preparation.TABLE} WHERE owner='entry_field_choices' AND field='genre'").fetchone()
+    assert job.progress(conn).prepared_revision is None
+    finish(conn)
+    row = conn.execute(f"SELECT value_kind,text_value FROM {preparation.TABLE} WHERE owner='entry_field_choices' AND field='genre'").fetchone()
     assert tuple(row) == ('null', None)
-    snapshots = [json.loads(row[0]) for row in store.conn.execute(f"SELECT source_snapshot FROM {preparation.ORIGINALS} "
+    snapshots = [json.loads(row[0]) for row in conn.execute(f"SELECT source_snapshot FROM {preparation.ORIGINALS} "
         "WHERE owner='entry_field_choices' AND json_extract(source_key,'$[1]')='genre'")]
     assert {'Blues', None} <= {json.loads(snapshot['value_json']) for snapshot in snapshots}
 
 
-def test_metadata_failure_is_durable_and_does_not_block_live_writers(predecessor):
+def test_metadata_failure_is_durable_and_does_not_block_live_writers(predecessor, preparation_worker):
     store = predecessor
+    conn = preparation_worker
     entry, _, _ = seed(store)
     job = preparation.JOB
-    job.install(store.conn)
+    job.install(conn)
     with store.conn:
         store.conn.execute("UPDATE entry_field_choices SET value_json='\"bad-number\"' WHERE field='bpm'")
     with pytest.raises(MigrationError, match='active metadata choice'):
-        finish(store.conn)
-    failed = job.progress(store.conn)
+        finish(conn)
+    failed = job.progress(conn)
     assert failed.status == 'failed' and failed.processed > 0
     choose_field(store, entry, 'bpm', 123)
-    assert job.progress(store.conn).status == 'failed'
+    assert job.progress(conn).status == 'failed'
     with pytest.raises(MigrationError, match='retry explicitly'):
-        job.step(store.conn)
-    regular.migrate(store.conn)
-    job.step(store.conn, retry=True)
-    assert finish(store.conn).status == 'prepared'
-    assert store.conn.execute(f"SELECT number_value FROM {preparation.TABLE} WHERE owner='entry_field_choices' AND field='bpm'").fetchone()[0] == 123
+        job.step(conn)
+    regular.migrate(conn)
+    job.step(conn, retry=True)
+    assert finish(conn).status == 'prepared'
+    assert conn.execute(f"SELECT number_value FROM {preparation.TABLE} WHERE owner='entry_field_choices' AND field='bpm'").fetchone()[0] == 123
 
 
 def test_metadata_interruption_rolls_back_only_current_batch_and_dependency_invalidates(predecessor):
@@ -172,17 +181,18 @@ def test_operational_fields_keep_recorded_subjects_and_all_observed_source_revis
 
 @pytest.mark.parametrize('raw', ['null', '[]', '{} ' + ' ' * preparation.MAX_OPERATIONAL_BYTES,
                                  '{"unclassified_provider_field":1}', ''])
-def test_invalid_operational_input_fails_durably_without_rewriting_it(predecessor, raw):
+def test_invalid_operational_input_fails_durably_without_rewriting_it(predecessor, preparation_worker, raw):
     store = predecessor
+    conn = preparation_worker
     seed(store)
-    with store.conn:
-        store.conn.execute('UPDATE provider_attempts SET fields_json=?', (raw,))
-    preparation.JOB.install(store.conn)
+    with conn:
+        conn.execute('UPDATE provider_attempts SET fields_json=?', (raw,))
+    preparation.JOB.install(conn)
     with pytest.raises((MigrationError, ValueError)):
-        finish(store.conn)
-    assert preparation.JOB.progress(store.conn).status == 'failed'
-    regular.migrate(store.conn)
-    assert store.conn.execute('SELECT fields_json FROM provider_attempts').fetchone()[0] == raw
+        finish(conn)
+    assert preparation.JOB.progress(conn).status == 'failed'
+    regular.migrate(conn)
+    assert conn.execute('SELECT fields_json FROM provider_attempts').fetchone()[0] == raw
 
 
 def test_large_requested_batch_is_capped_before_expanding_provider_fields(predecessor):

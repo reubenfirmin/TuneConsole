@@ -5,27 +5,33 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
-from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.home_fixture_support import home_control_routes, home_routes_only
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 from tests.test_home_other_genres import (
-    genre_bundles, genre_http_inputs, genre_routes,
+    _publish_menu, genre_http_inputs, genre_routes, seed_genres,
     template_bytecode,
 )
 from tests.test_mode_cards_route import prepare_home
-from yt_playlist.rec import graduation, home_cards, mix_tuning, mode_surfaces, rec_params, scoring
+from yt_playlist.rec import graduation, mix_tuning, mode_surfaces, rec_params, scoring
 from yt_playlist.web.app import create_app
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'genre_routes', 'genre_http_inputs')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'tuning_routes', 'genre_http_inputs',
+                                    'native_sql_calls')
 
+
+
+@pytest.fixture
+def tuning_routes(genre_routes, home_control_routes):
+    """Keep genre inputs and real controls without unrelated Home routes."""
 
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'),
                                   ('techno', 'Techno'), ('trance', 'Trance'),
-                                  ('ambient', 'Ambient'), ('gqom', 'Gqom'))) as schema:
+                                  ('ambient', 'Ambient'), ('gqom', 'Gqom'),
+                                  ('indie rock', 'Indie Rock'), ('classical', 'Classical')),
+                                 snapshot_guards=False) as schema:
         yield schema
 
 
@@ -36,7 +42,8 @@ def prepare_tuning_home(store, now):
 
 def client_at(store, clock):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0]),
+    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0],
+                                 background_work=False),
                       base_url="http://127.0.0.1")
 
 
@@ -53,24 +60,20 @@ def home_clients(store):
         yield open_client
 
 
-@pytest.fixture(scope='module')
-def tuning_template(_pristine_current_schema):
-    def build(source):
-        # Expiry consumes completed output; the reset case below retains real
-        # genre-filtered selection, and preparation has its own worker owners.
-        source.accounts.upsert_account('main', 'cred', None, True)
-        # One playable card is enough to exercise persisted control deadlines.
-        # Reset below independently verifies all four filled card slots.
-        publish_menu(source, 1000.0, count=1, genre_options=[
-            {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
-
-    with prepared_template(_pristine_current_schema, build) as template:
-        yield template
-
-
 @pytest.fixture
-def prepared_tuning(store, tuning_template):
-    tuning_template.restore(store)
+def prepared_tuning(store, genre_http_inputs, monkeypatch):
+    # Preserve all six original themes, four lanes and four songs per lane.
+    # Expiry consumes one completed menu; worker alternative enumeration has
+    # separate tests. Keep real genre selection, publication and control SQL.
+    seed_genres(store, tracks_per_lane=4)
+    store.accounts.upsert_account('main', 'cred', None, True)
+    _publish_menu(store, 1000.0)
+    payload = store.rec_proposals.get_proposals('home_prepared')
+    selected = payload['menus'][0]['protos']
+    # Deadline/reset workflows consume a completed selection. Keep every
+    # original HTTP adjustment and real persisted state; genre ranking and
+    # breadth-dependent selection retain their own tests.
+    monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
 
 
 def assert_cleared(store):
@@ -83,36 +86,17 @@ def assert_cleared(store):
     assert store.settings.get_setting(mix_tuning.VIBE_UPDATED_AT_SETTING) is None
 
 
-def test_clear_resets_genre_selections_and_all_biases_together(
-        store, monkeypatch, home_routes_only, without_metadata_providers):
+def test_clear_resets_genre_selections_and_all_biases_together(store, prepared_tuning, home_clients):
     clock = [1000.0]
-    # Reset owns clearing the combined persisted state and rendering a usable
-    # board. Each individual HTTP adjustment is covered by the parametrized
-    # four-hour control test below; replaying all six is unrelated setup here.
-    # Distinct themes must still fill all four slots after reset.
-    bundles = genre_bundles(store, genres=['Jazz', 'Techno', 'Trance', 'Ambient'], tracks_per_lane=4)
-    # Each of the four themes can fill its own slot. Reset does not need the
-    # sixteen alternative mode/lane pools owned by the assignment tests.
-    bundles['all'] = {}
-    for mode, lane in enumerate(mode_surfaces.CARD_SURFACES):
-        tracks = bundles[str(mode)][lane]
-        bundles[str(mode)] = {lane: tracks}
-        bundles['all'][lane] = tracks
-    seed_bundle_subjects(store, bundles)
-    publish_bundles(store, bundles, 1.0)
-    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
-    client = client_at(store, clock)
+    client = home_clients(clock)
     store.rec_model.set_weight("genre:jazz", 1.4, now=clock[0])
     learned = store.rec_model.get_weights(now=clock[0])
-    with mix_tuning.adjusting(store, clock[0]):
-        store.rec_proposals.put_proposals('home_genre_request', {
-            'epoch': 0, 'include_genres': ['jazz', 'techno']}, clock[0])
-        store.rec_model.set_lean('genre:jazz', 2 / 1.4, clock[0])
-        store.rec_model.set_lean('genre:gqom', 1, clock[0])
-        store.rec_model.hide_facet('genre:techno')
-        rec_params.set_param(store, 'breadth_bias', .8)
-    with mix_tuning.adjusting_vibe(store, clock[0]):
-        store.settings.set_setting('home_mix_vibe', 'relax')
+    assert client.post("/home/vibe", data={"vibe": "relax"}).status_code == 200
+    assert client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]}).status_code == 200
+    assert client.post("/home/steer", data={"axis": "genre:jazz", "weight": "2"}).status_code == 200
+    assert client.post("/home/breadth", data={"breadth_bias": ".8"}).status_code == 200
+    assert client.post("/home/fingerprint/add", data={"axis": "genre:gqom"}).status_code == 200
+    assert client.post("/home/fingerprint/remove", data={"axis": "genre:techno"}).status_code == 200
     assert store.rec_proposals.get_proposals("home_genre_request")["include_genres"] == ["jazz", "techno"]
     assert set(store.rec_model.get_leans()) == {"genre:jazz", "genre:gqom"}
     assert store.rec_model.hidden_facets() == {"genre:techno"}
@@ -121,8 +105,7 @@ def test_clear_resets_genre_selections_and_all_biases_together(
     assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) == "1000.0"
     assert store.settings.get_setting(mix_tuning.VIBE_UPDATED_AT_SETTING) == "1000.0"
 
-    with client:
-        response = client.post("/home/fingerprint/reset")
+    response = client.post("/home/fingerprint/reset")
     assert response.status_code == 200
     assert_cleared(store)
     assert store.rec_model.get_weights(now=clock[0]) == learned

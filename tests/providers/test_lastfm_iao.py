@@ -2,6 +2,7 @@
 import io
 from tests.enrichment_support import complete_entries
 import json
+import logging
 import urllib.error
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -426,6 +427,9 @@ def test_album_failure_retains_genre_and_a_later_run_completes_year(boundary, st
     ('[Deleted video]', ''), ('Dominicalito, Costa Rica', ''),
 ])
 def test_incomplete_queries_wait_locally_in_direct_and_queued_lookups(boundary, store, title, artist, caplog):
+    # Reproduce CI's unrelated diagnostic without suppressing database logs.
+    diagnostic = 'Controlled unrelated Slow SQL diagnostic'
+    logging.getLogger('yt_playlist.database').warning(diagnostic)
     b = boundary(lambda request: pytest.fail('Incomplete metadata reached Last.fm'))
     store.settings.set_setting('lastfm_api_key', 'secret')
     entry = store.tracks.upsert_track('incomplete', title, artist, None, 200)
@@ -445,7 +449,10 @@ def test_incomplete_queries_wait_locally_in_direct_and_queued_lookups(boundary, 
     assert store.enrichment_queue.resweep_batch(10, 500, providers=['lastfm'], now=1000) == []
     assert b.calls == b.paces == []
     assert not b.iao._waits['api'] and not b.iao._cache['api']
-    assert not caplog.records
+    assert any(record.name == 'yt_playlist.database' and record.getMessage() == diagnostic
+               for record in caplog.records)
+    assert not [record for record in caplog.records
+                if record.name.startswith(('yt_playlist.providers.', 'yt_playlist.integrations.lastfm'))]
 
 
 def test_worker_waits_for_metadata_and_correction_resumes_only_that_query(boundary, store):

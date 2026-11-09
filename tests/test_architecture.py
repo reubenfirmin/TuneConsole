@@ -74,6 +74,18 @@ def _imports(tree, module=None):
                 yield from (f"{base}.{alias.name}" for alias in node.names)
 
 
+@cache
+def _reference_fields(kind):
+    # These fields contain identifiers, operators or flags, never expressions
+    # with a Store access. The remaining fields are ASTs, AST lists or None.
+    # Visit them directly instead of inspecting every scalar field twice via
+    # ast.iter_fields/iter_child_nodes for every caller expression.
+    scalar = {'id', 'attr', 'arg', 'name', 'names', 'module', 'level', 'kind',
+              'tag', 'is_async', 'conversion', 'simple', 'type_comment',
+              'type_ignores', 'ctx', 'op', 'ops', 'rest', 'kwd_attrs', 'str'}
+    return tuple(field for field in kind._fields if field not in scalar)
+
+
 def _flat_repository_references(tree, methods):
     # Known fixture/context names remain useful, but constructor assignments and
     # aliases must also work for reader/writer/repaired and fixture dictionaries.
@@ -104,23 +116,30 @@ def _flat_repository_references(tree, methods):
         pending = list(ast.iter_child_nodes(scope))
         while pending:
             node = pending.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            kind = type(node)
+            if kind in (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef):
                 nested.append(node)
             else:
-                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                if kind in (ast.Assign, ast.AnnAssign):
                     assignments.append(node)
-                elif isinstance(node, ast.Attribute) and node.attr in forwarded_methods:
+                elif kind is ast.Attribute and node.attr in forwarded_methods:
                     attributes.append(node)
-                elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                elif (kind is ast.Call and isinstance(node.func, ast.Attribute)
                       and node.func.attr == 'setattr'):
                     patches.append(node)
                 # Names/constants cannot contain a constructor assignment,
                 # access or patch. Attribute contexts are also terminal; only
                 # its value can contain another relevant expression.
-                if isinstance(node, ast.Attribute):
+                if kind is ast.Attribute:
                     pending.append(node.value)
-                elif not isinstance(node, (ast.Name, ast.Constant, ast.alias)):
-                    pending.extend(ast.iter_child_nodes(node))
+                elif kind not in (ast.Name, ast.Constant, ast.alias, ast.MatchSingleton,
+                                  ast.Import, ast.ImportFrom, type(None)):
+                    for field in _reference_fields(kind):
+                        value = getattr(node, field)
+                        if type(value) is list:
+                            pending.extend(value)
+                        elif value is not None:
+                            pending.append(value)
         # Resolve the alias graph once. Repeatedly rescanning all assignments
         # makes reversed chains quadratic, although every edge is immutable.
         aliases, edges = set(inherited), {}
@@ -173,11 +192,17 @@ repaired.queue_remaining()
 songs["store"].get_playlist(1)
 monkeypatch.setattr(type(writer), "generated_track_keys", lambda: set())
 reader.rec_model.content_generation()
+display = {**{"rows": f"{writer.queue_remaining()}"}}
+matches = [row for row in () if repaired.get_playlist(1)]
+match reader:
+    case {"rows": rows, **rest} if reader.queue_remaining():
+        pass
 ''')
     methods = {"content_generation", "queue_remaining", "get_playlist", "generated_track_keys"}
     assert {reference for _, reference in _flat_repository_references(tree, methods)} == {
         "reader.content_generation", "writer.content_generation", "repaired.queue_remaining",
         "songs['store'].get_playlist", "patch repository directly",
+        "writer.queue_remaining", "repaired.get_playlist", "reader.queue_remaining",
     }
 
 
@@ -281,25 +306,27 @@ def _repository_methods():
     return methods
 
 
-def _caller_batches():
-    paths = sorted([*(SOURCE / 'yt_playlist').rglob('*.py'), *(ROOT / 'tests').rglob('*.py')])
-    return [paths[offset:offset + 16] for offset in range(0, len(paths), 16)]
-
-
-@pytest.mark.parametrize('paths', _caller_batches(), ids=lambda paths: str(paths[0].relative_to(ROOT)))
-def test_callers_name_repository_owners_and_retired_modules_stay_retired(paths):
+def test_callers_name_repository_owners_and_retired_modules_stay_retired():
     methods = _repository_methods()
     retired = {"yt_playlist.repos.rec", "yt_playlist.rec.rec_dao", "yt_playlist.rec.recommend"}
     violations = []
-    for path in paths:
-        # Each caller owns its tree only for this check. Keeping thousands of
-        # caller ASTs alive adds memory and garbage-collector scans without reuse.
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for dependency in _imports(tree):
-            if dependency in retired:
-                violations.append(f"{path.relative_to(ROOT)} imports {dependency}")
-        violations.extend(f"{path.relative_to(ROOT)}:{line}: {reference}"
-                          for line, reference in _flat_repository_references(tree, methods))
+    paths = sorted([*(SOURCE / 'yt_playlist').rglob('*.py'), *(ROOT / 'tests').rglob('*.py')])
+    collecting = gc.isenabled()
+    try:
+        # Trees are acyclic and discarded after each file. Scanning every file
+        # in one owner avoids per-batch pytest work and repeated GC scans of
+        # these short-lived syntax nodes. Restore the caller's GC policy below.
+        gc.disable()
+        for path in paths:
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for dependency in _imports(tree):
+                if dependency in retired:
+                    violations.append(f"{path.relative_to(ROOT)} imports {dependency}")
+            violations.extend(f"{path.relative_to(ROOT)}:{line}: {reference}"
+                              for line, reference in _flat_repository_references(tree, methods))
+    finally:
+        if collecting:
+            gc.enable()
     assert not violations, "\n".join(violations)
 
 

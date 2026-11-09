@@ -28,6 +28,9 @@ def installed(tmp_path, monkeypatch):
     try:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
+        # Match the installed application's WAL mode. Each real worker below
+        # still owns its validation, commits, rollback and connection lifetime.
+        conn.execute('PRAGMA journal_mode=WAL')
         install_numbered_input(conn, 79)
         with conn:
             conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")

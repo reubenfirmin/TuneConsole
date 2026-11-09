@@ -7,6 +7,10 @@ import sqlite3
 import pytest
 
 from tests.publication_support import plan, publish, stage
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as file_backed_store,
+    without_query_timing,
+)
 from yt_playlist.core import policy_config, recommendation_pools as pools
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.core.db_space import LowDiskSpace
@@ -14,6 +18,23 @@ from yt_playlist.core.migrations import current
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
 from yt_playlist.repos import policy_storage, proposal_cache, recommendation_publication as publication
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # These repository cases do not construct an HTTP app or a sync worker.
+    pass
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Candidate staging needs the real schema and revision guards, without an
+    # unrelated genre vocabulary. Every case keeps its own WAL file and readers.
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 @pytest.fixture

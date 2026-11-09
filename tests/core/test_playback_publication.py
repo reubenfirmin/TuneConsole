@@ -8,7 +8,7 @@ import pytest
 from tests.store_fixture_support import numbered_store as installed
 from tests.store_fixture_support import guarded_numbered_store as guarded_installed
 from tests.core.test_playback_context_preparation import finish, head, seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import preparation_ddl_connection, publication_consumer_reads
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import playback_context as preparation, playback_publication as publication
@@ -89,30 +89,31 @@ def test_pending_absence_account_kinds_and_video_presence_remain_distinct(instal
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['binding', 'intent', 'queue', 'extra-queue', 'header', 'file'])
-def test_incorrect_context_or_original_never_selects_a_runtime_owner(installed, failure):
+def test_incorrect_context_or_original_never_selects_a_runtime_owner(installed, preparation_ddl_connection, failure):
     store, _ = installed
+    conn = preparation_ddl_connection
     original = seed(store)
     owner = publication.OWNERS['bindings' if failure == 'binding' else 'pending-album']
-    revision = prepare(store.conn, owner)
-    with store.conn:
+    revision = prepare(conn, owner)
+    with conn:
         if failure == 'binding':
-            store.conn.execute('UPDATE '+preparation.BINDINGS+" SET opportunity_id='changed' WHERE position=0")
+            conn.execute('UPDATE '+preparation.BINDINGS+" SET opportunity_id='changed' WHERE position=0")
         elif failure == 'intent':
-            store.conn.execute('UPDATE '+preparation.INTENTS+" SET account_kind='missing',raw_account_id=NULL,account_id=NULL,unresolved_account_id=NULL")
+            conn.execute('UPDATE '+preparation.INTENTS+" SET account_kind='missing',raw_account_id=NULL,account_id=NULL,unresolved_account_id=NULL")
         elif failure == 'queue':
-            store.conn.execute('UPDATE '+preparation.ITEMS+" SET video_id='different' WHERE position=2")
+            conn.execute('UPDATE '+preparation.ITEMS+" SET video_id='different' WHERE position=2")
         elif failure == 'extra-queue':
-            store.conn.execute('INSERT INTO '+preparation.ITEMS+' SELECT source,generation,3,video_id,entry_id,recording_id,unresolved_video_reason '
+            conn.execute('INSERT INTO '+preparation.ITEMS+' SELECT source,generation,3,video_id,entry_id,recording_id,unresolved_video_reason '
                                'FROM '+preparation.ITEMS+' WHERE position=2')
         elif failure == 'header':
-            store.conn.execute('UPDATE '+preparation.tables(owner.source)[0]+" SET document_kind='cleared'")
+            conn.execute('UPDATE '+preparation.tables(owner.source)[0]+" SET document_kind='cleared'")
         else:
-            Path(store.conn.execute('SELECT filename FROM '+preparation.tables(owner.source)[1]+' LIMIT 1').fetchone()[0]).write_bytes(b'corrupt')
+            Path(conn.execute('SELECT filename FROM '+preparation.tables(owner.source)[1]+' LIMIT 1').fetchone()[0]).write_bytes(b'corrupt')
     with pytest.raises((MigrationError, ValueError, OSError)):
-        owner.publish(store.conn, revision=revision)
-    assert owner.selected(store.conn) is None
+        owner.publish(conn, revision=revision)
+    assert owner.selected(conn) is None
     assert store.settings.get_setting(owner.source) == original[owner.source]
-    regular.migrate(store.conn)
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('guarded_installed', [93], indirect=True)

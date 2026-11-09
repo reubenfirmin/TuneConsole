@@ -111,7 +111,8 @@ def test_profile_free_v2_documents_are_detached_and_reject_dangling_references()
 @pytest.mark.parametrize('group_pools', [False, True])
 def test_logical_budget_counts_each_copy_and_keeps_exact_detached_profiles(group_pools):
     profile = {'captured': ['東京\\\"' * 300], 'provenance': {'source': 'original'}}
-    tracks = [{'key': str(i), 'musical': profile} for i in range(100)]
+    tracks = [{'key': str(i), 'musical': profile, '東京\\\"': [None, False, True, 0, .1]}
+              for i in range(100)]
     value = {'all': {'wheelhouse': tracks}, 'menus': [{'tracks': tracks[:3]}]}
     encoded = json_cache.encode(value, group_pools=group_pools)
     size = len(json.dumps(value, separators=(',', ':')).encode())

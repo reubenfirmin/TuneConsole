@@ -9,15 +9,14 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_model_artifact_preparation import current, seed
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
-from yt_playlist.core import model_state, recommendation_outputs as files
+from tests.publication_fixture_support import installed, installed_reader
+from tests.store_fixture_support import native_sql_calls, publication_consumer_reads, without_query_timing
+from yt_playlist.core import model_state, recommendation_outputs as files, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_artifacts as preparation, model_publication as publication
-from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -44,36 +43,27 @@ def rejection_inputs(store):
 def test_existing_and_reopened_runtime_matches_historical_owner(installed, tmp_path, monkeypatch):
     store, _ = installed
     sources = seed(store)
-    other = Store(store._db_path)
-    try:
-        with closing(sqlite3.connect(tmp_path / 'historical-encoder-owner.db')) as expected:
-            expected.row_factory = sqlite3.Row
-            expected.execute('PRAGMA foreign_keys=ON')
-            expected.execute('PRAGMA synchronous=NORMAL')
-            store.conn.backup(expected)
-            expected.execute('PRAGMA journal_mode=WAL')
-            runner.migrate(expected, registry=registry.MIGRATIONS[:94])
-            served = {key: model_state.get(expected, key, 'missing') for key in sources}
-        other.init_schema(defer_metadata=True)
+    with (closing(sqlite3.connect(tmp_path / 'historical-encoder-owner.db')) as expected,
+          schema_inspection.reuse_tables(expected)):
+        expected.row_factory = sqlite3.Row
+        expected.execute('PRAGMA foreign_keys=ON')
+        expected.execute('PRAGMA synchronous=OFF')
+        store.conn.backup(expected)
+        expected.execute('PRAGMA journal_mode=WAL')
+        runner.migrate(expected, registry=registry.MIGRATIONS[:94])
+        served = {key: model_state.get(expected, key, 'missing') for key in sources}
+    with installed_reader(store._db_path, monkeypatch) as other:
         revisions = prepare(store)
         publication.publish(store.conn, **revisions)
         publication.publish(store.conn, **revisions)
         assert publication.selected(other.conn) == (0, 0)
-        with reuse_reporting_reader(other, monkeypatch):
-            assert {key: other.settings.get_setting(key, 'missing') for key in sources} == served
+        assert {key: other.settings.get_setting(key, 'missing') for key in sources} == served
         assert dict(store.conn.execute('SELECT key,value FROM settings')).items() >= sources.items()
         regular.validate(other.conn)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        other.conn.close()
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema(defer_metadata=True)
+    with installed_reader(store._db_path, monkeypatch) as reopened:
         assert publication.selected(reopened.conn) == (0, 0)
-        with reuse_reporting_reader(reopened, monkeypatch):
-            assert {key: reopened.settings.get_setting(key, 'missing') for key in sources} == served
-    finally:
-        reopened.conn.close()
+        assert {key: reopened.settings.get_setting(key, 'missing') for key in sources} == served
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

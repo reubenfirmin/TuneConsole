@@ -4,15 +4,44 @@ from contextlib import contextmanager
 from functools import wraps
 from tests.derived_rating_support import seed_dislike
 import json
+import sqlite3
 import time
 
 import pytest
 
 from yt_playlist.core import bundle_plan, fao, json_cache
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 from yt_playlist.rec import home_vibe, measurement, musical_character, musical_profiles, vibe_pools
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.core.proposal_codec import encode_proposals
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Prepared SQL/file readers do not start the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Keep real typed ranks, immutable profiles and current eligibility below
+    # both selectors. Taxonomy bootstrap is independent of these three groups.
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'),
+                                  ('house', 'House')), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def query_diagnostics(monkeypatch):
+    """Native private SQL below selectors; handle admission has other owners.
+
+    Reads, rank paging, files, head invalidation and feedback stay real. These
+    synchronous inputs contain no concurrent writer or snapshot conflict.
+    """
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+
+    for operation in ('execute', 'executemany'):
+        monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
 
 
 @contextmanager
@@ -225,6 +254,7 @@ def test_preparation_preserves_raw_genre_groups_and_refreshes_taxonomy(store):
                     if expected[i]:
                         groups.setdefault(expected[i], set()).add(rows[i]['key'])
                 actual = prepared['genres'][preset][lane]
+                assert list(actual) == list(groups)
                 assert {family: {item['key'] for item in items}
                         for family, items in actual.items()} == groups
                 for items in actual.values():
@@ -247,42 +277,43 @@ def test_preparation_preserves_raw_genre_groups_and_refreshes_taxonomy(store):
     assert original['all'] == {lane: rows for lane in lanes}
 
 
-@pytest.mark.parametrize('lane', ['fresh', 'explore'])
 def test_selected_vibe_read_matches_full_decode_and_skips_unrelated_profiles(
-        store, monkeypatch, lane, selected_vibe_inputs, vibe_read_costs):
+        store, monkeypatch, selected_vibe_inputs, vibe_read_costs):
     with measured(vibe_read_costs, 'full_decode'):
         decoded = full_decode(store, page_size=2)
     load = musical_character.load
-    # Each scenario reads the same immutable publication. Keep both lanes and
-    # every filter combination, with a fresh spy for each bounded read.
-    for include, avoid in [((), ()), (('techno',), ()), ((), ('jazz',)),
-                           (('jazz', 'techno'), ('techno',))]:
-        with measured(vibe_read_costs, 'full_decode_selection'):
-            expected = vibe_pools.candidates(store, 'energize', lane, bundles=decoded,
-                                            include_genres=include, avoid_genres=avoid)
-        visited = []
+    # Both lanes consume one immutable publication and one full-decode oracle.
+    # Keep all eight selection scenarios and a fresh spy for each bounded read,
+    # without republishing identical subjects/files or decoding both lanes twice.
+    for lane in ('fresh', 'explore'):
+        for include, avoid in [((), ()), (('techno',), ()), ((), ('jazz',)),
+                               (('jazz', 'techno'), ('techno',))]:
+            with measured(vibe_read_costs, 'full_decode_selection'):
+                expected = vibe_pools.candidates(store, 'energize', lane, bundles=decoded,
+                                                include_genres=include, avoid_genres=avoid)
+            visited = []
 
-        def selected(reader, keys):
-            visited.extend(keys)
-            # Selected rank pages now share one load; the profile repository
-            # still enforces its own 512-identity pages inside this helper.
-            assert len(keys) <= 16 * vibe_pools.POOL_LIMIT
-            for key in keys:
-                preset, selected_lane, family, _ = key.split(':')
-                assert preset == 'energize' and selected_lane == lane
-                if family != 'general':
-                    assert (include or avoid) and family not in avoid and (not include or family in include)
-            return load(reader, keys)
+            def selected(reader, keys):
+                visited.extend(keys)
+                # Selected rank pages now share one load; the profile repository
+                # still enforces its own 512-identity pages inside this helper.
+                assert len(keys) <= 16 * vibe_pools.POOL_LIMIT
+                for key in keys:
+                    preset, selected_lane, family, _ = key.split(':')
+                    assert preset == 'energize' and selected_lane == lane
+                    if family != 'general':
+                        assert (include or avoid) and family not in avoid and (not include or family in include)
+                return load(reader, keys)
 
-        with measured(vibe_read_costs, 'selected_read'), monkeypatch.context() as scenario:
-            scenario.setattr(musical_character, 'load', selected)
-            assert vibe_pools.candidates(store, 'energize', lane,
-                include_genres=include, avoid_genres=avoid) == expected, (lane, include, avoid)
-        assert len(expected) <= vibe_pools.POOL_LIMIT
-        assert visited, (lane, include, avoid)
-        if include or avoid:
-            # Filtering must traverse beyond the first selected native page.
-            assert any(int(key.rsplit(':', 1)[1]) >= 2 for key in visited)
+            with measured(vibe_read_costs, 'selected_read'), monkeypatch.context() as scenario:
+                scenario.setattr(musical_character, 'load', selected)
+                assert vibe_pools.candidates(store, 'energize', lane,
+                    include_genres=include, avoid_genres=avoid) == expected, (lane, include, avoid)
+            assert len(expected) <= vibe_pools.POOL_LIMIT
+            assert visited, (lane, include, avoid)
+            if include or avoid:
+                # Filtering must traverse beyond the first selected native page.
+                assert any(int(key.rsplit(':', 1)[1]) >= 2 for key in visited), (lane, include, avoid)
 
 
 

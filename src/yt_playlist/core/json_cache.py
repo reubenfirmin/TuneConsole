@@ -58,6 +58,10 @@ def _restore_profiles(value, profiles, fields=None, original_profiles=None, pres
     if isinstance(value, (list, dict)):
         check_cancellable_work()
     def restore(item):
+        # JSON scalars are immutable. Only containers can contain a profile
+        # reference or need an independent mutable copy.
+        if not isinstance(item, (list, dict)):
+            return item
         return (_restore_profiles(item, profiles) if fields is None else
                 _restore_profiles(item, profiles, fields, original_profiles, preserve))
     if isinstance(value, list):
@@ -100,7 +104,7 @@ def _check_profile_expansion(value, profiles, limit, original_profiles=None, pre
     """
     if limit is None or profiles is None:
         return
-    remaining, sizes, visited = limit, {}, 0
+    remaining, sizes, key_sizes, visited = limit, {}, {}, 0
 
     def charge(size):
         nonlocal remaining
@@ -121,7 +125,16 @@ def _check_profile_expansion(value, profiles, limit, original_profiles=None, pre
                     visit(child)
                 return
             for key, child in item.items():
-                charge(len(json.dumps(key).encode()) + 1)
+                # Candidate schemas repeat the same field names thousands of
+                # times. Charge every occurrence, but serialize each name once
+                # within this bounded check. Cap the auxiliary cache for inputs
+                # with arbitrary distinct keys.
+                size = key_sizes.get(key)
+                if size is None:
+                    size = len(json.dumps(key).encode()) + 1
+                    if len(key_sizes) < 1024:
+                        key_sizes[key] = size
+                charge(size)
                 if key == 'musical' and isinstance(child, dict):
                     position = child.get('profile')
                     if (set(child) != {'profile'} or type(position) is not int

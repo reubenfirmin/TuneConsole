@@ -9,15 +9,20 @@ import pytest
 from tests.core.test_ranked_state_preparation import seed
 from tests.store_fixture_support import (
     guarded_numbered_store as installed,
+    numbered_store as unadmitted_installed,
+    mock_snapshot_coordinator,
+    native_sql_calls,
+    preparation_ddl_connection,
     publication_consumer_reads,
+    publication_preparation_input,
+    without_query_timing,
 )
 from yt_playlist.core import group_evidence, recommendation_custody
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import pair_publication as publication, ranked_state as preparation
 from yt_playlist.core.store import Store
 
-
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -31,8 +36,11 @@ def roots(store, run_id):
     tracks = recordings([('House', 12, .3)])
     with store.conn:
         store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)', [(track.key,) for track in tracks])
-    groups = publish_groups(store, tracks)
-    generation = publish(store, plan(store)).generation_id
+    # Group generation is completed input to pair custody. Keep its actual
+    # rows/files while supplying uncontended coordination below that input.
+    with pytest.MonkeyPatch.context() as patch, mock_snapshot_coordinator(store, patch):
+        groups = publish_groups(store, tracks)
+        generation = publish(store, plan(store)).generation_id
     context = {'group_generation':groups['generation'], 'musical_groups':[
         {'version':groups['groups'][0]['version'], 'group_id':groups['groups'][0]['group_id']}]}
     key = f'proposal:model_pair:{run_id}:incumbent:radio:context'
@@ -65,6 +73,7 @@ def ready(conn, size=8):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_roots(
         installed):
     store, _ = installed
@@ -73,6 +82,7 @@ def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_ro
     owner = publication.OWNER
     other = Store(store._db_path)
     try:
+        other.conn.execute('PRAGMA synchronous=OFF')
         other.init_schema(defer_metadata=True)
         stage = ready(store.conn)
         owner.publish(store.conn, stage=stage)
@@ -94,52 +104,56 @@ def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_ro
         other.conn.close()
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema(defer_metadata=True)
         assert reopened.rec_proposals.get_proposals(f'model_pair:{run_id}:challenger:radio') == json.loads(originals[f'model_pair:{run_id}:challenger:radio'])
     finally:
         reopened.conn.close()
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_preparation_input', 'native_sql_calls')
 @pytest.mark.parametrize('failure', ['vector', 'display', 'run', 'context', 'root', 'root_original', 'missing_root', 'missing_output'])
-def test_unverified_projection_or_retention_state_cannot_publish(installed, failure):
-    store, _ = installed
+def test_unverified_projection_or_retention_state_cannot_publish(unadmitted_installed, preparation_ddl_connection, failure):
+    store, _ = unadmitted_installed
+    conn = preparation_ddl_connection
     _, run_id = seed(store)
     roots(store, run_id)
     owner = publication.OWNER
-    prepare(store.conn)
-    with store.conn:
+    prepare(conn)
+    with conn:
         if failure == 'vector':
-            store.conn.execute("UPDATE prepared_model_pairs_modes SET centroid=X'0000000000000000'")
+            conn.execute("UPDATE prepared_model_pairs_modes SET centroid=X'0000000000000000'")
         elif failure == 'display':
-            store.conn.execute("UPDATE prepared_model_pairs_parts SET filename='/missing' WHERE kind='display'")
+            conn.execute("UPDATE prepared_model_pairs_parts SET filename='/missing' WHERE kind='display'")
         elif failure == 'run':
-            store.conn.execute('UPDATE prepared_model_pairs_generations SET run_ref=NULL,run_resolution=\'missing_run\'')
+            conn.execute('UPDATE prepared_model_pairs_generations SET run_ref=NULL,run_resolution=\'missing_run\'')
         elif failure == 'context':
             # The source has no such context; the typed relation must be empty.
-            row = preparation.head(store.conn, f'model_pair:{run_id}:challenger:mixes')
-            store.conn.execute("INSERT INTO prepared_model_pairs_contexts VALUES (?,?, 'context','invented')",
+            row = preparation.head(conn, f'model_pair:{run_id}:challenger:mixes')
+            conn.execute("INSERT INTO prepared_model_pairs_contexts VALUES (?,?, 'context','invented')",
                 (row['surface'], row['preparation_revision']))
         elif failure == 'root':
-            store.conn.execute('UPDATE '+preparation.ROOTS+" SET source_context='invented'")
+            conn.execute('UPDATE '+preparation.ROOTS+" SET source_context='invented'")
         elif failure == 'root_original':
-            store.conn.execute('UPDATE '+preparation.ORIGINALS+" SET source_snapshot='{}'")
+            conn.execute('UPDATE '+preparation.ORIGINALS+" SET source_snapshot='{}'")
         elif failure == 'missing_root':
-            store.conn.execute('DELETE FROM '+preparation.ROOTS)
+            conn.execute('DELETE FROM '+preparation.ROOTS)
         elif failure == 'missing_output':
-            store.conn.execute('DELETE FROM prepared_model_pairs_heads')
+            conn.execute('DELETE FROM prepared_model_pairs_heads')
     for _ in range(100):
-        stage = owner.step(store.conn, batch_size=8)
+        stage = owner.step(conn, batch_size=8)
         if stage.complete:
             break
     assert stage.complete
     with pytest.raises((MigrationError, OSError, ValueError)):
-        owner.publish(store.conn, stage=stage.id)
-    assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
+        owner.publish(conn, stage=stage.id)
+    assert owner.selected(conn) is None
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_released_roots_withdraw_selection_keep_old_pins_and_reconcile_unknown_context(installed):
     store, _ = installed
     _, run_id = seed(store)
@@ -177,6 +191,7 @@ def test_released_roots_withdraw_selection_keep_old_pins_and_reconcile_unknown_c
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_source_snapshot_fence_and_real_prepared_writer_remain_compatible(installed):
     store, _ = installed
     originals, run_id = seed(store)
@@ -196,6 +211,7 @@ def test_source_snapshot_fence_and_real_prepared_writer_remain_compatible(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_interrupted_publication_and_root_race_cannot_select_partial_custody(installed, monkeypatch):
     store, _ = installed
     _, run_id = seed(store)
@@ -226,8 +242,9 @@ def test_interrupted_publication_and_root_race_cannot_select_partial_custody(ins
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_missing_display_or_output_files_and_failed_roots_do_not_block_ddl(
-        installed):
+        installed, preparation_ddl_connection, native_sql_calls):
     store, _ = installed
     _, run_id = seed(store)
     key = roots(store, run_id)
@@ -240,7 +257,7 @@ def test_missing_display_or_output_files_and_failed_roots_do_not_block_ddl(
         with pytest.raises(OSError):
             owner.publish(store.conn, stage=stage)
         store.init_schema(defer_metadata=True)
-        regular.migrate(store.conn)
+        regular.migrate(preparation_ddl_connection)
         publication.repair(store.conn, surface)
         owner.publish(store.conn, stage=stage)
     with store.conn.atomic():
@@ -253,7 +270,7 @@ def test_missing_display_or_output_files_and_failed_roots_do_not_block_ddl(
     failed = preparation.ROOT_JOB.progress(store.conn)
     assert failed.status == 'failed'
     store.init_schema(defer_metadata=True)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.ROOT_JOB.progress(store.conn) == failed
     assert preparation.ROOT_JOB.step(store.conn, retry=True).status == 'prepared'
     owner.publish(store.conn, stage=ready(store.conn))

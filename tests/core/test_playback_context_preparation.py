@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store, numbered_store as installed
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import playback_context as preparation
@@ -53,10 +53,10 @@ def seed(store):
     return documents
 
 
-@pytest.mark.parametrize('numbered_store', [79, 93], indirect=True)
-def test_exact_sources_repeated_bindings_queue_and_unknown_owners_are_retained(numbered_store):
-    store, _ = numbered_store
-    conn = store.conn
+@pytest.mark.parametrize('installed', [79, 93], indirect=True)
+def test_exact_sources_repeated_bindings_queue_and_unknown_owners_are_retained(installed, preparation_ddl_connection):
+    store, _ = installed
+    conn = preparation_ddl_connection
     originals = seed(store)
     counts = {table: conn.execute(f'SELECT count(*) FROM main.{table}').fetchone()[0]
               for table in ('identities', 'playlist_scopes', 'catalog_entries', 'album_provider_ids')}
@@ -232,22 +232,23 @@ def test_continuing_writer_reference_changes_and_cross_job_renames_reconcile(ins
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_independent_failure_does_not_block_regular_ddl_or_pending_updates(installed):
+def test_independent_failure_does_not_block_regular_ddl_or_pending_updates(installed, preparation_ddl_connection):
     store, _ = installed
+    conn = preparation_ddl_connection
     seed(store)
     store.settings.set_setting(preparation.BINDINGS_KEY, '{')
     for job in JOBS:
-        job.install(store.conn)
+        job.install(conn)
     with pytest.raises(ValueError):
-        finish(preparation.BINDINGS_JOB, store.conn)
-    assert finish(preparation.PENDING_JOB, store.conn).status == 'prepared'
-    regular.migrate(store.conn)
+        finish(preparation.BINDINGS_JOB, conn)
+    assert finish(preparation.PENDING_JOB, conn).status == 'prepared'
+    regular.migrate(conn)
     store.settings.set_setting(preparation.BINDINGS_KEY, '[]')
     with pytest.raises(MigrationError, match='retry explicitly'):
-        preparation.BINDINGS_JOB.step(store.conn)
-    preparation.BINDINGS_JOB.step(store.conn, retry=True)
-    finish(preparation.BINDINGS_JOB, store.conn)
-    assert head(store.conn)['item_count'] == 0
+        preparation.BINDINGS_JOB.step(conn)
+    preparation.BINDINGS_JOB.step(conn, retry=True)
+    finish(preparation.BINDINGS_JOB, conn)
+    assert head(conn)['item_count'] == 0
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -326,13 +327,14 @@ def test_interrupted_member_head_and_disk_failure_preserve_checkpoints(installed
     (preparation.PENDING_KEY, '{"playlist":"LM","browse":"b","opportunity_id":"o","at":NaN}'),
     (preparation.PENDING_KEY, '{"playlist":"LM","browse":"b","opportunity_id":"o","at":1,"videos":[null]}'),
 ])
-def test_invalid_contexts_fail_durably_without_changing_authoritative_source(installed, source, raw):
+def test_invalid_contexts_fail_durably_without_changing_authoritative_source(installed, preparation_ddl_connection, source, raw):
     store, _ = installed
+    conn = preparation_ddl_connection
     store.settings.set_setting(source, raw)
     job = preparation.BINDINGS_JOB if source == preparation.BINDINGS_KEY else preparation.PENDING_JOB
-    job.install(store.conn)
+    job.install(conn)
     with pytest.raises(ValueError):
-        finish(job, store.conn)
-    assert job.progress(store.conn).status == 'failed'
+        finish(job, conn)
+    assert job.progress(conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
-    regular.migrate(store.conn)
+    regular.migrate(conn)

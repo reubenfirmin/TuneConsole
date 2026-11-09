@@ -568,8 +568,21 @@ def migrate(conn, *, changes=None, clock=time.time):
         _migrate(conn, changes, clock, inspections)
 
 
-def _migrate(conn, changes, clock, inspections):
+def _validated_history(conn, changes):
     from .registry import MIGRATIONS
+    from ..schema_inspection import reuse_objects
+
+    # Both validations inspect the same pinned schema. Discard the catalog
+    # before applying DDL or leaving this transaction.
+    with reuse_objects(conn):
+        version = history(conn, MIGRATIONS)
+        if version < 79:
+            raise MigrationError('Regular schema changes require a supported installed layout (79+)')
+        validate_version(conn, version, foreign_keys=False, data=False)
+        return _applied(conn, changes)
+
+
+def _migrate(conn, changes, clock, inspections):
 
     pending = False
     while True:
@@ -577,11 +590,7 @@ def _migrate(conn, changes, clock, inspections):
             if not pending:
                 conn.execute('BEGIN')
                 inspections.refresh()
-                version = history(conn, MIGRATIONS)
-                if version < 79:
-                    raise MigrationError('Regular schema changes require a supported installed layout (79+)')
-                validate_version(conn, version, foreign_keys=False, data=False)
-                applied = _applied(conn, changes)
+                applied = _validated_history(conn, changes)
                 if applied == len(changes):
                     conn.rollback()
                     return
@@ -590,11 +599,7 @@ def _migrate(conn, changes, clock, inspections):
             inspections.refresh()
             # Another startup may have advanced either ledger after the read
             # plan. Recheck under the reservation before applying bounded DDL.
-            version = history(conn, MIGRATIONS)
-            if version < 79:
-                raise MigrationError('Regular schema changes require a supported installed layout (79+)')
-            validate_version(conn, version, foreign_keys=False, data=False)
-            applied = _applied(conn, changes)
+            applied = _validated_history(conn, changes)
             if applied == len(changes):
                 conn.rollback()
                 return

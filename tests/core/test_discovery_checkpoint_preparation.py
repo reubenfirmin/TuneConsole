@@ -4,11 +4,16 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import (
+    numbered_store as installed, preparation_ddl_connection, publication_preparation_input,
+)
 from yt_playlist.core import albums, artists, discovery_checkpoints, provider_frontiers
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_checkpoints as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)

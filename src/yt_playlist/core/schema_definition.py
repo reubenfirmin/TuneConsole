@@ -253,7 +253,10 @@ def _statements(version, *, definitions=None, baseline=None):
 
 
 def _checks(sql):
-    tokens = _tokens(sql)
+    return _check_tokens(_tokens(sql))
+
+
+def _check_tokens(tokens):
     checks = []
     for start, token in enumerate(tokens[:-1]):
         if token != 'check' or tokens[start + 1] != '(':
@@ -267,9 +270,8 @@ def _checks(sql):
     return Counter(checks)
 
 
-def _table_clauses(sql):
+def _table_clauses(tokens):
     """Split column/table constraints without splitting composite keys or expressions."""
-    tokens = _tokens(sql)
     start = tokens.index('(') + 1
     depth = 0
     for position in range(start, len(tokens)):
@@ -282,10 +284,10 @@ def _table_clauses(sql):
         depth += (token == '(') - (token == ')')
 
 
-def _foreign_key_deferrals(sql):
+def _foreign_key_deferrals(tokens):
     """SQLite's FK pragma omits deferral; retain it on its actual owning key."""
     result = Counter()
-    for clause in _table_clauses(sql):
+    for clause in _table_clauses(tokens):
         depth = 0
         top_level = []
         for position, token in enumerate(clause):
@@ -340,8 +342,8 @@ def _table_declarations(sql):
             annotations[tokens[position:position + 2]] += 1
         elif token == 'autoincrement':
             annotations[(token,)] += 1
-    return (tuple(_checks(sql).items()), flags, tuple(annotations.items()),
-            tuple(_foreign_key_deferrals(sql).items()))
+    return (tuple(_check_tokens(tokens).items()), flags, tuple(annotations.items()),
+            tuple(_foreign_key_deferrals(tokens).items()))
 
 
 def _inspect_table(conn, name, sql):
@@ -476,8 +478,8 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
     runtime_views = metadata_runtime.views() if metadata_runtime.active(conn) else {}
     # Preserve the full-contract check's last matching object, including a
     # trigger that reuses a table name. Named legacy lookups use the first row.
-    objects = {name: (kind, sql) for name, kind, sql in conn.execute(
-        'SELECT name,type,sql FROM main.sqlite_schema').fetchall()}
+    from .schema_inspection import catalog_rows
+    objects = {name: (kind, sql) for name, kind, sql in catalog_rows(conn)}
     file_vibe_guards = {}
     from . import recommendation_revalidations
     if recommendation_revalidations.available(conn):
@@ -505,8 +507,7 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
             raise MigrationError(f'Missing current {kind}: {name}')
         if kind == 'table':
             observed = _table(conn, name, actual[1])
-            columns, *constraints = expected
-            if any(observed[0].get(key) != value for key, value in columns.items()) or observed[1:] != tuple(constraints):
+            if not expected[0].items() <= observed[0].items() or observed[1:] != expected[1:]:
                 raise MigrationError(f'Incompatible current table/constraint: {name}')
         else:
             if name in file_vibe_guards:

@@ -9,6 +9,7 @@ import pytest
 from tests.core.test_discovery_checkpoint_preparation import finish, seed
 from tests.core.test_listening_preparation import connect
 from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads
+from tests.store_fixture_support import native_sql_calls, preparation_connection, without_query_timing
 from yt_playlist.core import discovery_checkpoints, provider_frontiers
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import discovery_checkpoint_publication as publication
@@ -16,7 +17,7 @@ from yt_playlist.core.preparation import discovery_checkpoints as preparation
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -39,12 +40,13 @@ def ready(conn, name, size=1):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_selected_reads_use_typed_rows_and_preserve_exact_source_keys(installed):
+def test_selected_reads_use_typed_rows_and_preserve_exact_source_keys(installed, native_sql_calls):
     store, _ = installed
     values = seed(store)
     store.discovery.upsert_discovered_artist('Artist', 2, ['because'], ['fits'], '', 100)
     preopened = Store(store._db_path)
     try:
+        preopened.conn.execute('PRAGMA synchronous=OFF')
         preopened.init_schema(defer_metadata=True)
         # Keep an old WAL snapshot across the whole preparation/migration job.
         # This fixture lifetime exceeds an ordinary bounded serving read; the
@@ -123,7 +125,7 @@ def test_source_audit_rejects_omissions_extra_rows_and_false_preparation(install
     seed(store)
     name = 'provider-refresh'
     owner, definition = publication.OWNERS[name], preparation.JOBS[name]
-    with connect(store) as job:
+    with preparation_connection(store) as job:
         definition.install(job)
         finish(definition, job)
         source = provider_frontiers.PREFIX+'known'

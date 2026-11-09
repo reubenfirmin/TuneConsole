@@ -1,15 +1,38 @@
 """The empty-catalog path uses actual selections and retained catalog evidence."""
+from contextlib import ExitStack
+import sys
+
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, seed_catalog_track
-from tests.home_fixture_support import without_metadata_providers
-from tests.store_fixture_support import file_consumer_store as store
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.store_fixture_support import (
+    bounded_consumer_schema, uncontended_file_consumer_store as store, without_query_timing,
+)
 from yt_playlist.rec import artist_start
 from yt_playlist.web.app import create_app
 
 
-pytestmark = pytest.mark.usefixtures('without_metadata_providers')
+pytestmark = pytest.mark.usefixtures(
+    'home_routes_only', 'without_metadata_providers', 'without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def client_lifecycle(store, monkeypatch):
+    make_client = client_for
+    with ExitStack() as clients:
+        def managed_client(store, fake):
+            return clients.enter_context(make_client(store, fake))
+
+        monkeypatch.setattr(sys.modules[__name__], 'client_for', managed_client)
+        yield
 
 
 def page(name, index, related=()):
@@ -152,9 +175,12 @@ def test_empty_owned_library_with_incidental_history_reaches_artist_setup(
 
 
 def test_artist_setup_requires_picks_and_live_play_from_the_generated_first_set(store):
+    from yt_playlist.library.playlist_generated import create_generated_playlist
+
     fake = Catalog()
     for page in fake._artists.values():
-        page['songs']['results'] = page['songs']['results'][:1]
+        for song in page['songs']['results']:
+            fake._catalog[song['videoId']] = song
     client = client_for(store, fake)
     store.settings.set_setting('last_sync_at', '999')
     service = artist_start.ArtistCatalog(lambda: {1: fake})
@@ -165,19 +191,13 @@ def test_artist_setup_requires_picks_and_live_play_from_the_generated_first_set(
     # Even a selected song played elsewhere must not skip the first-set handoff.
     store.history.record_play_event(1, first['key'], first['video_id'], 1001.)
     assert artist_start.required(store)
-    # Completed generated output is the input to this readiness check. Playlist
-    # creation owns remote confirmation, quarantine and item materialization.
-    playlist_ytm = 'first-set'
-    store.playlists.mark_generated_playlist(playlist_ytm)
-    playlist = store.playlists.upsert_playlist(1, playlist_ytm, 'My first set', len(tracks), 'first', 1002.)
-    ids = store.tracks.track_ids_for_videos([track['video_id'] for track in tracks])
-    store.playlists.set_playlist_tracks(playlist, [ids[track['video_id']] for track in tracks])
+    generated = create_generated_playlist(store, 'My first set', tracks, fake, 1002., 1)
     assert artist_start.required(store)  # creation alone is not listening
     store.history.record_play_event(1, 'unrelated|artist', 'unrelated', 1003.,
-                                    playlist_ytm_id=playlist_ytm)
+                                    playlist_ytm_id=generated['new_ytm'])
     assert artist_start.required(store)
     store.history.record_play_event(1, first['key'], first['video_id'], 1004.,
-                                    playlist_ytm_id=playlist_ytm)
+                                    playlist_ytm_id=generated['new_ytm'])
     assert not artist_start.required(store)
     assert client.get('/home/onboard/artists/state').json()['complete'] is True
     assert 'Pick 3 artists you love.' not in client.get('/home/onboard/start').text
@@ -331,7 +351,12 @@ def test_catalog_failure_is_bounded_and_existing_library_is_not_forced_into_pick
     assert not artist_start.required(store)
 
 
-def test_cleanup_retains_explicit_artist_input_and_playable_first_set(store):
+def test_cleanup_retains_explicit_artist_input_and_playable_first_set(store, monkeypatch):
+    from yt_playlist.core.db_revisions import Revisions
+
+    # This case owns real cleanup publication and its source-change fence.
+    store._snapshot_revisions = Revisions(store.conn)
+    monkeypatch.delattr(store, 'read_snapshot')
     service = artist_start.ArtistCatalog(lambda: {1: Catalog()})
     for index in range(3):
         service.select(store, f'UCartist{index}', True, 1000.)

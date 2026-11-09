@@ -6,15 +6,19 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    without_query_timing,
+)
 from yt_playlist.core import collection_recovery, policy_documents, radio_storage, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import append_operations as preparation
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture
@@ -173,7 +177,7 @@ def test_large_members_resume_without_source_io_and_continuing_replacement(insta
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(installed, monkeypatch):
+def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(installed, monkeypatch, preparation_ddl_connection):
     store, version = installed
     names, sources, _, _ = seed(store, version)
     name, source = names[0], sources[0]
@@ -192,7 +196,7 @@ def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(installed, mon
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_append_ddl'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_append_ddl', install, validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)
     with pytest.raises(MigrationError, match='retry explicitly'):

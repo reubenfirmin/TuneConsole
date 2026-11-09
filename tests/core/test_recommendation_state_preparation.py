@@ -3,9 +3,12 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import numbered_store as installed, publication_preparation_input
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation.recommendation_state import BYTE_LIMITS, JOBS
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 CASES = [(79, 'work'), (81, 'work'), (79, 'home-offers'), (82, 'home-offers'),

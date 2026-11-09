@@ -16,18 +16,61 @@ from yt_playlist.core.db_revisions import Revisions
 
 
 @pytest.fixture
+def without_query_timing(monkeypatch):
+    """Keep real SQL, handle admission and locking below ordinary consumers.
+
+    Query timing and slow-query reporting have their own diagnostic tests.
+    """
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+    from yt_playlist.core.db_handles import Connection
+
+    monkeypatch.setattr(DiagnosticConnection, 'cursor', Connection.cursor)
+
+
+@pytest.fixture
+def native_sql_calls(monkeypatch):
+    """Real SQLite beneath synchronous consumers of admitted, uncontended SQL.
+
+    Handle admission and thread coordination retain their instrumented owners.
+    These consumers still execute actual constraints, transactions and triggers.
+    """
+    from yt_playlist.core.db_diagnostics import DiagnosticConnection
+
+    for operation in ('execute', 'executemany'):
+        monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
+
+
+@pytest.fixture
 def file_consumer_store(tmp_path, _pristine_current_schema, monkeypatch):
     """Private WAL input for consumers that do not own snapshot construction."""
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+@pytest.fixture
+def uncontended_file_consumer_store(tmp_path, _pristine_current_schema, monkeypatch):
+    """Real private SQL/files below consumers of successful snapshot coordination."""
+    with _file_consumer_store(tmp_path, _pristine_current_schema, snapshot_guards=False) as database:
+        with mock_snapshot_coordinator(database, monkeypatch):
+            yield database
+
+
+@contextmanager
+def _file_consumer_store(tmp_path, pristine, *, snapshot_guards=True):
+    from yt_playlist.core import schema_inspection
     from yt_playlist.core.store import Store
 
     directory = tmp_path / 'consumer'
     directory.mkdir()
     database = Store(directory / 'consumer.db')
     with closing(database.conn):
-        initialize_consumer(database, _pristine_current_schema)
-        database.conn.execute('PRAGMA synchronous=NORMAL')
+        # Consumers own SQL/files and transaction visibility. Their disposable
+        # databases need no power-loss durability at copy, commit or cleanup.
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, pristine, snapshot_guards=snapshot_guards)
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(database, monkeypatch):
+        with schema_inspection.reuse_tables(database.conn):
             yield database
 
 
@@ -51,6 +94,30 @@ def publication_schema_inspections(request):
 
 
 @pytest.fixture
+def publication_preparation_input(request, monkeypatch):
+    """Use the controlled installed input below publication's preparation work.
+
+    Admission owners and explicit Store startup retain real base validation.
+    Publication keeps its preparation tables, SQL, files and custody checks.
+    """
+    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed', 'numbered_store')
+                    if name in request.fixturenames), None)
+    if fixture is None:
+        return
+    store, _ = request.getfixturevalue(fixture)
+    _publication_preparation_input(store, monkeypatch)
+
+
+def _publication_preparation_input(store, monkeypatch):
+    if (hasattr(store, '_fixture_installed_template')
+            or hasattr(store, '_fixture_numbered_input_version')):
+        from yt_playlist.core.preparation import listening_subjects, rows
+
+        monkeypatch.setattr(rows, 'validate_version', lambda *args, **kwargs: None)
+        monkeypatch.setattr(listening_subjects, 'validate_version', lambda *args, **kwargs: None)
+
+
+@pytest.fixture
 def publication_consumer_reads(request, monkeypatch):
     """Reuse real reporting reads below installed publication workflows.
 
@@ -66,7 +133,8 @@ def publication_consumer_reads(request, monkeypatch):
     from yt_playlist.core import schema_inspection
 
     store, _ = request.getfixturevalue(fixture)
-    with reuse_reporting_reader(store, monkeypatch), schema_inspection.reuse_tables(store.conn):
+    with monkeypatch.context() as patch, reuse_reporting_reader(store, patch), schema_inspection.reuse_tables(store.conn):
+        _publication_preparation_input(store, patch)
         yield
 
 
@@ -194,18 +262,46 @@ def guarded_numbered_store(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def preparation_ddl_connection(installed):
+def preparation_ddl_connection(request, monkeypatch):
     """A real SQLite DDL worker beside the preparation's live Store.
 
-    These tests own migration progress alongside incomplete preparation. The
-    Store's query diagnostics are below that SQL/transaction boundary.
+    These tests own migration progress alongside incomplete preparation. SQL
+    diagnostics and numbered-layout admission have independent owners. Keep
+    every regular change, its validation, ledger and real transaction live.
     """
-    store, _ = installed
+    fixture = next(name for name in ('installed', 'unadmitted_installed', 'guarded_installed', 'numbered_store')
+                   if name in request.fixturenames)
+    store, _ = request.getfixturevalue(fixture)
+    with preparation_connection(store) as conn:
+        from yt_playlist.core.migrations import regular
+
+        validate = regular.validate_version
+
+        def admitted(target, *args, **kwargs):
+            if target is not conn:
+                return validate(target, *args, **kwargs)
+
+        # The DDL worker consumes the installed fixture's completed numbered
+        # layout. Other connections, including explicit startup/upgrade checks,
+        # still perform actual admission. The runner still checks both live
+        # histories and validates every regular owner before and after DDL.
+        monkeypatch.setattr(regular, 'validate_version', admitted)
+        yield conn
+
+
+@contextmanager
+def preparation_connection(store):
+    """Own a real SQLite worker on a Store's private database file."""
+    from yt_playlist.core import schema_inspection
+
     with closing(sqlite3.connect(store._db_path)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
-        conn.execute('PRAGMA synchronous=NORMAL')
-        yield conn
+        # Keep actual WAL commits, visibility and rollback. Machine power loss
+        # is outside the contract of these disposable preparation workers.
+        conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(conn):
+            yield conn
 
 
 @contextmanager
@@ -223,6 +319,7 @@ def _numbered_input(version, tmp_path, monkeypatch, *, snapshot_guards=False):
         with closing(sqlite3.connect(':memory:')) as schema:
             install_numbered_input(schema, version)
             schema.backup(database.conn)
+        database._fixture_numbered_input_version = version
         database.conn.execute('PRAGMA journal_mode=WAL')
         database._schema_compatibility = version < 103
         database._rebuild_source_version = None
@@ -300,9 +397,12 @@ def mock_snapshot_coordinator(store, monkeypatch):
         return True
 
     with reuse_reporting_reader(store, monkeypatch) as reader:
-        snapshot = SimpleNamespace(store=reader, release_reader=lambda: None,
-                                   publish_ordered=publish)
-        monkeypatch.setattr(store, 'read_snapshot', lambda: nullcontext(snapshot))
+        def snapshot(**kwargs):
+            return nullcontext(SimpleNamespace(
+                store=reader, release_reader=lambda: None, publish=publish,
+                publish_ordered=publish, _changes=store.conn.total_changes))
+
+        monkeypatch.setattr(store, 'read_snapshot', snapshot)
         yield
 
 
@@ -313,12 +413,14 @@ def reuse_reporting_reader(store, monkeypatch):
     Snapshot/publication tests keep their real private snapshot connections.
     Reader-pool admission and time budgets have separate owners.
     """
+    from yt_playlist.core import schema_inspection
+
     assert store._db_path is not None
     with store._retained_readers():
         reader = store._make_reader()
         try:
             assert reader._read_only
-            with monkeypatch.context() as patch:
+            with monkeypatch.context() as patch, schema_inspection.reuse_tables(reader.conn):
                 patch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
                 yield reader
         finally:

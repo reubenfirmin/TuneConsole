@@ -15,6 +15,8 @@ from tests.store_fixture_support import (
     numbered_store as installed,
     preparation_ddl_connection,
     publication_consumer_reads,
+    publication_preparation_input,
+    without_query_timing,
 )
 from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -23,8 +25,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import comparison_storage
 from yt_playlist.repos import recommendation_publication
 
-
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -84,32 +85,34 @@ def rows(conn, surface, suffix, fields='*'):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_all_six_projections_and_four_lanes_preserve_sources_and_unknown_clocks(installed, preparation_ddl_connection):
     store, _ = installed
+    conn = preparation_ddl_connection
     originals, run_id = seed(store)
     for job in preparation.JOBS.values():
-        job.install(store.conn)
-        finish(job, store.conn, size=3)
+        job.install(conn)
+        finish(job, conn, size=3)
     for surface, raw in originals.items():
-        head = preparation.head(store.conn, surface)
+        head = preparation.head(conn, surface)
         assert head['built_at'] is None
-        assert preparation.read_original(store.conn, head) == raw
+        assert preparation.read_original(conn, head) == raw
         assert store.rec_proposals.get_proposals(surface) == json.loads(raw)
-        assert not store.conn.execute('SELECT 1 FROM recommendation_heads WHERE surface GLOB ?', (surface + '*',)).fetchone()
-        assert all(row[2].startswith('prepared_') for row in store.conn.execute(
+        assert not conn.execute('SELECT 1 FROM recommendation_heads WHERE surface GLOB ?', (surface + '*',)).fetchone()
+        assert all(row[2].startswith('prepared_') for row in conn.execute(
             f'PRAGMA foreign_key_list({preparation.table(surface,"generations")})'))
         if surface.endswith(':radio'):
             assert (head['run_id'], head['run_ref'], head['run_resolution']) == (run_id, run_id, None)
-            mode = rows(store.conn, surface, 'modes', 'mode_ref,resolution_reason,space,centroid')[0]
+            mode = rows(conn, surface, 'modes', 'mode_ref,resolution_reason,space,centroid')[0]
             assert mode[:3] == (None, 'missing_mode', '')
             assert struct.unpack('<ddd', mode[3]) == (1., -0., .25)
-            assert len(rows(store.conn, surface, 'candidates', 'pool_digest,rank')) == 16
+            assert len(rows(conn, surface, 'candidates', 'pool_digest,rank')) == 16
         elif surface.startswith('home_pool:'):
             assert (head['lane'], head['epoch']) == (surface.split(':')[1], 0)
-            assert rows(store.conn, surface, 'genres', 'position,raw_key,family_key,genre_key,resolution_reason') == [
+            assert rows(conn, surface, 'genres', 'position,raw_key,family_key,genre_key,resolution_reason') == [
                 (0, 'rock', 'rock', None, None), (1, 'other:Unregistered style', None, None, 'unknown_genre')]
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(preparation_ddl_connection)
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(conn)
 
 
 def prepare_native_comparison(store):
@@ -246,42 +249,44 @@ def test_continuing_inputs_reject_stale_plan_and_reconcile_resolved_identities(i
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_preparation_input')
 def test_interrupt_failure_retry_and_independent_regular_ddl(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
+    conn = preparation_ddl_connection
     seed(store)
     pairs, clicked = preparation.JOBS.values()
     for job in (pairs, clicked):
-        job.install(store.conn)
-    checkpoint = pairs.step(store.conn, batch_size=1)
+        job.install(conn)
+    checkpoint = pairs.step(conn, batch_size=1)
     tables = [name for name, sql in pairs.definition.destinations if sql.startswith('CREATE TABLE')]
-    retained = {name: list(map(tuple, store.conn.execute('SELECT * FROM ' + name))) for name in tables}
+    retained = {name: list(map(tuple, conn.execute('SELECT * FROM ' + name))) for name in tables}
     def interrupt(conn, row, revision, selected):
         preparation.copy_batch(conn, row, revision, selected)
         raise KeyboardInterrupt('controlled ranked interruption')
     with pytest.raises(KeyboardInterrupt):
-        replace(pairs, copy_batch=interrupt).step(store.conn, batch_size=128)
-    assert pairs.progress(store.conn) == checkpoint
-    assert {name: list(map(tuple, store.conn.execute('SELECT * FROM ' + name))) for name in tables} == retained
-    assert not store.conn.in_transaction
+        replace(pairs, copy_batch=interrupt).step(conn, batch_size=128)
+    assert pairs.progress(conn) == checkpoint
+    assert {name: list(map(tuple, conn.execute('SELECT * FROM ' + name))) for name in tables} == retained
+    assert not conn.in_transaction
     def failure(*args):
-        assert not store.conn.in_transaction
+        assert not conn.in_transaction
         raise OSError('controlled ranked disk failure')
     publish = files.publish
     monkeypatch.setattr(files, 'publish', failure)
     with pytest.raises(OSError, match='disk failure'):
-        clicked.step(store.conn)
-    failed = clicked.progress(store.conn)
+        clicked.step(conn)
+    failed = clicked.progress(conn)
     monkeypatch.setattr(files, 'publish', publish)
-    finish(pairs, store.conn)
+    finish(pairs, conn)
     def install(conn, context):
         conn.execute('CREATE TABLE independent_ranked_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_ranked_ddl'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
         'independent_ranked_ddl', install, validate)))
-    regular.migrate(preparation_ddl_connection)
-    assert clicked.progress(store.conn) == failed
-    assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
+    regular.migrate(conn)
+    assert clicked.progress(conn) == failed
+    assert conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     reopened = Store(store._db_path)
     try:
         with pytest.raises(MigrationError, match='retry explicitly'):
@@ -382,6 +387,7 @@ def test_roots_preserve_real_generations_versions_and_releases_in_bounded_batche
 @pytest.mark.parametrize('kind', ['address', 'candidate', 'codec', 'policy', 'size'])
 def test_invalid_source_fails_closed_retains_authoritative_bytes_and_does_not_block_regular_ddl(installed, preparation_ddl_connection, monkeypatch, kind):
     store, _ = installed
+    conn = preparation_ddl_connection
     originals, run_id = seed(store)
     surface = f'model_pair:{run_id}:incumbent:radio'
     value = json.loads(originals[surface])
@@ -397,17 +403,17 @@ def test_invalid_source_fails_closed_retains_authoritative_bytes_and_does_not_bl
     else:
         monkeypatch.setattr(preparation, 'MAX_SOURCE_BYTES', 1)
     raw = json.dumps(value)
-    with store.conn:
-        store.conn.execute('DELETE FROM rec_proposals')
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,NULL)', (surface, raw))
+    with conn:
+        conn.execute('DELETE FROM rec_proposals')
+        conn.execute('INSERT INTO rec_proposals VALUES (?,?,NULL)', (surface, raw))
     job = preparation.JOBS['pairs']
-    job.install(store.conn)
+    job.install(conn)
     with pytest.raises((ValueError, MigrationError)):
-        job.step(store.conn)
-    assert job.progress(store.conn).status == 'failed'
-    assert not store.conn.execute('SELECT 1 FROM prepared_model_pairs_heads').fetchone()
-    assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
-    regular.migrate(preparation_ddl_connection)
+        job.step(conn)
+    assert job.progress(conn).status == 'failed'
+    assert not conn.execute('SELECT 1 FROM prepared_model_pairs_heads').fetchone()
+    assert conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

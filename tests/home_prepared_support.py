@@ -9,7 +9,7 @@ from tests.recommendation_support import publish_bundles, seed_publication_subje
 from yt_playlist.util.matching import identity_key
 
 
-def publication_inputs(store, monkeypatch, *, tracks_per_card=1):
+def publication_inputs(store, monkeypatch, *, tracks_per_card=1, stable_options=False):
     """Controlled menu calculation beneath real preparation and publication.
 
     Selection/ranking and typed pool heads remain owned by test_home_cards,
@@ -47,10 +47,13 @@ def publication_inputs(store, monkeypatch, *, tracks_per_card=1):
     has_proposals = proposal_repo.has_proposals
     monkeypatch.setattr(proposal_repo, 'has_proposals',
         lambda self, surface: True if surface == 'mode_bundles' else has_proposals(self, surface))
-    requests = []
+    requests, options = [], None
 
     def cards(self, request):
+        nonlocal options
         requests.append(request)
+        if not stable_options or options is None:
+            options = self.options()
         order = request.mode_order or tuple(range(6))
         protos = []
         for index, lane in enumerate(lanes):
@@ -61,7 +64,7 @@ def publication_inputs(store, monkeypatch, *, tracks_per_card=1):
                      'tracks': deepcopy(bundles[str(mid)][lane])}
             protos.append(proto)
         return home_cards.CardsResult(protos, [{'proto': p, 'pool': None} for p in protos],
-            None, None, self.options(), [], request.epoch, None)
+            None, None, deepcopy(options), [], request.epoch, None)
 
     monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
     return SimpleNamespace(store=store, requests=requests, cards=cards)

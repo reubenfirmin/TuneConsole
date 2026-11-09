@@ -121,15 +121,18 @@ def test_all_presets_match_full_profile_selection_and_only_open_selected_profile
     for preset in home_vibe.PRESETS:
         with monkeypatch.context() as patch:
             full_opened = []
+            full_digests = set()
             def full(reader, preset, lanes, include, avoid, **options):
                 return stored(reader, preset, lanes, include, avoid, ranking_only=False)
             def full_profiles(reader, keys):
                 full_opened.extend(keys)
-                return load(reader, keys)
+                result = load(reader, keys)
+                full_digests.update(profile['digest'] for profile in result.values())
+                return result
             patch.setattr(vibe_pools, '_stored_pools', full)
             patch.setattr(musical_character, 'load', full_profiles)
             expected = vibe_pools.assemble(store, 1000, preset)
-        assert len(set(full_opened)) == 116
+        assert len(set(full_opened)) == len(full_digests) == 116
         opened = []
         with monkeypatch.context() as patch:
             def selected(reader, keys):

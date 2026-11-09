@@ -7,10 +7,16 @@ import pytest
 from tests.recommendation_support import publish_bundles
 from tests.recommendation_support import seed_bundle_subjects
 from tests.home_prepared_support import publication_inputs
-from tests.prepared_fixture_support import prepared_template
-from tests.rec.test_home_prepared import one_menu_per_attempt
+from tests.rec.test_home_prepared import (cached_menu_schema,
+                                         menu_publication_store as store,
+                                         one_menu_per_attempt)
 from yt_playlist.rec import (discover, embedding_vectors as embed, home_prepared, home_themes, home_vibe,
                              mode_surfaces, rec_params, stored_home, surfaces, transient)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Preparation snapshots do not start the application web workers."""
 
 
 @pytest.fixture(autouse=True)
@@ -40,17 +46,16 @@ def candidate_inputs(store, *, genres=('Jazz', 'Techno'), lanes=mode_surfaces.CA
     return bundles
 
 
-@pytest.fixture(scope='module')
-def eligibility_template(_pristine_current_schema):
-    def prepare(source):
-        bundles = candidate_inputs(source, lanes=('wheelhouse',))
-        bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
-                                     for item in reversed(items)] for mid in range(2)}
-        publish_bundles(source, bundles, 1)
-        return bundles
-
-    with prepared_template(_pristine_current_schema, prepare) as template:
-        yield template
+@pytest.fixture
+def eligibility_inputs(store):
+    # A cold consumer needs this small publication once. Construct it directly
+    # in its private Store instead of constructing, inventorying and cloning a
+    # second SQL/file library before the same selection check.
+    bundles = candidate_inputs(store, lanes=('wheelhouse',))
+    bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
+                                 for item in reversed(items)] for mid in range(2)}
+    publish_bundles(store, bundles, 1)
+    return bundles
 
 
 def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_families(
@@ -104,10 +109,10 @@ def test_shared_discovery_signals_preserve_selection_and_mutes(store, monkeypatc
 
 @pytest.mark.parametrize('include', [(), ('jazz', 'techno')])
 def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
-        store, monkeypatch, include, eligibility_template):
+        store, monkeypatch, include, eligibility_inputs):
     # A single lane still overlaps its mode and general pages across three
     # menus. Other lane/ranker selection contracts stay in test_stored_home.
-    bundles = eligibility_template.restore(store)
+    bundles = eligibility_inputs
     rec_params.set_param(store, 'ppr_ab_share', 0.5)
     seed_dislike(store, bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
     orders = [(epoch, (epoch % 2, (epoch + 1) % 2)) for epoch in range(3)]

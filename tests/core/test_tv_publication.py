@@ -10,15 +10,20 @@ from tests.core.test_tv_state_preparation import aliases, finish, seed
 from tests.test_tv_stream import video
 from tests.store_fixture_support import (
     guarded_numbered_store as guarded_installed,
+    native_sql_calls,
     numbered_store as installed,
     preparation_ddl_connection,
     publication_consumer_reads,
     reuse_reporting_reader,
+    without_query_timing,
 )
 from yt_playlist.core import tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import tv_publication as publication, tv_state as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +79,7 @@ def test_all_owners_work_for_preopened_and_reopened_readers(installed, monkeypat
     values, originals = seed(store)
     other = Store(store._db_path)
     try:
+        other.conn.execute('PRAGMA synchronous=OFF')
         other.init_schema(defer_metadata=True)
         publish_all(store)
         with reuse_reporting_reader(other, monkeypatch):
@@ -90,6 +96,7 @@ def test_all_owners_work_for_preopened_and_reopened_readers(installed, monkeypat
         other.conn.close()
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema(defer_metadata=True)
         with reuse_reporting_reader(reopened, monkeypatch):
             for surface, value in values.items():

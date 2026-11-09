@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.store_fixture_support import numbered_store, numbered_store as installed, publication_consumer_reads
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_consumer_reads
 from yt_playlist.core import recommendation_outputs as files, recommendation_setting_outputs as outputs
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import saved_outputs as preparation
@@ -38,28 +38,29 @@ def head(conn, source):
     return conn.execute(f'SELECT g.* FROM {current} h JOIN {generations} g USING(source,preparation_revision)').fetchone()
 
 
-@pytest.mark.parametrize('numbered_store', [79, 93, 94], indirect=True)
-def test_exact_files_ordered_references_and_old_readers_remain_usable(numbered_store):
-    store, _ = numbered_store
+@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+def test_exact_files_ordered_references_and_old_readers_remain_usable(installed, preparation_ddl_connection):
+    store, _ = installed
+    conn = preparation_ddl_connection
     sources, run = seed(store)
     for name, job in preparation.JOBS.items():
-        job.install(store.conn)
-        finish(job, store.conn)
+        job.install(conn)
+        finish(job, conn)
         source = preparation.SOURCES[name]
-        assert preparation.read_original(head(store.conn, source)) == sources[source]
+        assert preparation.read_original(head(conn, source)) == sources[source]
         assert store.settings.get_setting(source) == sources[source]
-    assert not outputs.available(store.conn)
-    assert tuple(head(store.conn, 'radio_seed_offer')[field] for field in ('menu_id', 'comparison_run_id', 'run_ref', 'run_resolution')) == (
+    assert not outputs.available(conn)
+    assert tuple(head(conn, 'radio_seed_offer')[field] for field in ('menu_id', 'comparison_run_id', 'run_ref', 'run_resolution')) == (
         'original-menu', run, run, None)
-    assert head(store.conn, 'rec_autotune_result')['observed_at'] == 12.5
-    assert [(row['position'], row['video_id'], row['resolution_reason']) for row in store.conn.execute(
+    assert head(conn, 'rec_autotune_result')['observed_at'] == 12.5
+    assert [(row['position'], row['video_id'], row['resolution_reason']) for row in conn.execute(
         f'SELECT * FROM {preparation.SUBJECTS} ORDER BY position')] == [
         (0, 'present-video', None), (1, 'missing-video', 'missing_entry'), (2, 'present-video', None)]
-    assert list(map(tuple, store.conn.execute(f'SELECT raw_version,policy_version,resolution_reason FROM {preparation.POLICIES} ORDER BY raw_version'))) == [
+    assert list(map(tuple, conn.execute(f'SELECT raw_version,policy_version,resolution_reason FROM {preparation.POLICIES} ORDER BY raw_version'))) == [
         ('missing-policy', None, 'missing_policy'), ('saved-policy', 'saved-policy', None)]
-    assert store.conn.execute('SELECT count(*) FROM rec_model_selection_runs').fetchone()[0] == 1
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
+    assert conn.execute('SELECT count(*) FROM rec_model_selection_runs').fetchone()[0] == 1
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
@@ -180,7 +181,7 @@ def test_source_write_during_file_publication_rejects_stale_plan_and_retains_ren
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interruption_file_failure_independent_regular_ddl_and_reopened_retry(installed, monkeypatch):
+def test_interruption_file_failure_independent_regular_ddl_and_reopened_retry(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     seed(store)
     radio, report = preparation.JOBS.values()
@@ -210,7 +211,7 @@ def test_interruption_file_failure_independent_regular_ddl_and_reopened_retry(in
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_saved_output_ddl'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
         'independent_saved_output_ddl', install, validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     assert radio.progress(store.conn) == failed
     reopened = Store(store._db_path)
@@ -269,16 +270,17 @@ def test_null_blank_missing_and_deletion_remain_distinct(installed, raw, kind):
     '{"comparison":{"run_id":true}}', '{"comparison":{"run_id":9223372036854775808}}',
     '{"tracks":[{"video_id":"v","pool_policy":false}]}', '{"tracks":' + json.dumps([{'video_id': 'v'}] * 1001) + '}',
     ' ' * (outputs.MAX_RAW_BYTES + 1)])
-def test_invalid_radio_fails_durably_without_changing_source_or_other_job(installed, raw):
+def test_invalid_radio_fails_durably_without_changing_source_or_other_job(installed, preparation_ddl_connection, raw):
     store, _ = installed
+    conn = preparation_ddl_connection
     store.settings.set_setting('radio_seed_offer', raw)
     radio, report = preparation.JOBS.values()
     for job in (radio, report):
-        job.install(store.conn)
+        job.install(conn)
     with pytest.raises((ValueError, MigrationError)):
-        finish(radio, store.conn)
-    assert radio.progress(store.conn).status == 'failed'
+        finish(radio, conn)
+    assert radio.progress(conn).status == 'failed'
     assert store.settings.get_setting('radio_seed_offer') == raw
-    assert head(store.conn, 'radio_seed_offer') is None
-    assert finish(report, store.conn).status == 'prepared'
-    regular.migrate(store.conn)
+    assert head(conn, 'radio_seed_offer') is None
+    assert finish(report, conn).status == 'prepared'
+    regular.migrate(conn)

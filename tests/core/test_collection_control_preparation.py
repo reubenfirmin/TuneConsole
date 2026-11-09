@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core import album_tuning_state, model_selection_heads
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_controls as preparation
@@ -44,35 +44,36 @@ def seed(store, *, legacy=False):
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 @pytest.mark.parametrize('legacy', [False, True])
 def test_exact_originals_order_and_unknown_references_survive_without_admission(
-        installed, legacy):
+        installed, preparation_ddl_connection, legacy):
     store, _ = installed
+    conn = preparation_ddl_connection
     sources, run = seed(store, legacy=legacy)
     for job in preparation.JOBS.values():
-        job.install(store.conn)
-        finish(job, store.conn)
-    assert tuple(store.conn.execute(f'SELECT source_kind,expires_at,novelty,control_style FROM {preparation.ALBUM}').fetchone()) == (
+        job.install(conn)
+        finish(job, conn)
+    assert tuple(conn.execute(f'SELECT source_kind,expires_at,novelty,control_style FROM {preparation.ALBUM}').fetchone()) == (
         'controls', 321.5, .3, 'legacy' if legacy else 'novelty')
-    assert [tuple(row) for row in store.conn.execute(f'SELECT position,raw_label,genre_key,unresolved_reason '
+    assert [tuple(row) for row in conn.execute(f'SELECT position,raw_label,genre_key,unresolved_reason '
         f'FROM {preparation.GENRES} ORDER BY position')] == [
         (0, 'Control Test', 'control-test', None), (1, 'Control Alias', 'control-test', None),
         (2, 'Unknown Control', None, 'unknown_genre'), (3, 'control-test', None, 'ambiguous_genre'),
         (4, 'Control Test', 'control-test', None)]
-    assert [tuple(row) for row in store.conn.execute(f'SELECT source,source_kind,recorded_run_id,run_id,unresolved_reason '
+    assert [tuple(row) for row in conn.execute(f'SELECT source,source_kind,recorded_run_id,run_id,unresolved_reason '
         f'FROM {preparation.RUNS} ORDER BY source')] == [
         ('rec_selection_active_run', 'recorded', run, run, None),
         ('rec_selection_display_run', 'recorded', 999, None, 'missing_run'),
         ('rec_selection_live_run', 'null', None, None, None), ('rec_selection_restore', 'blank', None, None, None)]
     retained = {}
     for name in ('album_controls', 'model_pointers'):
-        retained.update(store.conn.execute(f'SELECT source,raw_value FROM {preparation.originals(name)}'))
+        retained.update(conn.execute(f'SELECT source,raw_value FROM {preparation.originals(name)}'))
     assert retained == sources
-    assert dict(store.conn.execute('SELECT key,value FROM settings WHERE key IN (' + ','.join('?' for _ in sources) + ')',
+    assert dict(conn.execute('SELECT key,value FROM settings WHERE key IN (' + ','.join('?' for _ in sources) + ')',
                                    tuple(sources))) == sources
-    assert store.conn.execute('SELECT count(*) FROM rec_model_selection_runs').fetchone()[0] == 1
-    assert not album_tuning_state.available(store.conn)
-    assert not model_selection_heads.available(store.conn)
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
+    assert conn.execute('SELECT count(*) FROM rec_model_selection_runs').fetchone()[0] == 1
+    assert not album_tuning_state.available(conn)
+    assert not model_selection_heads.available(conn)
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -130,10 +131,10 @@ def test_continuing_writes_reference_edits_and_removal_reconcile(installed):
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interruption_and_explicit_retry_preserve_independent_checkpoints(installed):
+def test_interruption_and_explicit_retry_preserve_independent_checkpoints(installed, preparation_ddl_connection):
     store, _ = installed
     sources, _ = seed(store)
-    conn = store.conn
+    conn = preparation_ddl_connection
     album, pointers = preparation.JOBS.values()
     for job in (album, pointers):
         job.install(conn)
@@ -189,13 +190,14 @@ def test_null_blank_and_absent_controls_are_distinct(installed, raw, kind):
     ('model-pointers', 'rec_selection_active_run', '1' * (preparation.MAX_BYTES + 1)),
 ])
 def test_invalid_sources_fail_durably_without_changing_installed_values(
-        installed, name, source, raw):
+        installed, preparation_ddl_connection, name, source, raw):
     store, _ = installed
+    conn = preparation_ddl_connection
     store.settings.set_setting(source, raw)
     job = preparation.JOBS[name]
-    job.install(store.conn)
+    job.install(conn)
     with pytest.raises(ValueError):
-        finish(job, store.conn)
-    assert job.progress(store.conn).status == 'failed'
+        finish(job, conn)
+    assert job.progress(conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
-    regular.migrate(store.conn)
+    regular.migrate(conn)

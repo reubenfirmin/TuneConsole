@@ -4,7 +4,9 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import (
+    numbered_store as installed, preparation_ddl_connection, publication_preparation_input,
+)
 from yt_playlist.core import albums
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recommendation_demand as preparation
@@ -18,6 +20,9 @@ VALUES = {
     'home_genre_request': {'epoch': 125, 'include_genres': ['known-genre', 'Unknown captured', 'known-genre'],
                            'avoid_genres': [], 'held_by_vibe': False, 'suspended_by_vibe': True},
 }
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)

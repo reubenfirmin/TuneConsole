@@ -9,6 +9,10 @@ from tests.web.test_road_trip_routes import (
 from yt_playlist.rec import road_trip
 from yt_playlist.web.routes import road_trip as routes
 from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import without_query_timing
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)

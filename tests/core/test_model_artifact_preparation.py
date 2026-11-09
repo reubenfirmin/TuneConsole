@@ -6,11 +6,14 @@ from pathlib import Path
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, reuse_reporting_reader
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_preparation_input, reuse_reporting_reader
 from yt_playlist.core import model_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_artifacts as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)

@@ -1,17 +1,23 @@
 """Real preparation, source mutations and recovery through genuine old layouts."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import sqlite3
 
 import pytest
 
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import numbered_store as installed, reuse_reporting_reader
+from tests.store_fixture_support import (
+    numbered_store as installed, publication_preparation_input, reuse_reporting_reader,
+    without_query_timing,
+)
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import listening_subjects as preparation
 
 
-pytestmark = pytest.mark.parametrize('installed', [79, 99], indirect=True)
+pytestmark = [
+    pytest.mark.parametrize('installed', [79, 99], indirect=True),
+    pytest.mark.usefixtures('publication_preparation_input', 'without_query_timing'),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -36,14 +42,18 @@ def populated(store):
     return account
 
 
+@contextmanager
 def connect(store):
-    conn = sqlite3.connect(store._db_path, timeout=.1)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys=ON')
-    # These private workers test SQL rollback, reopen and concurrent capture;
-    # they do not simulate loss of the machine's filesystem write cache.
-    conn.execute('PRAGMA synchronous=OFF')
-    return closing(conn)
+    from yt_playlist.core import schema_inspection
+
+    with closing(sqlite3.connect(store._db_path, timeout=.1)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        # These private workers test SQL rollback, reopen and concurrent capture;
+        # they do not simulate loss of the machine's filesystem write cache.
+        conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(conn):
+            yield conn
 
 
 def finish(conn, *, batch_size=1):
@@ -79,7 +89,8 @@ def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_
     # Closing/reopening the independent job connection preserves its checkpoint.
     # No serving lock or open write transaction is retained between batches.
     store.settings.set_setting('during-listening-preparation', 'ordinary-write')
-    regular.migrate(store.conn)
+    with connect(store) as conn:
+        regular.migrate(conn)
     assert store.conn.execute('SELECT version FROM schema_changes').fetchall()[0][0] == 1
     with store.conn:
         store.conn.execute("UPDATE main.play_events SET like_status='LIKE' WHERE id=?", (cursor,))
@@ -114,7 +125,7 @@ def test_failed_batch_retains_prior_commit_and_requires_explicit_retry(installed
         failed = preparation.progress(conn)
         assert failed.status == 'failed' and failed.cursor == first.cursor and failed.processed == first.processed
         assert conn.execute('SELECT count(*) FROM prepared_listening_events').fetchone()[0] == 1
-        regular.migrate(store.conn)
+        regular.migrate(conn)
         store.tracks.record_item_rating(account, 'upload-0', 'LIKE', source='api', now=1704900000)
         with pytest.raises(MigrationError, match='retry explicitly'):
             preparation.step(conn, batch_size=1)

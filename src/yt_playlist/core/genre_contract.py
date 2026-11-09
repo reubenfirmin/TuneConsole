@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 import sqlite3
 
+from . import fao
 from .schema_contract import MigrationError
 
 
@@ -40,7 +41,8 @@ def _installed_definitions():
     for name in ('schema.sql', 'schema_metadata_evidence.sql',
                  'schema_genre_classifications.sql', 'schema_recipe_memberships.sql'):
         pending = ''
-        for line in (root / name).read_text().splitlines(keepends=True):
+        source = fao.read(root / name, max_bytes=4 * 1024 * 1024).bytes.decode('utf-8')
+        for line in source.splitlines(keepends=True):
             pending += line
             if sqlite3.complete_statement(pending):
                 if definition_name(pending) is not None:

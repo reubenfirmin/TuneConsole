@@ -5,16 +5,18 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_report_preparation import VALUE, finish, head, seed
-from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed, native_sql_calls, publication_consumer_reads,
+    reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports, schema_inspection
 from yt_playlist.core.migrations import MigrationError, migrate, regular, registry, runner
 from yt_playlist.core.preparation import recommendation_reports as preparation, report_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +32,8 @@ def prepare(conn):
 
 
 @pytest.mark.parametrize('installed', [79, 92], indirect=True)
-def test_publication_reads_files_and_typed_usage_while_continuing_writers_withdraw_it(installed, monkeypatch):
+def test_publication_reads_files_and_typed_usage_while_continuing_writers_withdraw_it(
+        installed, monkeypatch, native_sql_calls):
     store, _ = installed
     raw = seed(store)
     conn = store.conn
@@ -70,6 +73,7 @@ def test_publication_reads_files_and_typed_usage_while_continuing_writers_withdr
     assert conn.execute(f'SELECT count(DISTINCT revision) FROM {publication.LINKS}').fetchone()[0] == 2
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema()
         with reuse_reporting_reader(reopened, monkeypatch):
             assert reopened.rec_proposals.get_proposals('listening_choices') == replacement

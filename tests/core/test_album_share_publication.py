@@ -10,6 +10,7 @@ from tests.core.test_album_owner_preparation import finish, seed
 from tests.store_fixture_support import guarded_numbered_store as guarded_installed
 from tests.store_fixture_support import (
     numbered_store as installed, preparation_ddl_connection, publication_consumer_reads,
+    without_query_timing,
 )
 from yt_playlist.core import album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -17,7 +18,7 @@ from yt_playlist.core.preparation import album_shares as preparation, album_shar
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +181,7 @@ def test_reference_race_and_interrupted_cutover_leave_no_mixed_selection(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installed, monkeypatch):
+def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     complete_source(store)
     selected = stage(store.conn)
@@ -189,7 +190,7 @@ def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installe
     Path(store.conn.execute('SELECT filename FROM prepared_album_share_parts LIMIT 1').fetchone()[0]).unlink()
     with pytest.raises(FileNotFoundError):
         publication.OWNER.publish(store.conn, stage=selected)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     publication.repair(store.conn, 'release')
     publication.OWNER.publish(store.conn, stage=selected)
     with store.conn:
@@ -208,7 +209,7 @@ def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installe
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_album_share_publication'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
         'independent_album_share_publication', install, validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.JOB.progress(store.conn) == failed
     monkeypatch.setattr(preparation.files, 'publish', publish)
     with pytest.raises(MigrationError, match='retry explicitly'):

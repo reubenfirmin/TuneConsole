@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from tests.store_fixture_support import numbered_store as installed, guarded_numbered_store as guarded_installed, publication_consumer_reads
+from tests.store_fixture_support import preparation_ddl_connection
 from tests.core.test_demand_preparation import VALUES, seed, finish
 from yt_playlist.core import recommendation_requests
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -122,31 +123,32 @@ def test_compatible_writes_reference_edits_and_deletions_withdraw_without_stale_
 
 @pytest.mark.parametrize('installed',[86],indirect=True)
 @pytest.mark.parametrize('damage',['wrong','extra','missing'])
-def test_independent_verification_rejects_damaged_prepared_members(installed,damage):
+def test_independent_verification_rejects_damaged_prepared_members(installed,preparation_ddl_connection,damage):
     store,_ = installed
+    conn = preparation_ddl_connection
     seed(store)
-    preparation.JOB.install(store.conn)
-    finish(store.conn)
-    with store.conn:
+    preparation.JOB.install(conn)
+    finish(conn)
+    with conn:
         if damage=='wrong':
-            store.conn.execute("UPDATE prepared_home_genre_items SET genre_key=NULL,resolution_reason='unknown_genre' WHERE kind='include' AND position=0")
+            conn.execute("UPDATE prepared_home_genre_items SET genre_key=NULL,resolution_reason='unknown_genre' WHERE kind='include' AND position=0")
         elif damage=='extra':
-            store.conn.execute("INSERT INTO prepared_album_menu_exclusions VALUES (1,99,'extra',NULL,'missing_album')")
+            conn.execute("INSERT INTO prepared_album_menu_exclusions VALUES (1,99,'extra',NULL,'missing_album')")
         else:
-            store.conn.execute("DELETE FROM prepared_listening_choice_windows WHERE format='albums'")
+            conn.execute("DELETE FROM prepared_listening_choice_windows WHERE format='albums'")
     for _ in range(30):
-        stage = publication.step(store.conn,batch_size=16)
+        stage = publication.step(conn,batch_size=16)
         if stage.complete:
             break
     with pytest.raises(MigrationError,match='differs'):
-        publication.publish(store.conn,identity=stage.id)
-    assert publication.selected(store.conn) is None
+        publication.publish(conn,identity=stage.id)
+    assert publication.selected(conn) is None
     assert store.rec_proposals.get_proposals('choice_window:albums')==VALUES['choice_window:albums']
-    regular.migrate(store.conn)
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed',[86],indirect=True)
-def test_interruption_resume_and_publication_fence_keep_atomic_selection(installed,monkeypatch):
+def test_interruption_resume_and_publication_fence_keep_atomic_selection(installed,monkeypatch,preparation_ddl_connection):
     store,_ = installed
     seed(store)
     preparation.JOB.install(store.conn)
@@ -181,7 +183,7 @@ def test_interruption_resume_and_publication_fence_keep_atomic_selection(install
             publication.publish(store.conn,identity=stage.id)
     assert publication.selected(store.conn) is None
     assert store.rec_proposals.get_proposals('home_genre_request')=={}
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     final = ready(store.conn)
     publication.publish(store.conn,identity=final)
     assert store.rec_proposals.get_proposals('home_genre_request')=={}
@@ -191,7 +193,7 @@ def test_interruption_resume_and_publication_fence_keep_atomic_selection(install
 
 
 @pytest.mark.parametrize('installed',[86],indirect=True)
-def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_regular_changes_usable(installed):
+def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_regular_changes_usable(installed,preparation_ddl_connection):
     store,_ = installed
     seed(store)
     value = {'epoch':99,'include_genres':['known-genre']*100,'avoid_genres':['Missing']*100,'held_by_vibe':False}
@@ -207,7 +209,7 @@ def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_r
         finish(store.conn)
     assert preparation.JOB.progress(store.conn).status=='failed'
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     store.rec_proposals.put_proposals('home_genre_request',value,301)
     preparation.JOB.step(store.conn,retry=True)
     final = ready(store.conn,size=16)

@@ -6,15 +6,19 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    without_query_timing,
+)
 from yt_playlist.core import collection_recovery, policy_documents, recommendation_outputs as files, workflow_settings
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import workflow_receipts as preparation
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture
@@ -157,7 +161,7 @@ def test_large_ordered_slots_resume_without_payload_and_withdraw_on_continuing_w
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_retry_and_independent_regular_ddl_preserve_recovery_sources(installed, monkeypatch):
+def test_failure_retry_and_independent_regular_ddl_preserve_recovery_sources(installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     job = preparation.JOBS['playlists']
@@ -175,7 +179,7 @@ def test_failure_retry_and_independent_regular_ddl_preserve_recovery_sources(ins
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_workflow_ddl'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_workflow_ddl', install, validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)
     reopened = Store(store._db_path)

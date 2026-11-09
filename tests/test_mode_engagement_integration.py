@@ -99,9 +99,7 @@ def engagement(store, monkeypatch, home_page_bytecode):
     protos = []
     for mid in (1, 2):
         lane, tracks = next(iter(payload[str(mid)].items()))
-        # Two distinct heard songs and remaining unplayed songs are sufficient
-        # for these provenance cases; candidate ranking owns selection size.
-        proto = home_cards._proto(store, lane, f'Mode {mid}', tracks[:4], clock[0])
+        proto = home_cards._proto(store, lane, f'Mode {mid}', tracks, clock[0])
         proto.update(mode_id=mid, recipe={'model': 'mode', 'mode_id': mid, 'lane': lane})
         protos.append(proto)
     result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],

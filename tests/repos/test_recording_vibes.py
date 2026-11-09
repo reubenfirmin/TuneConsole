@@ -11,12 +11,11 @@ import pytest
 
 from tests.prepared_fixture_support import capture_template
 from tests.genre_catalog_support import bound_catalog
-from tests.rec.test_vibe_prediction import capture, drain, fits, track
+from tests.rec.test_vibe_prediction import capture, drain, fits, individual_model_rollout, track
 from tests.store_fixture_support import (
-    PristineSchema, bounded_consumer_schema, initialize_consumer,
-    install_numbered_input, mock_snapshot_coordinator,
+    bounded_consumer_schema, initialize_consumer,
+    install_numbered_input, mock_snapshot_coordinator, native_sql_calls, without_query_timing,
 )
-from yt_playlist.core.db_revisions import Revisions
 from tests.test_audio_vibes import sample
 from yt_playlist.core import catalog, prepared_inputs, sample_files, profile_files, vibe_provenance, vibe_versions
 from yt_playlist.core.db_rebuild import build, destination
@@ -27,6 +26,9 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import vibe_preparation
 from yt_playlist.rec import home_vibe
 from yt_playlist.rec.progressive import Preparation
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +66,7 @@ def test_sample_json_is_external_immutable_and_durable_before_reference(store, m
 @pytest.fixture(scope='module')
 def installed_v107_template(tmp_path_factory):
     """The actual earlier fresh format, followed by its bounded admission."""
-    with closing(sqlite3.connect(':memory:', factory=PristineSchema)) as template:
+    with closing(sqlite3.connect(':memory:')) as template:
         template.row_factory = sqlite3.Row
         build._configure(template)
         with pytest.MonkeyPatch.context() as patch:
@@ -74,7 +76,6 @@ def installed_v107_template(tmp_path_factory):
             # Full bootstrap/admission have their independent current-schema
             # owners; avoid rerunning them beneath score provenance assertions.
             install_numbered_input(template, len(MIGRATIONS), regular_owners=regular.CHANGES)
-            template.capture_revisions(Revisions(template))
         assert not vibe_versions.normalized(template)
         template.execute('PRAGMA query_only=ON')
         before = list(template.iterdump())
@@ -88,20 +89,24 @@ def test_installed_vibe_schema_input_is_immutable_and_keeps_original_versions(in
     assert not installed_v107_template.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.fixture(scope='module', params=('installed', 'normalized'))
-def versioned_store(request, tmp_path_factory):
+@pytest.fixture(params=('installed', 'normalized'))
+def versioned_store(request, tmp_path, monkeypatch):
     if request.param == 'installed':
         template = request.getfixturevalue('installed_v107_template')
-        installed = Store(':memory:')
+        installed = Store(tmp_path / 'installed-scores.db')
         try:
-            initialize_consumer(installed, template)
+            installed.conn.execute('PRAGMA synchronous=OFF')
+            initialize_consumer(installed, template, snapshot_guards=False)
             assert not vibe_versions.normalized(installed.conn)
-            yield installed
+            # Provenance owns committed score inputs and versions. Real SQL and
+            # files sit below an uncontended snapshot coordinator in this case.
+            with mock_snapshot_coordinator(installed, monkeypatch):
+                yield installed
         finally:
             installed.conn.close()
         return
-    path = tmp_path_factory.mktemp('normalized-scores') / 'normalized.db'
-    with sqlite3.connect(path) as conn:
+    path = tmp_path / 'normalized.db'
+    with closing(sqlite3.connect(path)) as conn, conn:
         build._configure(conn)
         conn.execute('BEGIN IMMEDIATE')
         destination.initialize(conn)
@@ -126,8 +131,8 @@ def test_versioned_score_input_has_expected_storage_contract(versioned_store, re
     assert not versioned_store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.fixture(scope='module')
-def original_score_state(versioned_store):
+@pytest.mark.usefixtures('native_sql_calls', 'individual_model_rollout')
+def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versioned_store, monkeypatch):
     store = versioned_store
     track(store, 'original')
     _tid, target = track(store, 'target')
@@ -135,14 +140,6 @@ def original_score_state(versioned_store):
     drain(store)
     prediction = store.conn.execute("SELECT p.* FROM recording_vibes v JOIN predictions p ON p.id=v.prediction_id "
         "JOIN recordings r ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
-    before = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table}'))) for table in (
-        'measurements', 'predictions', 'prediction_inputs', 'recording_vibes')}
-    return {'target': target, 'samples': values, 'prediction': prediction, 'rows': before}
-
-
-def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versioned_store, original_score_state):
-    store, state = versioned_store, original_score_state
-    prediction, values = state['prediction'], state['samples']
     assert prediction['lineage_complete'] == 1 and prediction['kind'] == 'artist_genre'
     lineage = vibe_provenance.read(store.conn,prediction['id'])
     inputs = [store.conn.execute('SELECT * FROM measurements WHERE id=?',(mid,)).fetchone() for mid in lineage['inputs']]
@@ -153,42 +150,16 @@ def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versio
     assert lineage['artists']
     assert all('vibes' not in json.loads(profile_files.read(store.conn,'recording',key))
                for key, in store.conn.execute('SELECT identity_key FROM rec_musical_profiles'))
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    plan = ' '.join(str(tuple(row)) for row in store.conn.execute(
-        "EXPLAIN QUERY PLAN SELECT recording_id,score FROM recording_vibes WHERE vibe='relax' ORDER BY score DESC,recording_id LIMIT 10"))
-    assert 'idx_recording_vibe_rank' in plan and 'TEMP B-TREE' not in plan
-
-
-@pytest.fixture(scope='module')
-def recaptured_score_state(versioned_store, original_score_state):
-    store = versioned_store
+    before = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table}'))) for table in (
+        'measurements', 'predictions', 'prediction_inputs', 'recording_vibes')}
     with store.conn:
-        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (original_score_state['target'],))
+        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
     drain(store)
-    return original_score_state
-
-
-def test_unchanged_score_recapture_preserves_every_original_row(versioned_store, recaptured_score_state):
-    store = versioned_store
-    for table, rows in recaptured_score_state['rows'].items():
+    for table, rows in before.items():
         assert list(map(tuple, store.conn.execute(f'SELECT * FROM {table}'))) == rows
-
-
-@pytest.fixture(scope='module')
-def changed_score_state(versioned_store, recaptured_score_state):
-    from yt_playlist.rec import vibe_joint_model
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'new-model')
-        drain(versioned_store)
-        expected_version = vibe_preparation.version() + '/' + vibe_joint_model.VERSION
-    return {**recaptured_score_state, 'version': expected_version}
-
-
-def test_changed_model_keeps_old_measurements_and_gives_equal_scores_a_new_identity(
-        versioned_store, changed_score_state):
-    store, state = versioned_store, changed_score_state
-    target, before, prediction = state['target'], state['rows'], state['prediction']
+    monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'new-model')
+    drain(store)
+    expected_version = vibe_preparation.version()
     assert store.conn.execute('SELECT COUNT(*) FROM measurements').fetchone()[0] > len(before['measurements'])
     assert set(before['measurements']) <= set(map(tuple, store.conn.execute('SELECT * FROM measurements')))
     current = store.conn.execute("SELECT p.* FROM recording_vibes v JOIN predictions p ON p.id=v.prediction_id "
@@ -196,25 +167,21 @@ def test_changed_model_keeps_old_measurements_and_gives_equal_scores_a_new_ident
     assert (current['score'], current['support']) == (prediction['score'], prediction['support'])
     assert current['id'] != prediction['id']  # Equal scores do not identify different input versions.
     rid = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (target,)).fetchone()[0]
-    expected_version = state['version']
     assert store.vibe_predictions._current(rid)['version'] == expected_version
     assert store.vibe_predictions.overlay({target: {}})[target]['vibes']['inputs_version'] == expected_version
-
-
-def test_changed_score_version_is_immutable_and_survives_reopen(versioned_store, changed_score_state):
-    store, state = versioned_store, changed_score_state
-    rid = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (state['target'],)).fetchone()[0]
-    assert store.vibe_predictions._current(rid)['version'] == state['version']
     if vibe_versions.normalized(store.conn):
         with pytest.raises(sqlite3.IntegrityError, match='immutable'), store.conn:
             store.conn.execute("UPDATE vibe_versions SET value='changed' WHERE id=1")
         reopened = Store(store._db_path)
         try:
             reopened.init_schema()
-            assert reopened.vibe_predictions._current(rid)['version'] == state['version']
+            assert reopened.vibe_predictions._current(rid)['version'] == expected_version
         finally:
             reopened.conn.close()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+    plan = ' '.join(str(tuple(row)) for row in store.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT recording_id,score FROM recording_vibes WHERE vibe='relax' ORDER BY score DESC,recording_id LIMIT 10"))
+    assert 'idx_recording_vibe_rank' in plan and 'TEMP B-TREE' not in plan
 
 
 def test_relations_reject_wrong_recording_wrong_vibe_and_duplicate_source_votes(store):

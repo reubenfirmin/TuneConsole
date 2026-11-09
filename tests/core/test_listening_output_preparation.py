@@ -6,11 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_preparation_input
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import listening_outputs as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_preparation_input')
 
 
 @pytest.fixture(autouse=True)
@@ -50,9 +53,9 @@ def head(conn, surface='listening_analytics'):
 
 
 @pytest.mark.parametrize('installed', [79, 89], indirect=True)
-def test_files_and_individually_verified_chunk_links_retain_exact_sources(installed):
+def test_files_and_individually_verified_chunk_links_retain_exact_sources(installed, preparation_ddl_connection):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     original = seed(store)
     history = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     preparation.JOB.install(conn)
@@ -83,9 +86,9 @@ def test_files_and_individually_verified_chunk_links_retain_exact_sources(instal
 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
-def test_long_manifest_batches_individual_references_and_reports_missing_chunks(installed):
+def test_long_manifest_batches_individual_references_and_reports_missing_chunks(installed, preparation_ddl_connection):
     store, _ = installed
-    conn = store.conn
+    conn = preparation_ddl_connection
     refs = [{'key': format(number, '024x'), 'from': '2026-01-01', 'until': '2026-01-01', 'bytes': 10}
             for number in range(600)]
     raw = json.dumps({'chunks': refs})
@@ -200,12 +203,13 @@ def test_interrupted_member_and_failed_file_work_keep_prior_checkpoint(installed
 @pytest.mark.parametrize('installed', [89], indirect=True)
 @pytest.mark.parametrize('surface,value', [('listening_chunk:' + '0'*24, {'rows': [], 'columns': [], 'catalog': {}}),
     ('listening_analytics', {'chunks': [{'key': 'bad'}]}), ('listening_edition', [])])
-def test_invalid_original_is_retained_and_fails_durably(installed, surface, value):
+def test_invalid_original_is_retained_and_fails_durably(installed, preparation_ddl_connection, surface, value):
     store, _ = installed
+    conn = preparation_ddl_connection
     store.rec_proposals.put_proposals(surface, value, 100)
-    preparation.JOB.install(store.conn)
+    preparation.JOB.install(conn)
     with pytest.raises((MigrationError, ValueError)):
-        finish(preparation.JOB, store.conn)
-    assert preparation.JOB.progress(store.conn).status == 'failed'
+        finish(preparation.JOB, conn)
+    assert preparation.JOB.progress(conn).status == 'failed'
     assert store.rec_proposals.get_proposals(surface) == value
-    regular.migrate(store.conn)
+    regular.migrate(conn)

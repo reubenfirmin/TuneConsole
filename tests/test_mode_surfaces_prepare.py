@@ -4,7 +4,12 @@ from tests.derived_rating_support import seed_dislike
 from yt_playlist.rec import embedding_vectors as embed, home_vibe, surfaces, mode_surfaces as ms
 from yt_playlist.rec.vibe_pool_contract import GENRE_RESERVE, POOL_LIMIT
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, uncontended_file_consumer_store as store,
+)
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
 
 
 @pytest.fixture(autouse=True)
@@ -15,7 +20,8 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
-    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'))) as schema:
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno')),
+                                 snapshot_guards=False) as schema:
         yield schema
 
 

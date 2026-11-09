@@ -7,8 +7,9 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.store_fixture_support import guarded_numbered_store as installed
+from tests.store_fixture_support import numbered_store as unadmitted_installed
 from tests.core.test_saved_output_preparation import head, seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import native_sql_calls, preparation_ddl_connection, publication_consumer_reads
 from yt_playlist.core import recommendation_setting_outputs as outputs
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import saved_output_publication as publication, saved_outputs as preparation
@@ -147,31 +148,32 @@ def test_verification_rejects_source_and_prepared_custody_races(installed,monkey
         other.close()
 
 
-@pytest.mark.parametrize('installed',[93],indirect=True)
+@pytest.mark.parametrize('unadmitted_installed',[93],indirect=True)
 @pytest.mark.parametrize('failure',['file','missing-file','metadata','subject','policy'])
-def test_corrupt_custody_does_not_select_a_file_or_block_regular_ddl(installed,failure):
-    store,_ = installed
+def test_corrupt_custody_does_not_select_a_file_or_block_regular_ddl(unadmitted_installed,preparation_ddl_connection,failure):
+    store,_ = unadmitted_installed
+    conn = preparation_ddl_connection
     sources,_ = seed(store)
     source = 'radio_seed_offer'
-    revision = prepare(store.conn,'radio-seed')
-    row = head(store.conn,source)
+    revision = prepare(conn,'radio-seed')
+    row = head(conn,source)
     if failure == 'file':
         Path(row['filename']).write_bytes(b'corrupt')
     elif failure == 'missing-file':
         Path(row['filename']).unlink()
     else:
-        with store.conn:
+        with conn:
             if failure == 'metadata':
-                store.conn.execute('UPDATE '+preparation.tables(source)[0]+" SET menu_id='wrong'")
+                conn.execute('UPDATE '+preparation.tables(source)[0]+" SET menu_id='wrong'")
             elif failure == 'subject':
-                store.conn.execute('DELETE FROM '+preparation.SUBJECTS+' WHERE position=1')
+                conn.execute('DELETE FROM '+preparation.SUBJECTS+' WHERE position=1')
             else:
-                store.conn.execute('UPDATE '+preparation.POLICIES+" SET policy_version=NULL,resolution_reason='missing_policy'")
+                conn.execute('UPDATE '+preparation.POLICIES+" SET policy_version=NULL,resolution_reason='missing_policy'")
     with pytest.raises((ValueError,OSError,MigrationError)):
-        publication.publish(store.conn,source,revision=revision)
-    assert publication.selected(store.conn,source) is None
+        publication.publish(conn,source,revision=revision)
+    assert publication.selected(conn,source) is None
     assert store.settings.get_setting(source) == sources[source]
-    regular.migrate(store.conn)
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
@@ -239,7 +241,8 @@ def test_long_repeated_subjects_and_policies_publish_without_identity_admission(
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
-def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_state(installed,monkeypatch):
+def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_state(
+        installed, monkeypatch, native_sql_calls, preparation_ddl_connection):
     store,_ = installed
     sources,_ = seed(store)
     source = 'radio_seed_offer'
@@ -259,7 +262,7 @@ def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_s
         job.step(store.conn,retry=True)
     failed_progress = job.progress(store.conn)
     assert failed_progress.status == 'failed'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert job.progress(store.conn) == failed_progress
     monkeypatch.setattr(preparation.files,'publish',real_publish)
     job.step(store.conn,retry=True)

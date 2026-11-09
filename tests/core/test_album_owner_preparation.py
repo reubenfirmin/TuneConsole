@@ -6,25 +6,24 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    without_query_timing,
+)
 from yt_playlist.core import albums, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_occurrences as rows, album_shares as shares
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture
 def disable_periodic_library_sync():
     pass
-
-
-@pytest.mark.parametrize('installed', [79, 93, 98], indirect=True)
-def test_album_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
 
 
 def finish(job, conn, size=128):
@@ -153,7 +152,7 @@ def test_large_share_resume_without_payload_and_continuing_replacement(installed
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_interrupt_missing_plan_retry_and_independent_ddl(installed, monkeypatch):
+def test_failure_interrupt_missing_plan_retry_and_independent_ddl(installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     job = shares.JOB
@@ -166,7 +165,7 @@ def test_failure_interrupt_missing_plan_retry_and_independent_ddl(installed, mon
     with pytest.raises(OSError, match='file failure'):
         job.step(store.conn)
     failed = job.progress(store.conn)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)
     checkpoint = job.step(store.conn, batch_size=1, retry=True)

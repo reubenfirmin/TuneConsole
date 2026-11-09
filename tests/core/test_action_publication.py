@@ -10,7 +10,10 @@ import pytest
 
 from tests.core.test_action_ledger_preparation import finish, rows, seed
 from tests.store_fixture_support import guarded_numbered_store as installed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    native_sql_calls, numbered_store as unadmitted_installed, preparation_ddl_connection,
+    publication_consumer_reads, without_query_timing,
+)
 from yt_playlist.core import action_backup_files, action_work
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import action_ledger as preparation, action_publication as publication
@@ -19,7 +22,7 @@ from yt_playlist.library import playlist_deletion
 
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +52,7 @@ def rejection_inputs(store):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 97], indirect=True)
-def test_preopened_readers_use_selected_actions_and_preserve_external_formats(installed):
+def test_preopened_readers_use_selected_actions_and_preserve_external_formats(installed, native_sql_calls):
     store, _ = installed
     account, path, identities = seed(store)
     action, placed, draft, linked, planned = identities
@@ -58,6 +61,7 @@ def test_preopened_readers_use_selected_actions_and_preserve_external_formats(in
     sequence = tuple(sequence) if sequence is not None else None
     preopened = Store(store._db_path)
     try:
+        preopened.conn.execute('PRAGMA synchronous=OFF')
         preopened.init_schema(defer_metadata=True)
         selected = stage(store.conn, size=2)
         publication.OWNER.publish(store.conn, stage=selected)
@@ -96,6 +100,7 @@ def test_preopened_readers_use_selected_actions_and_preserve_external_formats(in
         preopened.conn.close()
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema(defer_metadata=True)
         assert reopened.actions.get_action(draft).undo_json == 'non-JSON draft evidence'
     finally:
@@ -233,8 +238,8 @@ def test_sequence_and_reference_races_are_fenced_without_reassigning_ids(install
     assert publication.OWNER.selected(store.conn) is None
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(installed, monkeypatch, record_property):
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
+def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(unadmitted_installed, monkeypatch, record_property):
     @contextmanager
     def phase(name):
         began = time.perf_counter()
@@ -243,7 +248,7 @@ def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(ins
         finally:
             record_property('action_map_' + name + '_seconds', time.perf_counter() - began)
 
-    store, _ = installed
+    store, _ = unadmitted_installed
     # Batch only the initial source writes. The real preparation, map and
     # publication operations below still own their individual transactions.
     with phase('source_actions'), store._lock, store.conn.atomic():
@@ -301,9 +306,9 @@ def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(ins
         assert [a.id for a in store.actions.get_actions()] == list(range(259, 0, -1))
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_explicit(installed, monkeypatch):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
+def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_explicit(unadmitted_installed, preparation_ddl_connection, monkeypatch):
+    store, _ = unadmitted_installed
     _, _, identities = seed(store)
     selected = stage(store.conn)
     header = preparation.head(store.conn, identities[0])
@@ -312,7 +317,7 @@ def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_expli
     Path(rows(store.conn, identities[0], 'parts', 'position')[0]['filename']).unlink()
     with pytest.raises(FileNotFoundError):
         publication.OWNER.publish(store.conn, stage=selected)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     publication.repair(store.conn, str(identities[0]))
     publication.OWNER.publish(store.conn, stage=selected)
     store.actions.update_action(identities[0], 'delete_failed', 5)
@@ -329,7 +334,7 @@ def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_expli
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_action_publication'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_action_publication', install, validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.JOB.progress(store.conn) == progress
     with pytest.raises(MigrationError, match='retry explicitly'):
         preparation.JOB.step(store.conn)

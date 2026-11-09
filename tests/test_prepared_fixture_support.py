@@ -1,6 +1,6 @@
 """Prepared fixture clones keep real files and mutations independently owned."""
 from copy import deepcopy
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 
 import os
 from pathlib import Path
@@ -8,7 +8,7 @@ import sqlite3
 
 import pytest
 
-from tests.prepared_fixture_support import capture_template, historical_template, prepared_template, roots
+from tests.prepared_fixture_support import capture_template, coordinates, historical_template, prepared_template, roots
 from tests.rec.test_home_prepared import service
 from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import profile_files
@@ -31,6 +31,31 @@ def _pristine_current_schema():
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Fixture SQL/file checks do not construct the web application."""
+
+
+def test_file_coordinates_keep_physical_owners_quoted_names_and_logical_paths():
+    with closing(sqlite3.connect(':memory:')) as conn:
+        conn.execute('CREATE TABLE "owner""one" (filename TEXT, cache_filename TEXT, notfilename TEXT)')
+        conn.executemany('INSERT INTO "owner""one" VALUES (?,?,?)', [
+            ('/source/first', 'relative/one', '/ignored'),
+            ('/source/first', 'relative/two', '/ignored'),
+            (None, None, '/ignored'),
+        ])
+        conn.execute('CREATE VIEW projected AS SELECT filename FROM "owner""one"')
+        # A connection-local consumer view must not hide physical file custody.
+        conn.execute('CREATE TEMP TABLE "owner""one" (filename TEXT)')
+        conn.execute("INSERT INTO temp.\"owner\"\"one\" VALUES ('/temporary')")
+        assert set(coordinates(conn)) == {
+            ('"owner""one"', '"filename"', '/source/first'),
+            ('"owner""one"', '"cache_filename"', 'relative/one'),
+            ('"owner""one"', '"cache_filename"', 'relative/two'),
+        }
+        logical = (('owner"one', 'cache_filename'),)
+        assert coordinates(conn, logical=logical) == [
+            ('"owner""one"', '"filename"', '/source/first')]
+        conn.execute('UPDATE main."owner""one" SET cache_filename=?', ('/unexpected/absolute',))
+        with pytest.raises(AssertionError, match='unexpected/absolute'):
+            coordinates(conn, logical=logical)
 
 
 def test_prepared_clone_schema_keeps_complete_fixture_genres(_pristine_current_schema):

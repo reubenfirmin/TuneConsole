@@ -5,11 +5,23 @@ from types import SimpleNamespace
 import pytest
 
 from tests.derived_rating_support import seed_dislike
-from tests.home_fixture_support import publish_menu
-
-from tests.rec.test_home_prepared import service
+from tests.home_fixture_support import publish_menu, service
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 from yt_playlist.rec import home_cache, home_cards, home_prepared, measurement
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Retention owns private SQL/publications without a web lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # The completed four-card input uses House. Snapshot conflict detection
+    # has independent owners; retention consumes uncontended publications.
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+        yield schema
 
 
 @pytest.fixture

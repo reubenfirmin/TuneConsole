@@ -38,6 +38,24 @@ CHANGE_NAMES = (
 )
 
 
+def register_independent_ddl(monkeypatch, conn):
+    """Append a real pending change without replacing any applied history.
+
+    Keep every production change, including the unapplied suffix. A disposable
+    input must still run the complete registry before the added change.
+    """
+    regular.validate(conn)
+    change = regular.Change(
+        len(regular.CHANGES) + 1, 'independent_preparation_ddl',
+        lambda conn, context: conn.execute('CREATE TABLE independent_preparation_ddl (id INTEGER)'),
+        lambda conn: conn.execute('SELECT id FROM independent_preparation_ddl LIMIT 0'),
+    )
+    assert not conn.execute(
+        "SELECT 1 FROM main.sqlite_schema WHERE name='independent_preparation_ddl'").fetchone()
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, change))
+    return change
+
+
 def captured(conn):
     return {name: sorted((tuple(row) for row in conn.execute('SELECT * FROM "'+name+'"')), key=repr)
             for name, in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}

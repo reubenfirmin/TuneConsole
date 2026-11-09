@@ -5,11 +5,11 @@ import pytest
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_routes_only, prepared_client, publish_cards, without_metadata_providers
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, native_sql_calls
 from tests.test_mode_cards_route import prepare_home
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
 
 
 @pytest.fixture(scope='module')
