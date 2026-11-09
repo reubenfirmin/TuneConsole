@@ -47,7 +47,19 @@ def readiness_schema():
 
 
 @pytest.fixture
-def store(tmp_path, readiness_schema, monkeypatch):
+def store(tmp_path, readiness_schema, monkeypatch, request):
+    if 'measured_readiness_worker' in request.fixturenames:
+        import sqlite3
+
+        # This worker consumes fixed-schema SQL below controlled snapshot
+        # coordination. Reuse compiled statements on its real private handles.
+        connect = sqlite3.connect
+
+        def cached_connection(*args, **kwargs):
+            kwargs['cached_statements'] = 512
+            return connect(*args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, 'connect', cached_connection)
     database = Store(tmp_path / 'readiness.db')
     with closing(database.conn):
         # Readiness checks real SQL and published files below mocked snapshot
@@ -265,12 +277,20 @@ def vibe_menus(completed_vibe_menus):
 
 @pytest.fixture
 def measured_readiness_worker(store, monkeypatch):
+    from functools import lru_cache
     import sqlite3
 
+    from tests.genre_catalog_support import bound_catalog
     from yt_playlist.core import metadata_evidence, metadata_runtime, vibe_versions
     from yt_playlist.core.db_diagnostics import DiagnosticConnection
-    from yt_playlist.rec import vibe_joint_preparation
+    from yt_playlist.rec import vibe_joint_preparation, vibe_pools
 
+    # Match the installed fixture's single Jazz identity. Taxonomy curation is
+    # below this measured-evidence worker and readiness consumer.
+    bound_catalog(monkeypatch, entries=(('jazz', 'Jazz'),))
+    # Every preset sees the same artist/album strings. Keep actual normalization
+    # once per distinct value; neither worker evidence nor selection is cached.
+    monkeypatch.setattr(vibe_pools, 'normalize', lru_cache(maxsize=512)(vibe_pools.normalize))
     # This owner changes a recording's own measured support through the real
     # worker. Admission/training of optional statistical models is a lower
     # collaborator; no model is admitted in this controlled catalog.
@@ -292,6 +312,11 @@ def measured_readiness_worker(store, monkeypatch):
                         (vibe_versions, 'normalized')):
         installed = getattr(owner, name)(store.conn)
         monkeypatch.setattr(owner, name, lambda _conn, installed=installed: installed)
+    # Admit the configured version on the empty catalog, within measured setup.
+    # Otherwise the first evidence edit also refreshes all 116 already-current
+    # profiles through the unrelated model-replacement queue.
+    vibe_preparation.step(store, batch=512)
+    assert not vibe_preparation.due(store)
 
 
 def test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions(store, vibe_menus):
@@ -338,16 +363,37 @@ def test_worker_readiness_reads_compact_output_and_one_live_eligibility_batch(st
 
 
 @pytest.mark.usefixtures('measured_readiness_worker')
-def test_readiness_follows_normal_worker_updates_between_menu_publications(store):
+def test_readiness_follows_normal_worker_updates_between_menu_publications(store, monkeypatch):
     from yt_playlist.core import metadata_evidence
     from yt_playlist.rec import home_vibe, musical_preparation, vibe_pools
     from yt_playlist.rec.progressive import Budget, Preparation
+    from tests.musical_support import prepare_profiles
 
-    # These checks serve all presets without a genre filter. Genre-specific
-    # copies do not contribute to the measured-support/readiness transition.
-    # This producer reads SQL/files throughout; no later consumer needs a
-    # detached duplicate of every profile in every prepared preset/lane.
-    lanes = publish_vibe_menus(store, genre_reserves=False, retain_payload=False)
+    # Supply completed catalog facts below this worker/update owner. Provider
+    # ingestion and artist-credit capture are separate contracts; this workflow
+    # owns real metadata decisions, profile workers and SQL/file publication.
+    lanes, audio_inputs = vibe_menu_inputs(store, lane_count=16)
+    subjects = list(store.conn.execute('SELECT id,identity_key FROM recordings ORDER BY id'))
+    assert len(subjects) == 116
+    with atomic_write(store):
+        store.conn.executemany('UPDATE recordings SET energy=?,mood_relaxed=?,mood_happy=? WHERE id=?',
+            [(audio_inputs[key]['energy'], audio_inputs[key]['mood_relaxed'],
+              audio_inputs[key]['mood_happy'], rid) for rid, key in subjects])
+    prepare_profiles(store)
+
+    def publish():
+        # This workflow has no genre controls. Keep taxonomy in the real
+        # recording workers, but omit unused genre-specific menu copies.
+        previous = store.recommendations.head('home')
+        with store.read_view() as reader, monkeypatch.context() as patch:
+            patch.setattr(reader.genres, 'feature_axes', lambda _labels: {})
+            generation = publish_bundles(store, {'all': lanes, '_meta': {'comfort_pool': 36}},
+                                        vibes=True, genre_reserves=False, retain_payload=False)
+        assert previous is None or generation != previous['id']
+        assert all(store.recommendations.head(surface)['id'] == generation
+                   for surface in ('home', *('vibe:' + preset for preset in home_vibe.PRESETS)))
+
+    publish()
     # Keep all 116 published subjects, but change only the Fresh reserve that
     # determines this readiness transition. Three measured songs cannot satisfy
     # any preset's four-song minimum; the other lanes retain usable output.
@@ -358,10 +404,26 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     def check(expected):
         # Derive the expected answer from the actual current serving output,
         # including ranking changes, rather than from the cached summary.
-        # All six references inspect one unchanged read. Share only their
-        # current catalog facts within it; every state opens a new cache.
+        # All six references inspect one unchanged read. Share their current
+        # catalog/profile inputs within it; every state opens a new cache.
         with store.read_view() as reader, reader.recommendations.planning_read():
-            menus = [vibe_pools.assemble(reader, 1000, preset) for preset in home_vibe.PRESETS]
+            load, profiles = musical_character.load, {}
+
+            def current_profiles(target, keys):
+                assert target is reader
+                missing = list(dict.fromkeys(key for key in keys if key not in profiles))
+                if missing:
+                    profiles.update(load(target, missing))
+                # These selectors read profiles without mutating them. Keep
+                # fresh result mappings without cloning the same evidence tree
+                # again for each preset's selected tracks.
+                return {key: profiles[key] for key in keys if key in profiles}
+
+            # Each state still reads the actual newly published SQL/file heads.
+            # Share those unchanged inputs across its six serving references.
+            with monkeypatch.context() as patch:
+                patch.setattr(musical_character, 'load', current_profiles)
+                menus = [vibe_pools.assemble(reader, 1000, preset) for preset in home_vibe.PRESETS]
             usable = all(len(cards) == 4 and all(sum(growth_readiness._supported(track, preset)
                          for track in card['tracks']) >= 4 for card in cards)
                          for preset, cards in zip(home_vibe.PRESETS, menus))
@@ -398,15 +460,13 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     update_inputs(withdraw=False)
     check(False)
     # Withdrawn support must fail even while the old menu is retained.
-    publish_bundles(store, {'all': lanes, '_meta': {'comfort_pool': 36}},
-                    vibes=True, genre_reserves=False, retain_payload=False)
+    publish()
     check(False)
     update_inputs(withdraw=True)
     # Restored evidence revalidates the retained menu immediately, without
     # waiting for an unrelated complete recommendation publication.
     check(True)
-    publish_bundles(store, {'all': lanes, '_meta': {'comfort_pool': 36}},
-                    vibes=True, genre_reserves=False, retain_payload=False)
+    publish()
     check(True)
 
 

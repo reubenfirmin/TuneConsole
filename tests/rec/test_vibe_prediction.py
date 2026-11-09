@@ -62,7 +62,6 @@ def prediction_input(prediction_schema, tmp_path, monkeypatch, native_sql_calls)
         # These consumers own committed prediction facts, not power-loss recovery.
         store.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(store, prediction_schema, snapshot_guards=False)
-        store.conn.execute('BEGIN')
         store._snapshot_revisions = Revisions(store.conn)
         # Retain the generated SQL for the independent restart, without first
         # generating and discarding an identical set on the immutable seed.

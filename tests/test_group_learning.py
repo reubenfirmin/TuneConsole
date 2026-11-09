@@ -1,4 +1,5 @@
 from tests.file_content_support import age_file
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 
@@ -6,10 +7,9 @@ import pytest
 
 from tests.group_support import publish, recordings
 from tests.store_fixture_support import (
-    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
-    without_query_timing,
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
 )
-from yt_playlist.core import fao
+from yt_playlist.core import fao, schema_inspection
 from yt_playlist.rec import choice_evidence as choices, group_learning
 
 
@@ -31,9 +31,18 @@ def learning_schema():
 def store(tmp_path, learning_schema, monkeypatch):
     with _file_consumer_store(tmp_path, learning_schema) as database:
         # Learning owns immutable definitions and frozen contributions. Reuse
-        # an independent real reader below those synchronous consumers; keep
-        # actual snapshot guards, preparation, publication and evidence files.
-        with reuse_reporting_reader(database, monkeypatch):
+        # committed reporting SQL below those synchronous consumers. File
+        # leases must end after each read so retention can actually collect
+        # artifacts; preparation keeps its genuine fresh guarded snapshots.
+        reader = database._make_reader()
+
+        @contextmanager
+        def read_view(**kwargs):
+            with database._retained_readers():
+                yield reader
+
+        monkeypatch.setattr(database, 'read_view', read_view)
+        with closing(reader.conn), schema_inspection.reuse_tables(reader.conn):
             yield database
 
 

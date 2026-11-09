@@ -9,7 +9,9 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.genre_catalog_support import bound_catalog
 from tests.regular_schema_support import register_independent_ddl
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, install_numbered_input
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, install_numbered_input, without_query_timing,
+)
 from yt_playlist.core import schema_definition as current
 from yt_playlist.core.migrations import registry, regular, runner
 from yt_playlist.core.migrations.audit import audit
@@ -18,8 +20,9 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture(autouse=True)
-def disable_periodic_library_sync():
-    """Admission and audit tests do not construct the web application."""
+def disable_periodic_library_sync(monkeypatch):
+    """Admission consumes a saved Jazz vocabulary, without the web lifecycle."""
+    bound_catalog(monkeypatch, entries=(('jazz', 'Jazz'),))
 
 
 @pytest.fixture(scope='module')
@@ -110,6 +113,7 @@ def installed_library(tmp_path, _pristine_current_schema, _pristine_installed_sc
         path = tmp_path / 'installed.db'
         setup = Store(path)
         try:
+            setup.conn.execute('PRAGMA synchronous=OFF')
             if version == current.VERSION:
                 initialize_consumer(setup, _pristine_current_schema)
             else:
@@ -294,11 +298,19 @@ def test_audit_interruption_preserves_writes_history_and_revisions(installed_lib
 
 
 @pytest.mark.parametrize('version', [81, current.VERSION])
+@pytest.mark.usefixtures('without_query_timing')
 def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(installed_library, version, monkeypatch):
+    from fastapi import APIRouter
     from yt_playlist.providers import genres
     from yt_playlist.util import genre_catalog
+    from yt_playlist.web import app as webapp
     from yt_playlist.web.app import create_app
 
+    # This startup contract owns saved genre configuration and real maintenance,
+    # independent of the route table. Keep create_app and its actual context.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     path = installed_library(version)
     with closing(sqlite3.connect(path)) as setup, setup:
         if version < current.VERSION:
@@ -339,6 +351,7 @@ def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(in
             genres.set_active(None)
 
 
+@pytest.mark.usefixtures('without_query_timing')
 def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(
         tmp_path, caplog, installed_library, monkeypatch):
     """An independent schema writer never starts the frozen bulk conversions."""

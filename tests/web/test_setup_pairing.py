@@ -17,7 +17,7 @@ def test_bridge_status_reports_connection(store):
     assert client.get("/bridge/status").json() == {"connected": False, "now_playing": None,
                                                    "sensor_health": None,
                                                    "radio": False, "radio_ready": False,
-                                                   "resumable_player": None}
+                                                   "resumable_player": None, "radio_resume": None}
 
 
 def test_bridge_status_true_while_extension_connected(store):
@@ -30,7 +30,7 @@ def test_bridge_status_true_while_extension_connected(store):
         assert client.get("/bridge/status").json() == {"connected": True, "now_playing": None,
                                                        "sensor_health": None,
                                                        "radio": False, "radio_ready": False,
-                                                       "resumable_player": None}
+                                                       "resumable_player": None, "radio_resume": None}
 
 
 @pytest.mark.parametrize('paused', [False, True], ids=['recording', 'maintenance'])

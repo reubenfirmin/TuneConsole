@@ -91,6 +91,7 @@ def test_installed_vibe_schema_input_is_immutable_and_keeps_original_versions(in
 
 @pytest.fixture(params=('installed', 'normalized'))
 def versioned_store(request, tmp_path, monkeypatch):
+    bound_catalog(monkeypatch, entries=(('psybient', 'Psybient'),))
     if request.param == 'installed':
         template = request.getfixturevalue('installed_v107_template')
         installed = Store(tmp_path / 'installed-scores.db')
@@ -105,9 +106,26 @@ def versioned_store(request, tmp_path, monkeypatch):
         finally:
             installed.conn.close()
         return
-    path = tmp_path / 'normalized.db'
+    template = request.getfixturevalue('normalized_vibe_schema')
+    normalized = Store(tmp_path / 'normalized.db')
+    try:
+        normalized.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(normalized, template, snapshot_guards=False)
+        assert vibe_versions.normalized(normalized.conn)
+        with mock_snapshot_coordinator(normalized, monkeypatch):
+            yield normalized
+    finally:
+        normalized.conn.close()
+
+
+@pytest.fixture(scope='module')
+def normalized_vibe_schema(tmp_path_factory):
+    # Score provenance consumes an admitted empty native layout. Build it once
+    # through the real initializer and startup; each consumer gets private SQL.
+    path = tmp_path_factory.mktemp('normalized-vibe-schema') / 'template.db'
     with closing(sqlite3.connect(path)) as conn, conn:
         build._configure(conn)
+        conn.execute('PRAGMA synchronous=OFF')
         conn.execute('BEGIN IMMEDIATE')
         destination.initialize(conn)
         cursor = None
@@ -118,12 +136,18 @@ def versioned_store(request, tmp_path, monkeypatch):
             cursor = batch.cursor
         assert destination.finish(conn, conn, None, 10000).done
     normalized = Store(path)
-    try:
-        normalized.init_schema()
+    with closing(normalized.conn):
+        # A module fixture can be requested after a function-scoped vocabulary
+        # patch. Restore construction patches before yielding, so their later
+        # teardown cannot resurrect that already-finished consumer's bounds.
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch, entries=(('psybient', 'Psybient'),))
+            normalized.conn.execute('PRAGMA synchronous=OFF')
+            normalized.init_schema()
         assert vibe_versions.normalized(normalized.conn)
-        yield normalized
-    finally:
-        normalized.conn.close()
+        normalized.conn.execute('PRAGMA query_only=ON')
+        yield normalized.conn
+        assert normalized.conn.execute('PRAGMA query_only').fetchone()[0] == 1
 
 
 def test_versioned_score_input_has_expected_storage_contract(versioned_store, request):
@@ -174,6 +198,7 @@ def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versio
             store.conn.execute("UPDATE vibe_versions SET value='changed' WHERE id=1")
         reopened = Store(store._db_path)
         try:
+            reopened.conn.execute('PRAGMA synchronous=OFF')
             reopened.init_schema()
             assert reopened.vibe_predictions._current(rid)['version'] == expected_version
         finally:

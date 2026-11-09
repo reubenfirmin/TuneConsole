@@ -48,7 +48,6 @@ def walking(tmp_path, monkeypatch, retention_reader_repositories, native_sql_cal
         assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 3
         assert store.conn.execute('SELECT count(*) FROM group_version_aliases').fetchone()[0] == 4
         assert store.conn.execute('SELECT count(*) FROM group_lineage').fetchone()[0] == 1
-        store.conn.execute('BEGIN')
         store._snapshot_revisions = Revisions(store.conn)
         # Walk slices and their real rollback/reopen contracts keep WAL commits;
         # automatic checkpoint scheduling and power-loss durability are separate.
@@ -129,7 +128,6 @@ def test_closure_beyond_old_limit_resumes_after_reopen_with_exact_history(walkin
         reopened.conn.execute('PRAGMA wal_autocheckpoint=0')
         reopened._bind_repositories()
         monkeypatch.setattr(reopened, '_retained_readers', reopened.taste_groups.files.retained)
-        reopened.conn.execute('BEGIN')
         reopened._snapshot_revisions = Revisions(reopened.conn)
         assert tuple(reopened.conn.execute('SELECT * FROM group_retention_walk').fetchone()) == progress
         ready(reopened)
@@ -143,8 +141,13 @@ def test_closure_beyond_old_limit_resumes_after_reopen_with_exact_history(walkin
         reopened.conn.close()
 
 
+@pytest.mark.usefixtures('without_query_timing')
 def test_new_evidence_invalidates_completed_closure_and_stale_deletion(walking, monkeypatch):
     store, _ = walking
+    store.conn.execute('PRAGMA synchronous=OFF')
+    # This private input owns group files. Keep their real scoped leases while
+    # omitting reader guards for unrelated empty file domains.
+    monkeypatch.setattr(store, '_retained_readers', store.taste_groups.files.retained)
     monkeypatch.setattr(walk, 'BATCH', 1)
     ready(store)
     with store.read_snapshot() as snapshot:

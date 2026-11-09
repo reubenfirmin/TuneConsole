@@ -11,12 +11,24 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import db_diagnostics as diagnostics
 from yt_playlist.core import lock_diagnostics
 from yt_playlist.core import priority
 from yt_playlist.core.activity import WorkClosing, cancellable_work
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.repos.base import Repo, synchronized
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Keep actual SQL/lock diagnostics, without unrelated web construction."""
 
 
 @pytest.fixture
@@ -32,6 +44,17 @@ class ProbeRepo(Repo):
     @synchronized
     def query(self, sql, values=()):
         return self.conn.execute(sql, values).fetchall()
+
+
+@pytest.fixture
+def lock_probe():
+    # The live window owns these real diagnostic/priority/lock collaborators,
+    # without needing application repositories or an installed schema.
+    with closing(sqlite3.connect(':memory:', check_same_thread=False,
+                               factory=diagnostics.DiagnosticConnection)) as conn:
+        request_priority = priority.RequestPriority()
+        yield SimpleNamespace(conn=conn, priority=request_priority,
+                              _lock=priority.ServingLock(request_priority))
 
 
 def test_slow_sql_identifies_operation_phase_and_site_without_values(store, clock, caplog):
@@ -366,9 +389,10 @@ def test_nested_background_acquisition_does_not_yield_while_lock_is_held(store, 
     assert not caplog.records
 
 
-def test_live_log_window_separates_scheduler_yields_and_real_contention(store, tmp_path, caplog):
+def test_live_log_window_separates_scheduler_yields_and_real_contention(lock_probe, tmp_path, caplog):
     """Exercise real condition waits/RLock contention and inspect a fresh, timestamped log."""
     from yt_playlist.core.activity import check_stopping
+    store = lock_probe
     caplog.set_level(logging.DEBUG, logger='yt_playlist.database')
     path = tmp_path / 'serving-lock.log'
     handler = logging.FileHandler(path)

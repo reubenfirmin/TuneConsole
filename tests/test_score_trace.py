@@ -63,8 +63,25 @@ def test_taste_sample_items_carry_trace_but_normal_serving_does_not(store):
     taste = scoring.playlist_taste(store, now=100.0)
     assert set(taste.titles) == {"Night drive", "Sunday"}
 
-    # Include the complete fitted pool so both explanation cases are exercised
-    # every time, rather than depending on the random four-item sample.
+    # Keep all fitted candidates and add an explicit nonzero vector opposite
+    # the listened-to context. SVD need not put any Sunday member on that side
+    # of Night drive, and Sunday has no listening weight of its own.
+    unsupported_key = 'outsider|gamma'
+    opposite = -taste.centroids[taste.titles.index('Night drive')]
+    assert np.linalg.norm(opposite) > 0
+    contributions = [float(weight * np.dot(centroid, opposite))
+                     for centroid, weight in zip(taste.centroids, taste.weights)]
+    assert max(contributions) <= 0 and min(contributions) < 0
+    seed_publication_subjects(store, [dict(key=unsupported_key, video_id='outsider',
+                                         title='Outsider', artist='Gamma', genre='Folk')])
+    store.rec_model.replace_rec_vectors([
+        *[(key, vectors[index[key]].tobytes()) for key in keys],
+        (unsupported_key, opposite.astype(np.float32).tobytes())])
+    keys, vectors, index = embed.load_vectors(store)
+    taste = scoring.playlist_taste(store, now=100.0)
+
+    # Include the complete pool so the deliberately unsupported candidate is
+    # scored and served by the same real paths as its fitted neighbors.
     normal = surfaces.for_you(store, now=100.0, limit=len(keys))
     observed = surfaces.taste_sample(store, now=100.0, limit=len(keys))
 
@@ -94,7 +111,7 @@ def test_taste_sample_items_carry_trace_but_normal_serving_does_not(store):
         assert all(row["contribution"] > 0 for row in contexts)
         assert [row["contribution"] for row in contexts] == sorted(
             (row["contribution"] for row in contexts), reverse=True)
-    assert supported and unsupported
+    assert supported and unsupported_key in unsupported
 
 
 def test_taste_comparison_retains_suppressed_baseline_track_with_reason(store):

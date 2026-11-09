@@ -9,6 +9,7 @@ import math
 import os
 from os import fsync as _journal_fsync
 from pathlib import Path
+import platform
 import statistics
 import time
 import uuid
@@ -54,6 +55,8 @@ def _replay(report, event):
         if 'exitstatus' not in report:
             raise ValueError('Shard timing precedes session completion')
         report.update(exitstatus=event['exitstatus'], elapsed_seconds=event['elapsed_seconds'])
+        if 'process_cpu_seconds' in event:
+            report['process_cpu_seconds'] = event['process_cpu_seconds']
     else:
         raise ValueError('Unknown shard journal event')
 
@@ -67,6 +70,7 @@ def load_report(path):
     report.update(tests={}, executions=[], repeated_phases=[], active=None)
     report.pop('exitstatus', None)
     report.pop('elapsed_seconds', None)
+    report.pop('process_cpu_seconds', None)
     journal = path.with_suffix('.events.jsonl')
     with journal.open('rb') as stream:
         sequence = 0
@@ -141,13 +145,15 @@ def pytest_addoption(parser):
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_cmdline_main(config):
     started = time.monotonic()
+    cpu_started = time.process_time()
     exitstatus = yield
     shard = config.pluginmanager.get_plugin('isolated-ci-shard')
     if shard is not None and not shard.journal_failed and 'exitstatus' in shard.report:
         # The command has returned through sessionfinish and unconfigure,
         # including journal synchronization, reports and registered cleanup.
         # Only publication of this small timing receipt follows the clock read.
-        shard.event('timing', exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - started)
+        shard.event('timing', exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - started,
+                    process_cpu_seconds=time.process_time() - cpu_started)
     return exitstatus
 
 
@@ -194,6 +200,8 @@ class Shard:
         self.journal.write_bytes(b'')
         self.report = {"schema": 2, "suite": suite, "index": index, "total": total,
                        "revision": os.environ.get("GITHUB_SHA", "local"),
+                       'runtime': {'python': platform.python_version(), 'platform': platform.platform(),
+                                   'processor': platform.processor(), 'cpu_count': os.cpu_count()},
                        "started_at": datetime.now(timezone.utc).isoformat(), "tests": {},
                        "executions": [], "repeated_phases": [], 'journal_id': uuid.uuid4().hex,
                        'active': None}

@@ -6,7 +6,7 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.home_fixture_support import without_metadata_providers
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
 )
@@ -38,7 +38,7 @@ def file_backed_store(tmp_path, _pristine_current_schema):
 
 
 @pytest.fixture
-def chart_http(monkeypatch, without_metadata_providers):
+def chart_http(monkeypatch, without_metadata_providers, home_page_bytecode):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, charts
@@ -46,6 +46,17 @@ def chart_http(monkeypatch, without_metadata_providers):
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
         for module in (app_update, audio_preview, charts)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    # The two consistency owners still render their actual pages and use
+    # fresh reporting connections around each genuine between-query commit.
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 @pytest.fixture

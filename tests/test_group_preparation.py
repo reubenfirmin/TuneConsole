@@ -1,5 +1,7 @@
 import json
 import hashlib
+import sqlite3
+from contextlib import closing, contextmanager
 from dataclasses import replace
 
 import pytest
@@ -9,7 +11,7 @@ from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
 )
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import prepared_inputs
+from yt_playlist.core import prepared_inputs, schema_inspection
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import group_discovery, group_preparation, musical_profiles
 
@@ -30,12 +32,32 @@ def _pristine_current_schema():
 
 
 @pytest.fixture
-def store(tmp_path, _pristine_current_schema):
+def store(tmp_path, _pristine_current_schema, monkeypatch):
     # Keep real private readers, guarded snapshots, source-change rejection,
     # cancellation and file publication. A file reader avoids copying the
     # entire in-memory catalog for every preparation turn.
+    connect = sqlite3.connect
+
+    def cached_connection(*args, **kwargs):
+        # These consumers repeatedly query one fixed installed schema. SQLite
+        # still executes every statement, transaction and publication fence.
+        kwargs['cached_statements'] = 512
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, 'connect', cached_connection)
     with _file_consumer_store(tmp_path, _pristine_current_schema) as database:
-        yield database
+        reader = database._make_reader()
+
+        @contextmanager
+        def read_view(**kwargs):
+            # Preparation's actual snapshots stay independent. Reporting keeps
+            # a real committed reader, with artifact leases scoped to each call.
+            with database._retained_readers():
+                yield reader
+
+        monkeypatch.setattr(database, 'read_view', read_view)
+        with closing(reader.conn), schema_inspection.reuse_tables(reader.conn):
+            yield database
 
 
 def seed(store, tracks):

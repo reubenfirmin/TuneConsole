@@ -140,17 +140,19 @@ pulls. Keep private keys out of source.
 
 ## Serial CI shards
 
-PR CI uses four serial unit shards and four serial browser shards. Whole files
+PR CI uses eight serial unit shards and four serial browser shards. Whole files
 are partitioned using verified timing artifacts, falling back to
 `.github/test-durations.json`. The coverage job checks that completed cases
 equal normal collection exactly once. Browser jobs use the Playwright image
 pinned to `uv.lock`. Per-shard artifacts retain JUnit, timings and failure traces.
 
+Automatic selection compares the measured run's date, rather than its later
+export date. A newer passing run can replace exported historical measurements.
 When failed workflows leave the committed weights stale, explicitly refresh
-them from one run's eight downloaded shard artifacts:
+them from one run's twelve downloaded shard artifacts:
 
 ```sh
-python3 ci_test_shards.py evidence/ baseline --total=4 \
+python3 ci_test_shards.py evidence/ baseline --total=8 --browser-total=4 \
   --run https://github.com/reubenfirmin/TuneConsole/actions/runs/RUN_ID \
   --output .github/test-durations.json
 ```

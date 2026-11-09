@@ -91,6 +91,7 @@ def runtime_revision_input(completed_destination_sql):
                 cursor = batch.cursor
         conn.execute('CREATE TABLE '+build.CHECKPOINT+'('
                      'singleton INTEGER PRIMARY KEY CHECK(singleton=1),document TEXT NOT NULL)')
+        conn.commit()
         revisions = Revisions(conn)
         shape = tuple(conn.execute('SELECT type,name,sql FROM main.sqlite_schema ORDER BY type,name'))
         statements = [row[2].replace('CREATE ', 'CREATE TEMP ', 1)
@@ -101,6 +102,7 @@ def runtime_revision_input(completed_destination_sql):
 
 def test_runtime_revision_input_keeps_actual_current_guards(runtime_revision_input):
     conn = runtime_revision_input.conn
+    assert not conn.in_transaction
     with conn:
         conn.execute("INSERT INTO recordings(id,identity_key,title,artist) VALUES(8,'song|artist','Song','Artist')")
     assert conn.execute("SELECT revision FROM temp.snapshot_revisions "

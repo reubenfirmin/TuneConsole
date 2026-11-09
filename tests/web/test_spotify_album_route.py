@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_spotify_album_import import AlbumClient, album_zip
-from tests.home_fixture_support import without_metadata_providers
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
 )
@@ -32,8 +32,20 @@ def store(tmp_path, album_import_schema, native_sql_calls):
 
 
 @pytest.fixture(autouse=True)
-def album_import_routes(monkeypatch, without_metadata_providers):
+def album_import_routes(monkeypatch, without_metadata_providers, home_page_bytecode):
+    from yt_playlist.web import app as webapp
+
     install_routes(monkeypatch, 'setup')
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        # App recreation keeps private globals and live rendering. Reuse only
+        # source-checked compiled code; the first request pays compilation.
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 def web_client(store, clients):

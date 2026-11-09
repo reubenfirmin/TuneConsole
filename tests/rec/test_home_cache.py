@@ -133,10 +133,11 @@ def test_response_reuse_returns_detached_values_and_reopens_on_next_request(file
     assert len(calls) == 2
 
 
-def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roots(store, monkeypatch):
+def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roots(file_backed_store, monkeypatch):
     from tests.core.test_home_publication import real_roots
     from yt_playlist.controllers import group_evidence
 
+    store = file_backed_store
     real_roots(store)
     group = store.conn.execute('SELECT external_key FROM group_generations LIMIT 1').fetchone()[0]
     generation = store.conn.execute('SELECT generation_id FROM recommendation_generation_refs LIMIT 1').fetchone()[0]

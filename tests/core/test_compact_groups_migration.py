@@ -8,7 +8,15 @@ import time
 import pytest
 
 from tests import file_custody_support as custody
-from yt_playlist.core import choice_evidence_files, group_documents, group_storage, policy_documents, sample_files
+from tests.genre_catalog_support import bound_shipped_catalog
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls, reuse_reporting_reader,
+    without_query_timing,
+)
+from yt_playlist.core import (
+    choice_evidence_files, group_documents, group_storage, policy_documents, sample_files,
+    schema_inspection,
+)
 from yt_playlist.core.migrations import v070_policy_documents as policies, v071_album_descriptions as descriptions
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.migrations.runner import Context, MigrationError
@@ -320,8 +328,24 @@ def test_group_backup_restores_all_owned_files_after_originals_are_lost(predeces
     assert list(conn.iterdump()) == before
 
 
+@pytest.fixture(scope='module')
+def recovery_schema():
+    from yt_playlist.core import genre_identity
+
+    with bounded_consumer_schema(()) as schema:
+        # Keep the original two genres' real aliases and recommendation families.
+        with pytest.MonkeyPatch.context() as patch:
+            bound_shipped_catalog(patch, {'deep house', 'jazz'})
+            schema.execute('PRAGMA query_only=OFF')
+            with schema:
+                genre_identity.seed_catalog(schema)
+            schema.execute('PRAGMA query_only=ON')
+        yield schema
+
+
 @pytest.mark.parametrize('kind', ['compact', 'verified-backup'])
-def test_populated_sample_and_choice_owners_recover_without_producer(tmp_path, kind):
+def test_populated_sample_and_choice_owners_recover_without_producer(
+        tmp_path, kind, recovery_schema, monkeypatch, native_sql_calls, without_query_timing):
     from contextlib import closing
     from tests.test_audio_vibes import sample
     from yt_playlist.core.store import Store
@@ -331,18 +355,33 @@ def test_populated_sample_and_choice_owners_recover_without_producer(tmp_path, k
     source_path.parent.mkdir()
     source = Store(source_path)
     try:
-        source.init_schema()
-        samples = [sample(run_id='recovery', point=point) for point in ('thirty', 'middle', 'two_thirds')]
-        for index, value in enumerate(samples):
-            source.audio_vibes.save_sample(value, 100 + index)
-        opportunity = choice_evidence.issue(source, 'mixes', [
-            {'id': 'close', 'label': 'Stay close', 'genres': ['Deep House']},
-            {'id': 'explore', 'label': 'Explore', 'genres': ['Jazz']}],
-            100, context={'at': 100}, opportunity_id='recovery-menu')
-        assert opportunity == 'recovery-menu'
-        choice_evidence.respond(source, opportunity, 'visible', 101, visible=['close', 'explore'])
-        choice_evidence.respond(source, opportunity, 'choice', 102, option_id='close')
-        expected_report = choice_evidence.compile_report(source, 110)['formats']
+        bound_shipped_catalog(monkeypatch, {'deep house', 'jazz'})
+        restore_files = custody.restore_files
+
+        def restore_private_input(conn, *args, **kwargs):
+            # File custody remains real. Disposable SQL inputs do not exercise
+            # power-loss recovery, and their schema is stable during relocation.
+            conn.execute('PRAGMA synchronous=OFF')
+            with schema_inspection.reuse_tables(conn):
+                return restore_files(conn, *args, **kwargs)
+
+        monkeypatch.setattr(custody, 'restore_files', restore_private_input)
+        source.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(source, recovery_schema)
+        # Source startup and reporting-reader construction are inputs to this
+        # recovery owner. Its snapshot, restore, missing producer and reopen stay real.
+        with reuse_reporting_reader(source, monkeypatch):
+            samples = [sample(run_id='recovery', point=point) for point in ('thirty', 'middle', 'two_thirds')]
+            for index, value in enumerate(samples):
+                source.audio_vibes.save_sample(value, 100 + index)
+            opportunity = choice_evidence.issue(source, 'mixes', [
+                {'id': 'close', 'label': 'Stay close', 'genres': ['Deep House']},
+                {'id': 'explore', 'label': 'Explore', 'genres': ['Jazz']}],
+                100, context={'at': 100}, opportunity_id='recovery-menu')
+            assert opportunity == 'recovery-menu'
+            choice_evidence.respond(source, opportunity, 'visible', 101, visible=['close', 'explore'])
+            choice_evidence.respond(source, opportunity, 'choice', 102, option_id='close')
+            expected_report = choice_evidence.compile_report(source, 110)['formats']
         samples_root = sample_files.directory(source.conn)
         choices_root = choice_evidence_files.directory(source.conn)
 
@@ -358,8 +397,10 @@ def test_populated_sample_and_choice_owners_recover_without_producer(tmp_path, k
         expected_samples, expected_choices = sample_bytes(source.conn), choice_bytes(source.conn)
         assert len(expected_samples) == 3 and expected_choices
         source_sql = list(source.conn.iterdump())
-        report = custody.snapshot_library(source_path, tmp_path / 'recovered')
-        candidate_path = Path(report['restored'])
+        # The verified-backup branch restores its own independent SQL copy.
+        # Its previous first restore was discarded without being inspected.
+        report = custody.snapshot_library(source_path, tmp_path / 'recovered',
+                                         restore=kind == 'compact')
         if kind == 'verified-backup':
             candidate_path = tmp_path / 'independent' / 'state.db'
             candidate_path.parent.mkdir()
@@ -368,20 +409,22 @@ def test_populated_sample_and_choice_owners_recover_without_producer(tmp_path, k
                 backup.backup(target)
                 target.row_factory = sqlite3.Row
                 custody.restore_files(target, report['manifests'])
+        else:
+            candidate_path = Path(report['restored'])
         hidden_samples, hidden_choices = samples_root.with_name('hidden-samples'), choices_root.with_name('hidden-choices')
         samples_root.rename(hidden_samples)
         choices_root.rename(hidden_choices)
         try:
             recovered = Store(candidate_path)
-            try:
+            with closing(recovered.conn), schema_inspection.reuse_tables(recovered.conn):
+                recovered.conn.execute('PRAGMA synchronous=OFF')
                 recovered.init_schema(defer_metadata=True)
-                assert recovered.audio_vibes.samples('recovery') == samples
-                assert sample_bytes(recovered.conn) == expected_samples
-                assert choice_bytes(recovered.conn) == expected_choices
-                assert choice_evidence.compile_report(recovered, 110)['formats'] == expected_report
-                assert not recovered.conn.execute('PRAGMA foreign_key_check').fetchall()
-            finally:
-                recovered.conn.close()
+                with reuse_reporting_reader(recovered, monkeypatch):
+                    assert recovered.audio_vibes.samples('recovery') == samples
+                    assert sample_bytes(recovered.conn) == expected_samples
+                    assert choice_bytes(recovered.conn) == expected_choices
+                    assert choice_evidence.compile_report(recovered, 110)['formats'] == expected_report
+                    assert not recovered.conn.execute('PRAGMA foreign_key_check').fetchall()
         finally:
             hidden_samples.rename(samples_root)
             hidden_choices.rename(choices_root)

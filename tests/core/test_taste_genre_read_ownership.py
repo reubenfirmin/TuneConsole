@@ -8,9 +8,11 @@ import numpy as np
 import pytest
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_control_routes, home_routes_only, without_metadata_providers
+from tests.home_fixture_support import (
+    home_control_routes, home_page_bytecode, home_routes_only, without_metadata_providers,
+)
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import without_query_timing
+from tests.store_fixture_support import reuse_reporting_reader, without_query_timing
 from yt_playlist.core import catalog, genre_identity
 from yt_playlist.rec import home_cards, home_prepared, mix_tuning, onboarding, rec_params, surfaces, taste_analysis, taste_viz
 from yt_playlist.web.app import create_app
@@ -68,21 +70,41 @@ def _families(name, result):
     return {row['name'] for row in result}
 
 
+@pytest.fixture
+def live_tuning_input(installed, monkeypatch, home_page_bytecode):
+    from tests.test_home import _publish_existing_listener_mix
+    from tests.recommendation_support import publish_bundles
+    from yt_playlist.web import app as webapp
+
+    store, _ = installed
+    # Fixture preparation has no competing writer. Restore fresh reader
+    # admission before the actual concurrent genre calculation starts.
+    with reuse_reporting_reader(store, monkeypatch):
+        account, _ = _library(store)
+        _publish_existing_listener_mix(store)
+        pool = [{'key': key, **{field: track[field] for field in
+                 ('title', 'artist', 'album', 'video_id', 'thumbnail', 'genre')}} for key, track in
+                store.rec_query.group_candidates(store.rec_query.library_keys()).items()]
+        publish_bundles(store, {'all': {'wheelhouse': pool, 'explore': pool, 'comfort': pool},
+                               '_meta': {'full_pools': True, 'unmodeled': True}}, 1000)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
+    return account
+
+
 @pytest.mark.parametrize('installed', [93, 107], indirect=True)
 @pytest.mark.parametrize('commit', [False, True], ids=['rollback', 'commit'])
 def test_live_home_tuning_calculates_privately_then_publishes(
-        installed, monkeypatch, caplog, commit, home_control_routes, without_metadata_providers):
-    from tests.test_home import _publish_existing_listener_mix
-    from tests.recommendation_support import publish_bundles
-
+        installed, live_tuning_input, monkeypatch, caplog, commit,
+        home_control_routes, without_metadata_providers):
     store, _ = installed
-    account, _ = _library(store)
-    _publish_existing_listener_mix(store)
-    pool = [{'key': key, **{field: track[field] for field in
-             ('title', 'artist', 'album', 'video_id', 'thumbnail', 'genre')}} for key, track in
-            store.rec_query.group_candidates(store.rec_query.library_keys()).items()]
-    publish_bundles(store, {'all': {'wheelhouse': pool, 'explore': pool, 'comfort': pool},
-                           '_meta': {'full_pools': True, 'unmodeled': True}}, 1000)
+    account = live_tuning_input
     assert not store.rec_proposals.get_proposals('home_tuned')
     client = TestClient(create_app(store, lambda: {account: FakeClient()}, now_fn=lambda: 1000,
                                   background_work=False),

@@ -6,15 +6,16 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_page_bytecode
 from tests.publication_fixture_support import installed as playback_library
-from tests.test_deferred_playback_feedback import library
+from tests.test_deferred_playback_feedback import _pristine_current_schema, file_backed_store, library
 from yt_playlist.core import db_handles
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
-@pytest.fixture
-def playback_routes(monkeypatch):
+@pytest.fixture(autouse=True)
+def playback_routes(monkeypatch, home_page_bytecode):
     from yt_playlist.providers import genres
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, playlists
@@ -24,6 +25,15 @@ def playback_routes(monkeypatch):
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
                         for module in (app_update, audio_preview, playlists)])
     monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 @pytest.mark.parametrize('playback_library', [93], indirect=True)

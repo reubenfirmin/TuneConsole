@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_tv_state_migration import store, cutover
+from tests.store_fixture_support import without_query_timing
 from yt_playlist.core import recommendation_setting_outputs as owner, recommendation_outputs as files
 from yt_playlist.core.migrations import v095_recommendation_state as migration
 

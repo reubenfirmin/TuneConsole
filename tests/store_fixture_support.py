@@ -264,9 +264,7 @@ def consumer_schema(*, entries=None, snapshot_guards=True):
             if entries is not None:
                 genre_identity.seed_catalog(schema)
         if snapshot_guards:
-            # Generate the real TEMP guards in one transaction instead of an
-            # implicit transaction for every trigger. Revisions commits it.
-            schema.execute('BEGIN')
+            # Revisions owns the transaction that batches these TEMP guards.
             schema.capture_revisions(Revisions(schema))
         schema.execute('PRAGMA query_only=ON')
         yield schema
@@ -375,9 +373,7 @@ def _numbered_input(version, tmp_path, monkeypatch, *, snapshot_guards=False):
         database._schema_recovery_pending = False
         database._bind_repositories()
         if snapshot_guards:
-            # These connection-local guards are one completed lower input.
-            # Install their real DDL together, as consumer_schema does.
-            database.conn.execute('BEGIN')
+            # Revisions completes its own connection-local guard transaction.
             database._snapshot_revisions = Revisions(database.conn)
         with schema_inspection.reuse_tables(database.conn):
             yield database, version

@@ -198,7 +198,11 @@ def test_guard_construction_allows_external_writes_and_rebinds_changed_schema(tm
         finally:
             conn.set_trace_callback(None)
         assert changed and not errors
-        assert not conn.in_transaction
+        assert conn.in_transaction == already_in_transaction
+        # A caller's pre-existing transaction remains the caller's to finish.
+        # End its old read epoch before observing the concurrent writer's DDL.
+        if already_in_transaction:
+            conn.commit()
         assert conn.execute('SELECT value FROM settings').fetchone() == ('saved',)
         revisions.refresh()
         assert 'added' in revisions.tables

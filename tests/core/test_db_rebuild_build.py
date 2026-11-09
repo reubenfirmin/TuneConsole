@@ -3,7 +3,7 @@
 These controlled fixtures test transaction and recovery behavior. They do not
 stand in for the production schema-64 or actual-library conversion acceptance.
 """
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import replace
 import json
 import sqlite3
@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 from tests.db_rebuild_support import production64
+from tests.store_fixture_support import native_sql_calls, reuse_reporting_reader, without_query_timing
 from yt_playlist.core.db_rebuild import build
 
 
@@ -215,18 +216,29 @@ def test_converter_cannot_write_through_the_attached_source(conversion):
     assert source.read_bytes()==original
 
 
-def test_repository_writes_and_bookmark_share_one_transaction(production64, tmp_path):
+def test_repository_writes_and_bookmark_share_one_transaction(
+        production64, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    from tests.genre_catalog_support import bound_catalog
     from yt_playlist.core.db_rebuild import destination as schema
     from yt_playlist.core.migrations import current, regular
     from yt_playlist.core.store import Store
 
     output = tmp_path / 'repositories.db'
     fail = True
+    bound_catalog(monkeypatch, entries=())
+    reporting = ExitStack()
+    readers = set()
 
     def prepare(reader, store, cursor, limit):
         nonlocal fail
         assert isinstance(store, Store)
         assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+        if store not in readers:
+            # This engine contract owns transaction/bookmark visibility. Keep
+            # its independent real SQL reader without rebuilding every lower
+            # repository before each committed-state observation.
+            reporting.enter_context(reuse_reporting_reader(store, monkeypatch))
+            readers.add(store)
         expected = str(cursor) if cursor is not None else None
         with store.read_view() as reader:
             assert reader.settings.get_setting('repository_batch') == expected
@@ -248,12 +260,13 @@ def test_repository_writes_and_bookmark_share_one_transaction(production64, tmp_
     contract = build.Destination('repositories-v1', schema.initialize,
         (build.Stage('indexes', schema.indexes), build.Stage('guards', schema.finish),
          build.Stage('preparation', prepare, repositories=True)), verify)
-    with pytest.raises(InterruptedError, match='before bookmark'):
-        build.construct(production64, output, contract)
-    assert pending(output)['cursor'] == 1
-    with closing(sqlite3.connect(output)) as conn:
-        assert conn.execute("SELECT value FROM settings WHERE key='repository_batch'").fetchone()[0] == '1'
-    assert build.construct(production64, output, contract)['rows']['preparation'] == 3
+    with reporting:
+        with pytest.raises(InterruptedError, match='before bookmark'):
+            build.construct(production64, output, contract)
+        assert pending(output)['cursor'] == 1
+        with closing(sqlite3.connect(output)) as conn:
+            assert conn.execute("SELECT value FROM settings WHERE key='repository_batch'").fetchone()[0] == '1'
+        assert build.construct(production64, output, contract)['rows']['preparation'] == 3
 
 
 def test_validation_failure_is_resumable_without_recopy(conversion):

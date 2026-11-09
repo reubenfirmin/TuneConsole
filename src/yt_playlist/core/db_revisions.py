@@ -81,10 +81,22 @@ class Revisions:
 
     def __init__(self, conn):
         self.conn = conn
-        # This constructor already commits its completed guards below. Group
-        # their TEMP DDL instead of opening one SQLite transaction per trigger.
-        if not conn.in_transaction:
+        # Batch TEMP DDL, releasing only the transaction this constructor owns.
+        # A cancelled refresh must leave an already-open Store ready to retry.
+        owned = not conn.in_transaction
+        if owned:
             conn.execute('BEGIN')
+        try:
+            self._bind()
+            if owned:
+                conn.commit()
+        except BaseException:
+            if owned:
+                conn.rollback()
+            raise
+
+    def _bind(self):
+        conn = self.conn
         # If external DDL races binding, this older epoch forces another bind
         # and prevents readers using a newer definition from trusting counters.
         self.schema_version = conn.execute('PRAGMA main.schema_version').fetchone()[0]
@@ -142,7 +154,6 @@ class Revisions:
                                  f"VALUES ({_literal(name)},{_literal('group:' + group)},total_changes()+1) "
                                  "ON CONFLICT(table_name,record_key) "
                                  "DO UPDATE SET revision=excluded.revision; END")
-        conn.commit()
 
     def refresh(self):
         """Bind newly published owners before pinning another background view.

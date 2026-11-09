@@ -8,12 +8,14 @@ import sqlite3
 import pytest
 
 from tests.store_fixture_support import (
+    native_sql_calls,
     numbered_store as installed,
     preparation_ddl_connection,
     publication_preparation_input,
+    without_query_timing,
 )
 from tests.test_tv_stream import video
-from yt_playlist.core import tv_recommendation_state as state
+from yt_playlist.core import schema_inspection, tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import artist_lookup, tv_state as preparation
 from yt_playlist.core.store import Store
@@ -96,6 +98,7 @@ def test_all_five_jobs_retain_exact_shapes_clocks_and_reference_custody(installe
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_frozen_v95_upgrade_matches_every_prepared_relation_and_keeps_sources_for_upgrade(installed, tmp_path):
     store, _ = installed
     values, _ = seed(store)
@@ -103,10 +106,11 @@ def test_frozen_v95_upgrade_matches_every_prepared_relation_and_keeps_sources_fo
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    with closing(sqlite3.connect(tmp_path / 'tv-state-frozen-upgrade.db')) as upgraded:
+    with (closing(sqlite3.connect(tmp_path / 'tv-state-frozen-upgrade.db')) as upgraded,
+          schema_inspection.reuse_tables(upgraded)):
         upgraded.row_factory = sqlite3.Row
         upgraded.execute('PRAGMA foreign_keys=ON')
-        upgraded.execute('PRAGMA synchronous=NORMAL')
+        upgraded.execute('PRAGMA synchronous=OFF')
         store.conn.backup(upgraded)
         upgraded.execute('PRAGMA journal_mode=WAL')
         runner.migrate(upgraded, registry=registry.MIGRATIONS[:95])

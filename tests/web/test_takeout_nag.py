@@ -37,11 +37,15 @@ def test_dismiss_route_stamps(store):
     html = c.get('/').text
     assert 'takeout-nag' not in html
     assert '/setup?tab=import' in html
-    assert 'Choose only listening history' in html
+    assert 'Download your YouTube Music listening history from Google Takeout.' in html
+    assert 'In Setup, choose Import and upload the file.' in html
     assert 'Rediscover old favorites sooner' in html
     assert c.post("/onboard/takeout/dismiss").status_code == 200
     assert store.settings.get_setting("takeout_nag_dismissed_at") is not None   # snooze timestamp recorded
-    assert "takeout-nag" not in c.get("/").text
+    after = c.get('/').text
+    assert 'takeout-nag' not in after
+    assert '/setup?tab=import' in after
+    assert 'Rediscover old favorites sooner' in after
 
 
 def test_banner_waits_on_fresh_install_and_during_onboarding(store):

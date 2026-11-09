@@ -21,7 +21,7 @@ from tests.group_support import publish as publish_groups, recordings as grouped
 from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener, service
 from tests.home_prepared_support import publication_inputs as controlled_publication_inputs, seed
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
-from tests.store_fixture_support import (bounded_consumer_schema, initialize_consumer,
+from tests.store_fixture_support import (_file_consumer_store, bounded_consumer_schema, initialize_consumer,
                                          mock_snapshot_coordinator, reuse_reporting_reader,
                                          without_query_timing)
 from yt_playlist.core import schema_inspection
@@ -1545,10 +1545,18 @@ def test_cold_requests_coalesce_home_work_without_requesting_a_model_fit(store, 
     worker.shutdown()
 
 
+@pytest.fixture
+def shutdown_sql_store(tmp_path, cached_menu_schema):
+    # This owner reaches an actual cancellable recursive query before ranking.
+    # Completed candidate/menu construction belongs to the other Home owners.
+    # Keep instrumented handle admission, fresh readers and real revision guards.
+    with _file_consumer_store(tmp_path, cached_menu_schema) as database:
+        yield database
+
+
 def test_ui_remains_available_during_real_preparation_sql_and_shutdown_interrupts(
-        file_backed_store, home_seed_template, monkeypatch):
-    store = file_backed_store
-    home_seed_template.restore(store)
+        shutdown_sql_store, monkeypatch):
+    store = shutdown_sql_store
     started = threading.Event()
     def slow(reader, **kwargs):
         assert reader.conn is not store.conn

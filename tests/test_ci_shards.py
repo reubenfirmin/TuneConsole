@@ -102,8 +102,10 @@ def test_retained_measured_timings_balance_whole_file_groups(suite, total):
     assert sum(loads) == pytest.approx(sum(row["seconds"] for row in timings.values()))
     assert max(loads) / min(loads) < 1.02
     assert baseline["run"].startswith('https://github.com/reubenfirmin/TuneConsole/actions/runs/')
-    assert baseline["failed_cases"]  # Diagnostic timing input must not claim a passing source run.
+    assert baseline["failed_cases"] == []  # Committed weights now use a verified passing run.
     assert len(nodes) == baseline['measurements'][suite]['cases']
+    if suite == 'unit':
+        assert {row['source_shard'] for row in timings.values()} == set(range(1, 9))
 
 
 def reports(total=2, nodeids=None):
@@ -535,10 +537,11 @@ def test_terminal_work_is_in_recovered_elapsed_time_and_can_exceed_browser_budge
     (tmp_path / 'conftest.py').write_text('''
 from types import SimpleNamespace
 import pytest
+import time
 import ci_test_shards as journal
 
 clock = [1000.0]
-journal.time = SimpleNamespace(monotonic=lambda: clock[0])
+journal.time = SimpleNamespace(monotonic=lambda: clock[0], process_time=time.process_time)
 
 @pytest.hookimpl(trylast=True)
 def pytest_configure(config):
@@ -571,6 +574,11 @@ def test_clock():
     assert result.returncode == 0, result.stdout + result.stderr
     recovered = load_report(report)
     assert recovered['elapsed_seconds'] == 1210
+    # CPU timing is diagnostic only: it cannot replace charged wall time or
+    # turn an over-budget browser run into a passing receipt.
+    assert recovered['process_cpu_seconds'] > 0
+    assert recovered['runtime']['python'] == '.'.join(map(str, sys.version_info[:3]))
+    assert recovered['runtime']['cpu_count'] == os.cpu_count()
     with pytest.raises(ValueError, match='aggregate.*1200s total budget'):
         verify([recovered], 'browser', total=1)
     recovered['suite'] = 'unit'
@@ -692,6 +700,35 @@ def test_newer_committed_weight_refresh_is_not_overridden_by_stale_pr(started, e
             ]}
 
     assert timing_source(Source(), {'refreshed_at': '2026-10-25T12:33:40Z'}) == (
+        {'timing_run': '123', 'timing_artifact': '99'} if expected
+        else {'timing_run': '', 'timing_artifact': ''})
+
+
+@pytest.mark.parametrize('measured_at,expected', [
+    ('2026-10-24T12:00:00Z', True),
+    ('2026-10-25T12:00:00Z', False),
+    ('2026-10-25T12:00:01Z', False),
+    (None, False),
+])
+def test_baseline_export_time_does_not_hide_a_newer_passing_measurement(measured_at, expected):
+    class Source:
+        repository = 'owner/repo'
+
+        def api(self, path):
+            if path == 'repos/owner/repo/actions/runs/120':
+                return {'run_started_at': measured_at}
+            if '/artifacts?' in path:
+                return {'artifacts': [{'name': 'source-test-timings-1', 'id': 99,
+                                       'expired': False, 'size_in_bytes': 100}]}
+            return {'workflow_runs': [
+                {'status': 'completed', 'conclusion': 'success', 'event': 'pull_request',
+                 'head_repository': {'full_name': 'owner/repo'}, 'id': 123, 'run_attempt': 1,
+                 'run_started_at': '2026-10-25T12:00:00Z'},
+            ]}
+
+    baseline = {'run': 'https://github.com/owner/repo/actions/runs/120',
+                'refreshed_at': '2026-10-25T12:33:40Z'}
+    assert timing_source(Source(), baseline) == (
         {'timing_run': '123', 'timing_artifact': '99'} if expected
         else {'timing_run': '', 'timing_artifact': ''})
 

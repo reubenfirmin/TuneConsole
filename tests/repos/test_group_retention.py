@@ -51,9 +51,6 @@ def database(tmp_path, retention_predecessor, native_sql_calls):
     with closing(store.conn), schema_inspection.reuse_tables(store.conn):
         store._bind_repositories()
         store.conn.execute('PRAGMA journal_mode=WAL')
-        # Generate the genuine TEMP guards in one transaction instead of a
-        # separate implicit transaction for each table's triggers.
-        store.conn.execute('BEGIN')
         store._snapshot_revisions = Revisions(store.conn)
         assert store.taste_groups.head_generation() == 'second'
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()

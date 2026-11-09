@@ -4,8 +4,11 @@ import sqlite3
 import pytest
 
 from tests.conftest import FakeClient
-from tests.store_fixture_support import initialize_consumer
-from tests.test_tv_stream import video
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls, without_query_timing,
+)
+from tests.test_tv_stream import install_catalog_inputs, video
 from yt_playlist.core.store import Store
 from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.rec import tv_artwork
@@ -14,13 +17,28 @@ from yt_playlist.util.matching import search_squash
 from yt_playlist.web.routes.home_tv import playlist_items
 
 
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def tv_read_inputs(monkeypatch, native_sql_calls, without_query_timing):
+    # These synchronous readers own committed membership/artwork visibility.
+    # Genre discovery, query diagnostics and thread admission have other owners.
+    bound_catalog(monkeypatch, entries=())
+
+
 @pytest.mark.parametrize('file_backed', [False, True], ids=['memory', 'wal'])
 @pytest.mark.parametrize('artwork', [False, True], ids=['playback', 'display'])
 def test_playlist_response_stays_consistent_during_replacement_and_refreshes_next_read(
         tmp_path, _pristine_current_schema, monkeypatch, file_backed, artwork):
     source = Store(tmp_path / 'tv.db' if file_backed else ':memory:')
     try:
+        source.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(source, _pristine_current_schema)
+        install_catalog_inputs(source, monkeypatch)
         account = source.accounts.upsert_account('TV account', 'cred', None, True)
         videos = [video(index) for index in range(11)]
         client = FakeClient(catalog={item['video_id']: {

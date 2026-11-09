@@ -40,9 +40,13 @@ def test_bonus_replaces_banner_and_legacy_dismiss_keeps_it_available(store, monk
     html = c.get('/').text
     assert '/setup?tab=enrichment' in html
     assert 'lastfm-nudge' not in html
-    assert 'Find more music that fits' in html and 'See the setup steps' in html
+    assert 'Find more music that fits' in html and 'How to get here' in html
+    assert 'Register for a free Last.fm API key, paste it into Setup and turn Last.fm on.' in html
+    assert 'Set up Last.fm' in html
     assert c.post("/onboard/lastfm/dismiss").status_code == 200
     assert store.settings.get_setting("lastfm_nudge_dismissed_at") is not None   # snooze timestamp recorded
     after = c.get('/').text
     assert 'lastfm-nudge' not in after
     assert 'Find more music that fits' in after
+    assert '/setup?tab=enrichment' in after
+    assert 'Register for a free Last.fm API key, paste it into Setup and turn Last.fm on.' in after

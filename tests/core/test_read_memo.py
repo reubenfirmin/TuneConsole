@@ -3,7 +3,19 @@ import sqlite3
 
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Memo invalidation exercises SQL admission, without an HTTP lifecycle."""
 
 
 def test_tracked_view_reuses_only_unchanged_inputs_and_releases_admission(store):
@@ -163,10 +175,12 @@ def test_nested_captures_retain_overlapping_dependencies(store):
             "inner", lambda: reader.settings.get_setting("input"))) == "new"
 
 
-def test_external_commit_during_reader_pinning_cannot_reuse_old_result(tmp_path, monkeypatch):
+def test_external_commit_during_reader_pinning_cannot_reuse_old_result(
+        tmp_path, _pristine_current_schema, monkeypatch):
     path = tmp_path / "state.db"
     store = Store(path)
-    store.init_schema()
+    store.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(store, _pristine_current_schema)
     store.settings.set_setting("input", "old")
     def calculate(reader):
         return reader.memoized_read("example", lambda: reader.settings.get_setting("input"))

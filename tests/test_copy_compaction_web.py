@@ -61,7 +61,6 @@ def browsing_input(request, tmp_path, monkeypatch, without_query_timing):
             store._bind_repositories()
             store.conn.execute('PRAGMA journal_mode=WAL')
             store.conn.execute('PRAGMA wal_autocheckpoint=0')
-            store.conn.execute('BEGIN')
             store._snapshot_revisions = db_revisions.Revisions(store.conn)
             schema = resources.enter_context(closing(sqlite3.connect(':memory:', factory=PristineSchema)))
             # This holder only retains the generated TEMP guard SQL/state.
