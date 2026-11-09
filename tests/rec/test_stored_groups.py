@@ -7,9 +7,9 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.group_support import publish as publish_groups, recordings
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database
-from tests.repos.test_typed_recommendation_publication import recommendations, plan
+from tests.repos.test_typed_recommendation_publication import (
+    recommendation_predecessor, recommendations, plan,
+)
 from tests.rec.test_stored_fresh import fresh
 from tests.rec.test_stored_home import publish_bundle, candidates
 from yt_playlist.rec import group_home, group_serving, home_vibe, stored_groups

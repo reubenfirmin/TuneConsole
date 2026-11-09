@@ -6,22 +6,22 @@ import threading
 
 import pytest
 
+from tests.publication_fixture_support import installed, installed as guarded_installed
 from tests.store_fixture_support import (
-    numbered_store as installed,
-    guarded_numbered_store as guarded_installed,
     preparation_ddl_connection,
+    native_sql_calls,
     publication_consumer_reads,
     without_query_timing,
 )
 from tests.core.test_discovery_owner_preparation import seed
 from tests.core.test_discovery_artist_publication import ready as artist_ready
-from yt_playlist.core import artists, collection_recovery
+from yt_playlist.core import artists, collection_recovery, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_publication as publication, discovery_subjects as preparation
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'without_query_timing')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -176,7 +176,9 @@ def test_selected_readers_use_one_generation_and_writes_reconcile_without_losing
     _, aid, _, _ = seed(store)
     other = Store(store._db_path)
     try:
-        other.init_schema(defer_metadata=True)
+        other.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(other.conn):
+            other.init_schema(defer_metadata=True)
         with other.read_snapshot() as snapshot:
             pinned = snapshot.store
             assert pinned.discovery.get_discovered_artists()[0]['offered_count'] == 9
@@ -432,7 +434,8 @@ def test_frozen_native_upgrade_keeps_retained_inputs_and_prefers_native_readers(
         store.conn.backup(native.conn)
         runner.migrate(native.conn, registry=registry.MIGRATIONS)
         regular.migrate(native.conn)
-        native.init_schema(defer_metadata=True)
+        with schema_inspection.reuse_tables(native.conn):
+            native.init_schema(defer_metadata=True)
         assert owner.selected(native.conn) is None
         assert native.discovery.get_discovered_artists() == expected
         for kind, rows in retained.items():
@@ -454,7 +457,8 @@ def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(instal
         partial.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(partial.conn)
         runner.migrate(partial.conn, registry=registry.MIGRATIONS[:version])
-        partial.init_schema(defer_metadata=True)
+        with schema_inspection.reuse_tables(partial.conn):
+            partial.init_schema(defer_metadata=True)
         regular.migrate(partial.conn)
         assert publication.read_owners(partial.conn).revision is None
         assert partial.discovery.get_discovered_artists()[0]['offered_count'] == 9
@@ -476,7 +480,8 @@ def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeo
         partial.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(partial.conn)
         runner.migrate(partial.conn, registry=registry.MIGRATIONS[:100])
-        partial.init_schema(defer_metadata=True)
+        with schema_inspection.reuse_tables(partial.conn):
+            partial.init_schema(defer_metadata=True)
         regular.migrate(partial.conn)
         assert publication.read_owners(partial.conn).revision == stage
         assert partial.discovery.get_discovered_artists() == expected

@@ -224,6 +224,10 @@ def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_
     assert job.progress(conn) == checkpoint
     assert head(conn) is None
     assert not conn.execute(f'SELECT 1 FROM {preparation.CURSORS}').fetchone()
+    # A new input generation needs a file write; resuming the committed file
+    # checkpoint above reuses its manifest without writing the file again.
+    with conn:
+        conn.execute('UPDATE settings SET value=value WHERE key=?', (sync_state.KEY,))
     publish = files.publish
     def failed(*args):
         raise OSError('controlled sync disk failure')

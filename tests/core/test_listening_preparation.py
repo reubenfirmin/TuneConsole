@@ -7,7 +7,7 @@ import pytest
 
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
-    numbered_store as installed, publication_preparation_input, reuse_reporting_reader,
+    numbered_store as installed, preparation_ddl_connection, publication_preparation_input, reuse_reporting_reader,
     without_query_timing,
 )
 from yt_playlist.core.migrations import MigrationError, regular
@@ -111,10 +111,12 @@ def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_
     assert store.settings.get_setting('during-listening-preparation') == 'ordinary-write'
 
 
-def test_failed_batch_retains_prior_commit_and_requires_explicit_retry(installed):
+def test_failed_batch_retains_prior_commit_and_requires_explicit_retry(installed, preparation_ddl_connection):
     store, _ = installed
     account = populated(store)
-    with connect(store) as conn:
+    # Startup admission is completed below this preparation worker. All actual
+    # regular changes, rollback and explicit retry still run on its real SQL.
+    with preparation_ddl_connection as conn:
         preparation.install(conn)
         first = preparation.step(conn, batch_size=1)
         original, other = [row[0] for row in conn.execute('SELECT recording_id FROM play_events ORDER BY id LIMIT 2')]

@@ -1,6 +1,9 @@
 """The empty-catalog path uses actual selections and retained catalog evidence."""
-from contextlib import ExitStack
+import json
+from contextlib import ExitStack, nullcontext
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,7 +28,11 @@ def _pristine_current_schema():
 
 
 @pytest.fixture(autouse=True)
-def client_lifecycle(store, monkeypatch):
+def client_lifecycle(request, monkeypatch):
+    if 'store' not in request.fixturenames:
+        yield
+        return
+    request.getfixturevalue('store')
     make_client = client_for
     with ExitStack() as clients:
         def managed_client(store, fake):
@@ -217,26 +224,45 @@ def test_imported_exact_history_is_not_a_live_first_listen(store, source):
 
 @pytest.mark.parametrize('unavailable', ['playlist_listing', 'saved_albums'])
 def test_artist_setup_waits_for_a_connected_listing_but_not_unavailable_albums(
-        store, unavailable, immediate_sync_retries):
-    from yt_playlist.core.bridge import BridgeError
-    from yt_playlist.library.sync import sync_all
+        unavailable):
+    from yt_playlist.controllers.readiness import Readiness
+    from yt_playlist.controllers.sync import LibrarySync
+    from yt_playlist.repos.accounts import AccountRepo
+    from yt_playlist.repos.collection import CollectionRepo
+    from yt_playlist.repos.discovery import DiscoveryRepo
+    from yt_playlist.repos.readiness import ReadinessRepo
+    from yt_playlist.repos.settings import SettingsRepo
+    from yt_playlist.repos.sync import SyncRepo
 
-    class UnavailableLibrary(EmptyLibraryCatalog):
-        def get_library_playlists(self, limit=25):
-            if unavailable == 'playlist_listing':
-                raise BridgeError('No connected account')
-            return super().get_library_playlists(limit)
+    # The setup decision consumes persisted import facts. Sync's provider
+    # attempts and persistence are exercised by the import tests above.
+    resources = {
+        'playlist_listing': {'status': 'failed' if unavailable == 'playlist_listing' else 'complete'},
+        'saved_albums': {'status': 'failed' if unavailable == 'saved_albums' else 'complete'},
+    }
+    sync = Mock(spec_set=SyncRepo)
+    sync.state_facts.return_value = {'raw': json.dumps({'accounts': {'1': {'resources': resources}}})}
+    settings = Mock(spec_set=SettingsRepo)
+    settings.get_setting.return_value = None
+    readiness = Mock(spec_set=ReadinessRepo)
+    readiness.playable_owned.return_value = False
+    collection = Mock(spec_set=CollectionRepo)
+    collection.get_saved_albums.return_value = []
+    discovery = Mock(spec_set=DiscoveryRepo)
+    discovery.starter_artists.return_value = []
+    accounts = Mock(spec_set=AccountRepo)
+    accounts.get_accounts.return_value = [SimpleNamespace(id=1)]
+    reader = SimpleNamespace(
+        _read_only=True, settings=settings, collection=collection, discovery=discovery,
+        accounts=accounts,
+        readiness=Readiness(readiness, Mock(maximum_duration=Mock(return_value=1200))),
+        sync=LibrarySync(sync, settings, Mock(retained=nullcontext), None))
+    store = SimpleNamespace(_read_only=False, read_view=Mock(return_value=nullcontext(reader)))
 
-        def get_library_albums(self, limit=25):
-            if unavailable == 'saved_albums':
-                raise BridgeError('No connected account')
-            return []
-
-    fake = UnavailableLibrary()
-    client_for(store, fake)
-    sync_all(store, {1: fake}, 1000.)
-    assert store.settings.get_setting('last_sync_at') is None
     assert artist_start.required(store) == (unavailable == 'saved_albums')
+    settings.get_setting.assert_called_once_with('last_sync_at')
+    readiness.playable_owned.assert_called_once_with(exclude_generated=True, maximum_duration=1200)
+    store.read_view.assert_called_once_with()
 
 
 def test_search_deduplicates_provider_ids_and_does_not_select_suggestions(store):

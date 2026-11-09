@@ -206,8 +206,7 @@ def publish_vibe_menus(store, *, lane_count=16, fresh_count=48, comfort_count=36
     with atomic_write(store):
         for key, audio in audio_inputs.items():
             artists.observe(store.conn, entries[key], key.split('|', 1)[1], now=1000)
-            for field, value in audio.items():
-                metadata.select(store.conn, entries[key], field, value, 'fixture')
+            metadata.apply_provider(store.conn, entries[key], 'fixture', audio, ['fixture'], now=1000)
     prepare_profiles(store)
     bundle = {'all': lanes, '_meta': {'comfort_pool': comfort_count}}
     publish_bundles(store, bundle, vibes=True, genre_reserves=genre_reserves)
@@ -261,6 +260,7 @@ def vibe_menus(completed_vibe_menus):
 def measured_readiness_worker(store, monkeypatch):
     import sqlite3
 
+    from yt_playlist.core import metadata_evidence, metadata_runtime, vibe_versions
     from yt_playlist.core.db_diagnostics import DiagnosticConnection
     from yt_playlist.rec import vibe_joint_preparation
 
@@ -278,6 +278,13 @@ def measured_readiness_worker(store, monkeypatch):
     # excluding per-row timing and handle admission below the worker contract.
     for operation in ('execute', 'executemany'):
         monkeypatch.setattr(DiagnosticConnection, operation, getattr(sqlite3.Connection, operation))
+    # This completed consumer schema never migrates or switches storage during
+    # the worker updates. Format admission has separate owners; observe this
+    # fixture's real format once instead of probing sqlite_schema per field.
+    for owner, name in ((metadata_runtime, 'active'), (metadata_evidence, 'available'),
+                        (vibe_versions, 'normalized')):
+        installed = getattr(owner, name)(store.conn)
+        monkeypatch.setattr(owner, name, lambda _conn, installed=installed: installed)
 
 
 def test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions(store, vibe_menus):
@@ -332,9 +339,12 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     # These checks serve all presets without a genre filter. Genre-specific
     # copies do not contribute to the measured-support/readiness transition.
     lanes = publish_vibe_menus(store, genre_reserves=False)
+    # Keep all 116 published subjects, but change only the Fresh reserve that
+    # determines this readiness transition. Three measured songs cannot satisfy
+    # any preset's four-song minimum; the other lanes retain usable output.
     entries = [store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
                                  (item['key'],)).fetchone()[0]
-               for tracks in lanes.values() for item in tracks]
+               for item in lanes['fresh'][3:]]
 
     def check(expected):
         # Derive the expected answer from the actual current serving output,

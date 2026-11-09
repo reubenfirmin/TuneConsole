@@ -8,13 +8,18 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
-from tests.rec.test_home_prepared import cached_menu, cached_menu_schema, catalog_import, prepared, service, store
+from tests.rec.test_home_prepared import (
+    cached_menu, cached_menu_schema, menu_publication_store, prepared, service, store,
+)
 from tests.home_fixture_support import home_page_bytecode, home_pages_only, publish_menu, returning_listener, without_metadata_providers
 from tests.home_prepared_support import publication_inputs
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, mode_surfaces, transient
+from yt_playlist.rec import (
+    choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, mode_surfaces, transient,
+)
 from yt_playlist.web.app import create_app
 
 
@@ -97,7 +102,13 @@ def test_tuned_set_survives_learning_refresh_but_expiry_prefers_baseline(store, 
 
 @pytest.mark.usefixtures('returning_vibe_listener')
 def test_updated_set_replaces_fallback_in_same_window_and_clears_notice(
-        store, cached_menu, home_pages_only, without_metadata_providers):
+        store, cached_menu, home_pages_only, without_metadata_providers,
+        without_query_timing, monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, playlists
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, playlists)])
     prepared = cached_menu
     with mix_tuning.adjusting_vibe(store, 1001):
         store.settings.set_setting(home_vibe.SETTING, 'energize')
@@ -405,16 +416,27 @@ def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
     assert replacement['generation'] != payload['generation']
 
 
-def test_context_and_mix_preparation_share_signals_across_retries_and_expire(catalog_import, monkeypatch):
-    store = catalog_import
-    tracks = store.conn.execute('SELECT id FROM tracks ORDER BY id').fetchall()
-    # Signal sharing needs two distinct metadata-bearing subjects, rather than
-    # fitting every mode and all four candidate lanes before interrupting.
-    for track, genre in zip(tracks, ('Jazz', 'Techno', 'Classical', 'Ambient')):
-        store.tracks.set_track_genre(track['id'], genre)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_context_and_mix_preparation_share_signals_across_retries_and_expire(
+        menu_publication_store, monkeypatch):
+    from tests import home_prepared_support
+
+    store = menu_publication_store
+    # Preserve the original six modes and eight tracks in each of four lanes:
+    # 144 library subjects plus 48 discoveries. Numerical profile preparation
+    # is below signal sharing; assembly consumes completed candidates below.
+    with monkeypatch.context() as inputs:
+        inputs.setattr(home_prepared_support, 'prepare_profiles', lambda *args: None)
+        bundles = home_prepared_support.seed(store, publish=False)
     selected = [{'key': key, **track} for key, track in
                 store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
-    publish_bundles(store, {'all': {'wheelhouse': selected, 'explore': [], 'comfort': [], 'fresh': []}}, 1000)
+    # Pool publication is below sharing transient inputs. Supply its completed
+    # availability/framing, retaining every real subject and feedback read.
+    proposals = type(store.rec_proposals)
+    has_proposals = proposals.has_proposals
+    monkeypatch.setattr(proposals, 'has_proposals', lambda reader, surface:
+                        surface == 'mode_bundles' or has_proposals(reader, surface))
+    monkeypatch.setattr(mode_surfaces, 'bundle_metadata', lambda *args, **kwargs: bundles['_meta'])
     monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: [
         {'lane': 'wheelhouse', 'mode_id': None, 'tracks': selected}])
     track = store.conn.execute('SELECT identity_key FROM tracks LIMIT 1').fetchone()[0]
@@ -439,6 +461,9 @@ def test_context_and_mix_preparation_share_signals_across_retries_and_expire(cat
     monkeypatch.setattr(transient, 'facet_leans', counted)
     monkeypatch.setattr(transient, 'prepared_facet_leans', shared)
     monkeypatch.setattr(home_cards, '_complete_card', interrupted)
+    # Completion stops before consuming this lower catalog. Keep the actual
+    # feedback calculations and captured memo dependencies above it.
+    monkeypatch.setattr(home_cards, '_completion_catalog', lambda *args: {})
     assert choice_evidence.prepare_context(store, 1000)
     phase[0] = 'mixes'
     assert home_prepared.prepare(store, 1000) is None
@@ -483,9 +508,21 @@ def test_context_and_mix_preparation_share_signals_across_retries_and_expire(cat
 
 
 @pytest.mark.parametrize('new_feedback', [False, True])
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_graph_retry_reuses_completed_selection_until_its_inputs_change(
-        store, monkeypatch, new_feedback, adaptive_library_template, one_menu_per_attempt):
-    adaptive_library_template.restore(store)
+        menu_publication_store, monkeypatch, new_feedback, one_menu_per_attempt):
+    from tests.test_group_home import library
+    from yt_playlist.rec import measurement
+
+    store = menu_publication_store
+    # Keep the complete original 64-subject graph and its real publications.
+    # Fingerprinting and fixed catalog metadata are lower producer inputs.
+    monkeypatch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                        ('retry-input', {'ranker': 'retry-input'}))
+    library(store)
+    facts = store.recommendations._candidate_facts(store.rec_query.library_keys())
+    monkeypatch.setattr(type(store.recommendations), '_candidate_facts',
+                        lambda _controller, keys: {key: facts[key] for key in keys})
     assemble, complete = home_cards._group_cards, home_cards._complete_card
     calls, selected, failed = Counter(), [], []
 

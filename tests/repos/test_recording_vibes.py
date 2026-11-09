@@ -419,3 +419,53 @@ def test_dense_cohort_finishes_one_recording_with_exact_inputs(dense_cohort_stor
     pid = store.conn.execute("SELECT v.prediction_id FROM recording_vibes v JOIN recordings r ON r.id=v.recording_id "
                              "WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
     assert len(vibe_provenance.read(store.conn,pid)['inputs']) == 2000
+
+
+def test_cohort_fanout_keeps_partial_evidence_and_model_refresh_visits_every_recording(dense_cohort_store):
+    from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
+    from yt_playlist.rec import vibe_prediction
+
+    store = dense_cohort_store
+    keys = ('a-measured', 'b-partial', 'c-fallback', 'd-unrelated', 'e-unprepared')
+    channels = (*home_vibe.PRESETS, *INTENSITY_CHANNELS)
+    stamp = vibe_preparation.version()
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+                               [(index, key, key, 'Shared') for index, key in enumerate(keys, 1)])
+        version = vibe_versions.column(store.conn, 'measurements')
+        stored_version = vibe_versions.stored(store.conn, stamp)
+        originals = [(index, 1, channel) for index, channel in enumerate(channels, 1)]
+        originals.append((len(originals) + 1, 2, 'relax'))
+        store.conn.executemany(f'INSERT INTO measurements(id,recording_id,vibe,score,support,source,{version},'
+            "input_digest,measured_at) VALUES (?,?,?,.8,1,'provider_measurement',?,'fixture',1)",
+            [(*row, stored_version) for row in originals])
+        store.conn.executemany('INSERT INTO recording_vibes VALUES (?,?,.8,1,\'provider_measurement\',?,NULL,?, '
+            '\'[1]\',\'psybient\',NULL,NULL)',
+            [(rid, channel, mid, stored_version) for mid, rid, channel in originals])
+        store.conn.executemany('INSERT INTO recording_vibes VALUES (?,?,.5,0,\'heuristic\',NULL,NULL,?, '
+            '?,?,NULL,NULL)', [(2, 'energize', stored_version, '[1]', 'psybient'),
+                              (3, 'relax', stored_version, '[1]', 'psybient'),
+                              (4, 'relax', stored_version, '[2]', None)])
+        store.conn.execute('DELETE FROM rec_content_pending')
+        store.conn.execute('DELETE FROM rec_vibe_pending')
+
+    def drain_pages():
+        for _ in range(len(keys) + 2):
+            if not store.vibe_predictions.pending():
+                return
+            assert store.vibe_predictions.fanout(1)
+        pytest.fail('Single-recording fanout pages did not finish')
+
+    # Each dependency kind must retain partially measured and unmeasured
+    # recipients, without reprocessing independent measured recordings.
+    for group in vibe_prediction.groups('[1]', 'psybient'):
+        store.vibe_predictions.repository.queue([group])
+        drain_pages()
+        assert {row[0] for row in store.conn.execute('SELECT identity_key FROM rec_content_pending')} == {
+            'b-partial', 'c-fallback'}
+        with store.conn:
+            store.conn.execute('DELETE FROM rec_content_pending')
+    store.vibe_predictions.ensure_version(stamp)
+    drain_pages()
+    assert {row[0] for row in store.conn.execute('SELECT identity_key FROM rec_content_pending')} == set(keys)
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()

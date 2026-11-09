@@ -5,10 +5,10 @@ from yt_playlist.rec import group_discovery, group_similarity, group_versions, m
 def recordings(spec):
     result = []
     for genre, size, character in spec:
+        profile = musical_profiles.resolve([], genre=genre, overrides={
+            'mood_relaxed': 1 - character, 'mood_aggressive': character,
+            'instrumental': character, 'danceability': character, 'bpm': 80 + 80 * character})
         for i in range(size):
-            profile = musical_profiles.resolve([], genre=genre, overrides={
-                'mood_relaxed': 1 - character, 'mood_aggressive': character,
-                'instrumental': character, 'danceability': character, 'bpm': 80 + 80 * character})
             result.append(group_similarity.recording(f'{genre}:{character}:{i}',
                 {'genre': genre, 'year': str(1980 + 10 * (i % 4))}, profile))
     return result

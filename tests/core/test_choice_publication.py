@@ -6,17 +6,17 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.publication_fixture_support import installed
 from tests.core.test_choice_learning_preparation import seed,finish,head,originals
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input, publication_consumer_reads
-from yt_playlist.core import group_evidence,choice_learning_state
+from tests.store_fixture_support import install_numbered_input, publication_consumer_reads, without_query_timing
+from yt_playlist.core import group_evidence,choice_learning_state,schema_inspection
 from yt_playlist.core.migrations import regular,registry,runner,MigrationError
 from yt_playlist.core.preparation import choice_learning as preparation,choice_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +35,8 @@ def choice_installed(request,tmp_path,monkeypatch):
         with closing(sqlite3.connect(':memory:')) as source:
             install_numbered_input(source,version,regular_owners=regular.CHANGES)
             source.backup(store.conn)
-        store.init_schema(defer_metadata=True)
+        with schema_inspection.reuse_tables(store.conn):
+            store.init_schema(defer_metadata=True)
         yield store,version
     finally:
         store.conn.close()

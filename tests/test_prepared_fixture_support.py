@@ -497,24 +497,29 @@ def test_radio_genre_template_keeps_complete_private_inputs(
     assert len(metadata) == 108
     assert {row[2] for row in metadata} == {'2001'}
     assert {row[1] for row in metadata} == set(labels)
+    heads = template.source.recommendations.heads()
     for target in (template.source, store, file_backed_store):
-        assert target.rec_query.tracks_by_keys(keys) == library
         assert target._fixture_bundle_payload == template.bundles
-        assert target.recommendations.heads() == template.source.recommendations.heads()
-        assert [tuple(row) for row in target.conn.execute(
-            'SELECT video_id,genre,mb_year FROM catalog_tracks ORDER BY video_id')] == metadata
-        assert target.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 108
-        modes = target.modes.list_modes()
-        assert len(modes) == 9
-        for index, (mode, label) in enumerate(zip(modes, labels)):
-            assert (mode['mode_id'], mode['label'], mode['size']) == (index + 1, label, 12)
-            assert mode['families'] == [[label, 12]]
-            assert mode['rep_keys'] == []
-            assert mode['space'] == embedding_vectors.content_space_id(target)
-            angle = index * .01 if index < 6 else (index - 5) * 1.2
-            np.testing.assert_array_equal(mode['centroid'], np.array(
-                [np.cos(angle), np.sin(angle)], dtype=np.float32))
-        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        # Compare each complete immutable copy through one real private reader.
+        # Opening a new database copy for every mode/field adds no isolation check.
+        with target.read_view() as reader:
+            assert reader.rec_query.tracks_by_keys(keys) == library
+            assert reader.recommendations.heads() == heads
+            assert [tuple(row) for row in reader.conn.execute(
+                'SELECT video_id,genre,mb_year FROM catalog_tracks ORDER BY video_id')] == metadata
+            assert reader.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 108
+            modes = reader.modes.list_modes()
+            assert len(modes) == 9
+            space = embedding_vectors.content_space_id(reader)
+            for index, (mode, label) in enumerate(zip(modes, labels)):
+                assert (mode['mode_id'], mode['label'], mode['size']) == (index + 1, label, 12)
+                assert mode['families'] == [[label, 12]]
+                assert mode['rep_keys'] == []
+                assert mode['space'] == space
+                angle = index * .01 if index < 6 else (index - 5) * 1.2
+                np.testing.assert_array_equal(mode['centroid'], np.array(
+                    [np.cos(angle), np.sin(angle)], dtype=np.float32))
+            assert reader.conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     with pytest.raises(sqlite3.OperationalError, match='readonly'):
         template.source.settings.set_setting('private_radio_genre', 'forbidden')

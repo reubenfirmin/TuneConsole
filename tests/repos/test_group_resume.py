@@ -1,5 +1,5 @@
 """Interrupted staging resumes committed prefixes without weakening publication guards."""
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 import sqlite3
@@ -10,9 +10,10 @@ from tests.group_support import publish, recordings
 from tests.test_group_preparation import seed
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as file_backed_store,
-    native_sql_calls, without_query_timing,
+    native_sql_calls, reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import group_discovery, group_preparation, group_versions
 from yt_playlist.repos import group_publication
@@ -103,8 +104,9 @@ def finish(store, prepared, owner):
 
 @pytest.mark.parametrize('restart', [False, True])
 @pytest.mark.parametrize('error', [WorkBudgetExceeded, WorkClosing])
-def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatch, request, restart, error):
-    tracks = recordings([('House', 5, .3)])
+def test_preparation_resumes_exact_plan_and_legacy_versions(
+        database, monkeypatch, request, restart, error, _pristine_current_schema):
+    tracks = recordings([('House', 2, .3)])
     seed(database, tracks)
     legacy_version = legacy(database)
     # Model an already published historical definition. Current preparation
@@ -113,7 +115,9 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
     worker = group_preparation.Preparation(database)
     # Unchanged compact definitions reuse their completed membership. Give the
     # next publication genuinely new content so interruption exercises a prefix.
-    seed(database, recordings([('House', 6, .3)]))
+    # The existing two inputs are unchanged. Add only the new member instead
+    # of rewriting their prepared payloads and musical profiles as well.
+    seed(database, recordings([('House', 3, .3)])[-1:])
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 2)
     original = interrupt(monkeypatch, error=error)
     if error is WorkClosing:
@@ -125,6 +129,7 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
     generation = plan['generation']
     prefix = members(database, generation)
     assert 0 < len(prefix) < sum(len(group['members']) for group in plan['groups'])
+    assert plan['edges']
     assert database.taste_groups.head(members=True) == first
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
         snapshot.store.conn.execute('SELECT 1')
@@ -150,21 +155,31 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
         request.addfinalizer(database.conn.close)
         database.conn.execute('PRAGMA synchronous=NORMAL')
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        database.init_schema()
+        with schema_inspection.reuse_tables(database.conn):
+            # This case restarts the repository worker on already admitted SQL.
+            # Rebind real owners and connection-local guards without repeating
+            # application migrations, repairs and installed-format validation.
+            database._schema_compatibility = False
+            database._rebuild_source_version = None
+            database._schema_recovery_pending = False
+            database._bind_repositories()
+            database._snapshot_revisions = _pristine_current_schema.bind_revisions(database.conn)
         worker = group_preparation.Preparation(database)
-    assert worker.step(2060)
-    assert len(discovered) == int(restart)
-    assert worker._pending is None
-    assert database.taste_groups.head_generation() == generation
-    assert database.taste_groups.head()['created_at'] == 2000
-    assert members(database, generation) == sorted((group['version'], *member)
-        for group in plan['groups'] for member in group['members'])
-    assert sum(database.conn.execute(f'SELECT COUNT(*) FROM {table} WHERE generation_id='
-        '(SELECT id FROM group_generations WHERE external_key=?)', (generation,)).fetchone()[0]
-        for table in ('group_graph', 'unresolved_group_graph')) == len(plan['edges'])
-    assert legacy_version in database.taste_groups.legacy_versions()
-    assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']
-    assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
+    with (schema_inspection.reuse_tables(database.conn),
+          reuse_reporting_reader(database, monkeypatch) if restart else nullcontext()):
+        assert worker.step(2060)
+        assert len(discovered) == int(restart)
+        assert worker._pending is None
+        assert database.taste_groups.head_generation() == generation
+        assert database.taste_groups.head()['created_at'] == 2000
+        assert members(database, generation) == sorted((group['version'], *member)
+            for group in plan['groups'] for member in group['members'])
+        assert sum(database.conn.execute(f'SELECT COUNT(*) FROM {table} WHERE generation_id='
+            '(SELECT id FROM group_generations WHERE external_key=?)', (generation,)).fetchone()[0]
+            for table in ('group_graph', 'unresolved_group_graph')) == len(plan['edges'])
+        assert legacy_version in database.taste_groups.legacy_versions()
+        assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']
+        assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_foreign_live_lease_cannot_be_adopted(database, monkeypatch):

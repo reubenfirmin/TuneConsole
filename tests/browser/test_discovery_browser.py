@@ -79,7 +79,7 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
 
 
 @pytest.mark.parametrize("width", [1440])
-def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, width, tmp_path):
+def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, width, tmp_path, monkeypatch):
     from yt_playlist.rec import fresh_pool
 
     store.settings.set_setting("last_sync_at", "1")
@@ -94,11 +94,23 @@ def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, wid
     page.route("**/home/discovery", lambda route: route.abort())
     page.set_viewport_size({"width": width, "height": 1000})
     page.clock.install()
+    pause_at = page.clock.pause_at
+    pause_times = []
+
+    def delayed_pause(at):
+        # Inject protocol latency beyond the old 100 ms scheduling margin.
+        # This is a race challenge, not a wait for layout or preparation.
+        page.wait_for_timeout(250)
+        pause_at(at)
+        pause_times.append(at)
+
+    monkeypatch.setattr(page.clock, 'pause_at', delayed_pause)
     page.goto(f"{live_app}/")
     tiles = page.locator("#discovery-track-grid > [data-discovery-id]")
     expect(tiles).to_have_count(10)
     expect(tiles.first).to_be_hidden()
     discovery_interval(page, tiles.first)
+    assert page.evaluate('Date.now() / 1000') == pytest.approx(pause_times[0] + 1.15, rel=0, abs=.001)
     # Some songs also appear in Mix tapes; their existing offers belong to that surface.
     before = {row["identity_key"]: row["offered_count"] for row in store.discovery.get_discovered_tracks()}
     assert store.conn.execute("SELECT COUNT(*) FROM discovery_impressions WHERE recording_id IS NOT NULL").fetchone()[0] == 0

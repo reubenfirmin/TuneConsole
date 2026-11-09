@@ -450,6 +450,8 @@ class RecWorker:
         with self._lock:
             state = self.jobs.retry[Job.HOME]
             state.dirty = True
+            if force:
+                self.tasks.request_home_refresh()
         if force or time.monotonic() - state.attempted_at >= 30:
             self._schedule(full=False, home=True)
 

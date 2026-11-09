@@ -218,6 +218,9 @@ def consumer_schema(*, entries=None, snapshot_guards=True):
             if entries is not None:
                 genre_identity.seed_catalog(schema)
         if snapshot_guards:
+            # Generate the real TEMP guards in one transaction instead of an
+            # implicit transaction for every trigger. Revisions commits it.
+            schema.execute('BEGIN')
             schema.capture_revisions(Revisions(schema))
         schema.execute('PRAGMA query_only=ON')
         yield schema
@@ -400,7 +403,7 @@ def mock_snapshot_coordinator(store, monkeypatch):
         def snapshot(**kwargs):
             return nullcontext(SimpleNamespace(
                 store=reader, release_reader=lambda: None, publish=publish,
-                publish_ordered=publish, _changes=store.conn.total_changes))
+                publish_ordered=publish, is_current=lambda: True, _changes=store.conn.total_changes))
 
         monkeypatch.setattr(store, 'read_snapshot', snapshot)
         yield

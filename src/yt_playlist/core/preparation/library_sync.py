@@ -166,12 +166,18 @@ def describe(source, original):
             result.get('last_attempt_at') if result else None, items)
 
 
-def prepare(conn, row):
+def prepare(conn, row, *, revision=None, offset=0, rebuild=False):
     raw = bytes(row['value']) if row['value'] is not None else b''
     text = raw.decode('utf-8')
     kind, phase, has_attempt, finished_at, items = describe(row['key'], text if row['value'] is not None else None)
-    durable = [('file', position, files.publish(directory(conn), files.encode('library_sync', str(position),
-        text[start:start + PART_CHARACTERS]))) for position, start in enumerate(range(0, len(text), PART_CHARACTERS))]
+    # Completed file units already have a durable manifest for this generation.
+    # Final verification reads them; explicit repair still republishes the files.
+    retained = {part[0]: tuple(part[1:]) for part in conn.execute(
+        f'SELECT position,filename,digest,byte_size FROM {PARTS} WHERE source=? AND generation=?',
+        (row['key'], revision))} if offset and not rebuild else {}
+    durable = [('file', position, retained[position] if position in retained else
+        files.publish(directory(conn), files.encode('library_sync', str(position), text[start:start + PART_CHARACTERS])))
+        for position, start in enumerate(range(0, len(text), PART_CHARACTERS))]
     if len(durable) > MAX_PARTS:
         raise MigrationError('Library sync exceeds its original part budget')
     return Plan(hashlib.sha256(raw).hexdigest(), len(raw), len(durable), len(items), kind,
@@ -233,7 +239,7 @@ def repair(conn, progress):
                  max_bytes=MAX_BYTES, max_parts=MAX_PARTS)
 
 
-RESULT_JOB = OrderedJob(DEFINITION, prepare, begin, copy, complete, delete, repair_files=repair)
+RESULT_JOB = OrderedJob(DEFINITION, prepare, begin, copy, complete, delete, revision_aware=True, repair_files=repair)
 
 
 def stamp(conn, owner, key, row):

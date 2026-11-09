@@ -12,7 +12,8 @@ from tests.core.test_album_owner_preparation import finish, seed
 from tests.store_fixture_support import guarded_numbered_store as guarded_installed
 from tests.store_fixture_support import numbered_store as installed
 from tests.store_fixture_support import (
-    numbered_store, preparation_ddl_connection, publication_consumer_reads, reuse_reporting_reader,
+    native_sql_calls, numbered_store, preparation_ddl_connection, publication_consumer_reads,
+    reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.core import albums, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -20,7 +21,7 @@ from yt_playlist.core.preparation import album_occurrences as preparation, album
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -74,8 +75,8 @@ def projection(conn, tracks, states, links, keys):
 
 
 @pytest.fixture
-def preopened_album_publication(numbered_store, tmp_path, monkeypatch):
-    store, _ = numbered_store
+def preopened_album_publication(installed, tmp_path, monkeypatch):
+    store, _ = installed
     rich_source(store)
     sources = {owner:[dict(row) for row in store.conn.execute('SELECT * FROM main.'+owner+' ORDER BY '+key)]
         for owner,key in [('album_tracks','id'), ('album_fetch_state','album_id')]}
@@ -83,6 +84,10 @@ def preopened_album_publication(numbered_store, tmp_path, monkeypatch):
     native = Store(tmp_path / 'native.db')
     reads = ExitStack()
     try:
+        preopened.conn.execute('PRAGMA synchronous=OFF')
+        native.conn.execute('PRAGMA synchronous=OFF')
+        reads.enter_context(schema_inspection.reuse_tables(preopened.conn))
+        reads.enter_context(schema_inspection.reuse_tables(native.conn))
         preopened.init_schema(defer_metadata=True)
         store.conn.backup(native.conn)
         runner.migrate(native.conn, registry=registry.MIGRATIONS)
@@ -103,7 +108,7 @@ def preopened_album_publication(numbered_store, tmp_path, monkeypatch):
         preopened.conn.close()
 
 
-@pytest.mark.parametrize('numbered_store', [79, 93, 98], indirect=True)
+@pytest.mark.parametrize('installed', [79, 93, 98], indirect=True)
 def test_preopened_projection_groups_match_frozen_native_without_losing_originals(preopened_album_publication):
     store, preopened, native, sources, identity = preopened_album_publication
     actual = projection(store.conn, *(publication.relation(store.conn, owner) for owner in publication.RELATIONS))

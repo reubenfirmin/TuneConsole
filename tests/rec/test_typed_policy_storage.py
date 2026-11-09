@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database
-from tests.repos.test_typed_recommendation_publication import recommendations, plan, publish
+from tests.repos.test_typed_recommendation_publication import (
+    recommendation_predecessor, recommendations, plan, publish,
+)
 from yt_playlist.core import (policy_config, storage_maintenance,
                               policy_documents, recommendation_pools as pools)
 from yt_playlist.core.evidence_ledger import canonical

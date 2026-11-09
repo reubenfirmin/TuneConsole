@@ -203,22 +203,22 @@ def test_interrupted_slot_batch_resumes_all_remaining_shared_selections(recommen
                   for i in range(publication.SLOT_BATCH_ROWS + 2))
     prepared = replace(first, slots=slots)
     build = store.recommendations.claim(prepared)
-    from yt_playlist.controllers.recommendation_publications import RecommendationPublications
-    original = RecommendationPublications._stage_pool
+    from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+    original = RecommendationPublicationsRepo.attach_pool
     calls, changed = 0, False
 
-    def interrupted(repo, current, pool, **kwargs):
+    def interrupted(repo, current, slot, identity):
         nonlocal calls, changed
         calls += 1
         if interruption == 'closing' and calls == publication.SLOT_BATCH_ROWS + 1:
             raise WorkClosing('controlled interruption after the first slot batch')
-        result = original(repo, current, pool, **kwargs)
+        result = original(repo, current, slot, identity)
         if interruption == 'superseded' and calls == publication.SLOT_BATCH_ROWS:
             changed = True
         return result
 
     with monkeypatch.context() as boundary:
-        boundary.setattr(RecommendationPublications, '_stage_pool', interrupted)
+        boundary.setattr(RecommendationPublicationsRepo, 'attach_pool', interrupted)
         if interruption == 'closing':
             with pytest.raises(WorkClosing):
                 store.recommendations.stage(prepared, build)
@@ -237,6 +237,27 @@ def test_interrupted_slot_batch_resumes_all_remaining_shared_selections(recommen
     for slot in slots:
         assert [row['key'] for row in store.recommendations.page('home', slot.mode_key, 'wheelhouse')] == ['one', 'two']
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_staging_rejects_wrong_scores_before_sealing_and_can_retry_after_repair(recommendations):
+    store = recommendations
+    prepared = plan(store)
+    build = store.recommendations.claim(prepared)
+    identity, sealed, count = store.recommendations.repository.begin_pool(build, prepared.slots[0].pool)
+    assert not sealed and count == 2
+    with store.conn:
+        store.conn.execute('UPDATE recommendation_candidates SET score=.1 WHERE pool_id=? AND rank=0', (identity,))
+    with pytest.raises(ValueError, match='incomplete membership'):
+        store.recommendations.stage(prepared, build)
+    assert store.recommendations.head('home') is None
+    assert not store.conn.execute('SELECT 1 FROM recommendation_surface_pools').fetchone()
+    assert tuple(store.conn.execute('SELECT complete FROM recommendation_pools').fetchone()) == (0,)
+    assert tuple(store.conn.execute('SELECT status FROM recommendation_generations').fetchone()) == ('building',)
+    with store.conn:
+        store.conn.execute('UPDATE recommendation_candidates SET score=.9 WHERE pool_id=? AND rank=0', (identity,))
+    assert store.recommendations.stage(prepared, build)
+    store.recommendations.publish(build, 12)
+    assert [row['score'] for row in store.recommendations.page('home', 'all', 'wheelhouse')] == [.9, .7]
 
 
 def test_changed_pool_does_not_replace_unchanged_ranking_facts(recommendations):

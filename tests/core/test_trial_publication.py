@@ -7,7 +7,10 @@ import pytest
 
 from tests.core.test_model_trial_preparation import head, seed
 from tests.publication_fixture_support import installed, installed_reader
-from tests.store_fixture_support import native_sql_calls, publication_consumer_reads, without_query_timing
+from tests.store_fixture_support import (
+    native_sql_calls, preparation_ddl_connection, publication_consumer_reads, without_query_timing,
+)
+from tests.store_fixture_support import numbered_store as unadmitted_installed
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import model_trials as preparation, trial_publication as publication
 from yt_playlist.core.store import Store
@@ -30,9 +33,10 @@ def ready(owner, conn):
     pytest.fail('Trial preparation did not finish bounded fixture')
 
 
-@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(installed, monkeypatch):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [79, 93, 94], indirect=True)
+def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(
+        unadmitted_installed, monkeypatch, preparation_ddl_connection):
+    store, _ = unadmitted_installed
     values, originals = seed(store)
     with installed_reader(store._db_path, monkeypatch) as other:
         for owner in publication.OWNERS.values():
@@ -45,7 +49,7 @@ def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(installed
             captured = owner.capture(other.conn)
             assert captured['built_at'] is None
             assert captured['run_ref'] == (1 if owner.source == 'model_live_comparison' else None)
-        regular.migrate(other.conn)
+        regular.migrate(preparation_ddl_connection)
     with installed_reader(store._db_path, monkeypatch) as reopened:
         assert reopened.rec_proposals.get_proposals('model_album_assignment') == values['model_album_assignment']
 

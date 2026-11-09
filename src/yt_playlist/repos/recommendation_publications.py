@@ -64,7 +64,7 @@ class RecommendationPublicationsRepo(Repo):
     def claim(self, plan, digest, *, owner=None):
         return publication.claim(self, plan, digest, owner=owner)
 
-    @snapshot_read
+    @lookup_read
     def staged_slots(self, build, slots):
         if len(slots) > publication.SLOT_BATCH_ROWS:
             raise ValueError('Recommendation slot lookup exceeds its batch budget')
@@ -81,7 +81,7 @@ class RecommendationPublicationsRepo(Repo):
     def begin_pool(self, build, prepared):
         return publication.begin_pool(self, build, prepared)
 
-    @snapshot_read
+    @lookup_read
     def pool_size(self, identity):
         return self.conn.execute('SELECT (SELECT count(*) FROM recommendation_candidates WHERE pool_id=?)'
             '+(SELECT count(*) FROM unresolved_recommendation_candidates WHERE pool_id=?)',
@@ -94,8 +94,10 @@ class RecommendationPublicationsRepo(Repo):
             publication._touch(conn, build)
             recommendation_pools.append(conn, identity, candidates, start)
 
-    @snapshot_read
+    @lookup_read
     def verify_pool(self, identity, prepared):
+        # Staging owns an unfinished pool, and sealed membership is immutable.
+        # Check that indexed owner without cloning the whole memory database.
         return recommendation_pools.verify(self.conn, identity, prepared)
 
     def attach_pool(self, build, slot, identity):
@@ -110,7 +112,7 @@ class RecommendationPublicationsRepo(Repo):
             conn.execute('DELETE FROM recommendation_build_pools WHERE generation_id=? AND pool_id=?',
                 (build.generation_id, identity))
 
-    @snapshot_read
+    @lookup_read
     def staged_outputs(self, build, outputs):
         if len(outputs) > publication.OUTPUT_BATCH_ROWS:
             raise ValueError('Recommendation output lookup exceeds its batch budget')

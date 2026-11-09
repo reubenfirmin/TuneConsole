@@ -127,6 +127,7 @@ def complete(library, *, start=None):
     pytest.fail(f'Comparison did not finish: {result}')
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
         library, daily_library_template, file_backed_store, monkeypatch):
     store, now = library['store'], library['now']
@@ -134,20 +135,23 @@ def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
     with monkeypatch.context() as patch:
         sibling = _library(file_backed_store, patch, daily_library_template)
         for current in (daily_library_template.source, store, file_backed_store):
-            assert current.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
-            for offset in (0, 80):
-                playlist = current.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
-                assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
-                assert current.playlists.get_playlist_track_keys(playlist.id) == set(library['keys'][offset:offset + 80])
-            assert list(map(tuple, current.conn.execute('SELECT account_id,video_id,played_at '
-                'FROM play_event_subjects ORDER BY id'))) == [
-                    (library['account'], str(i), -100 * daily.DAY) for i in range(20)] + [
-                    (library['account'], str(i), now - 30 * daily.DAY + ((i - 20) // 2) * daily.DAY + 100)
-                    for i in range(20, 80)]
-            assert current.rec_model.get_rec_vectors() == library['original']
-            assert current.settings.get_setting('rec_dim') == '2'
-            assert not current.settings.get_setting('rec_fit_inputs')
-            assert current.model_selection.latest_daily_selection() is None
+            # Compare all the same SQL/vector inputs through one real reader
+            # per copy. No writes occur between these complete-copy assertions.
+            with current.read_view() as reader:
+                assert reader.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
+                for offset in (0, 80):
+                    playlist = reader.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
+                    assert len(reader.playlists.get_playlist_track_ids(playlist.id)) == 80
+                    assert reader.playlists.get_playlist_track_keys(playlist.id) == set(library['keys'][offset:offset + 80])
+                assert list(map(tuple, reader.conn.execute('SELECT account_id,video_id,played_at '
+                    'FROM play_event_subjects ORDER BY id'))) == [
+                        (library['account'], str(i), -100 * daily.DAY) for i in range(20)] + [
+                        (library['account'], str(i), now - 30 * daily.DAY + ((i - 20) // 2) * daily.DAY + 100)
+                        for i in range(20, 80)]
+                assert reader.rec_model.get_rec_vectors() == library['original']
+                assert reader.settings.get_setting('rec_dim') == '2'
+                assert not reader.settings.get_setting('rec_fit_inputs')
+                assert reader.model_selection.latest_daily_selection() is None
         for name, source in roots(daily_library_template.source.conn).items():
             destinations = [roots(target.conn)[name] for target in (store, file_backed_store)]
             assert len(set([source, *destinations])) == 3

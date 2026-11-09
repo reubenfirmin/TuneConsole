@@ -18,7 +18,8 @@ def discovery_dwell(page, tile, endpoint='/discovery/impressions'):
     # Let native layout/IntersectionObserver qualify a newly scrolled tile while
     # keeping the dwell itself under explicit clock control.
     page.clock.run_for(50)
-    page.wait_for_function('tile => discoveryExposure?.timers.has(tile)', arg=tile.element_handle())
+    page.wait_for_function('tile => discoveryExposure?.timers.has(tile)',
+                           arg=tile.element_handle(), polling=20)
     # Adjacent visible headings can post to the same endpoint during this jump.
     # Wait for this tile's write before inspecting its persisted view count.
     with page.expect_response(records_tile):
@@ -27,10 +28,16 @@ def discovery_dwell(page, tile, endpoint='/discovery/impressions'):
 
 def discovery_interval(page, tile):
     """Exercise an interval with no expected new exposure (hidden or already seen)."""
-    # install() alone still advances with wall time. Pause during the initial
-    # hidden interval so later assertions cannot race an already-fired dwell.
-    page.clock.pause_at(page.evaluate('Date.now() / 1000') + .1)
-    page.wait_for_function('tile => discoveryExposure?.observed.has(tile)', arg=tile.element_handle())
-    # Deliver native layout/IntersectionObserver updates before jumping timers.
+    # Freeze the pause target until pause_at has completed its protocol round
+    # trip. A future Date.now() offset races wall time on a busy runner.
+    now = page.evaluate('Date.now() / 1000')
+    page.clock.set_fixed_time(now)
+    page.clock.pause_at(now)
+    # Date and timers must advance together during the controlled intervals.
+    page.clock.set_system_time(now)
+    # HTMX observes replacement tiles after its settle timer. Deliver that and
+    # native layout/IntersectionObserver updates before awaiting registration.
     page.clock.run_for(50)
+    page.wait_for_function('tile => discoveryExposure?.observed.has(tile)',
+                           arg=tile.element_handle(), polling=20)
     page.clock.fast_forward(1100)

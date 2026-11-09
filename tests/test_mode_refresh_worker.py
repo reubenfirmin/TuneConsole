@@ -9,13 +9,13 @@ from yt_playlist.rec import (content_model, embedding_training as training, embe
                              model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes)
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
-    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls, without_query_timing,
 )
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('native_sql_calls')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -120,14 +120,30 @@ def test_deferred_model_fit_still_prepares_candidates(store, monkeypatch):
     assert prepared == [True]
 
 
-def test_content_update_refreshes_original_models_and_places_track(store, library):
-    mode_surfaces.prepare_bundles(store, 1000.0)
+def test_content_update_refreshes_original_models_and_places_track(store, library, monkeypatch):
+    # The update must replace an existing publication. Its prior ranking is a
+    # completed input; retain all 81 subjects there, then exercise real model
+    # refresh and ranking after the extra track arrives.
+    existing = [{'key': key, **track} for key, track in
+                store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
+    with monkeypatch.context() as initial:
+        initial.setattr(mode_surfaces, '_calculate_bundles', lambda reader, now, policies:
+            ({'all': {'temporal': policies.stamp(existing, 'temporal')}}, []))
+        mode_surfaces.prepare_bundles(store, 1000.0)
     space = embed.content_space_id(store)
-    tid = store.tracks.upsert_track("extra", "Zz extra", "Artist", None, None)
-    store.tracks.set_track_genre(tid, "Techno")
+    # Metadata ingestion is below repair of the model and candidate pools.
+    seed_publication_subjects(store, [{'key': 'zz extra|artist', 'video_id': 'extra',
+        'title': 'Zz extra', 'artist': 'Artist', 'genre': 'Techno'}])
     key = store.tracks.identity_key_for_video("extra")
 
     _settle(store)
+    # This assertion owns placement from the refreshed content vectors. Supply
+    # completed non-temporal scorer pools for every library subject; temporal
+    # membership, nearest-mode assignment and typed publication remain actual.
+    ranked = [SimpleNamespace(key=key, **track) for key, track in
+              store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
+    monkeypatch.setattr(mode_surfaces, '_rank_pools', lambda *args:
+                        {'wheelhouse': ranked, 'explore': ranked, 'comfort': ranked, 'fresh': []})
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert embed.content_space_id(store) == space
     assert {m['mode_id'] for m in taste_modes.live_modes(store)} == {
@@ -200,6 +216,13 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
 
     # Complete discovery encoding before guarding reuse of the saved groups.
     _settle(store)
+    # Only discovery repair is under test here. Supply completed library
+    # rankings for all 81 original subjects; keep discovery scoring live.
+    from yt_playlist.rec import surfaces
+    library_pool = [SimpleNamespace(key=key, **track) for key, track in
+                    store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
+    for name in ('for_you', 'explore_for_you', 'comfort_listening'):
+        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: library_pool)
     monkeypatch.setattr(taste_modes, "prepare_modes", forbidden)
     monkeypatch.setattr(training, "build_vectors_from_baskets", forbidden)
     worker = _worker(store)

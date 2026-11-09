@@ -23,6 +23,7 @@ from tests.home_prepared_support import publication_inputs as controlled_publica
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 from tests.store_fixture_support import (bounded_consumer_schema, initialize_consumer,
                                          mock_snapshot_coordinator, reuse_reporting_reader)
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, home_cache, home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, surfaces
@@ -55,7 +56,8 @@ def menu_publication_store(tmp_path, cached_menu_schema, monkeypatch):
         database.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(database, cached_menu_schema)
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(database, monkeypatch):
+        with (reuse_reporting_reader(database, monkeypatch),
+              schema_inspection.reuse_tables(database.conn)):
             yield database
 
 
@@ -101,6 +103,7 @@ def store(request, tmp_path, monkeypatch):
                 request.getfixturevalue('native_sql_calls')
             store = Store(tmp_path / 'cached-home.db')
             resources.callback(store.conn.close)
+            resources.enter_context(schema_inspection.reuse_tables(store.conn))
             store.conn.execute('PRAGMA synchronous=OFF')
             initialize_consumer(store, request.getfixturevalue('cached_menu_schema'))
             # Keep real WAL commits; checkpoint scheduling has its own owners

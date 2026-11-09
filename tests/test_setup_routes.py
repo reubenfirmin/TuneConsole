@@ -1,5 +1,7 @@
 """Account setup, validation and reauthentication messages."""
 from urllib.parse import parse_qs, urlsplit
+from types import SimpleNamespace
+from unittest.mock import Mock
 from tests.home_fixture_support import without_metadata_providers
 from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 
@@ -142,18 +144,35 @@ def test_setup_page_alpine_attr_well_formed(store):
 
 # --- streaming sync (background job + SSE) ---
 
-def test_saving_identity_definitions_does_not_clear_expired_session(store):
-    rt = _FakeRuntime(store, configured=True)
-    iid = store.accounts.upsert_account("main", "browser.json", None, True)
-    store.settings.set_setting("last_sync_at", "1.0")
-    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
-    app.state.ctx.flag_auth_expired(iid, "Main")
-    c = TestClient(app, base_url="http://127.0.0.1")
+def test_saving_identity_definitions_does_not_clear_expired_session():
+    from fastapi import FastAPI
+    from yt_playlist.controllers.accounts import Accounts
+    from yt_playlist.repos.accounts import AccountRepo
+    from yt_playlist.web.context import Ctx
+    from yt_playlist.web.jobs import SyncJobs
+    from yt_playlist.web.routes import setup
 
-    r = c.post("/setup", data={"label": ["main"],
-                               "brand_account_id": [""], "master": "0"}, follow_redirects=False)
+    iid = 1
+    repository = Mock(spec_set=AccountRepo)
+    repository.has_auth_state.return_value = True
+    repository.auth_expirations.return_value = {}
+    repository.flag_auth_expiration.return_value = {iid: 'Main'}
+    repository.get_accounts.return_value = [SimpleNamespace(id=iid)]
+    store = SimpleNamespace(accounts=Accounts(
+        repository, None, paused=lambda: False, maintenance_accounts=lambda: None))
+    rt = _FakeRuntime(store, configured=True)
+    ctx = Ctx(store, rt.clients, lambda: 1.0, Mock(), SyncJobs(), setup=rt)
+    ctx.flag_auth_expired(iid, 'Main')
+    app = FastAPI()
+    app.include_router(setup.build(ctx))
+    with TestClient(app) as c:
+        r = c.post("/setup", data={"label": ["main"],
+                                   "brand_account_id": [""], "master": "0"}, follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"].startswith("/setup?tab=identities&flash=")
-    assert app.state.ctx.auth_expired == {iid: "Main"}
+    assert ctx.auth_expired == {iid: "Main"}
+    assert rt.applied[0]['label'] == 'main'
+    repository.flag_auth_expiration.assert_called_once_with(iid, 'Main')
+    repository.clear_auth_expirations.assert_not_called()
 
 

@@ -102,6 +102,7 @@ class RecommendationPublications:
     def stage(self, plan, build, *, still_current=None):
         if recommendation_plan.validate(plan) != build.plan_digest:
             raise ValueError('Recommendation staged plan changed')
+        staged_pools = {}
         for start in range(0, len(plan.slots), recommendation_plan.SLOT_BATCH_ROWS):
             if still_current is not None and not still_current():
                 return False
@@ -114,10 +115,15 @@ class RecommendationPublications:
                     if digest != slot.pool.content_digest:
                         raise ValueError('Recommendation staged pool selection changed')
                     continue
-                identity = self._stage_pool(build, slot.pool, still_current=still_current)
+                identity = staged_pools.get(slot.pool.content_digest)
+                if identity is None:
+                    identity = self._stage_pool(build, slot.pool, still_current=still_current)
                 if identity is None:
                     return False
                 self.repository.attach_pool(build, slot, identity)
+                # Attaching seals the immutable pool. Other slots in this call
+                # can reuse its verification; retries verify their inputs anew.
+                staged_pools[slot.pool.content_digest] = identity
         for start in range(0, len(plan.outputs), recommendation_plan.OUTPUT_BATCH_ROWS):
             if still_current is not None and not still_current():
                 return False

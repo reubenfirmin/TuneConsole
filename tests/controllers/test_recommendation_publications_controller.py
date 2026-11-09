@@ -240,6 +240,30 @@ def test_failed_pool_verification_does_not_attach_or_mark_ready(publications):
     publications.repository.ready.assert_not_called()
 
 
+def test_shared_pool_is_verified_once_across_slot_batches_and_again_on_retry(publications):
+    pool = recommendation_pools.prepare('fresh', 'policy', None, '1' * 64, 'fresh',
+        (recommendation_pools.Candidate(1, .5),))
+    plan = recommendation_plan.Plan('test', 'policy', None, 0, 100, slots=tuple(
+        recommendation_plan.Slot('home', f'mode-{index}', 'fresh', pool)
+        for index in range(recommendation_plan.SLOT_BATCH_ROWS + 2)))
+    repository = publications.repository
+    repository.begin_pool.return_value = (9, True, 1)
+    assert publications.stage(plan, build(plan))
+    repository.verify_pool.assert_called_once_with(9, pool)
+    assert [call.args[1] for call in repository.attach_pool.call_args_list] == list(plan.slots)
+
+    # A later attempt must detect a failed membership check before attaching
+    # another slot, even when this controller verified that identity earlier.
+    repository.attach_pool.reset_mock()
+    repository.ready.reset_mock()
+    repository.verify_pool.side_effect = ValueError('incomplete membership')
+    with pytest.raises(ValueError, match='incomplete membership'):
+        publications.stage(plan, build(plan))
+    assert repository.verify_pool.call_count == 2
+    repository.attach_pool.assert_not_called()
+    repository.ready.assert_not_called()
+
+
 def test_changed_plan_is_rejected_before_any_staging_write(publications):
     plan = output_plan()
     with pytest.raises(ValueError, match='staged plan changed'):

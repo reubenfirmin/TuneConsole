@@ -4,9 +4,9 @@ from tests.derived_rating_support import seed_dislike
 import numpy as np
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database
-from tests.repos.test_typed_recommendation_publication import recommendations, publish, plan
+from tests.repos.test_typed_recommendation_publication import (
+    recommendation_predecessor, recommendations, publish, plan,
+)
 from tests.rec.test_stored_fresh import fresh, forbid_legacy
 from yt_playlist.rec import bundle_storage, mode_surfaces, rec_params
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications

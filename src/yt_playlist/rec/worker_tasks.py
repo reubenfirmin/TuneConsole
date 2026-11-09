@@ -5,6 +5,12 @@ class ServingTasks:
     def __init__(self, ctx, stage, *, checkpoint=None):
         self.ctx, self.stage = ctx, stage
         self.checkpoint = checkpoint
+        self._home_requested = self._home_prepared = 0
+
+    def request_home_refresh(self):
+        # Called under the worker lock. A request arriving during preparation
+        # must survive that publication, as must a deferred explicit attempt.
+        self._home_requested += 1
 
     def ratings(self):
         from yt_playlist.library import ratings
@@ -17,10 +23,16 @@ class ServingTasks:
     def home(self):
         from yt_playlist.rec import album_choices, album_notes, album_tuning, choice_evidence, graduation, home_prepared, measurement
         now = self.ctx.now_fn()
+        requested = self._home_requested
+        prepare_mixes = (requested != self._home_prepared
+                         or not home_prepared.has_prepared_batch(self.ctx.store, now))
         self.stage('recommendation policy storage', measurement.maintain_storage, self.ctx.store, now)
         self.stage("listening context", choice_evidence.prepare_context, self.ctx.store, now)
         albums = self.stage("Album choices", album_choices.prepare_cached, self.ctx.store, now)
-        result = self.stage("Home collections", home_prepared.prepare, self.ctx.store, now)
+        result = (self.stage("Home collections", home_prepared.prepare, self.ctx.store, now)
+                  if prepare_mixes else None)
+        if result is not None:
+            self._home_prepared = requested
         # Reporting has its own retryable publication. A failed report must not
         # prevent missing playable collections from being prepared first.
         self.stage("listening choices", choice_evidence.refresh_report, self.ctx.store, now)
@@ -40,15 +52,16 @@ class ServingTasks:
         from yt_playlist.core.accounts import catalog_client
         notes_pending = self.stage("Album sleeve notes", album_notes.prepare, self.ctx.store, now, menu,
                                    client=catalog_client(self.ctx.client_provider()), now_fn=self.ctx.now_fn)
-        if result is None:
+        if prepare_mixes and result is None:
             self.ctx.logger.debug("Home preparation deferred; retrying after preparation backoff")
             return True
-        self.stage("held steering exposure", graduation.graduate_slider_exposure, self.ctx.store, self.ctx.now_fn())
-        self.stage("listening exposure", graduation.graduate_play_exposure,
-                   self.ctx.store, self.ctx.now_fn(), prepared_leans=result["play_exposure"])
-        target = (home_prepared.MAX_MENUS
-                  if result.get('modes') or result.get('group_policy') == 'adaptive' else 1)
-        return albums is None or notes_pending or len(result["menus"]) < target
+        if result is not None:
+            self.stage("held steering exposure", graduation.graduate_slider_exposure, self.ctx.store, self.ctx.now_fn())
+            self.stage("listening exposure", graduation.graduate_play_exposure,
+                       self.ctx.store, self.ctx.now_fn(), prepared_leans=result["play_exposure"])
+        return (albums is None or notes_pending
+                or self._home_requested != self._home_prepared
+                or prepare_mixes and not home_prepared.batch_complete(result))
 
     def artwork(self, artist_ids):
         from yt_playlist.rec import discover

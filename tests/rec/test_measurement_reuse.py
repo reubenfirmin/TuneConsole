@@ -1,18 +1,22 @@
 import json
 import logging
 import sqlite3
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.controllers.rec_model import RecommendationModel
 from tests.conftest import seed_catalog_track
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -149,36 +153,50 @@ def test_failed_card_does_not_drop_remaining_response_measurements(store, monkey
 
 @pytest.fixture(scope='module')
 def measurement_schema():
-    with bounded_consumer_schema(entries=(('rock', 'Rock'),)) as schema:
+    with bounded_consumer_schema(entries=(('rock', 'Rock'),), snapshot_guards=False) as schema:
         yield schema
 
 
 @pytest.fixture
-def measurement_worker(tmp_path, monkeypatch, measurement_schema):
+def measurement_worker(tmp_path, monkeypatch, measurement_schema, native_sql_calls, without_query_timing):
     store = Store(tmp_path / "state.db")
-    store.conn.execute('PRAGMA synchronous=OFF')
-    initialize_consumer(store, measurement_schema)
-    store.conn.execute('PRAGMA wal_autocheckpoint=0')
-    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
-    worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
-                                       now_fn=lambda: 100))
-    monkeypatch.setattr(worker, "_start_loop", lambda: None)
-    # Retention and candidate hydration are below queue ownership and policy
-    # attribution. Preserve actual snapshots, configuration capture and writes.
-    monkeypatch.setattr(store.rec_ledger, '_prune_policy_batch', lambda *args: None)
-    monkeypatch.setattr(store.rec_ledger, 'scorecard_inputs', lambda *args, **kwargs: None)
-    track = {'video_id': 'video', 'title': 'Song', 'artist': 'Artist'}
-    monkeypatch.setattr(type(store.rec_query), 'tracks_by_keys', lambda self, keys: {'song|artist': track})
-    monkeypatch.setattr(type(store.rec_query), 'content_inputs_by_keys', lambda self, keys: {'song|artist': track})
-    monkeypatch.setattr(type(store.discovery), 'discovered_tracks_by_keys', lambda self, keys: {})
-    try:
-        # Keep each queued offer's actual pinned reader. Report lookups below
-        # the attribution assertions can share an unpinned read-only connection.
-        with reuse_reporting_reader(store, monkeypatch):
-            yield store, worker
-    finally:
-        worker.shutdown()
-        store.conn.close()
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, measurement_schema, snapshot_guards=False)
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
+        worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
+                                           now_fn=lambda: 100))
+        monkeypatch.setattr(worker, "_start_loop", lambda: None)
+        # Retention and candidate hydration are below queue ownership and policy
+        # attribution. Preserve actual snapshots, configuration capture and writes.
+        monkeypatch.setattr(store.rec_ledger, '_prune_policy_batch', lambda *args: None)
+        monkeypatch.setattr(store.rec_ledger, 'scorecard_inputs', lambda *args, **kwargs: None)
+        track = {'video_id': 'video', 'title': 'Song', 'artist': 'Artist'}
+        monkeypatch.setattr(type(store.rec_query), 'tracks_by_keys', lambda self, keys: {'song|artist': track})
+        monkeypatch.setattr(type(store.rec_query), 'content_inputs_by_keys', lambda self, keys: {'song|artist': track})
+        monkeypatch.setattr(type(store.discovery), 'discovered_tracks_by_keys', lambda self, keys: {})
+        @contextmanager
+        def pinned_offer(**options):
+            # Queue attribution consumes a pinned read transaction, without
+            # publishing derived state back through a revision guard. Keep
+            # eight actual WAL connections, their SQL pins and file leases;
+            # optimistic publication coordination is a lower collaborator.
+            with store._retained_readers():
+                reader = store._make_reader()
+                with closing(reader.conn), schema_inspection.reuse_tables(reader.conn):
+                    reader.conn.execute('BEGIN')
+                    reader.conn.execute('SELECT 1 FROM settings LIMIT 1').fetchone()
+                    yield SimpleNamespace(store=reader)
+
+        monkeypatch.setattr(store, 'read_snapshot', pinned_offer)
+        try:
+            # Keep each queued offer's actual pinned reader. Report lookups below
+            # the attribution assertions can share an unpinned read-only connection.
+            with reuse_reporting_reader(store, monkeypatch):
+                yield store, worker
+        finally:
+            worker.shutdown()
 
 
 def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(measurement_worker):

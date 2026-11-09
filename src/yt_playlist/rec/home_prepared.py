@@ -381,6 +381,25 @@ def _has_complete_menu(store, payload, now):
     return any(len(menu['protos']) >= 4 for menu in payload['menus'])
 
 
+def batch_complete(payload):
+    """One complete board already supplies four playable Home collections."""
+    return bool(payload) and any(
+        len(menu['protos']) == 4
+        and len({proto['lane'] for proto in menu['protos']}) == 4
+        and all(proto['tracks'] for proto in menu['protos'])
+        for menu in payload['menus'])
+
+
+def has_prepared_batch(store, now):
+    """Keep a fresh serving batch while background candidate pools catch up."""
+    mix_tuning.expire(store, now)
+    with store.read_view() as reader:
+        target = 'home_tuned' if mix_tuning.remaining(reader, now) > 0 else SURFACE
+        payload = _load_surface(reader, target, readiness_only=True)
+        return (batch_complete(payload) and now - payload['built_at'] < MAX_AGE_S
+                and payload['tuning'] == tuning_key(reader, now))
+
+
 def load(store, now, schedule=lambda: None, *, display_only=False):
     """A missing/corrupt cache never falls back to synchronous ranking."""
     mix_tuning.expire(store, now)

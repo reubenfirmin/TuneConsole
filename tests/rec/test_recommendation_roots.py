@@ -7,9 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database
-from tests.repos.test_typed_recommendation_publication import recommendations, publish, plan, collect
+from tests.repos.test_typed_recommendation_publication import (
+    recommendation_predecessor, recommendations, publish, plan, collect,
+)
 from yt_playlist.core import group_documents
 from yt_playlist.rec import choice_evidence, group_roots, recommendation_roots
 from yt_playlist.rec.choice_capture import CaptureQueue

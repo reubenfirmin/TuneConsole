@@ -9,7 +9,7 @@ from tests.radio_session_support import controlled_radio_checkpoints, poc, play
 from tests.genre_catalog_support import bound_shipped_catalog
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
-    bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing,
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls, without_query_timing,
 )
 from yt_playlist.core import genre_identity, schema_inspection
 from yt_playlist.core.store import Store
@@ -20,7 +20,7 @@ from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_genres import GenrePolicy, genre
 from yt_playlist.web import radio_session
 
-pytestmark = pytest.mark.usefixtures('without_query_timing')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -39,10 +39,12 @@ def isolated_genre_evidence_home(tmp_path_factory):
 def store(tmp_path, genre_schema, monkeypatch):
     source = Store(tmp_path / 'radio-genres.db')
     with closing(source.conn), schema_inspection.reuse_tables(source.conn):
-        initialize_consumer(source, genre_schema)
-        source.conn.execute('PRAGMA synchronous=NORMAL')
+        source.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(source, genre_schema, snapshot_guards=False)
         source.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(source, monkeypatch):
+        # Playback races happen in the native playlist collaborator. Database
+        # publication is uncontended below these selection/pinning checks.
+        with mock_snapshot_coordinator(source, monkeypatch):
             # Genre selection consumes completed policies. Keep all nine modes,
             # 108 subjects and their actual SQL/files without exporting and
             # restoring a second copy of this private candidate input.
@@ -58,7 +60,7 @@ def store(tmp_path, genre_schema, monkeypatch):
 def genre_schema():
     # Keep the shipped aliases and shared Electronic/Synthwave family. The
     # remaining catalog is unrelated to these nine modes and 108 recordings.
-    with bounded_consumer_schema(()) as schema:
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
         with pytest.MonkeyPatch.context() as patch:
             bound_shipped_catalog(patch, {'electronic', 'synthwave', 'jazz', 'rock', 'ambient'})
             schema.execute('PRAGMA query_only=OFF')

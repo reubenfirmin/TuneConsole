@@ -1,5 +1,5 @@
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import replace
 from types import SimpleNamespace
 from tests.enrichment_support import seed_audio
@@ -14,9 +14,15 @@ from tests.test_home_tuning import home_clients, prepare_tuning_home
 from tests.musical_support import prepare_profiles, prepare_vibes
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import (bounded_consumer_schema, initialize_consumer,
+                                         mock_snapshot_coordinator)
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces, musical_character, musical_profiles, rec_params
+
+
+VIBE_HTTP_GENRES = (('jazz', 'Jazz'), ('techno', 'Techno'), ('classical', 'Classical'),
+                   ('ambient', 'Ambient'), ('trance', 'Trance'), ('indie-rock', 'Indie Rock'),
+                   ('house', 'House'))
 
 
 def select_vibe(client, value, *, expected_phase='ready'):
@@ -121,10 +127,7 @@ def vibe_http_calculation(completed, selection):
 def vibe_http_schema(tmp_path_factory):
     # HTTP consumers exercise real catalog/SQL/files with their six input
     # genres plus the ordinary menu's House; full vocabulary is owned by admission.
-    with pytest.MonkeyPatch.context() as patch, bounded_consumer_schema((
-            ('jazz', 'Jazz'), ('techno', 'Techno'), ('classical', 'Classical'),
-            ('ambient', 'Ambient'), ('trance', 'Trance'), ('indie-rock', 'Indie Rock'),
-            ('house', 'House'))) as schema:
+    with pytest.MonkeyPatch.context() as patch, bounded_consumer_schema(VIBE_HTTP_GENRES) as schema:
         patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('vibe-http-home')))
         yield schema
 
@@ -136,51 +139,36 @@ def test_vibe_http_schema_keeps_every_offered_family_and_snapshot_guards(vibe_ht
     assert vibe_http_schema._revision_script
 
 
-@pytest.fixture(scope='module')
-def vibe_http_template(vibe_http_schema):
+@pytest.fixture
+def vibe_http_inputs(journey_store, monkeypatch, home_routes_only, without_metadata_providers):
     from yt_playlist.rec import home_cache, home_cards, home_prepared, measurement
 
-    def seed(store):
-        with pytest.MonkeyPatch.context() as patch:
-            publication_inputs(store, patch)
-            store.rec_model.set_weight('genre:jazz', 1.3, now=1000)
-            completed = home_cards.HomeCards.cards
-            cards = vibe_http_calculation(completed, SimpleNamespace(order=(4, 5, 0, 1, 2, 3)))
-            patch.setattr(home_cards.HomeCards, 'cards', cards)
-            with store.read_view() as reader:
-                baseline = cards(home_cards.HomeCards(reader, home_prepared._NoJobs(), None),
-                                 home_cards.CardsRequest(1000, record=False))
-            home_prepared.remember(store, None, baseline, 1000)
-            payload = home_cache.read(store, 'home_tuned')
-            assert home_prepared._valid(payload)
-            home_cache.put(store, home_prepared.SURFACE, payload, 1000)
-            home_cache.put(store, 'home_tuned', {}, 1000)
-            home_cache.put(store, 'home_choice', {}, 1000)
-            # A genuine typed head detects unintended candidate publication.
-            # Its policy is an input to this HTTP consumer, not a ranking build.
-            patch.setattr(measurement, 'serving_policy', lambda _store, _now, ranker='lane':
-                          ('controlled', {'schema': 4, 'algorithm': 'vibe-http-fixture', 'ranker': ranker}))
-            publish_bundles(store, {'all': {'wheelhouse': baseline.protos[0]['tracks']}}, 1000)
-            return SimpleNamespace(payload=payload, completed=completed)
-
-    with prepared_template(vibe_http_schema, seed) as template:
-        yield template
-
-
-@pytest.fixture
-def vibe_http_inputs(monkeypatch, vibe_http_template,
-                     home_routes_only, without_metadata_providers):
-    from yt_playlist.rec import home_cards
-
-    inputs = vibe_http_template.result
+    # One lifecycle consumes this private input once. Seed it directly instead
+    # of building, inventorying and restoring a second prepared Store first.
+    store = journey_store
+    publication_inputs(store, monkeypatch, stable_options=True)
+    store.rec_model.set_weight('genre:jazz', 1.3, now=1000)
+    completed = home_cards.HomeCards.cards
     selection = SimpleNamespace(order=(4, 5, 0, 1, 2, 3))
-    cards = vibe_http_calculation(inputs.completed, selection)
-
+    cards = vibe_http_calculation(completed, selection)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
     monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *_args, **_kwargs: None)
-    with vibe_http_template.open(':memory:') as store:
-        yield SimpleNamespace(store=store, payload=copy.deepcopy(inputs.payload), cards=cards,
-                              selection=selection)
+    with store.read_view() as reader:
+        baseline = cards(home_cards.HomeCards(reader, home_prepared._NoJobs(), None),
+                         home_cards.CardsRequest(1000, record=False))
+    home_prepared.remember(store, None, baseline, 1000)
+    payload = home_cache.read(store, 'home_tuned')
+    assert home_prepared._valid(payload)
+    home_cache.put(store, home_prepared.SURFACE, payload, 1000)
+    home_cache.put(store, 'home_tuned', {}, 1000)
+    home_cache.put(store, 'home_choice', {}, 1000)
+    # A genuine typed head detects unintended candidate publication. Its policy
+    # is a completed lower input; SQL and published files remain real.
+    with monkeypatch.context() as patch:
+        patch.setattr(measurement, 'serving_policy', lambda _store, _now, ranker='lane':
+                      ('controlled', {'schema': 4, 'algorithm': 'vibe-http-fixture', 'ranker': ranker}))
+        publish_bundles(store, {'all': {'wheelhouse': baseline.protos[0]['tracks']}}, 1000)
+    return SimpleNamespace(store=store, payload=payload, cards=cards, selection=selection)
 
 
 @pytest.fixture
@@ -277,9 +265,10 @@ def test_missing_audio_preserves_taste_and_does_not_invent_mood():
     assert home_vibe.affinity(items[0], "cruise", {}) == .5
 
 
-def test_library_audio_takes_precedence_and_keeps_extra_discovery_features(store):
+def test_library_audio_takes_precedence_and_keeps_extra_discovery_features(journey_store):
     from yt_playlist.util.matching import identity_key
 
+    store = journey_store
     key = identity_key("Song", "Artist")
     store.discovery.upsert_discovered_track(key, "v", "Song", "Artist", "", None, None, None, None, 1,
                                  audio={"energy": .9, "mood_relaxed": .8})
@@ -291,13 +280,45 @@ def test_library_audio_takes_precedence_and_keeps_extra_discovery_features(store
     assert profile['dimensions']['relaxed']['value'] == .8
 
 
-def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_changes(store, monkeypatch):
+@pytest.fixture
+def journey_store(tmp_path, journey_schema, monkeypatch, native_sql_calls):
+    from yt_playlist.core.store import Store
+
+    store = Store(tmp_path / 'journey.db')
+    with closing(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, journey_schema, snapshot_guards=False)
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        # Snapshot races have independent real guarded owners in
+        # rec/test_vibe_requests. These serial journey/HTTP consumers require
+        # real SQL/files beneath successful snapshot coordination.
+        with mock_snapshot_coordinator(store, monkeypatch):
+            yield store
+
+
+@pytest.fixture(scope='module')
+def journey_schema():
+    with bounded_consumer_schema(VIBE_HTTP_GENRES, snapshot_guards=False) as schema:
+        yield schema
+
+
+def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_changes(journey_store, monkeypatch):
     from yt_playlist.rec import choice_evidence, home_cards, home_prepared
 
-    tid = store.tracks.upsert_track('measured', 'Measured', 'Artist', '', 180)
-    seed_audio(store, tid, energy=.9)
-    key = store.tracks.identity_key_for_video('measured')
-    prepare_profiles(store)
+    store = journey_store
+    key = 'measured|artist'
+    seed_publication_subjects(store, [{'key': key, 'video_id': 'measured',
+                                      'title': 'Measured', 'artist': 'Artist'}])
+
+    def publish_profile(energy, now):
+        # Journey ordering consumes completed worker output. Keep actual
+        # profile files/SQL and replacement, without re-running metadata intake
+        # or inference; the normal-worker readiness owner covers those steps.
+        profile = musical_profiles.resolve([], selected={'energy': energy})
+        store.musical_profiles.publish_recordings([(key, musical_profiles.canonical(profile),
+            profile['version'], musical_profiles.digest(profile))], now)
+
+    publish_profile(.9, 1000)
     profile = musical_character.load(store, [key])[key]
     # A prepared selection can predate the latest profile publication.
     older = copy.deepcopy(profile)
@@ -319,8 +340,8 @@ def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_ch
         'recipe': {'vibe': None, 'vibe_policy': home_vibe.VERSION,
                    'musical_version': musical_character.VERSION}}], 1000, context={})
     captured = store.rec_ledger.evidence().get('opportunity', oid)
-    seed_audio(store, tid, energy=.2)
-    prepare_profiles(store, 1001)
+    publish_profile(.2, 1001)
+    assert musical_character.load(store, [key])[key] != profile
     prior_menu_key = home_prepared.tuning_key(store, 1002)
     monkeypatch.setattr(home_vibe, 'VERSION', 'next-policy')
     assert home_prepared.tuning_key(store, 1002) != prior_menu_key
@@ -414,14 +435,15 @@ def test_ordinary_menu_capture_has_no_vibe_purpose(ordinary_menu_client, caplog)
     assert not any('Mix choice capture failed' in record.getMessage() for record in caplog.records)
 
 
-def test_vibe_renders_changed_selection_with_visible_choice_evidence(vibe_http_inputs, vibe_clients):
+def test_vibe_renders_changed_selection_with_visible_choice_evidence(vibe_http_inputs, vibe_clients, monkeypatch):
     import html
     import json
     import re
     from yt_playlist.rec import choice_evidence
 
     store = vibe_http_inputs.store
-    client = vibe_clients([1000.0])
+    clock = [1000.0]
+    client = vibe_clients(clock)
     before = store.recommendations.head('home')
     learned = store.rec_model.get_weights()
     response = select_vibe(client, 'relax')
@@ -451,50 +473,12 @@ def test_vibe_renders_changed_selection_with_visible_choice_evidence(vibe_http_i
     assert store.rec_model.get_weights() == learned and store.rec_model.get_leans() == {}
     assert store.recommendations.head('home') == before
 
-
-def test_vibe_persists_through_reads_and_refresh_without_learning(vibe_http_inputs, vibe_clients):
-    store = vibe_http_inputs.store
-    clock = [1000.0]
-    client = vibe_clients(clock)
-    learned = store.rec_model.get_weights()
-    before = store.recommendations.head('home')
-    response = select_vibe(client, 'relax', expected_phase=None)
-    offered = store.rec_ledger.evidence().records('opportunity')[-1]
-    assert 'data-vibe="relax"' in response.text
+    # Continue the same temporary selection through refresh, policy replacement
+    # and expiry. Each stage preserves the evidence already shown to the user.
     assert 'data-vibe="relax"' in client.post("/home/refresh-cards").text
     assert store.rec_model.get_weights() == learned
     assert store.recommendations.head('home') == before
     assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
-
-
-def test_vibe_expires_without_learning_or_rewriting_history(vibe_http_inputs, vibe_clients):
-    store = vibe_http_inputs.store
-    clock = [1000.0]
-    client = vibe_clients(clock)
-    learned = store.rec_model.get_weights()
-    before = store.recommendations.head('home')
-    select_vibe(client, 'relax', expected_phase=None)
-    offered = store.rec_ledger.evidence().records('opportunity')[-1]
-    clock[0] += mix_tuning.TTL_S
-    response = client.get("/home/fingerprint")
-    assert 'data-vibe="relax"' not in response.text
-    assert store.settings.get_setting(home_vibe.SETTING) is None
-    assert store.rec_model.get_weights() == learned
-    assert store.recommendations.head('home') == before
-    assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
-
-
-def test_vibe_policy_change_reissues_choice_without_rewriting_history(
-        vibe_http_inputs, vibe_clients, monkeypatch):
-    import html
-    import json
-    import re
-    from yt_playlist.rec import choice_evidence
-
-    store = vibe_http_inputs.store
-    client = vibe_clients([1000.0])
-    select_vibe(client, 'relax', expected_phase=None)
-    offered = store.rec_ledger.evidence().records('opportunity')[-1]
     monkeypatch.setattr(home_vibe, 'VERSION', home_vibe.VERSION + '/changed-policy')
     # Supply the changed policy's new visible menu below the request controller.
     # A private version stamp alone cannot create different visible evidence.
@@ -507,6 +491,14 @@ def test_vibe_policy_change_reissues_choice_without_rewriting_history(
     assert revised['options'] != offered['options']
     assert all('recipe' not in option and 'tracks' not in option for option in revised['options'])
     assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
+    clock[0] += mix_tuning.TTL_S
+    response = client.get("/home/fingerprint")
+    assert 'data-vibe="relax"' not in response.text
+    assert store.settings.get_setting(home_vibe.SETTING) is None
+    assert store.rec_model.get_weights() == learned and store.rec_model.get_leans() == {}
+    assert store.recommendations.head('home') == before
+    assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
+    assert store.rec_ledger.evidence().get('opportunity', revised['id']) == revised
 
 
 @pytest.fixture(scope='module')

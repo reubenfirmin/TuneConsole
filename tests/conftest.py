@@ -757,7 +757,7 @@ def unlocked_home_controls(monkeypatch):
     monkeypatch.setattr(account_growth, 'vibe_access', lambda *_args, **_kwargs: True)
 
     monkeypatch.setattr(account_growth, 'view', lambda *_args, **_kwargs: {
-        'nodes': [], 'achievements': [], 'health': {'total': 0, 'processed': 0},
+        'nodes': [], 'trails': [], 'achievements': [], 'health': {'total': 0, 'processed': 0},
         'vibes_ready': True, 'ready_areas': {'directions': True, 'discover': True, 'recent': True},
         'ready_formats': {'mixes': True, 'albums': False, 'radio': False},
         'home_choice_available': False})

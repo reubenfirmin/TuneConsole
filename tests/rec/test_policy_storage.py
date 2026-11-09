@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as store, mock_snapshot_coordinator,
+    native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import db_space, policy_config, radio_storage
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, measurement, mode_surfaces, scorecard
@@ -22,14 +25,6 @@ def disable_periodic_library_sync():
 def _pristine_current_schema():
     with bounded_consumer_schema((('rock', 'Rock'),)) as source:
         yield source
-
-
-def test_policy_storage_input_has_real_current_schema_and_snapshot_guards(_pristine_current_schema):
-    source = _pristine_current_schema
-    assert source.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
-    assert source.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == 0
-    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source._revision_script
 
 
 def _publish(store, now=1, rankers=('first', 'second'), body=None):
@@ -137,12 +132,20 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
     assert config['ranker'] == f'vibe:lane:family-{variants - 1}'
 
 
-def test_repeated_advancing_time_preparation_without_serving_has_bounded_bytes(store, monkeypatch):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_repeated_advancing_time_preparation_without_serving_has_bounded_bytes(
+        store, monkeypatch, _pristine_current_schema):
+    source = _pristine_current_schema
+    assert source.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert source.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == 0
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source._revision_script
     monkeypatch.setattr(policy_config, 'GRACE_SECONDS', 240)
-    # Five cycles reach the full three-generation grace window, then collect
-    # expired revalidations while retaining the original pool's policy roots.
-    check_preparation_retention(store, monkeypatch, generations=5, variants=4,
-        evidence_bytes=256, maximum_generations=3, byte_bound=16000)
+    # Retention owns real publication, files, roots and collection. Snapshot
+    # coordination is an uncontended lower input to this sequential workflow.
+    with mock_snapshot_coordinator(store, monkeypatch):
+        check_preparation_retention(store, monkeypatch, generations=8, variants=4,
+            evidence_bytes=256, maximum_generations=3, byte_bound=16000)
 
 
 def test_unused_retention_protects_both_impression_paths_proposals_sessions_and_grace(store):

@@ -131,8 +131,12 @@ class VibePredictionsRepo(Repo):
                         'ORDER BY identity_key LIMIT ?', (cursor, remaining)).fetchall()
                 else:
                     where, args = self._cohort(*json.loads(key))
+                    # Own measurements do not consume cohort estimates. A
+                    # partial recording still appears through any fallback
+                    # channel; model-version refreshes above visit everyone.
                     rows = self.conn.execute('SELECT DISTINCT r.identity_key FROM recording_vibes v '
-                        f'JOIN recordings r ON r.id=v.recording_id WHERE {where} AND r.identity_key>? '
+                        f'JOIN recordings r ON r.id=v.recording_id WHERE {where} AND v.measurement_id IS NULL '
+                        'AND r.identity_key>? '
                         'ORDER BY r.identity_key LIMIT ?', (*args, cursor, remaining)).fetchall()
                 for identity, in rows:
                     self.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?) '
@@ -166,8 +170,9 @@ class VibePredictionsRepo(Repo):
             rows = [dict(row) for row in self.conn.execute('SELECT ' + projection +
                 ',m.input_digest FROM recording_vibes v LEFT JOIN measurements m ON m.id=v.measurement_id '
                 'WHERE v.recording_id=? ORDER BY v.vibe', (rid,))]
-        ids = [sid for row in rows if row['measurement_id'] is not None for sid, in self.conn.execute(
-            'SELECT sample_id FROM measurement_samples WHERE measurement_id=?', (row['measurement_id'],))]
+        ids = [sid for sid, in self.conn.execute('SELECT s.sample_id FROM recording_vibes v '
+            'JOIN measurement_samples s ON s.measurement_id=v.measurement_id '
+            'WHERE v.recording_id=? ORDER BY v.vibe,s.sample_id', (rid,))]
         return rows, ids
 
     @synchronized

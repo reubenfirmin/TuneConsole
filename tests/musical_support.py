@@ -1,11 +1,14 @@
 """Prepare the same retained profile inputs and bounded vibe pools as the worker."""
 from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import musical_preparation
-from yt_playlist.rec.progressive import Preparation
+from yt_playlist.rec.progressive import Budget, Preparation
 
 
 def prepare_profiles(store, now=1000):
-    preparation = Preparation(store)
+    # Consumers need all completed profiles, rather than a particular number
+    # of worker turns. Keep every recording and real guarded publication while
+    # processing this controlled input in larger, bounded batches.
+    preparation = Preparation(store, budget=Budget(batch=512))
     for _ in range(500):
         if not store.prepared_content.has_pending() and not musical_preparation.due(store):
             return

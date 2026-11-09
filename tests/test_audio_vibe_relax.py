@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tests.audio_vibe_fixture_support import disable_periodic_library_sync, specialist_store
-from tests.rec.test_vibe_prediction import drain, fits, track
+from tests.rec.test_vibe_prediction import catalog_track as track, drain, fits
 from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax

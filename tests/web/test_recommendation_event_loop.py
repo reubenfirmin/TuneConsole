@@ -7,22 +7,19 @@ import time
 import httpx
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
 from yt_playlist.web.app import create_app
 
 
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
 @pytest.fixture(scope='module')
-def home_contention_template(_pristine_current_schema):
-    from tests.onboarding_support import publish_personal_mix
-    from tests.prepared_fixture_support import prepared_template
-    from tests.test_growth_journey import early_journey
-
-    def build(source):
-        early_journey(source)
-        publish_personal_mix(source)
-
-    # Earn readiness once; each form still mutates its own SQL and file copy.
-    with prepared_template(_pristine_current_schema, build) as template:
-        yield template
+def _pristine_current_schema():
+    # These requests own thread handoff and actual SQL contention. Preserve the
+    # House controls and Rock recipe inputs; catalog curation has separate owners.
+    with bounded_consumer_schema((('house', 'House'), ('rock', 'Rock'))) as schema:
+        yield schema
 
 
 @pytest.mark.parametrize('path,data', [
@@ -71,14 +68,10 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request,
         data = _recipe_form(store, rid, own_pct=20, familiarity_pct=80)
     guarded_home = path.startswith('/home/') and path != '/home/generate'
     if guarded_home:
-        if path == '/home/vibe':
-            # This form owns database waits, not numerical readiness. Its
-            # real prerequisite/served-menu agreement has an independent owner
-            # in test_growth_readiness. Admission still opens the real reader
-            # and the accepted request persists through actual settings writes.
-            request.getfixturevalue('unlocked_home_controls')
-        else:
-            request.getfixturevalue('home_contention_template').restore(store)
+        # Completed readiness is below the form's thread handoff. Retained
+        # access checks still open the real database and must wait for the
+        # actual connection lock held below. Keep accepted settings writes real.
+        request.getfixturevalue('unlocked_home_controls')
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     monkeypatch.setattr(app.state.ctx.bridge, 'send_control', lambda frame, *, intent: True)
     if path == '/home/vibe':
