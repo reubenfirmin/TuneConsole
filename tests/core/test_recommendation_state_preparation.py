@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, publication_preparation_input
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, publication_preparation_input
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation.recommendation_state import BYTE_LIMITS, JOBS
 
@@ -35,7 +35,7 @@ def finish(job, conn):
 
 
 @pytest.mark.parametrize('installed,job_name', CASES, indirect=['installed'])
-def test_documents_stay_authoritative_and_capture_continuing_replacements(installed, job_name):
+def test_documents_stay_authoritative_and_capture_continuing_replacements(installed, job_name, preparation_ddl_connection):
     store, _ = installed
     job = JOBS[job_name]
     surface, value = VALUES[job_name]
@@ -46,7 +46,7 @@ def test_documents_stay_authoritative_and_capture_continuing_replacements(instal
     raw = store.conn.execute('SELECT payload,built_at FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
     job.install(store.conn)
     job.step(store.conn, batch_size=1)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     finish(job, store.conn)
     assert tuple(store.conn.execute('SELECT payload,built_at FROM rec_proposals WHERE surface=?', (surface,)).fetchone()) == tuple(raw)
     assert store.rec_proposals.get_proposals(surface) == value

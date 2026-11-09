@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from tests.store_fixture_support import numbered_store as installed, guarded_numbered_store as guarded_installed, publication_consumer_reads
-from tests.store_fixture_support import preparation_ddl_connection
+from tests.store_fixture_support import native_sql_calls, preparation_ddl_connection, without_query_timing
 from tests.core.test_demand_preparation import VALUES, seed, finish
 from yt_playlist.core import recommendation_requests
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -193,6 +193,7 @@ def test_interruption_resume_and_publication_fence_keep_atomic_selection(install
 
 
 @pytest.mark.parametrize('installed',[86],indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_regular_changes_usable(installed,preparation_ddl_connection):
     store,_ = installed
     seed(store)

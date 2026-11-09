@@ -10,6 +10,7 @@ from tests.publication_fixture_support import installed, installed as guarded_in
 from tests.store_fixture_support import (
     preparation_ddl_connection,
     native_sql_calls,
+    numbered_store,
     publication_consumer_reads,
     without_query_timing,
 )
@@ -65,9 +66,11 @@ def read(conn, owner, stage, name):
     return [dict(row) for row in conn.execute('SELECT * FROM '+owner.table(name)+' WHERE stage=?', (stage,))]
 
 
-@pytest.mark.parametrize('installed', [79, 85, 86, 100], indirect=True)
-def test_views_deduplicate_canonical_visits_and_preserve_legacy_residue_and_origins(installed):
-    store, version = installed
+@pytest.mark.parametrize('numbered_store', [79, 85, 86, 100], indirect=True)
+def test_views_deduplicate_canonical_visits_and_preserve_legacy_residue_and_origins(numbered_store, monkeypatch):
+    # These views consume installed SQL; snapshot coordination and whole-format
+    # admission belong to the guarded-reader and installed-upgrade cases below.
+    store, version = numbered_store
     account, aid, rid, album = seed(store)
     with store.conn:
         # Two retained spellings of one visible artist visit count once. Keep
@@ -78,7 +81,16 @@ def test_views_deduplicate_canonical_visits_and_preserve_legacy_residue_and_orig
         store.conn.execute('UPDATE main.album_discovery_memberships SET offered_count=5,first_shown=0,last_shown=1')
     original = {table: list(map(tuple, store.conn.execute('SELECT * FROM main.'+table))) for table in
         (*preparation.KEYS, 'discovered_artists', 'schema_migrations')}
-    owner, stage = ready(store.conn, size=1)
+    owner = prepare(store.conn)
+    owner.install(store.conn)
+    install = type(owner).install
+    def installed_schema(target, conn):
+        if target is not owner or conn is not store.conn:
+            return install(target, conn)
+    # This view test keeps the installed definitions unchanged. Admit them
+    # once below every real one-row stage, proof fence and publication check.
+    monkeypatch.setattr(type(owner), 'install', installed_schema)
+    owner, stage = stage_discovery(store.conn, size=1)
     owner.publish(store.conn, stage=stage)
     visits = read(store.conn, owner, stage, 'discovery_impressions')
     assert sorted(((r['view_id'], r['recording_id'], r['artist_id'], r['shown_at']) for r in visits),

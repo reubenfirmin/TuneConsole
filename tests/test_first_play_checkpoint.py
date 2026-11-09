@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
 from tests.historical_captures import retained_capture
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
@@ -35,6 +36,7 @@ def _assert_first(store, key, artist, day):
 
 
 @pytest.mark.parametrize("old_version", [7, 15])
+@pytest.mark.usefixtures('native_sql_calls')
 def test_catalog_checkpoint_upgrade_invalidates_index_and_retains_history(old_version):
     # Exercise the real historical catalog/checkpoint cutover. Later capture
     # conversion and the current index/reopen contract have explicit owners below.
@@ -89,10 +91,14 @@ def _seed_checkpoint(conn, old_version):
     conn.commit()
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_history_capture_cutover_preserves_first_dates_and_reopens(tmp_path):
     path = tmp_path / 'capture.db'
     with closing(sqlite3.connect(path)) as conn:
         conn.execute('PRAGMA foreign_keys=ON')
+        # Committed conversion and reopen remain real; this disposable input
+        # does not test persistence after power loss.
+        conn.execute('PRAGMA synchronous=OFF')
         # This is the shipped frozen predecessor, rather than reconstructing
         # it through today's assembled definition or unrelated old upgrades.
         definition = Path(v033_capture_evidence.__file__).with_name('schema_v032.sql').read_text()
@@ -125,7 +131,12 @@ def index_schema():
         yield schema
 
 
-def test_converted_history_rebuilds_current_index_after_file_reopen(tmp_path, index_schema):
+@pytest.mark.usefixtures('native_sql_calls')
+def test_converted_history_rebuilds_current_index_after_file_reopen(tmp_path, index_schema, monkeypatch):
+    # Reopening owns real startup admission and index reconstruction. Keep the
+    # same completed vocabulary as its one-recording input, rather than adding
+    # the unrelated full taxonomy during that second startup.
+    bound_catalog(monkeypatch, entries=(('rock', 'Rock'),))
     path = tmp_path / 'index.db'
     store = Store(path)
     with closing(store.conn):
@@ -150,6 +161,8 @@ def test_converted_history_rebuilds_current_index_after_file_reopen(tmp_path, in
         _assert_first(store, 'song|artist', 'Artist', 10)
     reopened = Store(path)
     with closing(reopened.conn):
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        reopened.conn.execute('PRAGMA wal_autocheckpoint=0')
         reopened.init_schema()
         _assert_first(reopened, 'song|artist', 'Artist', 10)
         assert list(map(tuple, reopened.conn.execute(

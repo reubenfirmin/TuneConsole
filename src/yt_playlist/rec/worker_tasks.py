@@ -29,10 +29,12 @@ class ServingTasks:
         self.stage('recommendation policy storage', measurement.maintain_storage, self.ctx.store, now)
         self.stage("listening context", choice_evidence.prepare_context, self.ctx.store, now)
         albums = self.stage("Album choices", album_choices.prepare_cached, self.ctx.store, now)
-        result = (self.stage("Home collections", home_prepared.prepare, self.ctx.store, now)
+        result = (self.stage("Home collections", home_prepared.prepare_mixes, self.ctx.store, now)
                   if prepare_mixes else None)
         if result is not None:
             self._home_prepared = requested
+        discovery = self.stage("Home Discovery", home_prepared.prepare_discovery, self.ctx.store, now)
+        revisit = self.stage("Home revisit", home_prepared.prepare_revisit, self.ctx.store, now)
         # Reporting has its own retryable publication. A failed report must not
         # prevent missing playable collections from being prepared first.
         self.stage("listening choices", choice_evidence.refresh_report, self.ctx.store, now)
@@ -59,7 +61,7 @@ class ServingTasks:
             self.stage("held steering exposure", graduation.graduate_slider_exposure, self.ctx.store, self.ctx.now_fn())
             self.stage("listening exposure", graduation.graduate_play_exposure,
                        self.ctx.store, self.ctx.now_fn(), prepared_leans=result["play_exposure"])
-        return (albums is None or notes_pending
+        return (albums is None or notes_pending or discovery is None or revisit is False
                 or self._home_requested != self._home_prepared
                 or prepare_mixes and not home_prepared.batch_complete(result))
 

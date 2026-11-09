@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, native_sql_calls
 from yt_playlist.core.migrations import migrate, registry, regular
 from yt_playlist.core.migrations.runner import Context, MigrationError, validate_version
 from yt_playlist.core import genre_identity, schema_admission, schema_definition
@@ -26,10 +27,13 @@ def bounded_vocabulary(monkeypatch):
 
 
 @pytest.fixture
-def bounded_current_store(store, bounded_vocabulary):
-    # Build the shared current schema before replacing this lower-layer input;
-    # later modules must still receive its complete unmodified catalog.
-    return store
+def bounded_current_store(tmp_path, bounded_vocabulary, native_sql_calls):
+    # Preference behavior owns the real SQL catalog and constraints. Admission
+    # and the independent genre vocabulary are completed inputs to these cases.
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz')),
+                                 snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
+            yield store
 
 
 @pytest.fixture

@@ -249,11 +249,14 @@ def test_failed_regular_ddl_does_not_pause_or_automatically_retry(predecessor, m
 
 
 @pytest.mark.usefixtures('native_sql_calls')
-def test_pre_cutover_snapshot_cannot_publish_after_background_commit(predecessor):
+def test_pre_cutover_snapshot_cannot_publish_after_background_commit(predecessor, monkeypatch):
     seed(predecessor)
     reopened = Store(predecessor._db_path)
     reopened.conn.execute('PRAGMA synchronous=OFF')
     reopened.init_schema(defer_metadata=True)
+    # Startup has admitted the installed numbered layout. The background
+    # worker still checks live histories and applies every real regular change.
+    monkeypatch.setattr(regular, 'validate_version', lambda *args, **kwargs: None)
     maintenance = StorageMaintenance(reopened)
     published = []
     try:

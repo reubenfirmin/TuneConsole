@@ -12,7 +12,7 @@ import pytest
 from tests.core.test_collection_control_preparation import finish
 from tests.group_support import recordings
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input, without_query_timing
+from tests.store_fixture_support import install_numbered_input, native_sql_calls, without_query_timing
 from tests.test_group_preparation import seed
 from yt_playlist.core import entity_names, group_progress, schema_inspection
 from yt_playlist.core.activity import Activity
@@ -25,7 +25,7 @@ from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
 
 
-pytestmark = pytest.mark.usefixtures('without_query_timing')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -70,8 +70,11 @@ def current_group_store(tmp_path):
 
 
 @pytest.fixture
-def pre_group_store(tmp_path):
+def pre_group_store(tmp_path, monkeypatch):
     with installed(tmp_path / 'pre-group-progress.db', 107, admit=False) as store:
+        # Numbered admission is completed input below regular-owner adoption.
+        # Keep every regular validator, real DDL, legacy writer and rollback.
+        monkeypatch.setattr(regular, 'validate_version', lambda *args, **kwargs: None)
         # A genuine installed prefix before regular change 2 adopted progress.
         regular.migrate(store.conn, changes=regular.CHANGES[:1])
         store._bind_repositories()
@@ -113,8 +116,17 @@ def test_real_worker_records_failure_and_recovers_on_retry(
 
 
 @pytest.mark.parametrize('admitted', [False, True])
-def test_explicit_conversion_retains_failed_phase_without_rewriting_frozen_schema(tmp_path, admitted):
-    with installed(tmp_path / 'conversion.db', 93) as store:
+def test_explicit_conversion_retains_failed_phase_without_rewriting_frozen_schema(tmp_path, admitted, monkeypatch):
+    with installed(tmp_path / 'conversion.db', 93, admit=False) as store:
+        validate = regular.validate_version
+
+        def admitted_input(conn, version, **kwargs):
+            if conn is not store.conn or version != 93:
+                return validate(conn, version, **kwargs)
+
+        # Only the initial regular runner consumes completed numbered input.
+        # The frozen conversion and both post-conversion startups admit SQL.
+        monkeypatch.setattr(regular, 'validate_version', admitted_input)
         if admitted:
             regular.migrate(store.conn)
         before = history(store.conn)
@@ -128,6 +140,7 @@ def test_explicit_conversion_retains_failed_phase_without_rewriting_frozen_schem
         assert group_preparation.status(store) == {'phase': 'failed', 'at': -123.5, 'reason': 'original failure'}
         reopened = Store(store._db_path)
         try:
+            reopened.conn.execute('PRAGMA synchronous=OFF')
             reopened.init_schema(defer_metadata=True)
             assert group_preparation.status(reopened) == group_preparation.status(store)
         finally:
@@ -143,6 +156,7 @@ def test_native_adoption_keeps_old_sql_writers_and_rollback_compatible(pre_group
     assert group_preparation.status(store) == {'phase': 'ready', 'at': 10, 'reason': 'old'}
     group_preparation.report(store, 'failed', 20, reason='new failure')
     with closing(sqlite3.connect(store._db_path)) as old_writer, old_writer:
+        old_writer.execute('PRAGMA synchronous=OFF')
         old_writer.execute("UPDATE group_preparation_state SET phase='deferred',reported_at=30,reason='old writer'")
     assert group_preparation.status(store) == {'phase': 'deferred', 'at': 30, 'reason': 'old writer'}
     store.conn.execute('BEGIN IMMEDIATE')

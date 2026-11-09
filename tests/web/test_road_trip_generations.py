@@ -6,10 +6,11 @@ import pytest
 from tests.web.test_road_trip_routes import (
     _app, _recipe, _recipe_form, _stub_pools, road_trip_schema, store,
 )
+from tests.web.test_road_trip_routes import road_trip_schema as _pristine_current_schema
 from yt_playlist.rec import road_trip
 from yt_playlist.web.routes import road_trip as routes
 from tests.home_fixture_support import without_metadata_providers
-from tests.store_fixture_support import without_query_timing
+from tests.store_fixture_support import uncontended_file_consumer_store, without_query_timing
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing')
@@ -122,7 +123,11 @@ def test_slow_worker_cannot_replace_or_finish_newer_work(store, monkeypatch, rep
     assert client.app.state.ctx.work.wait(0)
 
 
-def test_overlapping_edits_invalidate_queued_workers_and_current_failure_settles(store, monkeypatch):
+def test_overlapping_edits_invalidate_queued_workers_and_current_failure_settles(
+        uncontended_file_consumer_store, monkeypatch):
+    # The queued jobs own draft generations and revisions. Library-snapshot
+    # coordination is a completed lower input; draft SQL and files stay real.
+    store = uncontended_file_consumer_store
     _stub_pools(monkeypatch, store)
     client, _ = _app(store)
     rid = _recipe(store)

@@ -519,10 +519,20 @@ def test_graph_retry_reuses_completed_selection_until_its_inputs_change(
     # Fingerprinting and fixed catalog metadata are lower producer inputs.
     monkeypatch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
                         ('retry-input', {'ranker': 'retry-input'}))
+    facts = {}
+    candidate_facts = type(store.recommendations)._candidate_facts
+
+    def fixed_catalog(controller, keys):
+        missing = [key for key in keys if key not in facts]
+        if missing:
+            facts.update(candidate_facts(controller, missing))
+        return {key: facts[key] for key in keys}
+
+    monkeypatch.setattr(type(store.recommendations), '_candidate_facts', fixed_catalog)
     library(store)
-    facts = store.recommendations._candidate_facts(store.rec_query.library_keys())
-    monkeypatch.setattr(type(store.recommendations), '_candidate_facts',
-                        lambda _controller, keys: {key: facts[key] for key in keys})
+    # Independent discovery/history summaries do not participate in mix retry.
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', lambda *args: None)
+    monkeypatch.setattr(home_prepared, 'prepare_revisit', lambda *args: None)
     assemble, complete = home_cards._group_cards, home_cards._complete_card
     calls, selected, failed = Counter(), [], []
 

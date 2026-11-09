@@ -14,7 +14,8 @@ from tests.home_fixture_support import publish_menu
 from tests.musical_support import prepare_profiles
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer, reuse_reporting_reader)
 from yt_playlist.core.store import Store
 from yt_playlist.core import catalog
 from yt_playlist.core.db_writes import atomic_write
@@ -409,7 +410,18 @@ def test_clicked_library_fallback_prepares_the_shared_pools(store, monkeypatch):
     assert calls == [(store, 1000)]
 
 
-def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(store):
+@pytest.fixture
+def preference_store(tmp_path, monkeypatch):
+    # Preference serving consumes completed cards. Genre import and snapshot
+    # conflict detection have independent owners; retain real settings/files.
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
+            with reuse_reporting_reader(database, monkeypatch):
+                yield database
+
+
+def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(preference_store):
+    store = preference_store
     # The consumer receives a completed worker menu. Profile inference and
     # ranking are independent of retaining that menu after a preference change.
     with mix_tuning.adjusting_vibe(store, 1000):

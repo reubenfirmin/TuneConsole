@@ -9,15 +9,18 @@ def prepare_profiles(store, now=1000):
     # of worker turns. Keep every recording and real guarded publication while
     # processing this controlled input in larger, bounded batches.
     preparation = Preparation(store, budget=Budget(batch=512))
-    for _ in range(500):
-        if not store.prepared_content.has_pending() and not musical_preparation.due(store):
-            return
-        # A bounded capture may defer without completing a batch. Continue
-        # until the actual work drains, with the same finite attempt bound.
-        preparation.capture(now)
-    raise AssertionError('Profile preparation did not drain: '
-        f'pending={store.prepared_content.pending(32)!r}, '
-        f'musical_due={musical_preparation.due(store)!r}')
+    try:
+        for _ in range(500):
+            if not store.prepared_content.has_pending() and not musical_preparation.due(store):
+                return
+            # A bounded capture may defer without completing a batch. Continue
+            # until the actual work drains, with the same finite attempt bound.
+            preparation.capture(now)
+        raise AssertionError('Profile preparation did not drain: '
+            f'pending={store.prepared_content.pending(32)!r}, '
+            f'musical_due={musical_preparation.due(store)!r}')
+    finally:
+        preparation.close()
 
 
 def prepare_vibes(store, now=1000):

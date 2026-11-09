@@ -10,7 +10,10 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as svd_cache_store,
+    native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import catalog as catalog_writes
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
@@ -20,6 +23,11 @@ from yt_playlist.rec.progressive import BASIS_STATE, Budget, Preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
 from yt_playlist.controllers.prepared_content import PreparedContent
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Preparation checks do not construct the HTTP application or sync daemon."""
 
 
 @pytest.fixture(scope='module')
@@ -400,9 +408,18 @@ def test_grouping_settings_are_not_held_behind_metadata_accumulation(store, monk
     assert json.loads(store.settings.get_setting(BASIS_STATE))['reason'] == 'grouping-settings'
 
 
-def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_baskets(store, monkeypatch):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_baskets(svd_cache_store, monkeypatch):
     from tests.rec.test_model_refresh import seed
+    store = svd_cache_store
     ids = seed(store)
+    # This case owns the track SVD cache, content-input conflicts and changed
+    # track baskets. Independent artist fitting and mode clustering are lower
+    # collaborators; retain the full catalog and actual track/content fits.
+    monkeypatch.setattr(model_refresh.artist_model, 'artist_content_profiles', lambda reader: {})
+    monkeypatch.setattr(model_refresh.artist_model, '_discovered_artist_profiles', lambda reader: {})
+    monkeypatch.setattr(model_refresh.artist_model, 'artist_baskets', lambda reader: [])
+    monkeypatch.setattr(model_refresh.taste_modes, 'prepare_modes', lambda *args, **kwargs: None)
     cache = model_refresh.FitCache()
     train = embedding_training.build_vectors_from_baskets
     build = content_model.build_library_content

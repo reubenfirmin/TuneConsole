@@ -129,9 +129,10 @@ function syncHomeThemes() {
   const options = document.getElementById('home-genre-options');
   if (!summary || !options) return;
   const row = document.getElementById('home-mode-cards');
-  // A new menu restores its applied choices. Unrelated swaps preserve drafts and keyboard focus.
+  // Card refreshes describe applied choices, not an unsent draft. Keep the
+  // draft's controls and focus until it is successfully applied or replaced.
   const signature = JSON.stringify([row?.dataset.epoch, row?.dataset.genreOptions, row?.dataset.requestedGenres]);
-  if (options.dataset.signature !== signature) {
+  if (!options.dataset.draft && options.dataset.signature !== signature) {
     options.dataset.signature = signature;
     const available = JSON.parse(row?.dataset.genreOptions || '[]');
     const selected = JSON.parse(row?.dataset.requestedGenres || '[]');
@@ -204,6 +205,7 @@ document.addEventListener('DOMContentLoaded', syncHomeThemes);
 document.addEventListener('htmx:afterSettle', syncHomeThemes);
 document.addEventListener('change', event => {
   if (event.target.matches('#home-genre-options input')) {
+    document.getElementById('home-genre-options').dataset.draft = 'true';
     updateHomeGenreSelection();
     filterHomeGenres();
   }
@@ -225,14 +227,20 @@ document.addEventListener('htmx:beforeRequest', event => {
 document.addEventListener('htmx:afterRequest', event => {
   if (event.detail.elt?.id !== 'home-mix-form') return;
   document.getElementById('fp-mixes-panel')?.removeAttribute('aria-busy');
+  const applied = event.detail.successful && !document.getElementById('home-mode-cards')?.dataset.genreWarning
+    && document.querySelector('#home-mode-cards [data-genres]');
+  if (applied) {
+    const options = document.getElementById('home-genre-options');
+    delete options.dataset.draft;
+    delete options.dataset.signature;
+  }
   if (!event.detail.successful) {
     const summary = document.getElementById('home-theme-summary');
     summary.dataset.failed = 'true';
     summary.textContent = 'Couldn’t make your mixes. Try again.';
   }
   syncHomeThemes();
-  if (event.detail.successful && !document.getElementById('home-mode-cards')?.dataset.genreWarning
-      && document.querySelector('#home-mode-cards [data-genres]')) {
+  if (applied) {
     window.dispatchEvent(new CustomEvent('home-mixes-applied'));
   }
 });
@@ -475,7 +483,44 @@ function fpPanel() {
       this.$watch('vibesAvailable', available => {
         if (!available && this.tab === 'vibe') this.selectTab('mixes');
       });
+      this._saveRecovery = event => this.saveRecovery(event);
+      this._restoreRecovery = event => this.restoreRecovery(event);
+      window.addEventListener('app-page-leaving', this._saveRecovery);
+      window.addEventListener('app-page-changed', this._restoreRecovery);
       if (!this.collapsed) this.$nextTick(() => this.show());
+    },
+    destroy() {
+      window.removeEventListener('app-page-leaving', this._saveRecovery);
+      window.removeEventListener('app-page-changed', this._restoreRecovery);
+    },
+    saveRecovery(event) {
+      if (!event.detail?.state) return;
+      const options = this.$el.querySelector('#home-genre-options');
+      const focused = document.activeElement;
+      event.detail.state.homeMixControls = {
+        options: options.dataset.draft ? options : null,
+        search: this.$el.querySelector('#home-genre-search').value,
+        open: this.$refs.dialog.open,
+        focusId: this.$el.contains(focused) ? focused.id : '',
+        focusGenre: options.contains(focused) ? focused.value : null,
+      };
+    },
+    restoreRecovery(event) {
+      const state = event.detail?.state?.homeMixControls;
+      if (!state) return;
+      // A quiet page reconciliation must not turn an edited draft back into
+      // applied choices. Keep its actual inputs, including unchecked choices.
+      if (state.options) this.$el.querySelector('#home-genre-options').replaceWith(state.options);
+      this.$el.querySelector('#home-genre-search').value = state.search;
+      syncHomeThemes();
+      filterHomeGenres();
+      if (state.open) {
+        this.show();
+        const focused = state.focusGenre !== null
+          ? this.$el.querySelector('#home-genre-options input[value="' + CSS.escape(state.focusGenre) + '"]')
+          : state.focusId ? this.$el.querySelector('#' + CSS.escape(state.focusId)) : null;
+        focused?.focus({preventScroll: true});
+      }
     },
     selectTab(name, focus = false) {
       if (name === 'vibe' && !this.vibesAvailable) name = 'mixes';

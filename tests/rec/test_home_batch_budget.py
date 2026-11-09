@@ -22,6 +22,10 @@ def tasks_for(store, monkeypatch, producer, *, now=1001, albums_pending=False):
             return producer(*args, **kwargs)
         if name == 'Album choices':
             return None if albums_pending else {'items': []}
+        if name == 'Home Discovery':
+            return {}
+        if name == 'Home revisit':
+            return True
         return False
 
     return ServingTasks(SimpleNamespace(store=store, now_fn=lambda: now,
@@ -139,3 +143,50 @@ def test_reporting_failure_does_not_repeat_a_completed_explicit_build(store, cac
     tasks.stage = stage
     assert tasks.home() is False
     assert calls == [True]
+
+
+@pytest.mark.parametrize('summary', ['discovery', 'revisit'])
+def test_summary_budget_retry_and_new_discovery_leave_ready_mixes_alone(
+        store, cached_menu, monkeypatch, summary):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.rec import discover, surfaces
+
+    store.discovery.upsert_discovered_album('first', 'Artist', 'First album', '2026', None, 1)
+    for name in ('rediscover_playlists', 'rediscover_albums', 'rediscover_tracks'):
+        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
+    owner, name = ((discover, 'pick_discovered_albums') if summary == 'discovery'
+                   else (surfaces, 'rediscover_playlists'))
+    original = getattr(owner, name)
+    attempts = []
+
+    def exhausted_once(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise WorkBudgetExceeded('Independent summary exhausted its slice')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, exhausted_once)
+
+    def forbidden(*args):
+        pytest.fail('Summary recovery must not rebuild a ready mix batch')
+
+    tasks = tasks_for(store, monkeypatch, forbidden)
+    other_stage = tasks.stage
+
+    def stage(name, target, *args, **kwargs):
+        if target in (home_prepared.prepare_discovery, home_prepared.prepare_revisit):
+            return target(*args, **kwargs)
+        return other_stage(name, target, *args, **kwargs)
+
+    tasks.stage = stage
+    assert tasks.home() is True
+    assert tasks.home() is False
+    discovery = store.rec_proposals.get_proposals(home_prepared.DISCOVERY_SURFACE)
+    assert [album['browse_id'] for album in discovery['discovery_albums']] == ['first']
+    revisit = store.rec_proposals.get_proposals(home_prepared.REVISIT_SURFACE)
+    assert all(field in revisit for field in ('rediscover', 'rediscover_albums', 'rediscover_tracks'))
+    store.discovery.upsert_discovered_album('second', 'Artist', 'Second album', '2026', None, 1002)
+    assert tasks.home() is False
+    discovery = store.rec_proposals.get_proposals(home_prepared.DISCOVERY_SURFACE)
+    assert {album['browse_id'] for album in discovery['discovery_albums']} == {'first', 'second'}
+    assert home_cache.read(store, home_prepared.SURFACE) == cached_menu

@@ -10,7 +10,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_workflow_receipt_preparation import seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import native_sql_calls, publication_consumer_reads, without_query_timing
 from yt_playlist.core import workflow_settings
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import workflow_receipts as preparation, workflow_publication as publication
@@ -19,7 +19,7 @@ from yt_playlist.library import playlist_gc_retry
 from yt_playlist.library.spotify_library import _playlist_transfers
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -276,6 +276,11 @@ def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(insta
     with pytest.raises(OSError, match='controlled workflow file failure'):
         owner.worker.step(store.conn)
     progress = owner.worker.progress(store.conn)
+    def independent(conn, context):
+        conn.execute('CREATE TABLE independent_workflow_publication_ddl(value TEXT)')
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(
+        len(regular.CHANGES) + 1, 'independent_workflow_publication_ddl', independent,
+        lambda conn: conn.execute('SELECT * FROM independent_workflow_publication_ddl LIMIT 0'))))
     regular.migrate(store.conn)
     assert owner.worker.progress(store.conn) == progress
     monkeypatch.setattr(preparation.policy_documents, '_publish_encoded', install)

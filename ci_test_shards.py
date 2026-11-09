@@ -16,7 +16,7 @@ import uuid
 import pytest
 
 BASELINE = Path(__file__).parent / ".github/test-durations.json"
-SHARD_COUNTS = (1, 2, 4)
+SHARD_COUNTS = (1, 2, 4, 8)
 DIAGNOSTIC_BYTES = 64 * 1024
 BROWSER_BUDGET_SECONDS = 20 * 60
 
@@ -128,7 +128,7 @@ def pytest_configure(config):
         if total not in SHARD_COUNTS or not 1 <= index <= total:
             raise ValueError()
     except ValueError:
-        raise pytest.UsageError("--ci-shard must be INDEX/TOTAL with 1, 2 or 4 serial runners and 1 <= INDEX <= TOTAL") from None
+        raise pytest.UsageError("--ci-shard must be INDEX/TOTAL with 1, 2, 4 or 8 serial runners and 1 <= INDEX <= TOTAL") from None
     path = config.getoption("ci_shard_report")
     if path is None:
         raise pytest.UsageError("--ci-shard requires --ci-shard-report so coverage can be verified")
@@ -328,7 +328,7 @@ def verify(reports, suite, total=2):
     return _measure(reports, suite, total)
 
 
-def refresh_baseline(reports, run, total=4):
+def refresh_baseline(reports, run, total=4, *, browser_total=None):
     """Use complete diagnostic receipts as estimates, never passing coverage.
 
     This explicit maintenance path can consume a failed run. The normal CI
@@ -336,8 +336,9 @@ def refresh_baseline(reports, run, total=4):
     """
     if {report['suite'] for report in reports} != {'unit', 'browser'}:
         raise ValueError('Baseline refresh requires both unit and browser receipts')
+    counts = {'unit': total, 'browser': total if browser_total is None else browser_total}
     measured = {suite: _measure([row for row in reports if row['suite'] == suite],
-                                suite, total, diagnostic=True)
+                                suite, counts[suite], diagnostic=True)
                 for suite in ('unit', 'browser')}
     if measured['unit']['revision'] != measured['browser']['revision']:
         raise ValueError('Baseline suites must use the same source revision')
@@ -378,6 +379,8 @@ if __name__ == "__main__":
     parser.add_argument("directory", type=Path)
     parser.add_argument("suite", choices=("unit", "browser", "baseline"))
     parser.add_argument("--total", type=int, choices=SHARD_COUNTS, default=4)
+    parser.add_argument("--browser-total", type=int, choices=SHARD_COUNTS,
+                        help="Browser shard count when refreshing a baseline with different suite sizes")
     parser.add_argument("--run", help="Source CI run URL (required for an explicit baseline refresh)")
     parser.add_argument("--output", type=Path, help="Destination for the explicit diagnostic baseline")
     args = parser.parse_args()
@@ -385,15 +388,17 @@ if __name__ == "__main__":
         parser.error('baseline requires --run and --output; coverage verification accepts neither')
     if args.suite != 'baseline' and (args.run or args.output):
         parser.error('--run and --output are only for baseline refresh')
+    if args.suite != 'baseline' and args.browser_total is not None:
+        parser.error('--browser-total is only for baseline refresh')
     reports = [load_report(path) for path in args.directory.rglob("shard.json")]
     if args.suite == 'baseline':
-        result = refresh_baseline(reports, args.run, args.total)
+        result = refresh_baseline(reports, args.run, args.total, browser_total=args.browser_total)
         args.output.write_text(baseline_json(result))
         print(json.dumps({suite: {'cases': result['measurements'][suite]['cases'],
                                   'files': len(result[suite]),
                                   'estimated_seconds': partition(
                                       next(row['expected'] for row in reports if row['suite'] == suite),
-                                      result[suite], args.total)[1]}
+                                      result[suite], result['measurements'][suite]['shards'])[1]}
                           for suite in ('unit', 'browser')}, indent=2))
         raise SystemExit(0)
     result = verify([report for report in reports if report["suite"] == args.suite], args.suite, args.total)

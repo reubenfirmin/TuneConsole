@@ -7,6 +7,7 @@ import time
 import httpx
 import pytest
 
+from tests.home_fixture_support import without_metadata_providers
 from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
 from yt_playlist.web.app import create_app
 
@@ -20,6 +21,22 @@ def _pristine_current_schema():
     # House controls and Rock recipe inputs; catalog curation has separate owners.
     with bounded_consumer_schema((('house', 'House'), ('rock', 'Rock'))) as schema:
         yield schema
+
+
+@pytest.fixture
+def form_routes(path, monkeypatch, without_metadata_providers):
+    """Construct the real form owner without unrelated application routers."""
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, cleanup, clusters, home, road_trip, suggest, taste
+
+    owners = {'home': home, 'clusters': clusters, 'overlaps': cleanup,
+              'taste': taste, 'recs': suggest, 'road_trip': road_trip}
+    owner = owners.get(path.split('/')[1])
+    modules = (app_update, audio_preview) + ((owner,) if owner else ())
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in modules])
+    if path not in ('/play', '/now-playing/rate'):
+        monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
 
 @pytest.mark.parametrize('path,data', [
@@ -55,7 +72,7 @@ def _pristine_current_schema():
     ('/road_trip/draft/1/unpin', {'party': 'theirs', 'axis': 'genre:house'}),
     ('/road_trip/draft/1/save', {}),
 ])
-def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request, path, data):
+def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request, path, data, form_routes):
     existing_draft = data.get('id') == 'existing'
     if existing_draft:
         from tests.web.test_road_trip_routes import _recipe, _recipe_form, _stub_pools

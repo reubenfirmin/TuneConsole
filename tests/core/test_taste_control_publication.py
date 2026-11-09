@@ -6,8 +6,8 @@ import sqlite3
 import pytest
 
 from tests.core.test_taste_control_preparation import finish, members, seed
-from tests.publication_fixture_support import installed, installed_reader
-from tests.store_fixture_support import preparation_ddl_connection, publication_consumer_reads, without_query_timing
+from tests.publication_fixture_support import installed
+from tests.store_fixture_support import preparation_ddl_connection, publication_consumer_reads, reuse_reporting_reader, without_query_timing
 from yt_playlist.core import collection_recovery, experiment_decision_state, recommendation_outputs as files, taste_control_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import taste_controls as preparation, taste_control_publication as publication
@@ -40,7 +40,9 @@ def test_preopened_and_reopened_readers_use_exact_controls_and_keep_unknowns(ins
     values, originals = seed(store)
     before = {table:list(map(tuple, store.conn.execute('SELECT * FROM '+table)))
               for table in ('recordings', 'genre_catalog')}
-    with installed_reader(store._db_path, monkeypatch) as other:
+    # Exercise fresh serving connections to the admitted input, rather than
+    # repeating whole-library startup for each publication reader.
+    with monkeypatch.context() as patch, reuse_reporting_reader(store, patch) as other:
         for owner in publication.OWNERS.values():
             owner.publish(store.conn, revision=prepare(store.conn, owner))
             assert owner.selected(other.conn) == 0
@@ -49,7 +51,7 @@ def test_preopened_and_reopened_readers_use_exact_controls_and_keep_unknowns(ins
         assert not experiment_decision_state.available(other.conn)
         regular.validate(other.conn)
 
-    with installed_reader(store._db_path, monkeypatch) as reopened:
+    with monkeypatch.context() as patch, reuse_reporting_reader(store, patch) as reopened:
         assert {key:reopened.settings.get_setting(key) for key in originals} == originals
         assert before == {table:list(map(tuple, reopened.conn.execute('SELECT * FROM '+table))) for table in before}
         assert members(reopened.conn, preparation.BASELINE, 'entries')[1]['unresolved_key'] == 'unknown:1'

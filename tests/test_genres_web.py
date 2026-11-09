@@ -7,7 +7,10 @@ error path returns a 422 OOB toast. (Live behavior lives in the browser suite.)
 Coverage moved here from the old JSON-based test_web.py::test_genres_whitelist_editor.
 """
 from fastapi.testclient import TestClient
-from contextlib import closing
+from contextlib import closing, nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -92,12 +95,79 @@ def _client(store):
                       base_url="http://127.0.0.1")
 
 
-def test_page_renders_chip_list_zone(store):
-    c = _client(store)
+@pytest.fixture
+def _repository_client(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.templating import Jinja2Templates
+    from yt_playlist.controllers.genres import Genres
+    from yt_playlist.repos.genres import GenreRepo
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import genres
+
+    repository = Mock(spec_set=GenreRepo)
+    repository.transaction.side_effect = nullcontext
+    repository.uses_keyed_preferences.return_value = True
+    repository.label_matches.return_value = set()
+    repository.genre_name.return_value = None
+    repository.matcher_facts.return_value = None
+    store = SimpleNamespace(genres=Genres(repository, None))
+    ctx = SimpleNamespace(store=store,
+        templates=Jinja2Templates(directory=Path(webapp.__file__).with_name('templates')))
+    app = FastAPI()
+    app.state.ctx = ctx
+    app.include_router(genres.build(ctx))
+    monkeypatch.setattr(g, '_active', g._active)
+    monkeypatch.setattr(g, '_active_keys', g._active_keys)
+    with TestClient(app) as client:
+        yield repository, client, store
+
+
+def test_page_renders_chip_list_zone(_repository_client):
+    from yt_playlist.controllers.enrichment_reports import EnrichmentReports
+    from yt_playlist.controllers.enrichment_state import EnrichmentState
+    from yt_playlist.controllers.settings import Settings
+    from yt_playlist.repos.enrichment_reports import EnrichmentReportsRepo
+    from yt_playlist.repos.enrichment_state import EnrichmentStateRepo
+    from yt_playlist.repos.settings import SettingsRepo
+    from yt_playlist.web.icons import arrow_icon
+    from yt_playlist.web.routes import enrich
+    from yt_playlist.web.theme import mix_launch_tokens
+
+    repository, c, store = _repository_client
+    repository.get_genre_whitelist.return_value = ['Rock']
+    repository.taxonomy_facts.return_value = {
+        'families': {'rock': 'Rock'}, 'aliases': [], 'redirects': {},
+        'genres': [('rock', 'Rock', 'rock')]}
+    reports = Mock(spec_set=EnrichmentReportsRepo)
+    reports.coverage_stats.return_value = dict.fromkeys(
+        ('total', 'processed', 'genre', 'year', 'bpm', 'energy', 'danceability'), 0)
+    reports.queue_stats.return_value = {'total': 0, 'first_pass': 0, 'refresh': 0}
+    reports.activity_stats.return_value = {'latest': None, 'recent': 0}
+    reports.processed_timestamps.return_value = []
+    reports.outstanding_conflicts.return_value = 0
+    state = Mock(spec_set=EnrichmentStateRepo)
+    state.retry_status_inputs.return_value = None
+    state.artwork_retry_status.return_value = {'count': 0, 'retry_at': None}
+    settings = Mock(spec_set=SettingsRepo)
+    settings.get_setting.return_value = '1'
+    store.enrichment_reports = EnrichmentReports(reports, None)
+    store.enrichment_state = EnrichmentState(state, None, None, None, None, None, None, None)
+    store.settings = Settings(settings, None, None)
+    ctx = c.app.state.ctx
+    ctx.now_fn, ctx.enrich_worker = lambda: 1.0, None
+    # Global shell helpers are outside this genre-editor rendering contract.
+    ctx.templates.env.globals.update(
+        asset_v='test', arrow_icon=arrow_icon, mix_launch_tokens=mix_launch_tokens,
+        storage_maintenance_status=lambda: {'active': False, 'warning': False},
+        initial_setup_pending=lambda: False, has_multiple_identities=lambda: False,
+        audio_preview_available=lambda: False, auth_expired={})
+    c.app.include_router(enrich.build(ctx))
     redirect = c.get("/genres", follow_redirects=False)
     assert redirect.status_code == 303
     assert redirect.headers["location"] == "/enrich?advanced=genres#recognized-genre-tags"
-    body = c.get(redirect.headers["location"]).text
+    response = c.get(redirect.headers["location"])
+    assert response.status_code == 200
+    body = response.text
     assert "<h1>Enrichment</h1>" in body
     assert "Recognized genre tags" in body
     assert "Rock" in body                       # a built-in chip is server-rendered
@@ -105,15 +175,22 @@ def test_page_renders_chip_list_zone(store):
     assert "genresTab" not in body              # the Alpine factory is no longer referenced
 
 
-def test_add_returns_fragment_with_genre(store):
-    c = _client(store)
+def test_add_returns_fragment_with_genre(_repository_client):
+    repository, c, store = _repository_client
+    before, after = ['Rock'], ['Rock', 'Whack-a-doodle']
+    repository.get_genre_whitelist.side_effect = [before, after, after, after]
+    repository.taxonomy_facts.return_value = {
+        'families': {'rock': 'Rock'}, 'aliases': [], 'redirects': {},
+        'genres': [('rock', 'Rock', 'rock'), ('whack a doodle', 'Whack-a-doodle', None)]}
     n = len(store.genres.get_genre_whitelist())
     r = c.post("/genres/add", data={"name": "Whack-a-doodle"})
     assert r.status_code == 200
     assert "<!doctype html>" not in r.text.lower()   # a fragment, not the whole page
     assert "Whack-a-doodle" in r.text
     assert f"{n + 1} genres" in r.text               # count reflects the addition
-    # persisted and recognized by the live matcher
+    # The real controller requests persistence and reloads the live matcher.
+    repository.insert_custom.assert_called_once_with('whack a doodle', 'Whack-a-doodle')
+    repository.save_preference.assert_called_once_with('whack a doodle', enabled=True, origin='user')
     assert "Whack-a-doodle" in store.genres.get_genre_whitelist()
     assert g.pick_genre(["seen live", "whack-a-doodle"]) == "Whack-a-doodle"
 
@@ -141,15 +218,14 @@ def test_reset_restores_defaults(store):
     assert store.genres.get_genre_whitelist() == defaults
 
 
-def test_empty_add_returns_oob_toast(store):
-    c = _client(store)
-    before = len(store.genres.get_genre_whitelist())
+def test_empty_add_returns_oob_toast(_repository_client):
+    repository, c, _ = _repository_client
     r = c.post("/genres/add", data={"name": "   "})
     assert r.status_code == 422
     assert r.headers.get("hx-reswap") == "none"
     assert 'hx-swap-oob="afterbegin:#toasts"' in r.text
     assert "enter a genre name" in r.text
-    assert len(store.genres.get_genre_whitelist()) == before     # nothing added
+    assert repository.mock_calls == []  # Validation must not reach persistence.
 
 
 def test_equivalent_add_is_idempotent_and_alias_removal_disables_identity(store):
@@ -173,10 +249,17 @@ def test_search_matches_aliases_and_family_labels_without_changing_enabled_list(
     assert store.genres.get_genre_whitelist() == before
 
 
-def test_query_survives_edits_and_escapes_input(store):
-    c = _client(store)
+def test_query_survives_edits_and_escapes_input(_repository_client):
+    repository, c, _ = _repository_client
+    repository.get_genre_whitelist.return_value = ['Deep House', 'Whack-a-doodle']
+    repository.taxonomy_facts.return_value = {
+        'families': {'house': 'House'}, 'aliases': [], 'redirects': {},
+        'genres': [('deep house', 'Deep House', 'house'), ('whack a doodle', 'Whack-a-doodle', None)]}
     r = c.post("/genres/add", data={"name": "Whack-a-doodle", "q": "Whack"})
+    assert r.status_code == 200
     assert "Whack-a-doodle" in r.text and "Deep House" not in r.text
+    repository.insert_custom.assert_called_once_with('whack a doodle', 'Whack-a-doodle')
+    repository.save_preference.assert_called_once_with('whack a doodle', enabled=True, origin='user')
     r = c.get("/genres/list", params={"q": "<script>bad</script>"})
     assert "<script>bad</script>" not in r.text
     assert "&lt;script&gt;bad&lt;/script&gt;" in r.text

@@ -1,6 +1,6 @@
 # Tests run only on PRs. Releases build and publish independently.
 #
-# Each suite uses four isolated runners, with serial pytest inside each runner.
+# Unit tests use eight isolated runners; browser tests use four. Each runs serial pytest.
 name: PR checks
 
 on:
@@ -35,14 +35,14 @@ jobs:
     permissions:
       contents: read
       actions: read
-    name: unit (${{ matrix.shard }}/4)
+    name: unit (${{ matrix.shard }}/8)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       UV_PYTHON: '3.12'  # Exercise the minimum supported application runtime.
-      SHARD_TOTAL: '4'
+      SHARD_TOTAL: '8'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -124,7 +124,8 @@ jobs:
     needs: [plan, unit, browser]
     runs-on: ubuntu-latest
     env:
-      SHARD_TOTAL: '4'
+      UNIT_SHARD_TOTAL: '8'
+      BROWSER_SHARD_TOTAL: '4'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -136,8 +137,8 @@ jobs:
           path: evidence
       - name: Prove exact case coverage and retain measured file durations
         run: |
-          uv run python ci_test_shards.py evidence unit --total="$SHARD_TOTAL"
-          uv run python ci_test_shards.py evidence browser --total="$SHARD_TOTAL"
+          uv run python ci_test_shards.py evidence unit --total="$UNIT_SHARD_TOTAL"
+          uv run python ci_test_shards.py evidence browser --total="$BROWSER_SHARD_TOTAL"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -172,7 +173,8 @@ jobs:
       contents: read
       actions: read
     env:
-      SHARD_TOTAL: '4'
+      SHARD_TOTAL: '8'
+      BROWSER_SHARD_TOTAL: '4'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

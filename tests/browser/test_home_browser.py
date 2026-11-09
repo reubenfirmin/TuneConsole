@@ -349,3 +349,85 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(prepared_genre_app
     expect(button).to_be_enabled()
     expect(panel.locator("#fp-mixes-panel")).not_to_have_attribute("aria-busy", "true")
     assert set(page.evaluate("homeOfferedGenres()")) == after
+
+
+@pytest.mark.parametrize('draft', [[], ['classical']], ids=['shuffle', 'different-genre'])
+@pytest.mark.parametrize('refresh', ['cards', 'page'])
+def test_background_refresh_preserves_newer_genre_draft(prepared_genre_app, store, page, draft, refresh, output_path):
+    import json
+    import re
+    from pathlib import Path
+    from urllib.parse import parse_qs
+    from playwright.sync_api import expect
+
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.goto(f'{prepared_genre_app}/')
+    launcher = page.get_by_role('button', name='Tune these mixes', exact=True)
+    launcher.click()
+    panel = page.locator('#fingerprint')
+    jazz = panel.get_by_role('checkbox', name='jazz', exact=True, include_hidden=True)
+    techno = panel.get_by_role('checkbox', name='techno', exact=True, include_hidden=True)
+    button = panel.locator('#home-make-mixes')
+    jazz.check()
+    techno.check()
+    button.click()
+    expect(panel.locator('dialog')).not_to_be_visible()
+    launcher.click()
+    expect(jazz).to_be_checked()
+    expect(techno).to_be_checked()
+
+    # Retain a real response with the applied selection, but release it
+    # only after the user makes a newer draft. A changed epoch forces metadata
+    # reconciliation even though this response still describes Jazz/Techno.
+    response = page.request.get(f'{prepared_genre_app}/home/cards' if refresh == 'cards' else f'{prepared_genre_app}/')
+    assert response.ok
+    body, changes = re.subn(r'data-epoch="(\d+)"',
+                           lambda match: f'data-epoch="{int(match[1]) + 1}"', response.text(), count=1)
+    assert changes == 1
+    pending = []
+    previous_board = page.locator('#home-mode-cards').element_handle()
+    url = f'{prepared_genre_app}/home/cards?draft-refresh=1' if refresh == 'cards' else f'{prepared_genre_app}/'
+    page.route(url, lambda route: pending.append(route))
+    with page.expect_request(url):
+        page.evaluate("""refresh => {
+            window.draftRefresh = refresh === 'cards'
+                ? htmx.ajax('GET', '/home/cards?draft-refresh=1', {target: '#home-mode-cards', swap: 'outerHTML'})
+                : navigation.navigate(location.href, {history: 'replace', info: {refresh: true}}).finished;
+        }""", refresh)
+    jazz.uncheck()
+    techno.uncheck()
+    focused = panel.get_by_role('checkbox', name=draft[0], exact=True) if draft else jazz
+    if draft:
+        focused.check()
+    search = panel.get_by_role('searchbox', name='Find a genre for these mixes')
+    search.fill(draft[0] if draft else 'jazz')
+    focused.focus()
+    assert len(pending) == 1
+    pending[0].fulfill(response=response, body=body)
+    page.evaluate('window.draftRefresh')
+    assert not page.locator('#home-mode-cards').evaluate('(board, previous) => board === previous', previous_board)
+    expect(focused).to_be_focused()
+    expect(search).to_have_value(draft[0] if draft else 'jazz')
+    expect(jazz).not_to_be_checked()
+    expect(techno).not_to_be_checked()
+    assert panel.locator('#home-genre-options input:checked').evaluate_all('els => els.map(el => el.value)') == draft
+    expect(button).to_have_accessible_name('Make mixes' if draft else 'Shuffle genres')
+    assert set(page.evaluate('homeOfferedGenres()')) == {'jazz', 'techno'}
+    page.screenshot(path=Path(output_path) / 'draft-after-refresh.png')
+
+    path = '/home/mix-genres' if draft else '/home/other-genres'
+    with page.expect_request(f'**{path}') as submitted:
+        button.click()
+    genres = parse_qs(submitted.value.post_data)['genres']
+    if draft:
+        assert genres == draft
+    else:
+        assert json.loads(genres[0]) == ['jazz', 'techno']
+    expect(panel.locator('dialog')).not_to_be_visible()
+    offered = set(page.evaluate('homeOfferedGenres()'))
+    if draft:
+        assert offered == set(draft)
+    else:
+        assert len(offered) == 4 and not offered & {'jazz', 'techno'}

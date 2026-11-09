@@ -11,7 +11,9 @@ from tests.conftest import FakeClient
 from tests.onboarding_support import publish_personal_mix
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer, native_sql_calls,
+    mock_snapshot_coordinator, reuse_reporting_reader)
 from yt_playlist.core.store import Store
 from yt_playlist.rec import account_growth, tv
 from yt_playlist.web.app import create_app
@@ -32,6 +34,14 @@ def tv_launch_schema():
 
 
 @pytest.fixture
+def tv_home_store(tmp_path, tv_launch_schema, monkeypatch, native_sql_calls):
+    """Real Home SQL/files below independent snapshot conflict detection."""
+    with _file_consumer_store(tmp_path, tv_launch_schema, snapshot_guards=False) as database:
+        with mock_snapshot_coordinator(database, monkeypatch):
+            yield database
+
+
+@pytest.fixture
 def store(request, tmp_path, monkeypatch):
     if 'tv_journey_inputs' in request.fixturenames:
         yield request.getfixturevalue('store')
@@ -40,10 +50,9 @@ def store(request, tmp_path, monkeypatch):
     with closing(database.conn):
         launch = 'tv_launch_web' in request.fixturenames
         schema = request.getfixturevalue('tv_launch_schema' if launch else 'tv_schema')
-        if launch:
-            # HTTP launch keeps actual playlist SQL and files; synchronous
-            # persistence across power loss is irrelevant to this fixture.
-            database.conn.execute('PRAGMA synchronous=OFF')
+        # SQL/files and closed-file persistence stay real. These fixtures do
+        # not exercise persistence across power loss.
+        database.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(database, schema, snapshot_guards=not launch)
         # These cases own TV serving and publication, independently of the
         # periodic WAL checkpoint policy covered by test_publication_checkpoint.
@@ -696,8 +705,18 @@ def test_handoff_waits_for_extension_confirmation_and_never_assumes_success(stor
         assert web.post('/home/tv/takeover').status_code == 409
 
 
+@pytest.fixture
+def tv_length_routes(monkeypatch, tv_http_routes, native_sql_calls):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home_tv, playlists
+
+    # The length check launches TV; it does not render unrelated Home controls.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
+                                                       (app_update, audio_preview, home_tv, playlists)])
+
+
 def test_tv_length_cap_can_admit_long_video_without_changing_music_limit(
-        store, prepared_tv_predecessors, completed_video_catalog):
+        store, prepared_tv_predecessors, completed_video_catalog, tv_length_routes):
     from yt_playlist.library.playlist_generated import create_generated_playlist
     from tests.test_tv_stream import video
     iid = store.accounts.upsert_account('main', 'cred', None, True)
@@ -726,7 +745,7 @@ def test_tv_length_cap_can_admit_long_video_without_changing_music_limit(
         assert result.json()['items'][0]['duration'] == 2100
 
 
-def test_tv_tab_waits_for_real_mixes_and_follows_long_play(store, prepared_tv_predecessors):
+def test_tv_tab_waits_for_real_mixes_and_follows_long_play(tv_home_store, prepared_tv_predecessors):
     from html.parser import HTMLParser
     from tests.conftest import seed_catalog_track
 
@@ -750,6 +769,7 @@ def test_tv_tab_waits_for_real_mixes_and_follows_long_play(store, prepared_tv_pr
             if tag == 'button':
                 self.in_tab = False
 
+    store = tv_home_store
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     # An imported empty account has no preparation to await. Model a real
     # library whose first offers are still being prepared.

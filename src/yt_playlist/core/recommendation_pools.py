@@ -4,6 +4,7 @@ Pool content contains canonical recording IDs, ranks and scores. Display fields
 and musical measurements remain with their catalog and recording-vibe owners.
 """
 from dataclasses import dataclass
+from itertools import chain
 import math
 
 from . import group_content
@@ -43,8 +44,12 @@ class Pool:
 
 
 def header(pool):
+    return _header(pool, len(pool.candidates))
+
+
+def _header(pool, count):
     return canonical([FORMAT, pool.pool_key, pool.policy_version, pool.group_version_id,
-                      pool.input_fingerprint, pool.purpose, len(pool.candidates)])
+                      pool.input_fingerprint, pool.purpose, count])
 
 
 def rows(pool):
@@ -78,29 +83,51 @@ def _prepare(pool_key, policy_version, group_version_id, input_fingerprint, purp
             or any(c not in '0123456789abcdef' for c in input_fingerprint) or purpose not in PURPOSES):
         raise ValueError('Invalid recommendation pool inputs')
     normalized, identities, used = [], set(), 0
-    for candidate in candidates:
-        if not isinstance(candidate, (Candidate, UnresolvedCandidate)):
-            raise ValueError('Recommendation candidates require typed canonical owners')
-        kind, identity = owner(candidate)
-        score, band, genre = candidate.score, candidate.intensity_band, candidate.genre_key
-        if (kind == 'recording' and (type(identity) is not int or identity < 1)
-                or kind == 'unresolved' and (not isinstance(identity, str) or not identity or len(identity.encode()) > 1024)
-                or (kind, identity) in identities
-                or score is not None and (type(score) not in (int, float) or not math.isfinite(score))
-                or band is not None and (purpose != 'radio' or type(band) is not int or not 0 <= band <= 50)
-                or (band is None) != (genre is None)
-                or genre is not None and (not isinstance(genre, str) or len(genre.encode()) > 1024)):
-            raise ValueError('Invalid or duplicate recommendation candidate')
-        score = (float(score) if score else 0.0) if score is not None else None
-        normalized.append(type(candidate)(identity, score, band, genre))
-        identities.add((kind, identity))
-        used += len(canonical([[kind, identity], len(normalized) - 1, score, band, genre]))
-        if used > MAX_POOL_BYTES or len(normalized) > MAX_CANDIDATES:
-            raise ValueError('Recommendation pool exceeds its admitted membership budget')
-    value = Pool(pool_key, policy_version, group_version_id, input_fingerprint, purpose, tuple(normalized), '')
+
+    def admitted_rows():
+        nonlocal used
+        for candidate in candidates:
+            if not isinstance(candidate, (Candidate, UnresolvedCandidate)):
+                raise ValueError('Recommendation candidates require typed canonical owners')
+            kind, identity = owner(candidate)
+            score, band, genre = candidate.score, candidate.intensity_band, candidate.genre_key
+            if (kind == 'recording' and (type(identity) is not int or identity < 1)
+                    or kind == 'unresolved' and (not isinstance(identity, str) or not identity or len(identity.encode()) > 1024)
+                    or (kind, identity) in identities
+                    or score is not None and (type(score) not in (int, float) or not math.isfinite(score))
+                    or band is not None and (purpose != 'radio' or type(band) is not int or not 0 <= band <= 50)
+                    or (band is None) != (genre is None)
+                    or genre is not None and (not isinstance(genre, str) or len(genre.encode()) > 1024)):
+                raise ValueError('Invalid or duplicate recommendation candidate')
+            score = (float(score) if score else 0.0) if score is not None else None
+            normalized.append(type(candidate)(identity, score, band, genre))
+            identities.add((kind, identity))
+            row = canonical([[kind, identity], len(normalized) - 1, score, band, genre])
+            used += len(row)
+            if used > MAX_POOL_BYTES or len(normalized) > MAX_CANDIDATES:
+                raise ValueError('Recommendation pool exceeds its admitted membership budget')
+            yield row
+
+    value = Pool(pool_key, policy_version, group_version_id, input_fingerprint, purpose, (), '')
+    if type(candidates) in (tuple, list):
+        # The count is already known: admission and hashing stream the same
+        # bytes once, retaining neither encoded rows nor a second encoded pool.
+        count = len(candidates)
+        encoded_header = _header(value, count)
+        digest = group_content.digest(chain((encoded_header,), admitted_rows()))
+        if len(normalized) != count:
+            raise ValueError('Recommendation candidate input changed during admission')
+    else:
+        # Unknown-length iterables still stop on the first excess row. Do not
+        # exhaust or materialize an unbounded input just to learn its count.
+        for _ in admitted_rows():
+            pass
+        value = Pool(pool_key, policy_version, group_version_id, input_fingerprint, purpose, tuple(normalized), '')
+        encoded_header = header(value)
+        digest = group_content.digest(rows(value))
     prepared = Pool(pool_key, policy_version, group_version_id, input_fingerprint, purpose,
-                    value.candidates, group_content.digest(rows(value)))
-    return prepared, used + len(header(value))
+                    tuple(normalized), digest)
+    return prepared, used + len(encoded_header)
 
 
 def stored_rows(conn, pool_id):

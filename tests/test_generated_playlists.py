@@ -19,6 +19,8 @@ from yt_playlist.library import playlist_generated
 from tests.conftest import FakeClient
 from tests.playlist_fixture_support import remote_catalog
 from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator, native_sql_calls)
 
 
 def _client(store, provider):
@@ -268,8 +270,19 @@ def test_generate_endpoint_rejects_empty(store):
     assert r.status_code == 200 and "Couldn't save" in r.text
 
 
+@pytest.fixture
+def generated_card_store(tmp_path, monkeypatch, native_sql_calls):
+    # Rendering consumes completed candidates, independently of genre import
+    # and snapshot coordination. Keep the actual card, mode and evidence files.
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
+            with mock_snapshot_coordinator(database, monkeypatch):
+                yield database
+
+
 def test_home_renders_generated_cards(
-        store, unlocked_home_controls, home_routes_only, without_metadata_providers):
+        generated_card_store, unlocked_home_controls, home_routes_only, without_metadata_providers):
+    store = generated_card_store
     # Cards are lazy-loaded via /home/cards; assert against that endpoint instead of /.
     import numpy as np
     iid = store.accounts.upsert_account("main", "cred", None, True)

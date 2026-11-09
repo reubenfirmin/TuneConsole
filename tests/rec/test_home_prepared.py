@@ -1179,11 +1179,16 @@ def test_publication_acknowledges_commit_across_cleanup_deadline(
             assert result == stored
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_small_preparation_batches_accumulate_alternatives_across_attempts(publication_inputs, monkeypatch):
     """Complete every alternative through bounded retries without any exposure."""
     from yt_playlist.core import json_cache
 
     store = publication_inputs.store
+    # Catalog/modes remain fixed across these retries. Options are a completed
+    # lower input to retry composition; retain their real first construction.
+    options = service(store).options()
+    monkeypatch.setattr(home_cards.HomeCards, 'options', lambda self: deepcopy(options))
     clock = [100]
     original = home_cards.HomeCards.cards
 
@@ -1352,7 +1357,7 @@ def test_automatic_refreshes_share_backoff_and_retry_without_another_request(sto
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
                                        now_fn=lambda: 1000), debounce_s=0)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    monkeypatch.setattr(home_prepared, 'prepare', lambda *a: None)
+    monkeypatch.setattr(home_prepared, 'prepare_mixes', lambda *a: None)
     monkeypatch.setattr(mode_surfaces, 'prepare_bundles', lambda *a: {})
     worker.trigger_home_refresh()
     worker._run_pending()

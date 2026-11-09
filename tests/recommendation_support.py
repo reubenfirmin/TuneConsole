@@ -81,7 +81,7 @@ def seed_bundle_subjects(store, bundle, *, fresh=()):
 
 
 def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False,
-                    retain_vibe_readiness=True, genre_reserves=True):
+                    retain_vibe_readiness=True, genre_reserves=True, retain_payload=True):
     with store.read_snapshot() as snapshot:
         policies = measurement.PoolPolicies(snapshot.store, now)
         if vibes:
@@ -108,8 +108,9 @@ def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False,
         generation = mode_surfaces._publish_typed_bundles(store, snapshot, prepared,
             policies.stamp(list(fresh), 'fresh'), policies, {}, now)
     assert generation is not None
-    retained = bundle
-    if not genre_reserves and '_vibes' in bundle:
-        retained = {**bundle, '_vibes': {**bundle['_vibes'], 'genres': {}}}
-    store._fixture_bundle_payload = deepcopy(retained)
+    if retain_payload:
+        retained = bundle
+        if not genre_reserves and '_vibes' in bundle:
+            retained = {**bundle, '_vibes': {**bundle['_vibes'], 'genres': {}}}
+        store._fixture_bundle_payload = deepcopy(retained)
     return generation

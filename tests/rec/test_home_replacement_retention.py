@@ -5,10 +5,17 @@ from types import SimpleNamespace
 import pytest
 
 from tests.derived_rating_support import seed_dislike
-from tests.home_fixture_support import publish_menu, service
+from tests.home_fixture_support import publish_cards, service
+from tests.home_prepared_support import seed
 from tests.recommendation_support import publish_bundles
-from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, uncontended_file_consumer_store as store,
+    without_query_timing,
+)
 from yt_playlist.rec import home_cache, home_cards, home_prepared, measurement
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -18,9 +25,9 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
-    # The completed four-card input uses House. Snapshot conflict detection
-    # has independent owners; retention consumes uncontended publications.
-    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+    genres = ('Jazz', 'Techno', 'Classical', 'Ambient', 'Trance', 'Indie Rock')
+    with bounded_consumer_schema(tuple((genre.casefold(), genre) for genre in genres),
+                                 snapshot_guards=False) as schema:
         yield schema
 
 
@@ -33,12 +40,21 @@ def candidates(store, monkeypatch):
     # candidate stamps and their publication still use the real implementation.
     monkeypatch.setattr(measurement, 'serving_policy',
                         lambda *args, **kwargs: ('completed-policy', {'schema': 4, 'fixture': 'retention'}))
-    completed = publish_menu(store, tracks_per_card=1)
+    # Keep the original six modes, four lanes and four distinct songs per
+    # lane. Only the lower ranker's completed four-card selection is fixed.
+    bundles = seed(store, tracks_per_lane=4, publish=False)
+    protos = []
+    for mid, lane in enumerate(('wheelhouse', 'explore', 'comfort', 'fresh')):
+        proto = home_cards._proto(store, lane, f'{mid} {lane}',
+                                  deepcopy(bundles[str(mid)][lane]), 1000)
+        proto['mode_id'] = mid
+        proto['recipe'] = {'lane': lane, 'mode_id': mid}
+        protos.append(proto)
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, [], [], 0, None)
+    completed = publish_cards(store, result, 1000)
     completed['generation'] = 'completed-worker-generation'
     home_cache.put(store, home_prepared.SURFACE, completed, 1000)
-    bundles = {'all': {}, '_meta': {'full_pools': True, 'comfort_pool': 100}}
-    for proto in completed['menus'][0]['protos']:
-        bundles['all'][proto['lane']] = proto['tracks']
     state = SimpleNamespace(bundles=bundles, lanes=set(bundles['all']), completed=completed)
     publish_bundles(store, bundles, 1000)
 

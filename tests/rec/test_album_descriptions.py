@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.home_fixture_support import returning_listener, without_metadata_providers
-from tests.store_fixture_support import file_consumer_store as album_worker_store
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, reuse_reporting_reader
 from yt_playlist.core.store import Store
 from yt_playlist.integrations.deepseek import DeepSeekIAO
 from yt_playlist.providers import deepseek
@@ -12,6 +12,16 @@ from yt_playlist.rec import album_descriptions as copy
 
 ALBUM = {'browse_id': 'first-id', 'artist': 'Patrice Bäumel',
          'title': 'Global Underground #42: Berlin (DJ Mix)', 'year': '2019'}
+
+
+@pytest.fixture
+def album_worker_store(tmp_path, monkeypatch):
+    # The worker consumes album offers, independently of genre import and
+    # snapshot conflict detection. Keep its settings, offers and evidence real.
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
+            with reuse_reporting_reader(database, monkeypatch):
+                yield database
 
 
 def own_album(store, album=ALBUM):
@@ -262,8 +272,15 @@ def test_worker_prepares_refreshed_menu_instead_of_buying_copy_for_previous_menu
     def stage(name, target, *args, **kwargs):
         if target is album_choices.prepare_cached:
             return payload
-        if target is home_prepared.prepare:
-            return {'menus': [1], 'modes': [], 'play_exposure': []}
+        if target is home_prepared.prepare_mixes:
+            return {'menus': [{'protos': [
+                {'lane': lane, 'tracks': [{'key': lane}]}
+                for lane in ('comfort', 'wheelhouse', 'explore', 'fresh')]}],
+                'modes': [], 'play_exposure': []}
+        if target is home_prepared.prepare_discovery:
+            return {}
+        if target is home_prepared.prepare_revisit:
+            return True
         if target is album_notes.prepare:
             prepared.extend(album['browse_id'] for album in args[2])
         return None

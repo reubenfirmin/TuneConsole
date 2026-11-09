@@ -8,11 +8,29 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.radio_session_support import poc, play
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, native_sql_calls
 from yt_playlist.core import activity
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import account_growth
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.routes import radio_session as routes
+
+
+@pytest.fixture
+def store(tmp_path, native_sql_calls):
+    # Tuning consumes the complete 32-track catalog. Its concurrent requests,
+    # actual session checkpoints and snapshot guards remain private and real.
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        with _file_consumer_store(tmp_path, schema) as database:
+            from yt_playlist.util.matching import identity_key
+
+            pool = [{'key': identity_key(f'Song {i}', f'Artist {i}'),
+                     'video_id': f'v{i}', 'title': f'Song {i}', 'artist': f'Artist {i}'}
+                    for i in range(1, 33)]
+            seed_publication_subjects(database, pool)
+            database._fixture_radio_pool = pool
+            yield database
 
 
 @pytest.mark.parametrize('access', [False, True])

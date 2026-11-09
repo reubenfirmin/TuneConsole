@@ -188,6 +188,11 @@ def group_state(repo, generation_id, owner, plan):
                               (version_id,)).fetchone() is not None
         if pending is None and not sealed:
             raise publication.BuildUnavailable('Unfinished musical group content is awaiting cleanup')
+    if sealed:
+        # Published content is immutable. Resume cursors only apply to an
+        # unfinished build; the controller still verifies the complete content
+        # before linking an existing version into this generation.
+        return {'version_id': version_id, 'group_id': group_id, 'sealed': True}
     with repo._store.read_snapshot() as snapshot:
         conn = snapshot.store.conn
         count = _count(conn, version_id, ('group_members', 'unresolved_group_members'), 'group_version_id')

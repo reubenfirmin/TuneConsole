@@ -27,7 +27,8 @@ from tests.onboarding_support import publish_personal_mix
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 from tests.store_fixture_support import (
-    _file_consumer_store, bounded_consumer_schema, without_query_timing,
+    _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
+    native_sql_calls, without_query_timing,
 )
 from yt_playlist.core import fao, schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
@@ -315,8 +316,21 @@ def test_small_inventory_batches_advance_before_repeating_the_whole_ledger_scan(
     assert checkpoint(library.rec_ledger.evidence(), offer['context'])
 
 
+@pytest.fixture
+def restart_library(tmp_path, monkeypatch, native_sql_calls):
+    # Supply completed custody below recovery. Release the seed reader before
+    # reopening: retention must observe actual reader lifetimes, not a fixture
+    # holding its input alive until teardown.
+    with bounded_consumer_schema(EVIDENCE_GENRES, snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
+            with monkeypatch.context() as patch, mock_snapshot_coordinator(store, patch):
+                seed_evidence_library(store)
+            yield store
+
+
 @pytest.mark.parametrize('failure', [WorkBudgetExceeded, WorkClosing, OSError])
-def test_pending_cleanup_survives_interruption_without_pausing_activity(library, monkeypatch, failure):
+def test_pending_cleanup_survives_interruption_without_pausing_activity(restart_library, monkeypatch, failure):
+    library = restart_library
     path = library._db_path
     original = choice_evidence._maintain_storage
     monkeypatch.setattr(choice_evidence, '_maintain_storage', lambda *a, **kw: (_ for _ in ()).throw(failure('stop')))
@@ -335,31 +349,49 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(library,
     # A new Store and worker reconstruct intent from committed state, without
     # inheriting an iterator, cache, old thread or old retry timestamp.
     reopened = Store(path)
-    reopened.conn.execute('PRAGMA synchronous=OFF')
-    with schema_inspection.reuse_tables(reopened.conn):
-        reopened.init_schema()
-    worker = recovery_worker(reopened, 11)
-    assert not reopened.activity_paused
-    scheduled = []
-    monkeypatch.setattr(worker, '_start_loop', lambda: scheduled.append(True))
-    worker._poll_evidence_storage()
-    assert scheduled and worker.jobs.has('evidence_storage')
-    for _ in range(10):
-        result = choice_evidence.maintain_storage(reopened, 11)
-        if not result.get('deferred'):
-            break
-    else:
-        pytest.fail('Committed evidence recovery did not finish after restart')
-    assert reopened.settings.get_setting(choice_evidence.STORAGE_PENDING) == '0'
-    assert not reopened.activity_paused
-    assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
-    assert reopened.taste_groups.definition('first-leaf', generation='first')
-    worker.shutdown()
-    worker.join(0)
-    reopened.conn.close()
+    try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(reopened.conn):
+            reopened.init_schema()
+        worker = recovery_worker(reopened, 11)
+        try:
+            assert not reopened.activity_paused
+            scheduled = []
+            monkeypatch.setattr(worker, '_start_loop', lambda: scheduled.append(True))
+            worker._poll_evidence_storage()
+            assert scheduled and worker.jobs.has('evidence_storage')
+            for _ in range(10):
+                result = choice_evidence.maintain_storage(reopened, 11)
+                if not result.get('deferred'):
+                    break
+            else:
+                pytest.fail('Committed evidence recovery did not finish after restart')
+            assert reopened.settings.get_setting(choice_evidence.STORAGE_PENDING) == '0'
+            assert not reopened.activity_paused
+            assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
+            assert reopened.taste_groups.definition('first-leaf', generation='first')
+        finally:
+            worker.shutdown()
+            worker.join(0)
+    finally:
+        reopened.conn.close()
 
 
-def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(library):
+@pytest.fixture
+def playlist_library(tmp_path, _pristine_current_schema, monkeypatch, serving_routes):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, playlists
+
+    # Playlist rendering needs admitted SQL and independent snapshot readers,
+    # without musical-group publication, choice evidence or Home routing.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, playlists)])
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
+
+
+def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(playlist_library):
+    library = playlist_library
     main = library.accounts.upsert_account('Main', 'bridge-main', None, True)
     other = library.accounts.upsert_account('Other', 'bridge-other', None, False)
     audio = library.tracks.upsert_track('playlist-audio', 'Audio', 'Artist', None, 100,
@@ -608,7 +640,19 @@ def test_repeated_cutoffs_commit_checkpoints_and_resume_beyond_the_prefix_after_
             reopened.conn.close()
 
 
-def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(library, monkeypatch):
+@pytest.fixture
+def fifo_library(tmp_path, monkeypatch, native_sql_calls):
+    # This case owns accepted FIFO custody and retry, with no competing source
+    # writer. Keep the actual ledger files, SQL roots and recovery worker.
+    with bounded_consumer_schema(EVIDENCE_GENRES, snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
+            with mock_snapshot_coordinator(store, monkeypatch):
+                seed_evidence_library(store)
+                yield store
+
+
+def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(fifo_library, monkeypatch):
+    library = fifo_library
     # Drive retry ordering without the unrelated two-second scheduling delay.
     worker = recovery_worker(library, 100)
     scheduled = []

@@ -10,6 +10,7 @@ from tests.core.test_tv_state_preparation import aliases, finish, seed
 from tests.test_tv_stream import video
 from tests.store_fixture_support import (
     guarded_numbered_store as guarded_installed,
+    mock_preparation_schema,
     native_sql_calls,
     numbered_store as installed,
     preparation_ddl_connection,
@@ -17,7 +18,7 @@ from tests.store_fixture_support import (
     reuse_reporting_reader,
     without_query_timing,
 )
-from yt_playlist.core import tv_recommendation_state as state
+from yt_playlist.core import schema_inspection, tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import tv_publication as publication, tv_state as preparation
 from yt_playlist.core.store import Store
@@ -80,7 +81,8 @@ def test_all_owners_work_for_preopened_and_reopened_readers(installed, monkeypat
     other = Store(store._db_path)
     try:
         other.conn.execute('PRAGMA synchronous=OFF')
-        other.init_schema(defer_metadata=True)
+        with schema_inspection.reuse_tables(other.conn):
+            other.init_schema(defer_metadata=True)
         publish_all(store)
         with reuse_reporting_reader(other, monkeypatch):
             for surface, owner in publication.SOURCES.items():
@@ -97,7 +99,8 @@ def test_all_owners_work_for_preopened_and_reopened_readers(installed, monkeypat
     reopened = Store(store._db_path)
     try:
         reopened.conn.execute('PRAGMA synchronous=OFF')
-        reopened.init_schema(defer_metadata=True)
+        with schema_inspection.reuse_tables(reopened.conn):
+            reopened.init_schema(defer_metadata=True)
         with reuse_reporting_reader(reopened, monkeypatch):
             for surface, value in values.items():
                 assert reopened.rec_proposals.get_proposals(surface) == value
@@ -310,7 +313,7 @@ def test_selected_custody_missing_file_and_failed_recovery_keep_ddl_independent(
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
-def test_receipt_budget_numeric_affinity_and_interrupted_cutover(installed):
+def test_receipt_budget_numeric_affinity_and_interrupted_cutover(installed, monkeypatch):
     store, _ = installed
     value = {f'{number+1}:stream:request:{number}':{'playlist_id':number+101, 'stream':'next',
         'items':[video(index) for index in range(60)]} for number in range(60)}
@@ -319,7 +322,19 @@ def test_receipt_budget_numeric_affinity_and_interrupted_cutover(installed):
         store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('tv_continuations', raw, 9007199254740993))
     original = tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', ('tv_continuations',)).fetchone())
     owner = publication.OWNERS['continuations']
-    revision = prepare(owner, store.conn, size=512)
+    # Build the complete lower-level input, including its original files, once.
+    # Keep every real 512-row SQL batch and both independent publication checks.
+    prepare_input = owner.worker.prepare
+    plans = {}
+    def prepared_input(conn, row):
+        key = tuple(row)
+        if key not in plans:
+            plans[key] = prepare_input(conn, row)
+        return plans[key]
+    owner = replace(owner, worker=replace(owner.worker, prepare=prepared_input))
+    owner.worker.install(store.conn)
+    mock_preparation_schema(monkeypatch, owner.worker.definition, store.conn)
+    revision = finish(owner.worker, store.conn, size=512).prepared_revision
     assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_receipts')+
         ' WHERE preparation_revision=?', (revision,)).fetchone()[0] == 60
     assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_items')+

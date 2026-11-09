@@ -6,9 +6,10 @@ import numpy as np
 import pytest
 
 from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
-from tests.conftest import seed_catalog_track
-from tests.rec.test_model_refresh import refresh_costs
-from tests.prepared_fixture_support import capture_template, prepared_template
+from tests.genre_catalog_support import bound_catalog
+from tests.rec.test_model_refresh import native_model_input_sql, refresh_costs
+from tests.prepared_fixture_support import prepared_template
+from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema
 from tests.rec.test_candidate_refresh import candidate, no_fit
 from yt_playlist.core.store import Store
@@ -23,7 +24,10 @@ def expiry_rankers():
     # The subject is suppression expiry in Wheelhouse. Keep its real eligibility,
     # policy capture and typed publication; other lanes/presets have independent
     # ranking owners and need not be republished for every expiry transition.
-    with pytest.MonkeyPatch.context() as patch:
+    # Every expiry transition and the idle maintenance loop below execute
+    # synchronously on private SQL. Handle admission and diagnostic clocks
+    # belong below this owner; real snapshots, guards and publications remain.
+    with pytest.MonkeyPatch.context() as patch, native_model_input_sql():
         rank = surfaces.for_you
         patch.setattr(surfaces, 'for_you',
             lambda store, now, **kw: rank(store, now, limit=1))
@@ -87,9 +91,13 @@ def candidate_library_template(candidate_expiry_schema, expiry_rankers):
     def build(store):
         with store._lock:
             account = store.accounts.upsert_account('Listener', 'fixture', None, True)
-            tids = [seed_catalog_track(store, f'expiry-{i}', f'Song {i}', f'Artist {i}',
-                                      video_id=f'v{i}', genre=('Techno', 'Jazz', 'Rock')[i % 3])
-                    for i in range(3)]
+            # Expiry consumes completed catalog inputs. Keep all three subjects,
+            # memberships and genres without provider delivery/artist inference.
+            seed_publication_subjects(store, [
+                {'key': f'expiry-{i}', 'title': f'Song {i}', 'artist': f'Artist {i}',
+                 'video_id': f'v{i}', 'genre': ('Techno', 'Jazz', 'Rock')[i]}
+                for i in range(3)])
+            tids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
             for i, members in enumerate((tids[:2], tids[1:])):
                 playlist = store.playlists.upsert_playlist(account, f'p{i}', f'Playlist {i}', len(members), '', 1)
                 store.playlists.set_playlist_tracks(playlist, members)
@@ -115,7 +123,12 @@ def store(candidate_library_template):
     # their genuine guards/files, instead of initializing and replacing an
     # empty consumer before restoring the same prepared inputs again.
     with candidate_library_template.open(':memory:') as consumer:
-        yield consumer
+        # These clock/feedback transitions are synchronous and uncontended.
+        # Read their committed results under the consumer's real lock rather
+        # than cloning the same in-memory SQL for each reporting assertion.
+        # refresh() still opens its actual guarded publication snapshots.
+        with consumer._lock:
+            yield consumer
 
 
 def refresh(store, now=2000):
@@ -132,11 +145,12 @@ def snooze(store, key, until=3000.1, now=2100):
 
 def test_candidate_expiry_inputs_publish_a_ranked_wheelhouse(candidate_library_template):
     source = candidate_library_template.source
-    assert candidate(source, candidate_library_template.result)
-    assert {key for key, _vector in source.rec_model.get_rec_vectors()} == {'expiry-0', 'expiry-1', 'expiry-2'}
-    assert len(source.rec_query.library_keys()) == 3
-    assert source.rec_model.suppressed_keys('for_you', 2000) == set()
-    assert source.recommendations.head('home') is not None
+    with source._lock:
+        assert candidate(source, candidate_library_template.result)
+        assert {key for key, _vector in source.rec_model.get_rec_vectors()} == {'expiry-0', 'expiry-1', 'expiry-2'}
+        assert len(source.rec_query.library_keys()) == 3
+        assert source.rec_model.suppressed_keys('for_you', 2000) == set()
+        assert source.recommendations.head('home') is not None
 
 
 def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeypatch, candidate_library_template):
@@ -186,32 +200,28 @@ def test_expiry_preserves_unavailable_and_removed_sources(
     assert candidate(store, key) is None
 
 
-@pytest.fixture(scope='module')
-def snoozed_library_template(candidate_library_template, tmp_path_factory):
-    path = tmp_path_factory.mktemp('snoozed-candidates') / 'snoozed.db'
-    with candidate_library_template.open(path) as store:
-        key = candidate_library_template.result
-        snooze(store, key)
-        yield capture_template(store, key)
-
-
-def test_snoozed_candidate_persists_its_deadline_and_keeps_fitted_vectors(
-        snoozed_library_template, candidate_library_template):
-    source = snoozed_library_template.source
-    assert candidate(source, snoozed_library_template.result) is None
-    assert not candidate_refresh.due(source, 3000)
-    assert candidate_refresh.due(source, 3000.1)
-    assert source.rec_model.get_rec_vectors() == candidate_library_template.source.rec_model.get_rec_vectors()
-
-
-def test_expiry_survives_restart(tmp_path, monkeypatch, snoozed_library_template):
+def test_expiry_survives_restart(tmp_path, monkeypatch, candidate_library_template):
+    # Reopen the actual snoozed file. Capturing and cloning a second snoozed
+    # template repeats the same SQL/file copy without another expiry state.
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock')))
     path = tmp_path / 'expiry.db'
-    with snoozed_library_template.open(path) as store:
-        key = snoozed_library_template.result
+    key = candidate_library_template.result
+    with candidate_library_template.source._lock:
+        original_vectors = candidate_library_template.source.rec_model.get_rec_vectors()
+    with candidate_library_template.open(path) as store, store._lock:
         vectors = store.rec_model.get_rec_vectors()
+        assert vectors == original_vectors
+        snooze(store, key)
+        assert not candidate_refresh.due(store, 3000)
+        assert candidate_refresh.due(store, 3000.1)
+        assert store.rec_model.get_rec_vectors() == vectors
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     store = Store(path)
     try:
+        # Keep real startup admission and committed persistence across restart;
+        # power-loss durability is outside this disposable fixture's contract.
+        store.conn.execute('PRAGMA synchronous=OFF')
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
         store.init_schema()
         with store.read_view() as reader:
             assert reader.rec_model.get_rec_vectors() == vectors

@@ -8,6 +8,7 @@ from tests.core.test_collection_control_preparation import finish
 from tests.group_support import publish
 from tests.store_fixture_support import (
     guarded_numbered_store as guarded_installed,
+    native_sql_calls,
     numbered_store as installed,
     preparation_ddl_connection,
     reuse_reporting_reader,
@@ -103,7 +104,7 @@ def test_frozen_upgrade_matches_checkpoint_domain_fields(installed, tmp_path):
 
 
 @pytest.mark.parametrize('guarded_installed', [93], indirect=True)
-def test_continuing_writes_renames_and_generation_arrival_reconcile(guarded_installed):
+def test_continuing_writes_renames_and_generation_arrival_reconcile(native_sql_calls, guarded_installed):
     store, _ = guarded_installed
     sources = seed(store)
     for job in preparation.JOBS.values():

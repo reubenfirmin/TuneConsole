@@ -36,7 +36,18 @@ def ready(owner, conn):
 @pytest.mark.parametrize('unadmitted_installed', [79, 93, 94], indirect=True)
 def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(
         unadmitted_installed, monkeypatch, preparation_ddl_connection):
-    store, _ = unadmitted_installed
+    from yt_playlist.core.migrations import runner
+
+    store, version = unadmitted_installed
+    validate = runner.validate_version
+
+    def admitted_input(conn, target_version, **kwargs):
+        if target_version != version:
+            return validate(conn, target_version, **kwargs)
+
+    # Numbered-layout admission is a completed lower input. Keep both actual
+    # Store startups, regular-owner validation and independent reader bindings.
+    monkeypatch.setattr(runner, 'validate_version', admitted_input)
     values, originals = seed(store)
     with installed_reader(store._db_path, monkeypatch) as other:
         for owner in publication.OWNERS.values():

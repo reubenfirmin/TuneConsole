@@ -7,7 +7,9 @@ from tests.derived_rating_support import seed_dislike
 import pytest
 
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+)
 from yt_playlist.core.store import Store
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, home_vibe, measurement, musical_character, vibe_preparation
@@ -193,7 +195,7 @@ def vibe_menu_inputs(store, *, lane_count=8, fresh_count=48, comfort_count=36, a
 
 
 def publish_vibe_menus(store, *, lane_count=16, fresh_count=48, comfort_count=36,
-                       genre_reserves=True):
+                       genre_reserves=True, retain_payload=True):
     from tests.musical_support import prepare_profiles
     from yt_playlist.core import artists, metadata
 
@@ -209,17 +211,19 @@ def publish_vibe_menus(store, *, lane_count=16, fresh_count=48, comfort_count=36
             metadata.apply_provider(store.conn, entries[key], 'fixture', audio, ['fixture'], now=1000)
     prepare_profiles(store)
     bundle = {'all': lanes, '_meta': {'comfort_pool': comfort_count}}
-    publish_bundles(store, bundle, vibes=True, genre_reserves=genre_reserves)
+    publish_bundles(store, bundle, vibes=True, genre_reserves=genre_reserves,
+                    retain_payload=retain_payload)
     return lanes
 
 
 @pytest.fixture
-def completed_vibe_inputs(store, monkeypatch):
+def completed_vibe_inputs(store, monkeypatch, native_sql_calls):
     from yt_playlist.rec import home_vibe, musical_profiles, rec_params
 
     # These consumers inspect completed menus, policy compatibility and live
     # feedback. The real worker/update owners below cover profile production.
     # Retain all 116 original subjects and completed profiles for every lane.
+    # Synchronous private reads keep native SQL below the diagnostic clocks.
     monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'readiness-model')
     lanes, audio_inputs = vibe_menu_inputs(store, lane_count=16, fresh_count=48, comfort_count=36)
     rec_params.set_param(store, 'comfort_min_pool', 36)
@@ -234,8 +238,11 @@ def completed_vibe_inputs(store, monkeypatch):
             for preset in home_vibe.PRESETS}}
         profiles[soft] = musical_character.compact(profile)
     by_key = {key: profiles[attributes['energy'] < .5] for key, attributes in audio_inputs.items()}
+    # The controlled catalog has two completed profile values. Detach one
+    # returned batch, preserving that input sharing instead of copying each
+    # identical profile tree again for every recording in every preset read.
     monkeypatch.setattr(musical_character, 'load',
-                        lambda _reader, keys: {key: deepcopy(by_key[key]) for key in keys})
+                        lambda _reader, keys: deepcopy({key: by_key[key] for key in keys}))
     store.settings.set_setting('rec_vibe_version', vibe_preparation.version())
     return {'all': lanes, '_meta': {'comfort_pool': 36}}
 
@@ -334,11 +341,13 @@ def test_worker_readiness_reads_compact_output_and_one_live_eligibility_batch(st
 def test_readiness_follows_normal_worker_updates_between_menu_publications(store):
     from yt_playlist.core import metadata_evidence
     from yt_playlist.rec import home_vibe, musical_preparation, vibe_pools
-    from yt_playlist.rec.progressive import Preparation
+    from yt_playlist.rec.progressive import Budget, Preparation
 
     # These checks serve all presets without a genre filter. Genre-specific
     # copies do not contribute to the measured-support/readiness transition.
-    lanes = publish_vibe_menus(store, genre_reserves=False)
+    # This producer reads SQL/files throughout; no later consumer needs a
+    # detached duplicate of every profile in every prepared preset/lane.
+    lanes = publish_vibe_menus(store, genre_reserves=False, retain_payload=False)
     # Keep all 116 published subjects, but change only the Fresh reserve that
     # determines this readiness transition. Three measured songs cannot satisfy
     # any preset's four-song minimum; the other lanes retain usable output.
@@ -349,7 +358,9 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     def check(expected):
         # Derive the expected answer from the actual current serving output,
         # including ranking changes, rather than from the cached summary.
-        with store.read_view() as reader:
+        # All six references inspect one unchanged read. Share only their
+        # current catalog facts within it; every state opens a new cache.
+        with store.read_view() as reader, reader.recommendations.planning_read():
             menus = [vibe_pools.assemble(reader, 1000, preset) for preset in home_vibe.PRESETS]
             usable = all(len(cards) == 4 and all(sum(growth_readiness._supported(track, preset)
                          for track in card['tracks']) >= 4 for card in cards)
@@ -367,7 +378,10 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
                 for field in ('energy', 'mood_relaxed', 'mood_happy'):
                     metadata_evidence.choose(store.conn, entry, field, None,
                                              withdraw=withdraw, now=1001)
-        worker = Preparation(store)
+        # Drain this finite input through the ordinary worker without repeating
+        # snapshot admission for 32-recording slices. The whole 116-subject
+        # workflow, every pending dependency and every publication stay real.
+        worker = Preparation(store, budget=Budget(batch=512))
         try:
             for turn in range(1000):
                 if (not store.prepared_content.has_pending() and not musical_preparation.due(store)
@@ -385,14 +399,14 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     check(False)
     # Withdrawn support must fail even while the old menu is retained.
     publish_bundles(store, {'all': lanes, '_meta': {'comfort_pool': 36}},
-                    vibes=True, genre_reserves=False)
+                    vibes=True, genre_reserves=False, retain_payload=False)
     check(False)
     update_inputs(withdraw=True)
     # Restored evidence revalidates the retained menu immediately, without
     # waiting for an unrelated complete recommendation publication.
     check(True)
     publish_bundles(store, {'all': lanes, '_meta': {'comfort_pool': 36}},
-                    vibes=True, genre_reserves=False)
+                    vibes=True, genre_reserves=False, retain_payload=False)
     check(True)
 
 
@@ -486,11 +500,13 @@ def test_legacy_publication_without_summary_does_not_restore_full_bundle(store, 
 
 @pytest.mark.parametrize('summary', [True, False])
 def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
-        store, summary, vibe_menus, record_property):
+        store, summary, completed_vibe_inputs, record_property):
     from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness
 
-    lanes = vibe_menus
-    bundle = deepcopy(store._fixture_bundle_payload)
+    # Each state below publishes its own menu. Start with completed subjects
+    # and profiles instead of first publishing an unused, unfiltered menu.
+    lanes = completed_vibe_inputs['all']
+    bundle = {'all': dict(lanes), '_meta': dict(completed_vibe_inputs['_meta'])}
     bundle['all']['temporal'] = [{**track, 'year': (1980, 1995, 2020)[index % 3]}
                                for index, track in enumerate(lanes['comfort'])]
     bundle['_meta'].update(comfort_pool=0, year_cuts=[1990, 2000])
@@ -502,11 +518,19 @@ def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
         nonlocal state
         state += 1
         store.rec_proposals.put_proposals('home_genre_request', {'epoch': 0, **filters}, 1000)
+        # Preparation replaces lane lists and creates new preset/genre pools.
+        # Copy their input containers, without cloning obsolete prepared pools
+        # or retaining another full profile tree solely for this fixture.
+        publication = {'all': dict(bundle['all']), '_meta': dict(bundle['_meta'])}
         with measured(record_property, f'state_{state}_publication'):
-            publish_bundles(store, deepcopy(bundle), vibes=True, retain_vibe_readiness=summary)
-        assert ('vibe_readiness' in store._fixture_bundle_payload['_meta']) is summary
-        for epoch in range(3):
-            with store.read_view() as reader:
+            publish_bundles(store, publication, vibes=True, retain_vibe_readiness=summary,
+                            retain_payload=False)
+        published = store.recommendations.output('home', 'ranking-evidence') or {}
+        assert ('vibe_readiness' in published) is summary
+        # All three rotations read the same unchanged publication and catalog.
+        # A new state opens a fresh planning cache after its writes commit.
+        with store.read_view() as reader, reader.recommendations.planning_read():
+            for epoch in range(3):
                 signatures = set()
                 usable = True
                 for preset in home_vibe.PRESETS:

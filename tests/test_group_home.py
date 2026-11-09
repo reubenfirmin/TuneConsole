@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import closing, nullcontext
 from copy import deepcopy
 from html.parser import HTMLParser
 from types import SimpleNamespace
@@ -9,16 +10,89 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, seed_catalog_track
 from tests.group_support import publish, recordings
+from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import home_page_bytecode, returning_listener, without_metadata_providers
 from tests.playlist_fixture_support import library_catalog
 from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, reuse_reporting_reader,
+    native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import mix_choices
+from yt_playlist.core import schema_inspection
+from yt_playlist.core.store import Store
 from yt_playlist.rec import (choice_evidence, group_home, group_serving, group_viz,
                              home_cache, home_cards, home_prepared, taste_viz)
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture
+def adaptive_selection(tmp_path, _pristine_current_schema, monkeypatch,
+                       native_sql_calls, without_query_timing):
+    """Build the full graph directly below its uncontended Home consumers."""
+    from unittest.mock import Mock
+    from yt_playlist.core import bounded_json, home_outputs, json_cache
+    from yt_playlist.repos.group_ordering import GroupOrderingRepo
+    from yt_playlist.rec import measurement, stored_groups
+
+    bound_catalog(monkeypatch, entries=(('house', 'House'), ('jazz', 'Jazz')))
+    # The input documents are trusted fixture output. Codec admission has its
+    # own tests; retain actual encoding, file publication and full decoding.
+    monkeypatch.setattr(json_cache, '_check_profile_expansion', lambda *args, **kwargs: None)
+    monkeypatch.setattr(home_outputs, '_validate_numbers', lambda value: None)
+
+    def fixture_json(encoded, *, keys=None, finite=False):
+        value = json.loads(encoded)
+        return ({key: item for key, item in value.items() if key in keys}
+                if keys is not None and isinstance(value, dict) else value)
+
+    monkeypatch.setattr(bounded_json, 'loads', fixture_json)
+    # No sound preset is selected here. The group selector never ranks through
+    # its lower scratch repository, but otherwise creates twelve disk databases.
+    monkeypatch.setattr(GroupOrderingRepo, 'open',
+                        lambda: nullcontext(Mock(spec=GroupOrderingRepo)))
+    store = Store(tmp_path / 'adaptive-selection.db')
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, _pristine_current_schema)
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        monkeypatch.setattr(measurement, 'serving_policy',
+                            lambda *args, **kwargs: ('graph-input', {'ranker': 'graph-input'}))
+        facts, candidate_facts = {}, type(store.recommendations)._candidate_facts
+
+        def fixed_catalog(controller, keys):
+            missing = [key for key in keys if key not in facts]
+            if missing:
+                facts.update(candidate_facts(controller, missing))
+            return {key: facts[key] for key in keys}
+
+        monkeypatch.setattr(type(store.recommendations), '_candidate_facts', fixed_catalog)
+        pages, read_pages = {}, stored_groups.pages
+
+        def fixed_pages(reader, generation, version, lane):
+            key = generation, version, lane
+            if key not in pages:
+                pages[key] = tuple(read_pages(reader, generation, version, lane))
+            return deepcopy(pages[key])
+
+        # These cases keep their catalog and candidate generation fixed.
+        # Supply its complete pages once; graph allocation, rotation and
+        # every one of the twelve menus still run through the real code.
+        monkeypatch.setattr(stored_groups, 'pages', fixed_pages)
+        with reuse_reporting_reader(store, monkeypatch):
+            # Publishing fixture inputs does not own source-change races.
+            # Restore real guarded snapshots before exercising Home preparation.
+            with monkeypatch.context() as patch, mock_snapshot_coordinator(store, patch):
+                tracks, head = library(store)
+            # These cases own graph menus; independent song-summary producers
+            # consume completed output below that boundary.
+            monkeypatch.setattr(home_prepared, 'prepare_discovery', lambda *args: None)
+            monkeypatch.setattr(home_prepared, 'prepare_revisit', lambda *args: None)
+            monkeypatch.setattr(home_cards, '_order_by_journey',
+                                lambda owner, items, *args, **kwargs: list(items))
+            yield store, tracks, head
 
 
 @pytest.fixture(scope='module')
@@ -201,8 +275,8 @@ def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(adap
     assert not list(store.rec_ledger.evidence().records('opportunity'))
 
 
-def test_cached_group_headings_are_served_without_rewriting_the_prepared_set(store, adaptive_library):
-    _tracks, head = adaptive_library
+def test_cached_group_headings_are_served_without_rewriting_the_prepared_set(adaptive_selection):
+    store, _tracks, head = adaptive_selection
     payload = home_prepared.prepare(store, 1200)
     names = {group['version']: group['name'] for group in head['groups']}
     for menu in payload['menus']:
@@ -395,7 +469,10 @@ def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(
 def test_home_worker_retries_partial_adaptive_menus_until_full(store, adaptive_library):
     from yt_playlist.rec.worker_tasks import ServingTasks
     calls = []
-    payload = {'group_policy': 'adaptive', 'modes': [], 'menus': [{}], 'play_exposure': {}}
+    protos = [{'lane': lane, 'tracks': [{'key': lane}]}
+              for lane in ('wheelhouse', 'explore', 'fresh', 'comfort')]
+    payload = {'group_policy': 'adaptive', 'modes': [],
+               'menus': [{'protos': protos[:3]}], 'play_exposure': {}}
 
     def stage(name, target, *args, **kwargs):
         calls.append(name)
@@ -403,14 +480,20 @@ def test_home_worker_retries_partial_adaptive_menus_until_full(store, adaptive_l
             return payload
         if name == 'Album choices':
             return {'items': []}
+        if name == 'Home Discovery':
+            return {}
+        if name == 'Home revisit':
+            return True
         return None
 
     tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1200,
         client_provider=lambda: {}, logger=logging.getLogger(__name__)), stage)
     assert tasks.home()
-    payload['menus'] = [{} for _ in range(home_prepared.MAX_MENUS)]
+    payload['menus'] = [{'protos': protos[:3]} for _ in range(home_prepared.MAX_MENUS)]
+    assert tasks.home()
+    payload['menus'] = [{'protos': protos}]
     assert not tasks.home()
-    assert calls.count('Home collections') == 2
+    assert calls.count('Home collections') == 3
 
 
 def test_muting_and_suppression_are_checked_again_after_group_preparation(store, adaptive_library):
@@ -425,8 +508,8 @@ def test_muting_and_suppression_are_checked_again_after_group_preparation(store,
     assert all(t['key'] not in {tracks[0].key, tracks[1].key} for p in cards for t in p['tracks'])
 
 
-def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_models(store, monkeypatch, adaptive_library):
-    _tracks, head = adaptive_library
+def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_models(adaptive_selection, monkeypatch):
+    store, _tracks, head = adaptive_selection
     from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
     original = RecommendationProposals.get_proposals
     preview_reads = []
@@ -449,8 +532,8 @@ def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_mod
     assert context['musical_groups'] and all('choice_context' not in m for m in prepared['menus'])
 
 
-def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(store, adaptive_library):
-    _tracks, head = adaptive_library
+def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(adaptive_selection):
+    store, _tracks, head = adaptive_selection
     assert home_prepared.prepare(store, 1200)
     store.settings.set_setting('rec_group_serving', 'legacy')
     scheduled = []

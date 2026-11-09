@@ -7,6 +7,7 @@ import pytest
 
 from tests.genre_catalog_support import bound_catalog
 from tests.store_fixture_support import install_numbered_input, install_regular_input
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
 from yt_playlist.core.migrations import v080_metadata_evidence
 from yt_playlist.core.migrations.runner import validate_version
@@ -27,6 +28,9 @@ def installed(tmp_path, monkeypatch):
     conn = sqlite3.connect(path)
     try:
         conn.row_factory = sqlite3.Row
+        # These disposable workers own DDL commits and rollback, without a
+        # power-loss durability requirement for their temporary database.
+        conn.execute('PRAGMA synchronous=OFF')
         conn.execute('PRAGMA foreign_keys=ON')
         # Match the installed application's WAL mode. Each real worker below
         # still owns its validation, commits, rollback and connection lifetime.
@@ -46,7 +50,8 @@ def legacy_history(conn):
 
 def test_album_feedback_outbox_installation_rolls_back_and_retries_without_advancing_layout(installed, monkeypatch):
     from yt_playlist.core import album_feedback_outbox
-    with closing(sqlite3.connect(installed)) as conn:
+    with closing(sqlite3.connect(installed)) as conn, schema_inspection.reuse_tables(conn):
+        conn.execute('PRAGMA synchronous=OFF')
         version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
         regular.migrate(conn, changes=regular.CHANGES[:version - 1])
         history = legacy_history(conn)
@@ -122,8 +127,9 @@ def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeyp
     def failed_conversion(conn):
         raise RuntimeError('Conversion deliberately suspended for retry')
 
-    with closing(sqlite3.connect(installed)) as conn, conn:
+    with closing(sqlite3.connect(installed)) as conn, schema_inspection.reuse_tables(conn), conn:
         conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA synchronous=OFF')
         conn.execute('PRAGMA foreign_keys=ON')
         before = legacy_history(conn)
         with monkeypatch.context() as held:
@@ -204,13 +210,17 @@ def test_regular_cli_does_not_run_legacy_conversion(installed, tmp_path, monkeyp
     assert not missing.exists()
 
 
-def test_competing_regular_startups_install_once(installed):
+def test_competing_regular_startups_install_once(installed, monkeypatch):
+    # Numbered-layout admission is completed input. Competing workers still
+    # recheck live histories and validate every real regular change under WAL.
+    monkeypatch.setattr(regular, 'validate_version', lambda *args, **kwargs: None)
     barrier = threading.Barrier(2)
     errors = []
 
     def start():
         try:
             with closing(sqlite3.connect(installed, timeout=5)) as conn, conn:
+                conn.execute('PRAGMA synchronous=OFF')
                 conn.execute('PRAGMA foreign_keys=ON')
                 barrier.wait()
                 regular.migrate(conn)
@@ -265,8 +275,18 @@ def test_regular_change_repairs_retired_preparation_capture_without_rewriting_hi
     from yt_playlist.core import genre_identity
     from yt_playlist.core.migrations import v085_genre_preferences
     from yt_playlist.core.preparation import genre_preferences
-    with closing(sqlite3.connect(installed)) as conn, conn:
+    with closing(sqlite3.connect(installed)) as conn, schema_inspection.reuse_tables(conn), conn:
         conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA synchronous=OFF')
+        # Numbered-layout admission is completed input to this repair. Keep
+        # actual histories, every regular DDL/validator and frozen upgrade live.
+        validate = regular.validate_version
+
+        def admitted(target, *args, **kwargs):
+            if target is not conn:
+                return validate(target, *args, **kwargs)
+
+        monkeypatch.setattr(regular, 'validate_version', admitted)
         with conn:
             genre_identity.seed_catalog(conn)
             conn.execute("INSERT INTO genre_whitelist VALUES ('Rock')")

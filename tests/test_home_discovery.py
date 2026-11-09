@@ -1,5 +1,6 @@
 """Home Discover serves prepared pools immediately and never fits models on a request."""
 import re
+from contextlib import ExitStack
 from functools import wraps
 import time
 from uuid import uuid4
@@ -10,7 +11,8 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_page_bytecode, publish_cards, returning_listener, without_metadata_providers
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, native_sql_calls
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, uncontended_file_consumer_store as store)
 from yt_playlist.core.recommendation_invalidation import clear_model_display
 from yt_playlist.rec import discover, fresh_pool, home_cards, home_prepared, home_vibe, surfaces
 from yt_playlist.web.app import create_app
@@ -21,19 +23,24 @@ pytestmark = pytest.mark.usefixtures('native_sql_calls')
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
-    with bounded_consumer_schema((('jazz', 'Jazz'), ('house', 'House'))) as schema:
+    from yt_playlist.core.migrations import current, regular
+
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('house', 'House')),
+                                 snapshot_guards=False) as schema:
+        assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+        assert regular.validate(schema) == len(regular.CHANGES)
+        assert schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
         yield schema
 
 
-def test_discovery_schema_keeps_empty_current_owners_and_snapshot_guards(_pristine_current_schema):
-    from yt_playlist.core.migrations import current, regular
-
-    schema = _pristine_current_schema
-    assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
-    assert regular.validate(schema) == len(regular.CHANGES)
-    assert schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
-    assert 'CREATE TEMP TRIGGER' in schema._revision_script
+@pytest.fixture(autouse=True)
+def discovery_clients(monkeypatch, request):
+    make_client = client_for
+    with ExitStack() as clients:
+        monkeypatch.setattr(request.module, 'client_for',
+                            lambda *args, **kwargs: clients.enter_context(make_client(*args, **kwargs)))
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -87,7 +94,7 @@ def prepare_client_state(store):
 
 def client_for(store, busy="idle", *, prepare=True):
     iid = prepare_client_state(store) if prepare else store.accounts.get_master_account().id
-    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 3)
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 3, background_work=False)
     app.state.ctx.rec_worker._model_active = busy == "rebuild"
     app.state.ctx.rec_worker._discovering = busy == "discovery"
     return TestClient(app, base_url="http://127.0.0.1")

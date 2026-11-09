@@ -257,8 +257,11 @@ def test_local_configuration_enables_model_and_environment_can_disable_it(tmp_pa
     local.write_text('YT_PLAYLIST_AUDIO_VIBES=1\nYT_PLAYLIST_AUDIO_VIBE_MODEL=' + str(path) + '\n')
     monkeypatch.setattr(features, 'LOCAL_ENV', local)
     monkeypatch.delenv(model.ENVIRONMENT_KEY)
-    assert heuristic.predict(samples)['model']['trained_labels'] == ['energize']
+    prediction = heuristic.predict(samples)
+    assert prediction['model']['trained_labels'] == ['energize']
+    assert model.identity() == prediction['model']['sha256']
     monkeypatch.setenv(model.ENVIRONMENT_KEY, '')
+    assert model.identity() == 'heuristic'
     assert heuristic.predict(samples) == baseline
 
 

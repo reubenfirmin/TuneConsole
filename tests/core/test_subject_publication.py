@@ -98,9 +98,24 @@ def test_preopened_and_new_readers_match_native_precision_and_subjects(guarded_i
 
 @pytest.mark.parametrize('installed', [79, 99], indirect=True)
 def test_continuing_capture_and_source_removal_withdraw_and_reconcile(
-        installed, publication_consumer_reads, preparation_ddl_connection):
+        installed, publication_consumer_reads, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     account = populated(store)
+    # The schema stays fixed through all three real one-row reconciliations.
+    # Install it once below the data/selection workflow; keep verification,
+    # source revision fences and the eventual complete regular DDL run real.
+    preparation.install(store.conn)
+    preparation._validate_schema(store.conn)
+    publication.install(store.conn)
+    validate_schema = preparation._validate_schema
+
+    def installed_preparation(conn):
+        if conn is preparation_ddl_connection:
+            validate_schema(conn)
+
+    monkeypatch.setattr(preparation, '_validate_schema', installed_preparation)
+    monkeypatch.setattr(preparation, 'install', lambda conn, **kwargs: preparation.progress(conn))
+    monkeypatch.setattr(publication, 'install', lambda conn: None)
     with connect(store) as job:
         identity = ready(job)
         publication.publish(job, identity=identity)

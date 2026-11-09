@@ -4,6 +4,7 @@ Current owners have one physical name. Explicit writer identifiers and read
 projections keep installed predecessors authoritative during preparation.
 """
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 
 from .schema_contract import TOKEN
@@ -43,6 +44,7 @@ _RENAMED_DEFINITION = re.compile(r'\b(?:' + '|'.join(PREDECESSOR_NAMES) +
     r'|playlist_scopes|cleanup_ignored|quarantined_playlists|suppressed_overlaps|overlap_kept|rec_mode_picks)\b', re.I)
 
 
+@lru_cache(maxsize=2048)
 def predecessor_definition(sql):
     """Name retained schema definitions for validation, preserving literals.
 

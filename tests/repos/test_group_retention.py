@@ -1,25 +1,63 @@
 """Actual evidence protects exact history; unused preparations release shared content."""
 from copy import deepcopy
+from contextlib import closing
 import json
 import sqlite3
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
+from tests.core.test_compact_groups_migration import historical_groups, apply
+from tests.genre_catalog_support import bound_catalog
 from tests.repos.test_compact_group_publication import (
-    bounded_compact_group_template as compact_group_template,
-    database,
     finish,
+    third_generation,
 )
-from tests.store_fixture_support import reuse_reporting_reader
-from yt_playlist.core import group_evidence, group_storage
+from tests.store_fixture_support import native_sql_calls, reuse_reporting_reader
+from yt_playlist.core import group_evidence, group_storage, schema_inspection
 from yt_playlist.core import group_reads as group_queries
+from yt_playlist.core.db_revisions import Revisions
+from yt_playlist.core.migrations import registry, runner
+from yt_playlist.core.store import Store
 from yt_playlist.repos import compact_group_publication as compact, group_publication, group_retention
+from yt_playlist.repos.group_retention_queries import GroupRetentionRepo
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Group retention owns SQL and file lifetimes without HTTP startup."""
+
+
+@pytest.fixture(scope='module')
+def retention_predecessor():
+    # Retention consumes real compacted history, including retired v69 tables.
+    with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as source:
+        bound_catalog(patch, entries=(('house', 'House'),))
+        source.execute('PRAGMA foreign_keys=ON')
+        runner.migrate(source, registry=registry.MIGRATIONS[:69])
+        source.execute('PRAGMA query_only=ON')
+        yield source
+
+
+@pytest.fixture
+def database(tmp_path, retention_predecessor, native_sql_calls):
+    # Build the populated predecessor and actual conversion once per private
+    # consumer, without an intermediate Store, template capture or file copy.
+    path = tmp_path / 'groups.db'
+    with historical_groups(path, retention_predecessor) as conn:
+        conn.execute('PRAGMA synchronous=OFF')
+        prepared = third_generation(conn)
+        apply(conn)
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store._bind_repositories()
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        # Generate the genuine TEMP guards in one transaction instead of a
+        # separate implicit transaction for each table's triggers.
+        store.conn.execute('BEGIN')
+        store._snapshot_revisions = Revisions(store.conn)
+        assert store.taste_groups.head_generation() == 'second'
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+        yield store, prepared
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +67,20 @@ def retention_io(database, monkeypatch):
     # retention cases do not own power-loss durability or automatic checkpoints.
     store.conn.execute('PRAGMA synchronous=NORMAL')
     store.conn.execute('PRAGMA wal_autocheckpoint=0')
+    bind = Store._bind_repositories
+
+    def bind_retention_reader(reader):
+        if not getattr(reader, '_read_only', False):
+            return bind(reader)
+        # Readers consume SQL facts through the real retention repository.
+        # Keep actual private connections, WAL pinning and publication guards;
+        # constructing unrelated application controllers adds no coverage here.
+        reader.group_retention = GroupRetentionRepo(reader)
+
+    monkeypatch.setattr(Store, '_bind_repositories', bind_retention_reader)
+    # These inputs own group and policy documents. Keep both real file leases
+    # without opening unrelated application domains for every private snapshot.
+    monkeypatch.setattr(store, '_retained_readers', store.taste_groups.files.retained)
     with reuse_reporting_reader(store, monkeypatch):
         yield
 

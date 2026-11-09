@@ -229,6 +229,8 @@ def prepare_revisit(store, now):
             {**latest, 'next': (offset + 1) % 3}, now)
         store.maintenance_diagnostics.record('deferred', reasons=('time_budget',),
                                              phase=REVISIT_PHASE)
+        return False
+    return completed
 
 
 def _prepare(store, now):

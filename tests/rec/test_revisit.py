@@ -1,5 +1,8 @@
 """Revisit is remembered music, with hard listening rests and per-visit variety."""
+import pytest
+
 from tests.conftest import seed_catalog_track
+from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls, without_query_timing
 from tests.test_recommend import _seed_album
 from yt_playlist.core import artists
 from yt_playlist.library import ratings
@@ -8,6 +11,22 @@ from yt_playlist.rec import home_prepared, surfaces
 
 DAY = 86400
 NOW = 2000*DAY
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These listening/selection checks never construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Remembered-song eligibility reads ratings and listening, with no genre
+    # selection. Keep its actual SQL and guards below a bounded vocabulary.
+    with bounded_consumer_schema((('rock', 'Rock'),)) as schema:
+        yield schema
 
 
 def song(store, iid, name, *, plays=0, age=40, liked=False):

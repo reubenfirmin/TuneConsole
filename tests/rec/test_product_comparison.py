@@ -297,26 +297,24 @@ def prepared_trial(store, home_prepared_template):
 def comparison_menu_schema():
     from tests.store_fixture_support import bounded_consumer_schema
 
-    with bounded_consumer_schema((('house', 'House'),)) as schema:
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
         yield schema
 
 
 @pytest.fixture
 def menu_trial(tmp_path, comparison_menu_schema, monkeypatch):
     from tests.home_fixture_support import publish_menu
-    from tests.store_fixture_support import initialize_consumer, reuse_reporting_reader
-    from yt_playlist.core.store import Store
+    from tests.store_fixture_support import _file_consumer_store, mock_snapshot_coordinator, use_native_sql_calls
 
     # Attribution consumes completed worker output. Ranking and preparation
     # have independent owners; four tracks retain observable replacement order.
-    store = Store(tmp_path / 'comparison.db')
-    try:
-        initialize_consumer(store, comparison_menu_schema)
-        with reuse_reporting_reader(store, monkeypatch):
+    # The worker flush runs after serving, so source-conflict detection is below
+    # this attribution contract. Retain the actual menu, evidence and SQL/files.
+    use_native_sql_calls(monkeypatch)
+    with _file_consumer_store(tmp_path, comparison_menu_schema, snapshot_guards=False) as store:
+        with mock_snapshot_coordinator(store, monkeypatch):
             normal = publish_menu(store, modeled=True)
             yield store, _trial(store), normal
-    finally:
-        store.conn.close()
 
 
 @pytest.fixture(scope='module')

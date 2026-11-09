@@ -9,7 +9,8 @@ import pytest
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
-    _file_consumer_store, bounded_consumer_schema, without_query_timing,
+    _file_consumer_store, bounded_consumer_schema,
+    use_native_sql_calls, without_query_timing,
 )
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core import embedding_files, schema_inspection
@@ -51,7 +52,13 @@ def file_backed_store(tmp_path, _pristine_current_schema):
 @pytest.fixture(scope='module')
 def daily_library_template(_pristine_current_schema):
     def seed(source):
-        return _seed_library(source, _seed_catalog(source))
+        # This completed lower input owns real ingestion SQL and vector files.
+        # SQL diagnostics have independent owners.
+        # The cold input builder has one writer. Owned repository reads reuse
+        # that connection; actual ingestion/vector writes still commit normally.
+        with pytest.MonkeyPatch.context() as patch, source._lock:
+            use_native_sql_calls(patch)
+            return _seed_library(source, _seed_catalog(source))
 
     with prepared_template(_pristine_current_schema, seed) as template:
         yield template
@@ -152,8 +159,9 @@ def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
                 assert reader.settings.get_setting('rec_dim') == '2'
                 assert not reader.settings.get_setting('rec_fit_inputs')
                 assert reader.model_selection.latest_daily_selection() is None
+        copied_roots = [roots(target.conn) for target in (store, file_backed_store)]
         for name, source in roots(daily_library_template.source.conn).items():
-            destinations = [roots(target.conn)[name] for target in (store, file_backed_store)]
+            destinations = [directories[name] for directories in copied_roots]
             assert len(set([source, *destinations])) == 3
             for path in source.rglob('*'):
                 if path.is_file():

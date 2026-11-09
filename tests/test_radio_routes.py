@@ -1,4 +1,10 @@
 """Radio routes, playlist launch validation and served assets."""
+import json
+import time
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
@@ -39,30 +45,59 @@ def test_routes_use_independent_playlist_session(poc, monkeypatch):
 
 
 @pytest.mark.parametrize("restored", [False, True])
-def test_status_polls_project_session_without_loading_seed_menu(poc, monkeypatch, restored):
+def test_status_polls_project_session_without_loading_seed_menu(monkeypatch, restored):
+    from yt_playlist.controllers.playlists import Playlists
+    from yt_playlist.controllers.radio_checkpoints import RadioCheckpoints
+    from yt_playlist.controllers.settings import Settings
+    from yt_playlist.rec import radio_tuning
+    from yt_playlist.repos.playlists import PlaylistRepo
+    from yt_playlist.repos.radio_checkpoints import RadioCheckpointRepo
+    from yt_playlist.repos.settings import SettingsRepo
+    from yt_playlist.web.radio_persistence import encode
     from yt_playlist.web.radio_session import PlaylistRadio
+    from yt_playlist.web.radio_state import Phase, Session
     from yt_playlist.web.routes.bridge import build as build_bridge_route
 
-    c, *_ = poc
-    c.seeds()
-    assert c.start()["ok"]
-    play(c, "v1")
-    if restored:
-        c = PlaylistRadio(c.ctx)
-        c.ctx.radio = c
-    expected = c.bootstrap()["state"]
-    settings = c.ctx.store.settings.get_setting
-
-    def without_seed_menu(key, *args, **kwargs):
-        assert key != "radio_seed_offer", "Status loaded the saved seed menu"
-        return settings(key, *args, **kwargs)
+    tracks = [{"key": f"song{i}|artist", "video_id": f"v{i}",
+               "title": f"Song {i}", "artist": "Artist"} for i in range(1, 4)]
+    session = Session(None, SimpleNamespace(tuning=radio_tuning.DEFAULTS, fingerprint="status"),
+                      1, "Radio Session", phase=Phase.PLAYING, playlist="PLSESSION", local_id=1,
+                      tracks=tracks, heard=tracks[:1], position=0, furthest=0, monitoring=True)
+    encoded = encode(session)
+    checkpoints = Mock(spec_set=RadioCheckpointRepo)
+    checkpoints.checkpoint_facts.return_value = {
+        'native': True, 'header': {'id': session.episode_id, 'revision': 1,
+            'account_id': 1, 'status': 'playing', 'recovery_filename': 'session.json',
+            'recovery_digest': 'stored-digest', 'recovery_bytes': len(encoded.encode())},
+        'queue': [{'position': i, 'video_id': track['video_id'],
+                   'identity_key': track['key'], 'state': 'current'} for i, track in enumerate(tracks)]}
+    checkpoints.operation_facts.return_value = None
+    files = SimpleNamespace(retained=nullcontext, read=Mock(side_effect=lambda *a, **kw: json.loads(encoded)))
+    settings = Mock(spec_set=SettingsRepo)
+    store = SimpleNamespace(settings=Settings(settings, files, files), tracks=None, activity_paused=False,
+        playlists=Playlists(Mock(spec_set=PlaylistRepo), None, None, nullcontext),
+        radio_checkpoints=RadioCheckpoints(checkpoints, None, None, files, nullcontext))
+    store.read_view = lambda: nullcontext(store)
+    bridge = SimpleNamespace(connected=True, resumable_player=None,
+        now_playing={"video_id": "v1", "playlist_ytm_id": "PLSESSION", "paused": False},
+        now_playing_seen_at=time.monotonic())
+    ctx = SimpleNamespace(store=store, bridge=bridge, now_fn=lambda: 1234.)
+    c = ctx.radio = PlaylistRadio(ctx)
+    # Scheduling is checked separately; these polls must project an existing
+    # live session or a committed checkpoint without preparing recommendations.
+    monkeypatch.setattr(c.work, "start_thread", Mock())
+    if not restored:
+        c.session = session
+        c.offer = []
+    expected = {"active": True, "playlist_id": "PLSESSION", "title": "Radio Session", "history": tracks[:1]}
 
     def no_seed_work(*args, **kwargs):
         pytest.fail("Session status performed seed-menu work")
 
-    monkeypatch.setattr(c.ctx.store.settings, "get_setting", without_seed_menu)
+    settings.get_setting.side_effect = no_seed_work
     monkeypatch.setattr(c, "bootstrap", no_seed_work)
     monkeypatch.setattr(c, "_eligible_seeds", no_seed_work)
+    checkpoints.reset_mock()
     c.ctx.bridge.resumable_player = None
     app = FastAPI()
     app.include_router(radio_routes.build(c.ctx))
@@ -77,6 +112,8 @@ def test_status_polls_project_session_without_loading_seed_menu(poc, monkeypatch
         assert bridge.status_code == 200
         assert bridge.json()["radio"] == expected["active"]
         assert bridge.json()["now_playing"]["source"]["kind"] == "radio"
+    assert checkpoints.checkpoint_facts.call_count == (2 if restored else 0)
+    settings.get_setting.assert_not_called()
 
 
 def test_playlist_seed_preserves_source_order_and_continues_in_a_separate_playlist(poc):

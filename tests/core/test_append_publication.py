@@ -9,6 +9,7 @@ import pytest
 from tests.core.test_append_operation_preparation import seed
 from tests.publication_fixture_support import installed, installed_reader
 from tests.store_fixture_support import (
+    mock_preparation_schema,
     native_sql_calls,
     numbered_store as unadmitted_installed,
     preparation_ddl_connection,
@@ -194,10 +195,23 @@ def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(
     # The explicit startup below installs actual guards. Initial snapshots
     # are not used while creating and corrupting these retained append files.
     store, version = unadmitted_installed
+    validate = regular.validate_version
+
+    def admitted_input(conn, target, **kwargs):
+        if conn is not store.conn or target != version:
+            return validate(conn, target, **kwargs)
+
+    # Numbered-layout admission is completed input to this missing-file case.
+    # Keep actual startup, every regular DDL owner/validator and recovery live.
+    monkeypatch.setattr(runner, 'validate_version', admitted_input)
+    monkeypatch.setattr(regular, 'validate_version', admitted_input)
     names, sources, recipe, _ = seed(store, version)
     name, source = names[0], sources[0]
     owner = publication.OWNERS[name]
     identity = stage(owner, store.conn)
+    # Stage installed and validated this worker's actual SQL. Recovery below
+    # owns files, failed progress and retries, with data verification kept real.
+    mock_preparation_schema(monkeypatch, owner.worker.definition, store.conn)
     owner.publish(store.conn, stage=identity)
     header = owner.capture(store.conn, identity, source)
     Path(header['plan_filename']).unlink()

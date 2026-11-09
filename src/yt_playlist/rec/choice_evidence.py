@@ -734,51 +734,53 @@ def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
     if capture is not None:
         protected.update(capture.artifacts())
         opportunities.update(capture.opportunities())
-    for format in FORMATS:
-        window = store.rec_proposals.get_proposals('choice_window:' + format) or {}
-        if window.get('opportunity_id'):
-            opportunities.add(window['opportunity_id'])
     from yt_playlist.rec import product_comparison
-    live = product_comparison.state(store)
-    if live.get('phase') in ('preparing', 'observing') and live.get('vectors'):
-        protected.add(live['vectors'])
-    try:
-        with store.read_view() as reader:
+    # Gather committed protection inputs on one bounded reader. Release its
+    # file lifetime before retention, which needs exclusive collection access.
+    with store.read_view() as reader:
+        for format in FORMATS:
+            window = reader.rec_proposals.get_proposals('choice_window:' + format) or {}
+            if window.get('opportunity_id'):
+                opportunities.add(window['opportunity_id'])
+        live = product_comparison.state(reader)
+        if live.get('phase') in ('preparing', 'observing') and live.get('vectors'):
+            protected.add(live['vectors'])
+        try:
             radio = reader.radio_checkpoints.load()[0] or {}
-        if not radio.get('stopped'):
-            direction = radio.get('directions') or {}
-            if direction.get('menu_id'):
-                opportunities.add(direction['menu_id'])
-    except (TypeError, ValueError):
-        pass
-    pair_artifacts, surfaces = store.model_selection.retained_pair_artifacts()
-    protected.update(pair_artifacts)
-    for surface in surfaces:
-        pair = store.rec_proposals.get_proposals(surface) or {}
-        data = pair.get('data') if isinstance(pair.get('data'), dict) else pair
-        context = data.get('context') or data.get('choice_context') or {}
-        if context.get('artifact'):
-            protected.add(context['artifact'])
-    runs = store.model_selection.selection_runs(limit=12)
-    active = store.settings.get_setting('rec_selection_active_run')
-    if active and not any(str(run['id']) == active for run in runs):
-        run = store.model_selection.selection_run(active)
-        if run:
-            runs.append(run)
-    for run in runs:
-        if run.get('serving_vectors'):
-            protected.add(run['serving_vectors'])
-    for note in (store.rec_proposals.get_proposals('album_notes') or {}).values():
-        if note.get('evidence'):
-            protected.add(note['evidence'])
-    for surface in ('album_prepared', 'home_prepared', 'home_tuned', 'home_choice'):
-        payload = (home_cache.read(store, surface) if surface in home_cache.SURFACES
-                   else store.rec_proposals.get_proposals(surface)) or {}
-        for field in ('context', 'choice_context', 'album_choice_context'):
-            context = payload.get(field) or {}
+            if not radio.get('stopped'):
+                direction = radio.get('directions') or {}
+                if direction.get('menu_id'):
+                    opportunities.add(direction['menu_id'])
+        except (TypeError, ValueError):
+            pass
+        pair_artifacts, surfaces = reader.model_selection.retained_pair_artifacts()
+        protected.update(pair_artifacts)
+        for surface in surfaces:
+            pair = reader.rec_proposals.get_proposals(surface) or {}
+            data = pair.get('data') if isinstance(pair.get('data'), dict) else pair
+            context = data.get('context') or data.get('choice_context') or {}
             if context.get('artifact'):
                 protected.add(context['artifact'])
-    monitor = store.rec_proposals.get_proposals(product_comparison.MONITOR) or {}
+        runs = reader.model_selection.selection_runs(limit=12)
+        active = reader.settings.get_setting('rec_selection_active_run')
+        if active and not any(str(run['id']) == active for run in runs):
+            run = reader.model_selection.selection_run(active)
+            if run:
+                runs.append(run)
+        for run in runs:
+            if run.get('serving_vectors'):
+                protected.add(run['serving_vectors'])
+        for note in (reader.rec_proposals.get_proposals('album_notes') or {}).values():
+            if note.get('evidence'):
+                protected.add(note['evidence'])
+        for surface in ('album_prepared', 'home_prepared', 'home_tuned', 'home_choice'):
+            payload = (home_cache.read(reader, surface) if surface in home_cache.SURFACES
+                       else reader.rec_proposals.get_proposals(surface)) or {}
+            for field in ('context', 'choice_context', 'album_choice_context'):
+                context = payload.get(field) or {}
+                if context.get('artifact'):
+                    protected.add(context['artifact'])
+        monitor = reader.rec_proposals.get_proposals(product_comparison.MONITOR) or {}
     store._evidence_phase = 'retention'
     progress = store._evidence_progress = {}
     result = ledger.maintain(

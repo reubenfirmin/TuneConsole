@@ -273,6 +273,8 @@ def test_restored_schema_with_added_owner_gets_real_revision_guards(
 @pytest.mark.parametrize('historical', [False, True])
 def test_prepared_template_isolates_construction_and_restores_caller_settings(
         _pristine_current_schema, tmp_path, monkeypatch, fail_build, historical):
+    from yt_playlist.rec import audio_vibe_model, vibe_preparation
+
     caller = {'YT_PLAYLIST_HOME': str(tmp_path / 'caller-home'),
               'YT_PLAYLIST_AUDIO_VIBES': '1',
               'YT_PLAYLIST_AUDIO_VIBE_MODEL': 'caller-model',
@@ -290,6 +292,9 @@ def test_prepared_template_isolates_construction_and_restores_caller_settings(
         assert homes[-1].is_dir()
         assert os.environ['YT_PLAYLIST_AUDIO_VIBES'] == '0'
         assert os.environ['YT_PLAYLIST_AUDIO_VIBE_MODEL'] == ''
+        assert audio_vibe_model.configured_path() is None
+        assert audio_vibe_model.identity() == 'heuristic'
+        assert vibe_preparation.version().endswith('/heuristic')
         assert 'DEEPSEEK_API_KEY' not in os.environ
         source.settings.set_setting('constructed', 'private template')
         if fail_build:
@@ -314,10 +319,20 @@ def test_prepared_template_isolates_construction_and_restores_caller_settings(
 
 
 def test_shared_home_templates_use_the_test_model(home_seed_template, home_prepared_template):
+    # These are published candidate inputs, without a fitted prediction model.
+    # Model selection during construction belongs to the isolation check above;
+    # artifact selection/provenance belongs to test_audio_vibe_model.
+    from yt_playlist.rec import home_vibe
+
     for template in (home_seed_template, home_prepared_template):
-        version = template.source.settings.get_setting('rec_vibe_version')
-        assert version and version.endswith('/heuristic'), version
-    assert len(home_prepared_template.result['menus'][0]['protos']) == 4
+        assert template.source.settings.get_setting('rec_vibe_version') is None
+        assert template.source.rec_proposals.has_proposals('mode_bundles')
+        heads = template.source.recommendations.heads()
+        assert {head['surface'] for head in heads} >= {'vibe:' + preset for preset in home_vibe.PRESETS}
+    assert home_seed_template.source.rec_proposals.get_proposals(home_prepared.SURFACE) is None
+    result = home_prepared_template.result
+    assert home_prepared._valid(result) and home_prepared.batch_complete(result)
+    assert home_prepared_template.source.rec_proposals.get_proposals(home_prepared.SURFACE) == result
 
 
 @pytest.mark.parametrize('tracks_per_lane,published', [(4, True), (8, True), (8, False)])

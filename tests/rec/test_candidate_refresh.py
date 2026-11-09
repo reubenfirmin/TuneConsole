@@ -1,6 +1,7 @@
 """Preference refreshes reuse the established models and update saved ranking provenance."""
 from pathlib import Path
 from contextlib import closing
+from copy import deepcopy
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, call
@@ -11,16 +12,22 @@ from fastapi.testclient import TestClient
 import numpy as np
 import pytest
 
-from tests.conftest import seed_catalog_track
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import seed_publication_subjects
 from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
 from tests.rec.test_model_refresh import refresh_costs, seed
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
-from yt_playlist.core.db_writes import atomic_write
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls, reuse_reporting_reader,
+    without_query_timing,
+)
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, home_prepared, model_refresh, mode_surfaces, rec_params, surfaces
 from yt_playlist.util import genre_map
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These checks build their own router without the application lifespan."""
 
 
 @pytest.fixture(scope='module')
@@ -33,8 +40,11 @@ def candidate_schema():
 def store(candidate_schema, tmp_path, monkeypatch):
     database = Store(tmp_path / 'candidate-refresh.db')
     with closing(database.conn):
+        # Keep real committed visibility and guarded snapshots on private WAL
+        # files. These refresh owners do not claim host power-loss durability.
+        database.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(database, candidate_schema)
-        database.conn.execute('PRAGMA synchronous=NORMAL')
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
         # Reporting reads consume the current private database. Preparation
         # keeps its actual pinned snapshots and guarded publication.
         with reuse_reporting_reader(database, monkeypatch):
@@ -87,17 +97,23 @@ def no_fit(*args, **kwargs):
 
 
 @pytest.fixture
-def completed_ranking_inputs(store, monkeypatch):
+def completed_ranking_inputs(native_sql_calls, without_query_timing, store, monkeypatch):
     """Clock admission consumes completed ranks; score changes are tested below."""
-    key = 'completed candidate|artist'
-    item = {'key': key, 'video_id': 'completed-candidate', 'title': 'Completed candidate',
-            'artist': 'Artist', 'genre': 'Techno', 'score': .8}
-    seed_publication_subjects(store, [item])
-    store.rec_model.replace_rec_vectors([(key, np.array([1., 0.], np.float32).tobytes())])
+    # Keep the original complete catalog, audio, artist credits, eight baskets
+    # and listening history. Only the independent fitted scores are completed
+    # inputs beneath projection-version admission and publication.
+    seed(store)
+    items = [{'key': f'song {i:03}|artist {i}', 'video_id': f'v{i}',
+              'title': f'Song {i:03}', 'artist': f'Artist {i}',
+              'genre': ('Techno', 'Jazz', 'Rock')[i * 3 // 96], 'score': .8}
+             for i in range(96)]
+    vector = np.zeros(16, np.float32)
+    vector[0] = 1
+    store.rec_model.replace_rec_vectors([(item['key'], vector.tobytes()) for item in items])
     vectors = store.rec_model.get_rec_vectors()
     assert vectors
     def calculate(reader, now, policies):
-        return {'all': {'wheelhouse': policies.stamp([dict(item)], 'wheelhouse')},
+        return {'all': {'wheelhouse': policies.stamp(deepcopy(items), 'wheelhouse')},
                 '_meta': {'full_pools': True, 'comfort_pool': 0}}, None
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
@@ -113,7 +129,7 @@ def completed_ranking(store, completed_ranking_inputs):
     yield publish
     # Check the final durable output once; the tests exercise every intermediate
     # deadline, and no_fit rejects model work during any publication.
-    key = 'completed candidate|artist'
+    key = 'song 000|artist 0'
     assert candidate(store, key)['key'] == key
     assert store.rec_model.get_rec_vectors() == completed_ranking_inputs
 
@@ -186,24 +202,45 @@ def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(
     assert store.rec_model.get_rec_vectors() == vectors
 
 
-def test_genre_mute_http_accepts_zero_and_schedules_candidate_work(store, taste_controls):
-    client, schedule = taste_controls
-    axis = 'genre:' + genre_map.family('Techno')
-    # Genre controls permit zero (hard mute), unlike the ordinary lane floor.
-    assert client.post('/taste/weight', data={'axis': axis, 'weight': 0}).status_code == 200
-    assert store.rec_model.get_weights(now=2000)[axis] == 0
-    assert client.post('/taste/reset-weights').status_code == 200
-    assert axis not in store.rec_model.weight_records()
-    assert schedule.call_args_list == [call(full=False, bundles=True)] * 2
+@pytest.fixture
+def taste_parameter_inputs(monkeypatch):
+    # These workflows change one scalar control and actual facet weights.
+    # Supply the other registered defaults as completed lower inputs; parameter
+    # persistence/clamping has its own owners. Keep real SQL reads for the
+    # edited control in policy capture, due decisions and served ranking.
+    defaults = {spec.name: spec.default for spec in rec_params.PARAMS}
+    get_param = rec_params.get_param
+    monkeypatch.setattr(rec_params, 'get_param', lambda reader, name:
+        get_param(reader, name) if name == 'comfort_min_plays' else defaults[name])
+
+
+def completed_policy_inputs(store, monkeypatch):
+    # These two control sequences keep the clock, listening history, metadata
+    # and fitted vectors unchanged. Resolve those lower inputs once, rather
+    # than reconstructing them for each publication of new scalar/facet
+    # preferences. Policies still capture the actual edited SQL preferences
+    # and each refresh keeps its own guarded snapshot and durable publication.
+    from yt_playlist.rec import measurement, transient
+
+    with store.read_snapshot() as snapshot:
+        leans = transient.facet_leans(snapshot.store, 2000)
+        models = measurement._model_identities(snapshot.store)
+
+    def listening_inputs(reader, now):
+        assert now == 2000
+        return deepcopy(leans)
+
+    monkeypatch.setattr(transient, 'facet_leans', listening_inputs)
+    monkeypatch.setattr(measurement, '_model_identities', lambda reader: deepcopy(models))
 
 
 @pytest.fixture
-def genre_ranking(store, monkeypatch):
+def genre_ranking(store, monkeypatch, taste_parameter_inputs):
     """Native genre weighting/publication with completed lower model inputs."""
-    with atomic_write(store):
-        for index, genre in enumerate(('Techno', 'Techno', 'Jazz', 'Jazz')):
-            seed_catalog_track(store, f'genre {index}|artist', f'Genre {index}', 'Artist',
-                               video_id=f'genre-{index}', genre=genre)
+    seed_publication_subjects(store, [
+        {'key': f'genre {index}|artist', 'title': f'Genre {index}', 'artist': 'Artist',
+         'video_id': f'genre-{index}', 'genre': genre}
+        for index, genre in enumerate(('Techno', 'Techno', 'Jazz', 'Jazz'))])
     store.rec_model.replace_rec_vectors([
         (f'genre {i}|artist', np.array([1., i / 4], np.float32).tobytes()) for i in range(4)])
     # The fitted preference geometry is an input. Keep the actual vector read,
@@ -219,56 +256,74 @@ def genre_ranking(store, monkeypatch):
                 '_meta': {'full_pools': True}}, None
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
+    completed_policy_inputs(store, monkeypatch)
     vectors = store.rec_model.get_rec_vectors()
     yield store, 'genre 0|artist', 'genre:' + genre_map.family('Techno')
     assert store.rec_model.get_rec_vectors() == vectors
 
 
-@pytest.mark.parametrize('weight', [.5, 1.5, 0])
-def test_genre_weight_reranks_saved_candidates_and_retains_policy(genre_ranking, weight):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(
+        genre_ranking, taste_controls):
     store, key, axis = genre_ranking
+    client, schedule = taste_controls
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
     original = candidate(store, key)
     assert original is not None and len(pool(store, 'wheelhouse')) == 4
-    store.rec_model.set_weight(axis, weight, lo=0, now=2000)
-    assert candidate_refresh.due(store, 2000)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    row = candidate(store, key)
-    if weight == 0:
-        assert row is None
-        assert [item['key'] for item in pool(store, 'wheelhouse')] == ['genre 2|artist', 'genre 3|artist']
-    else:
-        assert (row['score'] < original['score']) == (weight < 1)
-    head = store.recommendations.head('home')
-    policy = store.rec_ledger.policy_configuration(head['policy_version'])
-    assert policy['weights'][axis] == weight
-    if row is not None:
-        assert store.rec_ledger.policy_configuration(row['pool_policy'])['weights'][axis] == weight
+    original_pool = pool(store, 'wheelhouse')
+    vectors = store.rec_model.get_rec_vectors()
+
+    def rerank(**kwargs):
+        assert kwargs == {'full': False, 'bundles': True}
+        assert candidate_refresh.due(store, 2000)
+        assert mode_surfaces.prepare_bundles(store, 2000) is not None
+
+    schedule.side_effect = rerank
+    for weight in (.5, 1.5, 0):
+        # Keep HTTP zero admission and worker scheduling in the same workflow
+        # as the actual mute/rerank, rather than a separate empty-store check.
+        assert client.post('/taste/weight', data={'axis': axis, 'weight': weight}).status_code == 200
+        assert store.rec_model.get_weights(now=2000)[axis] == weight
+        row = candidate(store, key)
+        if weight == 0:
+            assert row is None
+            assert [item['key'] for item in pool(store, 'wheelhouse')] == ['genre 2|artist', 'genre 3|artist']
+        else:
+            assert (row['score'] < original['score']) == (weight < 1)
+        head = store.recommendations.head('home')
+        policy = store.rec_ledger.policy_configuration(head['policy_version'])
+        assert policy['weights'][axis] == weight
+        if row is not None:
+            assert store.rec_ledger.policy_configuration(row['pool_policy'])['weights'][axis] == weight
+        assert not candidate_refresh.due(store, 2000)
+        assert store.rec_model.get_rec_vectors() == vectors
+
+    assert client.post('/taste/reset-weights').status_code == 200
+    assert axis not in store.rec_model.weight_records()
+    assert pool(store, 'wheelhouse') == original_pool
     assert not candidate_refresh.due(store, 2000)
-
-
-@pytest.mark.parametrize('restore', ['reset', 'checkpoint'])
-def test_genre_weight_restoration_republishes_exact_saved_scores(genre_ranking, restore):
-    store, key, axis = genre_ranking
-    if restore == 'checkpoint':
-        store.rec_model.set_weight(axis, .5, now=2000)
-        store.rec_model.save_taste_settings('taste_settings_checkpoint_v1', [], 2000)
+    assert schedule.call_args_list == [call(full=False, bundles=True)] * 4
+    store.rec_model.set_weight(axis, .5, now=2000)
+    # The HTTP controls already captured their initial starting point. Replace
+    # it deliberately when saving this later half-weight checkpoint.
+    store.rec_model.save_taste_settings('taste_settings_checkpoint_v1', [], 2000, replace=True)
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    original = pool(store, 'wheelhouse')
-    assert candidate(store, key) is not None and len(original) == 4
+    saved = pool(store, 'wheelhouse')
+    saved_score = candidate(store, key)['score']
+    assert len(saved) == 4
     store.rec_model.set_weight(axis, 1.5, now=2000)
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    assert candidate(store, key)['score'] != next(row['score'] for row in original if row['key'] == key)
-    if restore == 'checkpoint':
-        assert store.rec_model.restore_taste_settings('taste_settings_checkpoint_v1', [])
-    else:
-        store.rec_model.reset_weights()
+    assert candidate(store, key)['score'] != saved_score
+    assert store.rec_model.restore_taste_settings('taste_settings_checkpoint_v1', [])
     assert candidate_refresh.due(store, 2000)
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    assert pool(store, 'wheelhouse') == original
+    assert candidate(store, key)['score'] == saved_score
+    assert pool(store, 'wheelhouse') == saved
     assert not candidate_refresh.due(store, 2000)
+    assert store.rec_model.get_rec_vectors() == vectors
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 @pytest.mark.parametrize('change', ['elapsed-time', 'half-life'])
 def test_decay_and_half_life_changes_refresh_without_authoritative_edits(
         store, completed_ranking, change):
@@ -306,13 +361,12 @@ def test_completed_ranking_retains_captured_preferences_and_leaves_later_edits_d
 
 
 @pytest.fixture
-def small_taste_ranking(store, monkeypatch):
+def small_taste_ranking(store, monkeypatch, taste_parameter_inputs):
     """Real ranking controls/publications, with completed lower candidate inputs."""
     iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
-    with atomic_write(store):
-        for i in range(4):
-            seed_catalog_track(store, f'song {i}|artist {i}', f'Song {i}', f'Artist {i}',
-                               video_id=f'control-{i}', genre='Techno')
+    seed_publication_subjects(store, [
+        {'key': f'song {i}|artist {i}', 'title': f'Song {i}', 'artist': f'Artist {i}',
+         'video_id': f'control-{i}', 'genre': 'Techno'} for i in range(4)])
     keys = [store.tracks.identity_key_for_video(f'control-{i}') for i in range(4)]
     store.history.import_play_events(iid, [
         (key, f'control-{i}', 1000 - day * 86400)
@@ -340,20 +394,20 @@ def small_taste_ranking(store, monkeypatch):
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    completed_policy_inputs(store, monkeypatch)
     vectors = store.rec_model.get_rec_vectors()
     yield store
     assert store.rec_model.get_rec_vectors() == vectors
 
 
 @pytest.fixture
-def taste_controls(store, monkeypatch):
+def taste_controls(store):
     """Exercise the real resource and worker entry point, without starting a model job."""
     from yt_playlist.rec.rec_worker import RecWorker
     from yt_playlist.web.routes import taste
 
     worker = RecWorker.__new__(RecWorker)
     worker._schedule = Mock()
-    monkeypatch.setattr(candidate_refresh, 'due', Mock(return_value=True))
     ctx = SimpleNamespace(store=store, rec_worker=worker, now=lambda: 2000,
         templates=Jinja2Templates(directory=str(Path(taste.__file__).parents[1] / 'templates')))
     app = FastAPI()
@@ -362,87 +416,66 @@ def taste_controls(store, monkeypatch):
         yield client, worker._schedule
 
 
-def test_taste_parameter_edit_and_reset_queue_candidate_work(store, taste_controls):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_taste_controls_rerank_saved_pools_after_edits_resets_and_checkpoint_restore(
+        small_taste_ranking, taste_controls):
+    # One coherent workflow owns requests, real due decisions, worker scheduling
+    # and served ranks. Completed model/candidate inputs are below this owner;
+    # no request can pass merely by calling a mocked refresh predicate.
+    store = small_taste_ranking
     client, schedule = taste_controls
-    assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
-    assert rec_params.get_param(store, 'comfort_min_plays') == 12
-    assert client.post('/taste/reset-param', data={'name': 'comfort_min_plays'}).status_code == 200
-    assert rec_params.get_param(store, 'comfort_min_plays') == 4
-    assert schedule.call_args_list == [call(full=False, bundles=True)] * 2
+    assert mode_surfaces.prepare_bundles(store, 2000) is not None
 
+    def rerank(**kwargs):
+        assert kwargs == {'full': False, 'bundles': True}
+        assert candidate_refresh.due(store, 2000)
+        assert mode_surfaces.prepare_bundles(store, 2000) is not None
 
-def test_taste_weight_edit_and_reset_queue_candidate_work(store, taste_controls):
-    client, schedule = taste_controls
-    assert client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3}).status_code == 200
-    assert store.rec_model.get_weights(now=2000)['lane:deep_cut'] == 3
-    assert client.post('/taste/reset-weights').status_code == 200
-    assert 'lane:deep_cut' not in store.rec_model.weight_records()
-    assert schedule.call_args_list == [call(full=False, bundles=True)] * 2
-
-
-def test_taste_checkpoint_restore_and_reset_all_queue_candidate_work(store, taste_controls):
-    client, schedule = taste_controls
-    seed_catalog_track(store, 'retained|artist', 'Retained', 'Artist', video_id='checkpoint-retained')
-    store.rec_model.replace_rec_vectors([
-        ('retained|artist', np.array([1., 0.], np.float32).tobytes())])
+    schedule.side_effect = rerank
     vectors = store.rec_model.get_rec_vectors()
-    assert client.post('/taste/checkpoint').status_code == 200
-    assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
-    assert client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3}).status_code == 200
-    assert client.post('/taste/checkpoint/restore').status_code == 200
-    assert rec_params.get_param(store, 'comfort_min_plays') == 4
-    assert store.rec_model.weight_records() == {}
-    assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
-    assert client.post('/taste/reset-all').status_code == 200
-    assert rec_params.get_param(store, 'comfort_min_plays') == 4
-    assert store.rec_model.weight_records() == {}
-    assert store.rec_model.get_rec_vectors() == vectors
-    assert schedule.call_args_list == [call(full=False, bundles=True)] * 5
-
-
-def test_comfort_parameter_reranks_real_saved_pools_and_updates_tuning(small_taste_ranking):
-    store = small_taste_ranking
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    original = pool(store, 'comfort')
-    assert len(original) == 4
-    tuning = home_prepared.tuning_key(store, 2000)
-    rec_params.set_param(store, 'comfort_min_plays', 12)
-    assert candidate_refresh.due(store, 2000)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    assert pool(store, 'comfort') == []
-    assert home_prepared.tuning_key(store, 2000) != tuning
-    rec_params.reset_param(store, 'comfort_min_plays')
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
-    assert pool(store, 'comfort') == original
-    assert not candidate_refresh.due(store, 2000)
-
-
-@pytest.mark.parametrize('restore', ['reset', 'checkpoint'])
-def test_lane_weight_reranks_real_saved_pools_and_retains_policy(small_taste_ranking, restore):
-    store = small_taste_ranking
-    if restore == 'checkpoint':
-        store.rec_model.save_taste_settings('taste_settings_checkpoint_v1', [], 2000)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
     original = pool(store, 'wheelhouse')
     assert len(original) == 4
     assert [r['key'] for r in original] == [f'song {i}|artist {i}' for i in (0, 2, 1, 3)]
-    store.rec_model.set_weight('lane:deep_cut', 3, now=2000)
-    assert candidate_refresh.due(store, 2000)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    original_comfort = pool(store, 'comfort')
+    assert len(original_comfort) == 4
+    tuning = home_prepared.tuning_key(store, 2000)
+    assert client.post('/taste/checkpoint').status_code == 200
+    assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
+    assert rec_params.get_param(store, 'comfort_min_plays') == 12
+    assert pool(store, 'comfort') == []
+    assert home_prepared.tuning_key(store, 2000) != tuning
+    assert client.post('/taste/reset-param', data={'name': 'comfort_min_plays'}).status_code == 200
+    assert rec_params.get_param(store, 'comfort_min_plays') == 4
+    assert pool(store, 'comfort') == original_comfort
+    assert client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3}).status_code == 200
+    assert store.rec_model.get_weights(now=2000)['lane:deep_cut'] == 3
     changed = pool(store, 'wheelhouse')
     assert [r['key'] for r in changed] == [f'song {i}|artist {i}' for i in (2, 3, 0, 1)]
     policy = store.rec_ledger.policy_configuration(changed[0]['pool_policy'])
     assert policy['weights']['lane:deep_cut'] == 3
     assert policy['params']['comfort_min_plays'] == 4
-    if restore == 'checkpoint':
-        assert store.rec_model.restore_taste_settings('taste_settings_checkpoint_v1', [])
-    else:
-        store.rec_model.reset_weights()
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    assert client.post('/taste/reset-weights').status_code == 200
+    assert 'lane:deep_cut' not in store.rec_model.weight_records()
     assert pool(store, 'wheelhouse') == original
+    assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
+    assert client.post('/taste/weight', data={'axis': 'lane:deep_cut', 'weight': 3}).status_code == 200
+    assert client.post('/taste/checkpoint/restore').status_code == 200
+    assert rec_params.get_param(store, 'comfort_min_plays') == 4
+    assert store.rec_model.weight_records() == {}
+    assert pool(store, 'wheelhouse') == original
+    assert pool(store, 'comfort') == original_comfort
+    assert client.post('/taste/param', data={'name': 'comfort_min_plays', 'value': 12}).status_code == 200
+    assert client.post('/taste/reset-all').status_code == 200
+    assert rec_params.get_param(store, 'comfort_min_plays') == 4
+    assert store.rec_model.weight_records() == {}
+    assert pool(store, 'wheelhouse') == original
+    assert pool(store, 'comfort') == original_comfort
+    assert schedule.call_args_list == [call(full=False, bundles=True)] * 9
+    assert store.rec_model.get_rec_vectors() == vectors
     assert not candidate_refresh.due(store, 2000)
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_lane_decay_invalidates_prepared_rankings(store, completed_ranking):
     store.rec_model.set_weight('lane:deep_cut', 3, now=2000)
     completed_ranking()

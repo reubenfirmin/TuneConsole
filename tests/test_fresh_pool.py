@@ -1,5 +1,6 @@
 import re
 import logging
+from contextlib import contextmanager
 from tests.enrichment_support import seed_discovered_enrichment
 import threading
 import time
@@ -9,19 +10,26 @@ import pytest
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client as current_client
-from tests.home_fixture_support import home_routes_only, prepared_client as _prepared_client, returning_listener
-from tests.home_fixture_support import publish_cards, publish_menu, without_metadata_providers
+from tests.home_fixture_support import (
+    home_control_routes, home_routes_only, prepared_client as _prepared_client, returning_listener,
+)
+from tests.home_fixture_support import publish_cards, seed_menu_cards, without_metadata_providers
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
-from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, reuse_reporting_reader
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, file_consumer_store as store, mock_snapshot_coordinator, native_sql_calls,
+    reuse_reporting_reader, use_native_sql_calls, without_query_timing,
+)
 from yt_playlist.core.activity import Activity
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
 
 
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
 @pytest.fixture(autouse=True)
-def fresh_routes(monkeypatch, home_routes_only, one_menu_per_attempt,
+def fresh_routes(monkeypatch, home_control_routes, one_menu_per_attempt,
                  without_metadata_providers, fresh_template_bytecode):
     from yt_playlist.rec import home_cards
     from yt_playlist.web import app as webapp
@@ -50,14 +58,15 @@ def prepared_client(store):
     return _prepared_client(store, background_work=False, backend_options={'use_uvloop': True})
 
 
-def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
-    keys = []
-    for i in range(12):
-        title, artist = f"Unenriched {i}", f"Unknown artist {i}"
-        key = identity_key(title, artist)
-        store.discovery.upsert_discovered_track(key, f"new{i}", title, artist,
-                                      None, None, None, None, None, 100)
-        keys.append(key)
+def test_fresh_card_waits_for_metadata_then_renders_discoveries(metadata_store):
+    store = metadata_store
+    tracks = [{'key': identity_key(f'Unenriched {i}', f'Unknown artist {i}'),
+               'title': f'Unenriched {i}', 'artist': f'Unknown artist {i}', 'video_id': f'new{i}'}
+              for i in range(12)]
+    keys = [track['key'] for track in tracks]
+    # Catalog ingestion is below the metadata gate. Preserve all twelve raw,
+    # unenriched discoveries without repeating delivery and artist inference.
+    seed_publication_subjects(store, tracks, discoveries=keys, now=100)
     mode_surfaces.prepare_bundles(store, 200)
 
     with _client(store) as client:
@@ -172,6 +181,23 @@ def fresh_workflow_schema():
         yield schema
 
 
+@pytest.fixture
+def metadata_store(tmp_path, monkeypatch):
+    """Real Fresh SQL/files with the House metadata consumed by this workflow."""
+    from yt_playlist.rec import home_prepared
+
+    # Independent Discover/Revisit summaries are not inputs to Fresh's mix
+    # eligibility. Their producers have separate preparation tests.
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', lambda *args: None)
+    monkeypatch.setattr(home_prepared, 'prepare_revisit', lambda *args: None)
+    # Metadata eligibility has no competing source writer. Keep both real
+    # ranking/publication rounds while supplying uncontended coordination.
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
+            with mock_snapshot_coordinator(database, monkeypatch):
+                yield database
+
+
 @pytest.fixture(scope='module')
 def fresh_template_bytecode(tmp_path_factory):
     from jinja2 import FileSystemBytecodeCache
@@ -180,37 +206,52 @@ def fresh_template_bytecode(tmp_path_factory):
 
 
 @pytest.fixture
-def fresh_workflow_home(fresh_workflow_menu, fresh_template_bytecode,
+def fresh_workflow_home(fresh_workflow_schema, fresh_template_bytecode,
                         without_metadata_providers, monkeypatch, tmp_path):
-    with fresh_workflow_menu.open(tmp_path / 'fresh.db') as store, reuse_reporting_reader(store, monkeypatch):
-        payload = fresh_workflow_menu.result
-        selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'}
-                    for proto in payload['menus'][0]['protos']]
-        monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
-        client = prepared_client(store)
-        client.app.state.ctx.templates.env.bytecode_cache = fresh_template_bytecode
-        with client:
+    with _file_consumer_store(tmp_path, fresh_workflow_schema) as store, reuse_reporting_reader(store, monkeypatch):
+        with _fresh_workflow_client(store, monkeypatch, fresh_template_bytecode) as client:
             yield store, client
 
 
-@pytest.fixture(scope='module')
-def fresh_workflow_menu(fresh_workflow_schema):
+@pytest.fixture
+def empty_search_home(tmp_path, monkeypatch, fresh_template_bytecode, without_metadata_providers):
+    # Empty-search retry owns job settlement and real candidate publication,
+    # independently of conflict detection against another source writer.
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'), ('techno', 'Techno')),
+                                 snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
+            with mock_snapshot_coordinator(store, monkeypatch):
+                with _fresh_workflow_client(store, monkeypatch, fresh_template_bytecode) as client:
+                    yield store, client
+
+
+@contextmanager
+def _fresh_workflow_client(store, monkeypatch, bytecode):
+    payload = _fresh_workflow_menu(store)
+    selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'}
+                for proto in payload['menus'][0]['protos']]
+    monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
+    client = prepared_client(store)
+    client.app.state.ctx.templates.env.bytecode_cache = bytecode
+    with client:
+        yield client
+
+
+def _fresh_workflow_menu(store):
     from yt_playlist.rec import home_cards, home_prepared
 
-    def seed(store):
+    # Seed directly in the case's private file. A prepared source plus another
+    # database copy adds work without adding an input to this three-card menu.
+    with pytest.MonkeyPatch.context() as patch, store._lock:
+        use_native_sql_calls(patch)
         returning_listener(store, 'mixes', now=1000)
-        payload = publish_menu(store, count=3, tracks_per_card=1, genre='Jazz', genre_options=[
-            {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
-        selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'}
-                    for proto in payload['menus'][0]['protos']]
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
-            service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__),
-                genre_options=payload['genre_options'])
-            return publish_cards(store, service.cards(home_cards.CardsRequest(1000, record=False)), 1000)
-
-    with prepared_template(fresh_workflow_schema, seed) as template:
-        yield template
+        options = [{'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}]
+        protos = seed_menu_cards(store, count=3, tracks_per_card=1, genre='Jazz')
+        selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'} for proto in protos]
+        patch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
+        service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__),
+            genre_options=options)
+        return publish_cards(store, service.cards(home_cards.CardsRequest(1000, record=False)), 1000)
 
 
 def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(fresh_workflow_home, monkeypatch):
@@ -392,36 +433,39 @@ def test_failed_or_empty_search_stops_polling_and_allows_retry(store, monkeypatc
     assert client.get("/home/fresh-pool/999999").status_code == 404
 
 
-@pytest.mark.parametrize('deferred', [False, True])
-def test_completed_search_with_insufficient_tracks_is_retryable(fresh_workflow_home, monkeypatch, deferred):
+def test_completed_search_with_insufficient_tracks_is_retryable(empty_search_home, monkeypatch):
     from yt_playlist.rec import candidate_refresh
-    store, client = fresh_workflow_home
-    if deferred:
-        candidate_refresh.checked(store, 940)
+    store, client = empty_search_home
     monkeypatch.setattr(fresh_pool, "populate", lambda *args, **kwargs: 0)
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
     # This route owns completed/deferrable empty-search handling. Ranking has
     # independent owners; retain real candidate publication and job settlement.
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', lambda *args, **kwargs: ({}, []))
-    response = client.post("/home/fresh-pool", data={"include_genres": ["jazz"]})
-    assert client.app.state.ctx.work.wait(20)
-    match = re.search(r'hx-get="/home/fresh-pool/(\d+)"', response.text)
-    if deferred:
-        assert match
-        job = client.app.state.ctx.jobs.get(int(match[1]))
-        assert job.outcome == 'waiting' and not job.done
-        waiting = client.get(f'/home/fresh-pool/{job.id}')
-        assert 'Not enough matching songs yet' not in waiting.text
-        assert 'hx-trigger="every 2s"' in waiting.text
-        assert fresh_pool.prepare(store, 4540) is not None
-    if match:
-        for _ in range(100):
-            response = client.get(f"/home/fresh-pool/{match[1]}")
-            if 'aria-busy="false"' in response.text:
-                break
-            time.sleep(.01)
-    assert "Not enough matching songs yet" in response.text
-    assert 'hx-trigger="every 2s"' not in response.text
+    previous = None
+    for deferred in (False, True):
+        if deferred:
+            candidate_refresh.checked(store, 940)
+        response = client.post("/home/fresh-pool", data={"include_genres": ["jazz"]})
+        assert client.app.state.ctx.work.wait(20)
+        job = client.app.state.ctx.jobs.latest('fresh_pool', {'include_genres': ['jazz'], 'avoid_genres': []})
+        assert job is not None and job is not previous
+        previous = job
+        match = re.search(r'hx-get="/home/fresh-pool/(\d+)"', response.text)
+        if deferred:
+            assert match
+            assert job.outcome == 'waiting' and not job.done
+            waiting = client.get(f'/home/fresh-pool/{job.id}')
+            assert 'Not enough matching songs yet' not in waiting.text
+            assert 'hx-trigger="every 2s"' in waiting.text
+            assert fresh_pool.prepare(store, 4540) is not None
+        if match:
+            for _ in range(100):
+                response = client.get(f"/home/fresh-pool/{match[1]}")
+                if 'aria-busy="false"' in response.text:
+                    break
+                time.sleep(.01)
+        assert "Not enough matching songs yet" in response.text
+        assert 'hx-trigger="every 2s"' not in response.text
 
 
 def test_board_refresh_checks_completed_search_before_declaring_old_slot_empty(fresh_workflow_home, monkeypatch):

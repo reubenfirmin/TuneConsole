@@ -12,6 +12,7 @@ from experiments.audio_lab_tools.pooling import vibe_pooling_labels as categoric
 from tests.conftest import seed_catalog_track
 from tests.rec.test_musical_preparation import observe
 from tests.rec.test_vibe_prediction import track
+from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.controllers.vibe_evaluation import VibeEvaluation
 from yt_playlist.core import catalog, db_handles, file_collection, profile_files
@@ -153,8 +154,9 @@ def test_frozen_masked_comparison_matches_runtime_and_ignores_target_observation
     assert all(fit['generation'] == 'controlled-generation' and
                fit['new_track_variance'] > fit['mean_variance'] > 0 for fit in candidate.values())
     # Snapshot capture has its real SQL/file owners below. Only its completed
-    # lower output is supplied here; freeze, loading, holdouts and all six fits
-    # execute normally, including both opposite target measurements.
+    # lower output is supplied here. Freeze and validate each distinct plan,
+    # then reuse that loaded input beneath all six real heldout fits, including
+    # both opposite target measurements.
     snapshot = {'rows': rows, 'profile_inputs': profiles}
     monkeypatch.setattr(vibe_evaluation, 'evaluation_snapshot', lambda *_args: deepcopy(snapshot))
     scores, plans = [], []
@@ -169,7 +171,8 @@ def test_frozen_masked_comparison_matches_runtime_and_ignores_target_observation
         actual = {}
         for vibe in home_vibe.PRESETS:
             output = tmp_path / f'{turn}-{vibe}.json'
-            evaluation.run(path, output, stratum, fold, vibe)
+            evaluation.run(path, output, stratum, fold, vibe,
+                           plan_loader=lambda _path: deepcopy(plan))
             result = json.loads(output.read_text())
             assert result['outcome'] == 'complete'
             row, = result['rows']
@@ -212,9 +215,16 @@ def test_source_profile_budget_deferral_preserves_pending_and_retries(file_backe
 def masked_source(file_backed_store):
     store = file_backed_store
     key = 'heldout|target artist'
-    target = seed_catalog_track(store, key, 'heldout', 'Target artist', video_id='heldout', genre='Psybient')
-    alternate = seed_catalog_track(store, 'heldout-upload|target artist', 'heldout-upload',
-                                   'Target artist', video_id='heldout-upload', genre='Psybient')
+    # Capture consumes catalog identities rather than provider ingestion. Keep
+    # both uploads and their actual association on native SQL below capture.
+    seed_publication_subjects(store, [
+        {'key': key, 'title': 'heldout', 'artist': 'Target artist',
+         'video_id': 'heldout', 'genre': 'Psybient'},
+        {'key': 'heldout-upload|target artist', 'title': 'heldout-upload',
+         'artist': 'Target artist', 'video_id': 'heldout-upload', 'genre': 'Psybient'},
+    ])
+    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+    target, alternate = entries['heldout'], entries['heldout-upload']
     recording, = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (target,)).fetchone()
     with store.conn:
         catalog.associate_item(store.conn, 'heldout-upload', recording, source='verified',

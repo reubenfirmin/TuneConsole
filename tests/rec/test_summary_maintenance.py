@@ -10,7 +10,7 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.home_fixture_support import without_metadata_providers
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, native_sql_calls
 from yt_playlist.core.store import Store
 from yt_playlist.library import analysis
 from yt_playlist.rec import actions, maintenance, trend_rollups
@@ -19,7 +19,13 @@ from yt_playlist.rec.rec_worker import RecWorker
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
+    # Summary maintenance consumes an installed schema. Admission validation
+    # belongs below this worker; keep its actual snapshot guards and SQL input.
     with bounded_consumer_schema((('techno', 'Techno'),)) as schema:
+        assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert schema.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] > 0
+        assert schema._revision_script
+        assert not schema.execute('PRAGMA foreign_key_check').fetchone()
         yield schema
 
 
@@ -54,28 +60,19 @@ def seed(store):
     return iid
 
 
-def test_summary_schema_input_keeps_installed_sql_and_generated_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] > 0
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_summary_input_keeps_admitted_schema_and_real_guards(file_consumer_store):
-    from yt_playlist.core.migrations import current, regular
-
-    current.validate(file_consumer_store.conn)
-    regular.validate(file_consumer_store.conn)
-    assert file_consumer_store._snapshot_revisions.conn is file_consumer_store.conn
-    assert not file_consumer_store.conn.execute('PRAGMA foreign_key_check').fetchone()
+@pytest.fixture
+def summary_store(native_sql_calls, tmp_path, _pristine_current_schema):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
 
 
 def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(
-        file_consumer_store, monkeypatch, without_metadata_providers):
+        summary_store, monkeypatch, without_metadata_providers):
     from fastapi import FastAPI
     from fastapi.templating import Jinja2Templates
     from yt_playlist.web.routes import trends
 
-    store = file_consumer_store
+    store = summary_store
     iid = seed(store)
     store.playlists.upsert_playlist(iid, 'empty', 'Empty playlist', 0, '', 0)
     now = [timestamp('2026-10')]

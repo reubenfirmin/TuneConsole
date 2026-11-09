@@ -2,6 +2,7 @@
 the reel route, the absence of a browsable tab, and the Home recap nag (show / link / dismiss)."""
 from datetime import datetime, timezone
 from contextlib import ExitStack, nullcontext
+from itertools import count
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,18 +17,21 @@ from yt_playlist.rec.recap_details import slides
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_page_bytecode, returning_listener, without_metadata_providers
 from tests.onboarding_support import publish_personal_mix
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, without_query_timing
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.core import schema_inspection
 
 
-pytestmark = pytest.mark.usefixtures('without_query_timing', 'without_metadata_providers')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'without_metadata_providers')
 
 
 @pytest.fixture(scope='session')
 def _pristine_current_schema():
     # Recap readers keep the full prepared story and dashboard menu; the only
     # catalog input used by their actual menu fixture is House.
-    with bounded_consumer_schema((('house', 'House'),)) as schema:
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
         yield schema
 
 
@@ -139,13 +143,20 @@ def _recap_app(store, story, synced=True, now_fn=lambda: _NOW):
 
 
 @pytest.fixture
-def _client(_pristine_current_schema):
+def _client(_pristine_current_schema, tmp_path, monkeypatch):
     with ExitStack() as resources:
+        identities = count()
+
         def create(story, synced=True, now_fn=lambda: _NOW):
-            store = Store(":memory:")
+            # Recap visibility owns actual settings/cache persistence and HTTP
+            # rendering. Reader admission and snapshot revision coordination
+            # sit below it; reuse a real committed reader of this private file.
+            store = Store(tmp_path / f'recap-{next(identities)}.db')
             resources.callback(store.conn.close)
-            initialize_consumer(store, _pristine_current_schema)
+            store.conn.execute('PRAGMA synchronous=OFF')
+            initialize_consumer(store, _pristine_current_schema, snapshot_guards=False)
             resources.enter_context(schema_inspection.reuse_tables(store.conn))
+            resources.enter_context(reuse_reporting_reader(store, monkeypatch))
             app = _recap_app(store, story, synced=synced, now_fn=now_fn)
             client = resources.enter_context(TestClient(app, base_url="http://127.0.0.1"))
             return client, store

@@ -46,15 +46,15 @@ def test_removed_consumers_do_not_erase_measured_module_setup_from_the_plan():
     assert expanded_loads == [200, 60]
 
 
-@pytest.mark.parametrize("suite", ["unit", "browser"])
-def test_retained_measured_timings_balance_four_whole_file_groups(suite):
+@pytest.mark.parametrize("suite,total", [("unit", 8), ("browser", 4)])
+def test_retained_measured_timings_balance_whole_file_groups(suite, total):
     baseline = json.loads(BASELINE.read_text())
     timings = baseline[suite]
     nodes = [f"{name}::recorded_case[{case}]" for name, row in timings.items() for case in range(row["cases"])]
-    owners, loads = partition(nodes, timings, 4)
-    assert set(owners.values()) == {1, 2, 3, 4}
+    owners, loads = partition(nodes, timings, total)
+    assert set(owners.values()) == set(range(1, total + 1))
     assert sum(loads) == pytest.approx(sum(row["seconds"] for row in timings.values()))
-    assert max(loads) - min(loads) < 2
+    assert max(loads) / min(loads) < 1.02
     assert baseline["run"].startswith('https://github.com/reubenfirmin/TuneConsole/actions/runs/')
     assert baseline["failed_cases"]  # Diagnostic timing input must not claim a passing source run.
     assert len(nodes) == baseline['measurements'][suite]['cases']
@@ -75,27 +75,28 @@ def reports(total=2, nodeids=None):
     return rows
 
 
-def test_four_shards_cover_every_parameter_once_and_keep_modules_together():
-    nodeids = [f"file-{file}.py::test_case[{case}]" for file in range(12) for case in range(3)]
-    rows = reports(4, nodeids)
-    assert verify(rows, "unit", total=4)["case_digest"] == verify(reports(1, nodeids), "unit", total=1)["case_digest"]
+@pytest.mark.parametrize('total', [4, 8])
+def test_shards_cover_every_parameter_once_and_keep_modules_together(total):
+    nodeids = [f"file-{file}.py::test_case[{case}]" for file in range(3 * total) for case in range(3)]
+    rows = reports(total, nodeids)
+    assert verify(rows, "unit", total=total)["case_digest"] == verify(reports(1, nodeids), "unit", total=1)["case_digest"]
     assert all(len(row["selected"]) == 9 for row in rows)
-    assert set(rows[0]["file_owners"].values()) == {1, 2, 3, 4}
-    with pytest.raises(ValueError, match="all 4"):
-        verify(rows[:3], "unit", total=4)
-    rows[3]["exitstatus"] = 1
+    assert set(rows[0]["file_owners"].values()) == set(range(1, total + 1))
+    with pytest.raises(ValueError, match=f"all {total}"):
+        verify(rows[:-1], "unit", total=total)
+    rows[-1]["exitstatus"] = 1
     with pytest.raises(ValueError, match="did not pass"):
-        verify(rows, "unit", total=4)
+        verify(rows, "unit", total=total)
 
 
-@pytest.mark.parametrize("shard", ["1/1", "2/2", "1/4", "4/4", "0/4", "5/4", "1/3", "1/8"])
+@pytest.mark.parametrize("shard", ["1/1", "2/2", "1/4", "4/4", "1/8", "8/8", "0/4", "5/4", "1/3", "9/8", "1/16"])
 def test_runner_configuration_accepts_supported_splits_and_rejects_invalid_indices(tmp_path, shard):
     options = {"ci_shard": shard, "ci_shard_report": tmp_path / "shard.json",
                "ci_suite": "unit", "ci_duration_baseline": BASELINE, 'ci_source_report': None}
     registered = []
     config = SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
         register=lambda plugin, name: registered.append(plugin)))
-    if shard in {"0/4", "5/4", "1/3", "1/8"}:
+    if shard in {"0/4", "5/4", "1/3", "9/8", "1/16"}:
         with pytest.raises(pytest.UsageError, match="INDEX/TOTAL"):
             configure_shard(config)
     else:
@@ -111,6 +112,18 @@ def test_every_parameter_case_executes_once_and_all_phases_feed_timings():
     assert result["files"]["one.py"]["seconds"] == pytest.approx(.6)
     assert result["test_runner_minutes"] == pytest.approx(20 / 60)
     assert result["phase_seconds"] == pytest.approx({"setup": .3, "call": .3, "teardown": .3})
+
+
+def test_baseline_refresh_retains_eight_unit_and_four_browser_receipts():
+    rows = reports(8)
+    browser = reports(4, ['browser.py::test_case'])
+    for row in browser:
+        row['suite'] = 'browser'
+    result = refresh_baseline(rows + browser, 'https://example.test/run', total=8, browser_total=4)
+    assert result['measurements']['unit']['shards'] == 8
+    assert result['measurements']['browser']['shards'] == 4
+    with pytest.raises(ValueError, match='all 4'):
+        refresh_baseline(rows + browser[:-1], 'https://example.test/run', total=8, browser_total=4)
 
 
 @pytest.mark.parametrize("total", [1, 2, 4])
@@ -497,12 +510,13 @@ def test_newer_committed_weight_refresh_is_not_overridden_by_stale_pr(started, e
         else {'timing_run': '', 'timing_artifact': ''})
 
 
-def hosted_jobs(shards=2, prefix=""):
-    jobs = [{"name": f"{suite} ({index}/{shards})", "html_url": "https://example.test/job", "conclusion": "success",
+def hosted_jobs(shards=2, prefix="", *, browser_shards=None):
+    counts = {'unit': shards, 'browser': shards if browser_shards is None else browser_shards}
+    jobs = [{"name": f"{suite} ({index}/{total})", "html_url": "https://example.test/job", "conclusion": "success",
              "created_at": "2026-10-23T12:00:00Z", "started_at": "2026-10-23T12:01:00Z",
              "completed_at": "2026-10-23T12:04:00Z", "steps": [
                  {"name": "Run the test suite", "started_at": "2026-10-23T12:02:00Z", "completed_at": "2026-10-23T12:03:00Z"}]}
-            for suite in ("unit", "browser") for index in range(1, shards + 1)]
+            for suite, total in counts.items() for index in range(1, total + 1)]
     jobs.extend([
         {"name": "plan", "html_url": "https://example.test/plan", "conclusion": "success",
          "created_at": "2026-10-23T11:58:00Z", "started_at": "2026-10-23T11:58:00Z",
@@ -563,6 +577,36 @@ def test_four_runner_metrics_require_every_shard_and_count_all_runner_minutes():
     assert not measure([job for job in jobs if job["name"] != "browser (4/4)"], "abc", shards=4)["complete"]
     jobs[3]["conclusion"] = "cancelled"
     assert not measure(jobs, "abc", shards=4)["complete"]
+
+
+def test_eight_unit_and_four_browser_metrics_require_all_twelve_runners():
+    jobs = hosted_jobs(8, browser_shards=4)
+    result = measure(jobs, 'abc', shards=8, browser_shards=4)
+    assert result['complete']
+    assert result['shards'] == 8 and result['browser_shards'] == 4
+    assert result['test_runner_minutes'] == 36
+    assert len(result['jobs']) == 12
+    for missing in ('unit (8/8)', 'browser (4/4)'):
+        assert not measure([job for job in jobs if job['name'] != missing], 'abc',
+                           shards=8, browser_shards=4)['complete']
+    assert not measure(jobs, 'abc', shards=8)['complete']
+
+
+def test_hosted_collection_matches_each_suites_own_shard_count():
+    class Source:
+        repository = 'owner/repo'
+
+        def api(self, path):
+            if '/jobs?' in path:
+                return {'jobs': hosted_jobs(8, browser_shards=4)}
+            return {'head_sha': 'abc', 'event': 'pull_request', 'run_attempt': 1,
+                    'html_url': 'https://example.test/run/123'}
+
+    suites = {suite: {**verify(reports(total), 'unit', total=total), 'suite': suite}
+              for suite, total in (('unit', 8), ('browser', 4))}
+    assert collect(Source(), '123', None, 8, suites, browser_shards=4)['complete']
+    suites['browser']['shards'] = 8
+    assert not collect(Source(), '123', None, 8, suites, browser_shards=4)['complete']
 
 
 @pytest.mark.parametrize("event,head,accepted", [
@@ -631,6 +675,21 @@ def test_four_shards_can_be_compared_with_repeated_serial_or_two_shard_controls(
     assert result["candidate_shards"] == 4
     assert set(result["measurements"]) == {str(baseline), "4"}
     assert result["runner_minute_change"] == 3
+
+
+def test_unit_shard_comparison_keeps_browser_shards_at_four():
+    rows = measurements()
+    for row in rows:
+        total = 4 if row['shards'] == 1 else 8
+        row.update(shards=total, browser_shards=4)
+        row['suites']['unit']['shards'] = total
+        row['suites']['browser']['shards'] = 4
+    result = compare(rows)
+    assert (result['baseline_shards'], result['candidate_shards']) == (4, 8)
+    assert result['baseline_browser_shards'] == result['candidate_browser_shards'] == 4
+    rows[0]['browser_shards'] = 2
+    with pytest.raises(ValueError):
+        compare(rows)
 
 
 @pytest.mark.parametrize("fault", ["single-run", "revision", "duplicate", "cases", "failed", "missing-suite", "stale-timings"])

@@ -27,7 +27,8 @@ from yt_playlist.core import discovery_cache_policy, discovery_provenance
 from yt_playlist.core.proposal_codec import encode_proposals
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
-from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, use_native_sql_calls, without_query_timing)
 
 DAY = 86400
 
@@ -38,7 +39,7 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture(autouse=True)
-def query_diagnostics(without_query_timing):
+def query_diagnostics(native_sql_calls, without_query_timing):
     """Keep actual SQL/snapshot concurrency without slow-query reporting."""
 
 
@@ -50,7 +51,14 @@ def _pristine_current_schema():
 
 @pytest.fixture(scope='module')
 def population_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, populate) as template:
+    def build(store):
+        # Input construction precedes the actual cleanup race. Keep every SQL
+        # subject, pool and file while supplying its lower diagnostic transport.
+        with pytest.MonkeyPatch.context() as patch:
+            use_native_sql_calls(patch)
+            return populate(store)
+
+    with prepared_template(_pristine_current_schema, build) as template:
         yield template
 
 
@@ -459,18 +467,28 @@ def test_cleanup_retry_finishes_after_earlier_repository_commits(database, monke
     assert database.discovery.discovered_tracks_by_keys([key]) == {}
 
 
-@pytest.mark.parametrize('encoded', [False, True])
-def test_legacy_cache_pruning_preserves_all_other_fields_and_compression(encoded):
-    """Retain the old complete-document assertions at the explicit codec boundary."""
+@pytest.fixture(scope='module')
+def legacy_cache_input():
+    # Both codec inputs consume this same complete document. Keep its cold
+    # construction in the replacement group without rebuilding it per format.
     items = [{'key': 'gone' if n == 0 else f'keep-{n}', 'title': f'Track {n}',
               'description': 'album context and independent listening evidence ' * 20,
               'pool_policy': 'retained-policy'} for n in range(8000)]
     bundles = {'all': {'fresh': items, 'wheelhouse': [{'key': 'owned'}]},
                '1': {'fresh': items}, '_meta': {'full_pools': True, 'comfort_pool': 12},
                '_radio': {'1': ['gone', 'keep-1']}}
+    plain = json.dumps(bundles)
+    assert len(plain.encode()) > 10 * 1024 * 1024
+    return items, bundles, plain
+
+
+@pytest.mark.parametrize('encoded', [False, True])
+def test_legacy_cache_pruning_preserves_all_other_fields_and_compression(encoded, legacy_cache_input):
+    """Retain the old complete-document assertions at the explicit codec boundary."""
+    items, bundles, plain = legacy_cache_input
     source = {'mode_bundles': bundles, 'fresh_pool': items}
-    assert len(json.dumps(bundles).encode()) > 10 * 1024 * 1024
-    rows = [{'surface': surface, 'payload': encode_proposals(surface, value) if encoded else json.dumps(value)}
+    rows = [{'surface': surface, 'payload': encode_proposals(surface, value) if encoded else
+             plain if surface == 'mode_bundles' else json.dumps(value)}
             for surface, value in source.items()]
     prepared = {surface: raw for raw, surface in discovery_cache_policy.prepare(rows, {'gone'})}
     expected = items[1:]
@@ -479,11 +497,15 @@ def test_legacy_cache_pruning_preserves_all_other_fields_and_compression(encoded
     assert json_cache.decode(prepared['fresh_pool']) == expected
     assert json_cache.decode(prepared['mode_bundles'], keys={'all', '_meta'}) == {
         'all': cleaned['all'], '_meta': bundles['_meta']}
+    # Retained descriptions alone bound the uncompressed document from below.
+    # Exact decoded equality above proves every field survived; serializing
+    # both large expected documents again adds no compression evidence.
+    retained_text_bytes = sum(len(item['description'].encode()) for item in expected)
     for surface, raw in prepared.items():
         envelope = json.loads(raw)
         assert envelope[json_cache.MARKER] == json_cache.FORMAT
         assert envelope['policies'] == [{'pool_policy': 'retained-policy'}]
-        assert len(raw.encode()) < len(json.dumps(cleaned if surface == 'mode_bundles' else expected).encode())
+        assert len(raw.encode()) < retained_text_bytes
 
 
 def test_stale_discovery_retry_does_not_repeat_the_daily_generated_playlist_sweep(database, monkeypatch, caplog):

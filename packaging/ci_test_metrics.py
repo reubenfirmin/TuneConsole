@@ -21,7 +21,8 @@ def seconds(start, end):
     return elapsed if elapsed >= 0 else None
 
 
-def measure(jobs, revision, shards=2, suites=None):
+def measure(jobs, revision, shards=2, suites=None, *, browser_shards=None):
+    counts = {'unit': shards, 'browser': shards if browser_shards is None else browser_shards}
     rows = []
     orchestration = []
     for job in jobs:
@@ -42,13 +43,15 @@ def measure(jobs, revision, shards=2, suites=None):
                    test_seconds=seconds(test.get("started_at"), test.get("completed_at")) if test else None)
         rows.append(row)
     required = rows + orchestration
-    expected = [f"{suite} ({index}/{shards})" for suite in ("unit", "browser") for index in range(1, shards + 1)]
+    expected = [f"{suite} ({index}/{total})" for suite, total in counts.items() for index in range(1, total + 1)]
     expected.extend(("plan", "coverage", "checks"))
-    complete = (shards in (1, 2, 4) and Counter(row["role"] for row in required) == Counter(expected)
+    complete = (all(total in (1, 2, 4, 8) for total in counts.values())
+                and Counter(row["role"] for row in required) == Counter(expected)
                 and all(row["conclusion"] == "success" and row["runner_seconds"] is not None
                         and row["queue_seconds"] is not None for row in required)
                 and all(row["test_seconds"] is not None and row["setup_seconds"] is not None for row in rows))
     return {"revision": revision, "shards": shards, "complete": complete, "jobs": rows, "suites": suites or {}, "scope": SCOPE,
+            **({'browser_shards': browser_shards} if browser_shards is not None else {}),
             "orchestration_jobs": orchestration,
             "elapsed_seconds": seconds(min(row["created_at"] for row in required), max(row["completed_at"] for row in required))
                 if required and all(row["created_at"] and row["completed_at"] for row in required) else None,
@@ -65,7 +68,10 @@ def compare(measurements):
     counts = sorted({row["shards"] for row in measurements})
     groups = {total: [row for row in measurements if row["shards"] == total] for total in counts}
     if (len(groups) != 2 or any(len(group) < 2 for group in groups.values())
-            or not all(row["complete"] and row["shards"] in (1, 2, 4) and row["elapsed_seconds"] > 0 for row in measurements)):
+            or not all(row["complete"] and row["shards"] in (1, 2, 4, 8)
+                       and row.get('browser_shards', row['shards']) in (1, 2, 4, 8)
+                       and row["elapsed_seconds"] > 0 for row in measurements)
+            or any(len({row.get('browser_shards', row['shards']) for row in group}) != 1 for group in groups.values())):
         raise ValueError("Compare at least two passing baseline runs and two passing sharded runs")
     revisions = {row["revision"] for row in measurements}
     identities = {(row["run_id"], row["run_attempt"]) for row in measurements}
@@ -77,7 +83,8 @@ def compare(measurements):
             raise ValueError("Both verified suite timing reports are required")
         for suite in ("unit", "browser"):
             report = row["suites"][suite]
-            if (report["suite"] != suite or report["revision"] != row["revision"] or report["shards"] != row["shards"]
+            total = row.get('browser_shards', row['shards']) if suite == 'browser' else row['shards']
+            if (report["suite"] != suite or report["revision"] != row["revision"] or report["shards"] != total
                     or report["cases"] < 1 or not report["case_digest"]):
                 raise ValueError("Suite timing reports do not match the measured source checks")
         coverage.append(tuple((suite, row["suites"][suite]["cases"], row["suites"][suite]["case_digest"])
@@ -101,12 +108,14 @@ def compare(measurements):
     baseline, sharded = (summaries[str(total)] for total in counts)
     return {"revision": next(iter(revisions)), "measurements": summaries,
             "baseline_shards": counts[0], "candidate_shards": counts[1],
+            "baseline_browser_shards": groups[counts[0]][0].get('browser_shards', counts[0]),
+            "candidate_browser_shards": groups[counts[1]][0].get('browser_shards', counts[1]),
             "wall_time_reduction_percent": 100 * (1 - sharded["median_elapsed_seconds"] / baseline["median_elapsed_seconds"]),
             "runner_minute_change": sharded["median_runner_minutes"] - baseline["median_runner_minutes"],
             "scope": SCOPE}
 
 
-def collect(backend, run_id, attempt, shards, suites):
+def collect(backend, run_id, attempt, shards, suites, *, browser_shards=None):
     run = backend.api(f"repos/{backend.repository}/actions/runs/{run_id}")
     attempt = attempt or run["run_attempt"]
     jobs, page = [], 1
@@ -120,9 +129,10 @@ def collect(backend, run_id, attempt, shards, suites):
     # PR jobs check out GITHUB_SHA (the synthetic merge), while the run API's
     # head_sha identifies the PR branch. Retain both instead of relabelling tests.
     tested_revision = next(iter(revisions)) if len(revisions) == 1 else run["head_sha"]
-    result = measure(jobs, tested_revision, shards, suites)
+    result = measure(jobs, tested_revision, shards, suites, browser_shards=browser_shards)
+    counts = {'unit': shards, 'browser': shards if browser_shards is None else browser_shards}
     result["complete"] = (result["complete"] and set(suites) == {"unit", "browser"} and len(revisions) == 1
-                          and all(report["suite"] == suite and report["shards"] == shards
+                          and all(report["suite"] == suite and report["shards"] == counts[suite]
                                   for suite, report in suites.items())
                           and (run["event"] == "pull_request" or tested_revision == run["head_sha"]))
     result.update(run_id=str(run_id), run_attempt=str(attempt), url=run["html_url"], head_revision=run["head_sha"])
@@ -135,7 +145,9 @@ if __name__ == "__main__":
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--attempt", default=os.environ.get("GITHUB_RUN_ATTEMPT"))
-    parser.add_argument("--shards", type=int, choices=(1, 2, 4), default=int(os.environ.get("SHARD_TOTAL", "4")))
+    parser.add_argument("--shards", type=int, choices=(1, 2, 4, 8), default=int(os.environ.get("SHARD_TOTAL", "4")))
+    parser.add_argument("--browser-shards", type=int, choices=(1, 2, 4, 8),
+                        default=int(os.environ['BROWSER_SHARD_TOTAL']) if 'BROWSER_SHARD_TOTAL' in os.environ else None)
     parser.add_argument("--timings", type=Path, default=Path("evidence"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -147,7 +159,8 @@ if __name__ == "__main__":
             parser.error("--repository and --run-id are required outside GitHub Actions")
         suites = {suite: json.loads(path.read_text()) for suite in ("unit", "browser")
                   if (path := args.timings / f"{suite}-timings.json").is_file()}
-        result = collect(Backend(args.repository), args.run_id, args.attempt, args.shards, suites)
+        result = collect(Backend(args.repository), args.run_id, args.attempt, args.shards, suites,
+                         browser_shards=args.browser_shards)
         output = args.output or Path("ci-test-metrics.json")
     output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

@@ -418,8 +418,15 @@ def test_home_worker_serves_explicit_album_page_demand_outside_its_menu(store, m
     def stage(name, target, *args, **kwargs):
         if target is album_choices.prepare_cached:
             return {'items': [ALBUM]}
-        if target is home_prepared.prepare:
-            return {'menus': [1], 'modes': [], 'play_exposure': []}
+        if target is home_prepared.prepare_mixes:
+            return {'menus': [{'protos': [
+                {'lane': lane, 'tracks': [{'key': lane}]}
+                for lane in ('comfort', 'wheelhouse', 'explore', 'fresh')]}],
+                'modes': [], 'play_exposure': []}
+        if target is home_prepared.prepare_discovery:
+            return {}
+        if target is home_prepared.prepare_revisit:
+            return True
         if target is album_notes.prepare:
             return target(*args, **kwargs)
 

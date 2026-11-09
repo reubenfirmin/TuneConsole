@@ -132,6 +132,16 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
     Different prefixes own disjoint tracks. Preparation, readiness and ranking
     tests should continue to build their own real inputs.
     """
+    protos = seed_menu_cards(store, now, prefix=prefix, count=count, tracks_per_card=tracks_per_card,
+                             modeled=modeled, mode_ids=mode_ids, genre=genre, labels=labels, vibe=vibe)
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, list(genre_options), [], home_cards._epoch(store, 'cards'), vibe)
+    return publish_cards(store, result, now, surface=surface)
+
+
+def seed_menu_cards(store, now=1000, *, prefix='prepared', count=4, tracks_per_card=4,
+                    modeled=False, mode_ids=(), genre='house', labels=(), vibe=None):
+    """Seed real card subjects below consumers, without publishing an unused menu."""
     protos = []
     with atomic_write(store):
         for index, lane in enumerate(('comfort', 'wheelhouse', 'explore', 'temporal')[:count]):
@@ -161,9 +171,7 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
             elif modeled:
                 proto['mode_id'] = None
             protos.append(proto)
-    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
-                                   None, None, list(genre_options), [], home_cards._epoch(store, 'cards'), vibe)
-    return publish_cards(store, result, now, surface=surface)
+    return protos
 
 
 def publish_cards(store, result, now, *, surface='home_prepared'):

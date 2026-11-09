@@ -1,11 +1,13 @@
 """Old genre repairs preserve invalid history while independently guarding writes."""
 import sqlite3
+from contextlib import closing
 
 import pytest
 
 from tests.core.test_installed_genre_contract import earlier_database
 from tests.core.test_domain_contract_preparation import finish
 from tests.genre_catalog_support import bound_catalog
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import domain_contracts, installed_genre_contract as repair
 
@@ -17,8 +19,8 @@ def disable_periodic_library_sync():
 
 def test_regular_repair_never_reads_or_copies_axis_population_and_audit_is_separate(tmp_path, monkeypatch):
     bound_catalog(monkeypatch)
-    conn = earlier_database(tmp_path/'earlier.db')
-    try:
+    with closing(earlier_database(tmp_path/'earlier.db')) as conn, schema_inspection.reuse_tables(conn):
+        conn.execute('PRAGMA synchronous=OFF')
         with conn:
             conn.execute("INSERT INTO taste_axes(id,kind) VALUES (8,'other')")
         history = list(map(tuple,conn.execute('SELECT * FROM schema_migrations')))
@@ -54,5 +56,3 @@ def test_regular_repair_never_reads_or_copies_axis_population_and_audit_is_separ
         finish(selected,conn)
         domain_contracts.verify(conn,selected)
         assert domain_contracts.original(conn,selected,record['source_key'],record['source_digest'])==original
-    finally:
-        conn.close()

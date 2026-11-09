@@ -6,7 +6,19 @@ from tests.enrichment_support import complete_entries, complete_discovered
 from tests.conftest import seed_catalog_track
 from tests.onboarding_support import publish_personal_mix
 from tests.test_growth_journey import early_journey
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator, native_sql_calls)
 from yt_playlist.rec import account_growth, home_cache, home_prepared
+
+
+@pytest.fixture
+def radio_access_store(tmp_path, monkeypatch, native_sql_calls):
+    # Access admission reads real prepared outputs, independently of the full
+    # metadata vocabulary and snapshot-conflict machinery.
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz')), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
+            with mock_snapshot_coordinator(database, monkeypatch):
+                yield database
 
 
 @pytest.mark.parametrize('case, expected', [
@@ -15,7 +27,8 @@ from yt_playlist.rec import account_growth, home_cache, home_prepared
     ('incomplete_coverage', False), ('ready', True), ('mix_feedback', True), ('prior_radio', True),
     ('prior_tv', True), ('prior_vibes', True), ('excluded_seed', False),
 ])
-def test_radio_access_matches_journey_and_preserves_earned_access(store, monkeypatch, case, expected):
+def test_radio_access_matches_journey_and_preserves_earned_access(radio_access_store, monkeypatch, case, expected):
+    store = radio_access_store
     radio = {'seeds': [], 'state': {}, 'seedMenu': 'current'}
     if case != 'empty':
         if not case.startswith('prior_'):

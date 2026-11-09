@@ -5,9 +5,20 @@ from yt_playlist.rec import surfaces
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as store, native_sql_calls, without_query_timing,
+)
 
 
-pytestmark = pytest.mark.usefixtures('home_routes_only')
+pytestmark = pytest.mark.usefixtures('home_routes_only', 'native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Card rotation consumes one prepared House menu. Keep real SQL/files,
+    # selected-card rendering and view writes without importing other genres.
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
 
 
 def _client(store, iid):

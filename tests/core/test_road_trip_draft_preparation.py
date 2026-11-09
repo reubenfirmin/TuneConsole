@@ -5,11 +5,19 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import (
+    native_sql_calls,
+    numbered_store as installed,
+    preparation_ddl_connection,
+    without_query_timing,
+)
 from yt_playlist.core import collection_recovery, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import road_trip_drafts as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)

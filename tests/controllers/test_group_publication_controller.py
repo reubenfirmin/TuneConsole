@@ -134,6 +134,20 @@ def test_digest_match_with_different_actual_members_cannot_advance_the_head(publ
     service.repository.finish_staged.assert_not_called()
 
 
+def test_reused_sealed_content_is_verified_before_linking_without_resume_counts(publication):
+    service, prepared, _events, _active = publication
+    service.repository.group_state.return_value = {
+        'version_id': 13, 'group_id': 12, 'sealed': True,
+    }
+    service.repository.version_facts.return_value['members'][0] = (1, .1, .8, 'a' * 64)
+    with pytest.raises(ValueError, match='digest collision'):
+        service.publish(prepared)
+    service.repository.install_members.assert_not_called()
+    service.repository.install_representatives.assert_not_called()
+    service.repository.link_group.assert_not_called()
+    service.repository.finish_staged.assert_not_called()
+
+
 def test_ready_build_only_needs_its_final_publication(publication):
     service, prepared, _events, _active = publication
     service.repository.claim_generation.return_value = 10, 11, 'owner', True

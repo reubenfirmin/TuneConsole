@@ -3,7 +3,7 @@
 Real checkpoints and concurrent capture/deletion fences remain covered by the
 recommendation-retirement and album-feedback-outbox integration owners.
 """
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 import logging
 import sqlite3
 from threading import RLock
@@ -171,18 +171,30 @@ def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sq
     store.settings = Mock(spec=['get_setting'])
     store.settings.get_setting.side_effect = lambda key: (
         'retention' if key == choice_evidence.STORAGE_PHASE else None)
-    store.rec_proposals = Mock(get_proposals=Mock(return_value={}))
+    reader = NoDatabase()
+    reader.settings = Mock(get_setting=Mock(return_value=None))
+    reader.rec_proposals = Mock(get_proposals=Mock(return_value={}))
     cache_reads = []
 
     def cached(owner, surface):
-        assert owner is store and surface in home_cache.SURFACES
+        assert owner is reader and surface in home_cache.SURFACES
         cache_reads.append(surface)
         return {'choice_context': {'artifact': surface + '-artifact'}}
 
     monkeypatch.setattr(home_cache, 'read', cached)
-    store.radio_checkpoints = Mock(load=Mock(return_value=({}, 0)))
-    store.read_view = lambda: nullcontext(store)
-    store.model_selection = Mock(
+    reader.radio_checkpoints = Mock(load=Mock(return_value=({}, 0)))
+    reading = []
+
+    @contextmanager
+    def committed_inputs():
+        reading.append(True)
+        try:
+            yield reader
+        finally:
+            reading.pop()
+
+    store.read_view = committed_inputs
+    reader.model_selection = Mock(
         retained_pair_artifacts=Mock(return_value=([], [])),
         selection_runs=Mock(return_value=[]))
     ledger = Mock(byte_budget=1024)
@@ -201,7 +213,7 @@ def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sq
     store.album_feedback = Mock(protection=Mock(side_effect=protection))
 
     def maintain(cutoff, *, pending_protection, **options):
-        assert not events
+        assert not events and not reading
         assert options['protected_artifacts'] == {'inventory-artifact'} | {
             surface + '-artifact' for surface in home_cache.SURFACES}
         assert options['protected_opportunities'] == {'inventory-opportunity'}

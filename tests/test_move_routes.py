@@ -1,6 +1,9 @@
 """Cross-identity playlist copy and move route responses."""
 import json
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -15,13 +18,57 @@ def _two_identity_move(store):
     return i1, i2, pid
 
 
-def test_move_run_copy_returns_row_with_message(store):
-    i1, i2, pid = _two_identity_move(store)
-    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
-    r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
+def test_move_run_copy_returns_row_with_message():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from starlette.templating import Jinja2Templates
+    from yt_playlist.controllers.actions import Actions
+    from yt_playlist.controllers.playlists import Playlists
+    from yt_playlist.controllers.tracks import Tracks
+    from yt_playlist.library.ops import PlaylistOps
+    from yt_playlist.repos.actions import ActionRepo
+    from yt_playlist.repos.models import Playlist
+    from yt_playlist.repos.playlists import PlaylistRepo
+    from yt_playlist.repos.tracks import TrackRepo
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import move
+
+    i1, i2, pid, track_id, copied_id = 1, 2, 3, 4, 5
+    playlist = Playlist(pid, i1, "PL1", "Mix", 1, "h", 1., 1., 1.)
+    playlists = Mock(spec_set=PlaylistRepo)
+    playlists.get_playlist.return_value = playlist
+    playlists.get_playlist_tracks_with_meta.return_value = [("s|x", "v1", "S", "X", 200, 1)]
+    playlists.upsert_playlist.return_value = copied_id
+    tracks = Mock(spec_set=TrackRepo)
+    tracks.track_ids_for_videos.return_value = {"v1": track_id}
+    tracks.catalog_subject.return_value = {"identity_key": "s|x"}
+    actions = Mock(spec_set=ActionRepo)
+    # Persistence and durable recovery are owned by the real-store transfer tests.
+    actions.has_durable_targets.return_value = False
+    actions.transaction.side_effect = nullcontext
+    files = SimpleNamespace(retained=nullcontext)
+    store = SimpleNamespace(
+        playlists=Playlists(playlists, None, None, nullcontext),
+        tracks=Tracks(tracks, None, None, None, None, None),
+        actions=Actions(actions, files, None, 'copy-route', nullcontext))
+    source = FakeClient(tracks={"PL1": [_track("v1", "S", "X")]})
+    target = FakeClient(catalog={"v1": _track("v1", "S", "X")})
+    ops = PlaylistOps(store, lambda: {i1: source, i2: target}, lambda: 1.)
+    ctx = SimpleNamespace(store=store, ops=lambda: ops, logger=Mock(),
+                          templates=Jinja2Templates(directory=Path(webapp.__file__).with_name('templates')))
+    app = FastAPI()
+    app.include_router(move.build(ctx))
+    with TestClient(app) as c:
+        r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
     assert r.status_code == 200
     assert "Copied" in r.text and "Mix" in r.text       # row re-rendered, still present
     assert store.playlists.get_playlist(pid) is not None
+    assert target.created == [("PL_NEW_0", "Mix", "Copied by TuneConsole")]
+    assert target.added == [("PL_NEW_0", ["v1"])]
+    assert source.deleted == []
+    playlists.set_playlist_tracks.assert_called_once_with(copied_id, [track_id])
+    playlists.remove_playlist.assert_not_called()
+    actions.insert_action.assert_called_once()
 
 
 def test_move_run_move_removes_row(store,monkeypatch,tmp_path):

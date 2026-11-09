@@ -9,14 +9,15 @@ import pytest
 from tests.core.test_predecessor_writes import consumer_installed as template_installed
 from tests.prepared_fixture_support import assert_upgrade_phase, coordinates, custody_predecessor, custody_upgrade_cases
 from tests.publication_fixture_support import installed
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads, without_query_timing
+from tests.store_fixture_support import (
+    assert_installed_consumer_input, native_sql_calls, publication_consumer_reads, without_query_timing)
 from yt_playlist.core import action_backup_files, collection_recovery, fao, policy_documents, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import action_ledger as preparation
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'publication_consumer_reads')
 
 
 @pytest.fixture
@@ -226,6 +227,12 @@ def test_failure_interrupt_retry_missing_manifest_and_retained_backup_rebuild(in
     with pytest.raises(OSError, match='file failure'):
         job.step(store.conn)
     failed = job.progress(store.conn)
+    def install(conn, context):
+        conn.execute('CREATE TABLE independent_action_ddl(value TEXT)')
+    def validate(conn):
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_action_ddl'").fetchone()
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(
+        len(regular.CHANGES) + 1, 'independent_action_ddl', install, validate)))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)

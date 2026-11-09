@@ -34,6 +34,11 @@ def native_sql_calls(monkeypatch):
     Handle admission and thread coordination retain their instrumented owners.
     These consumers still execute actual constraints, transactions and triggers.
     """
+    use_native_sql_calls(monkeypatch)
+
+
+def use_native_sql_calls(monkeypatch):
+    """Supply native SQL below higher-scope fixture producers as well."""
     from yt_playlist.core.db_diagnostics import DiagnosticConnection
 
     for operation in ('execute', 'executemany'):
@@ -81,7 +86,7 @@ def publication_schema_inspections(request):
     Validators still check live SQL and refresh after external commits. Keep
     reader and artifact leases entirely under each test's control.
     """
-    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed')
+    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed', 'numbered_store')
                     if name in request.fixturenames), None)
     if fixture is None:
         yield
@@ -115,6 +120,22 @@ def _publication_preparation_input(store, monkeypatch):
 
         monkeypatch.setattr(rows, 'validate_version', lambda *args, **kwargs: None)
         monkeypatch.setattr(listening_subjects, 'validate_version', lambda *args, **kwargs: None)
+
+
+def mock_preparation_schema(monkeypatch, job, conn):
+    """Admit installed SQL once below tests of data/file preparation.
+
+    Use only when the test keeps this job's SQL definitions unchanged. Worker
+    progress, data verification, source fences and publication remain real.
+    """
+    job.validate(conn)
+    validate = type(job).validate
+
+    def admitted(worker, target):
+        if worker is not job or target is not conn:
+            return validate(worker, target)
+
+    monkeypatch.setattr(type(job), 'validate', admitted)
 
 
 @pytest.fixture

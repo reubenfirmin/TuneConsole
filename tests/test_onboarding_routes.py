@@ -6,11 +6,13 @@ from tests.home_fixture_support import home_page_bytecode, home_pages_only, home
 from tests.test_growth_readiness import readiness_policy
 from tests.store_fixture_support import (
     bounded_consumer_schema, uncontended_file_consumer_store as store,
+    initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
     reuse_reporting_reader, without_query_timing,
 )
 
 import pytest
 from fastapi.testclient import TestClient
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
@@ -471,47 +473,63 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
 
 
 @pytest.mark.parametrize('format', ['mixes', 'albums'])
+@pytest.mark.usefixtures('native_sql_calls')
 def test_completed_setup_survives_offer_loss_and_a_database_restart(
-        tmp_path, monkeypatch, format):
-    from tests.genre_catalog_support import bound_catalog
-    from tests.onboarding_support import publish_personal_mix
-    from tests.test_growth_journey import early_journey
-    from yt_playlist.core import home_outputs
-    from yt_playlist.rec import onboarding
+        tmp_path, monkeypatch, request, format, _pristine_current_schema):
+    from tests.conftest import seed_catalog_track
+    from tests.onboarding_support import publish_personal_album, publish_personal_mix
+    from yt_playlist.core import home_outputs, store as store_module
+    from yt_playlist.rec import growth_readiness, onboarding
 
+    # These two applications use Home and setup status; the broader page
+    # fixtures' playlist/chart/sync routers are unrelated to durable completion.
+    request.getfixturevalue('home_routes_only')
     path = tmp_path / 'library.db'
-    bound_catalog(monkeypatch, entries=(('house', 'House'), ('jazz', 'Jazz')))
     first = Store(path)
     first.conn.execute('PRAGMA synchronous=OFF')
-    first.init_schema()
+    initialize_consumer(first, _pristine_current_schema, snapshot_guards=False)
     first.conn.execute('PRAGMA wal_autocheckpoint=0')
-    with closing(first.conn), reuse_reporting_reader(first, monkeypatch):
+    # This controller owns durable setup completion, projection loss and a real
+    # Store restart. Foundation/discovery preparation are completed lower inputs;
+    # keep the actual album/mix offers that cause completion and their deletion.
+    monkeypatch.setattr(growth_readiness, 'foundation', lambda *args: True)
+    monkeypatch.setattr(growth_readiness, 'discover', lambda *args: True)
+    with closing(first.conn), mock_snapshot_coordinator(first, monkeypatch):
         first.settings.set_setting('last_sync_at', '1000')
-        early_journey(first)
+        seed_catalog_track(first, 'first|artist', 'First song', 'Artist', video_id='first')
+        publish_personal_album(first, count=2)
         if format == 'mixes':
             publish_personal_mix(first)
-        client = TestClient(create_app(first, lambda: {}, now_fn=lambda: 1000,
-                                       background_work=False), base_url='http://127.0.0.1')
-        assert client.get('/home/onboard/status').json()['setup']['complete']
+        with TestClient(create_app(first, lambda: {}, now_fn=lambda: 1000,
+                                  background_work=False), base_url='http://127.0.0.1',
+                        backend_options={'use_uvloop': True}) as client:
+            assert client.get('/home/onboard/status').json()['setup']['complete']
         assert first.settings.get_setting(onboarding.SETUP_COMPLETE) == '1'
         # Disposable projections and offer-deduplication rows are not setup state.
         with first.conn:
             first.conn.execute('BEGIN IMMEDIATE')
             home_outputs.clear(first.conn, ('home_prepared','home_tuned','home_choice','album_prepared'))
     restored = Store(path)
-    restored.init_schema()
+    restored.conn.execute('PRAGMA synchronous=OFF')
+    # Snapshot invalidation is a lower coordinator, independent of the durable
+    # setup setting. Keep actual startup admission, repair and file reopening;
+    # HTTP reads below still use a separate real read-only SQL connection.
+    monkeypatch.setattr(store_module, 'Revisions', lambda connection: None)
+    with schema_inspection.reuse_tables(restored.conn):
+        restored.init_schema()
     with closing(restored.conn), reuse_reporting_reader(restored, monkeypatch):
-        client = TestClient(create_app(restored, lambda: {}, now_fn=lambda: 1100,
-                                       background_work=False), base_url='http://127.0.0.1')
-        setup = client.get('/home/onboard/status').json()['setup']
-        assert setup['complete'] and setup['phase'] == 'ready'
-        assert not setup['offers_ready']
-        assert not onboarding.initial_setup_pending(restored, 1100)
-        assert not onboarding.onboarding_active(restored, 1100)
-        html = client.get('/').text
-        assert 'id="home-feed"' in html
-        assert 'id="onboarding-feed"' not in html
-        assert 'class="setup-banner"' not in html
+        with TestClient(create_app(restored, lambda: {}, now_fn=lambda: 1100,
+                                  background_work=False), base_url='http://127.0.0.1',
+                        backend_options={'use_uvloop': True}) as client:
+            setup = client.get('/home/onboard/status').json()['setup']
+            assert setup['complete'] and setup['phase'] == 'ready'
+            assert not setup['offers_ready']
+            assert not onboarding.initial_setup_pending(restored, 1100)
+            assert not onboarding.onboarding_active(restored, 1100)
+            html = client.get('/').text
+            assert 'id="home-feed"' in html
+            assert 'id="onboarding-feed"' not in html
+            assert 'class="setup-banner"' not in html
 
 
 @pytest.mark.parametrize('surface,payload', [

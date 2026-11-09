@@ -10,10 +10,13 @@ from tests.core.test_metadata_owner_cutover import predecessor, seed
 from tests.core.test_metadata_preparation import finish
 from tests.metadata_provenance_support import metadata_provenance
 from tests.core.test_metadata_publication import publish as read_publication
-from tests.store_fixture_support import native_sql_calls
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import catalog
 from yt_playlist.core.migrations import MigrationError, regular, migrate, registry
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_destinations as publication
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture
@@ -52,10 +55,20 @@ def stage(conn):
 
 @pytest.mark.usefixtures('admitted_preparation_input', 'native_sql_calls')
 def test_files_typed_observations_and_explicit_unresolved_selection_preserve_choices(
-        predecessor):
+        predecessor, monkeypatch):
     store,conn = predecessor,predecessor.conn
     entry,recording,key = seed(store)
     preparation.JOB.install(conn)
+    # The worker's table structure is now admitted. This case owns actual
+    # staged values, delivery files and lineage, whose verification stays live.
+    worker_type = type(preparation.JOB)
+    validate = worker_type.validate
+
+    def admitted_schema(worker, target):
+        if worker is not preparation.JOB or target is not conn:
+            return validate(worker, target)
+
+    monkeypatch.setattr(worker_type, 'validate', admitted_schema)
     expected_native = store.enrichment_state.metadata_observations(key)
     source = conn.execute('SELECT source_key,payload FROM rec_musical_sources LIMIT 1').fetchone()
     identity = stage(conn)

@@ -14,7 +14,7 @@ import pytest
 import uvicorn
 
 from tests.live_server import LiveServer
-from tests.store_fixture_support import initialize_consumer
+from tests.store_fixture_support import initialize_consumer, without_query_timing
 from yt_playlist.core import evidence_ledger
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence
@@ -24,6 +24,7 @@ from yt_playlist.web import app as webapp
 
 @pytest.mark.parametrize('ending', ['normal', 'failure', 'interrupt'])
 @pytest.mark.parametrize('work_kind', ['request', 'background'])
+@pytest.mark.usefixtures('without_query_timing')
 def test_teardown_drains_real_response_before_removing_its_store(
         tmp_path, _pristine_current_schema, monkeypatch, caplog, ending, work_kind, request):
     held, release, owner_finished = threading.Event(), threading.Event(), threading.Event()
@@ -41,7 +42,11 @@ def test_teardown_drains_real_response_before_removing_its_store(
             directory = Path(directory)
             store = Store(directory / 'home.db')
             try:
+                # This owner retains real SQL locking and the held native-file
+                # sync below. It does not test SQLite power-loss durability.
+                store.conn.execute('PRAGMA synchronous=OFF')
                 initialize_consumer(store, _pristine_current_schema)
+                store.conn.execute('PRAGMA wal_autocheckpoint=0')
                 opportunity = choice_evidence.issue(store, 'albums', [{'id': 'album'}], 100,
                     context={}, opportunity_id='held-menu')
                 ledger = store.rec_ledger.evidence()

@@ -1,14 +1,15 @@
 """Festival availability follows real serving outputs, including partial preparation."""
 import json
-from contextlib import closing
 from tests.enrichment_support import complete_entries, complete_discovered
 from tests.derived_rating_support import seed_dislike
 
 import pytest
 
 from tests.conftest import seed_catalog_track
-from tests.home_fixture_support import home_pages_only, home_page_bytecode, without_metadata_providers
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.home_fixture_support import (
+    home_pages_only, home_page_bytecode, install_home_routes, without_metadata_providers)
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls)
 from tests.store_fixture_support import file_consumer_store as store
 from tests.onboarding_support import publish_personal_album, publish_personal_mix
 from tests.test_tv_stream import video
@@ -18,13 +19,10 @@ from yt_playlist.rec import account_growth, choice_evidence, home_prepared, into
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema(vibe_journey_schema):
-    return vibe_journey_schema
-
-
-def test_growth_destination_input_keeps_empty_current_owners_and_snapshot_guards(vibe_journey_schema):
     assert vibe_journey_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
     assert vibe_journey_schema.execute('PRAGMA query_only').fetchone()[0] == 1
     assert vibe_journey_schema._revision_script
+    return vibe_journey_schema
 
 
 def publish_destinations(store, now=1000):
@@ -103,21 +101,37 @@ def publish_full_journey(store, now=1000):
 
 
 @pytest.fixture
-def growth_web(store, home_pages_only, without_metadata_providers):
+def mix_count_store(tmp_path, monkeypatch, native_sql_calls):
+    # These synchronous readiness reads consume committed menus. Snapshot
+    # conflict detection and Vibe's genre catalog are independent of mix count.
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz')), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
+            with mock_snapshot_coordinator(database, monkeypatch):
+                yield database
+
+
+@pytest.fixture
+def growth_web(mix_count_store, home_pages_only, without_metadata_providers, monkeypatch):
     from tests.test_onboarding_routes import _client
 
-    _, client = _client(store)
-    with closing(client):
+    install_home_routes(monkeypatch)
+    _, client = _client(mix_count_store)
+    with client:
         yield client
 
 
 @pytest.mark.parametrize('count', [1, 3, 4])
 def test_four_eligible_mixes_are_required_everywhere(
-        store, count, growth_web, monkeypatch, home_pages_only, without_metadata_providers):
-    from tests.test_growth_journey import early_journey
-
+        mix_count_store, count, growth_web, monkeypatch, home_pages_only, without_metadata_providers):
+    store = mix_count_store
     client = growth_web
-    early_journey(store)
+    # This gate consumes completed Foundation/Discover prerequisites. Their
+    # 48-subject preparation belongs to the journey and readiness tests; keep
+    # the earlier playable album format and every counted mix real here.
+    monkeypatch.setattr(account_growth.growth_readiness, 'foundation', lambda *args: True)
+    monkeypatch.setattr(account_growth.growth_readiness, 'discover', lambda *args: True)
+    seed_catalog_track(store, 'first|artist', 'First song', 'Artist', video_id='first')
+    publish_personal_album(store, count=2)
     store.settings.set_setting('last_sync_at', '1')
     publish_personal_mix(store, count=count)
     expected = count == 4
