@@ -55,8 +55,22 @@ def _contracts(version):
     """Reuse fixed reference DDL; live installed schemas are checked each time."""
     from . import current
     statements = tuple(current.statements(version=version))
-    return (current._schema_contract(statements),
-            current._schema_contract(legacy_statements(statements)))
+    reference = current._schema_contract(statements)
+    # Only these owners have a known earlier alternative. Observe the two
+    # table declarations through SQLite, including their actual constraints;
+    # views/triggers use the same token comparison as full-contract validation.
+    # Rebuilding every unchanged table, index and trigger adds no alternative.
+    alternatives = {name: sql for sql in legacy_statements(statements)
+                    if (name := _name(sql)) in (*REPLACEMENTS, 'taste_axes', 'taste_axis_legacy')}
+    earlier = current._schema_contract(sql for name, sql in alternatives.items()
+                                      if reference[name][0] == 'table')
+    for name, sql in alternatives.items():
+        if reference[name][0] != 'table':
+            tokens = current._tokens(sql)
+            # sqlite_schema omits the final statement terminator, including
+            # the one after a trigger's END. Internal semicolons stay intact.
+            earlier[name] = (reference[name][0], tokens[:-1] if tokens[-1:] == (';',) else tokens)
+    return reference, earlier
 
 
 def validate_predecessor(conn, version, *, foreign_keys=True, data=True):

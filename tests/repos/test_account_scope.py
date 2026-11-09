@@ -11,6 +11,11 @@ from yt_playlist.core.migrations import registry,v024_account_scope,v030_account
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Account migrations and repository checks start no HTTP application."""
+
+
 @pytest.fixture(scope='module')
 def account_predecessors(tmp_path_factory):
     directory = tmp_path_factory.mktemp('account-predecessors')

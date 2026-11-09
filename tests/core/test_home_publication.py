@@ -10,16 +10,23 @@ import time
 import pytest
 
 from tests.core.test_home_output_preparation import seed, root_rows
-from tests.store_fixture_support import guarded_numbered_store as installed, preparation_ddl_connection, publication_consumer_reads
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed,
+    native_sql_calls,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    reuse_reporting_reader,
+    without_query_timing,
+)
 from tests.store_fixture_support import numbered_store as unadmitted_installed
 from tests.store_fixture_support import publication_preparation_input
-from yt_playlist.core import group_evidence, recommendation_custody
+from yt_playlist.core import group_evidence, recommendation_custody, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import home_outputs as preparation, home_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_preparation_input')
+pytestmark = pytest.mark.usefixtures('publication_preparation_input', 'native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -197,7 +204,7 @@ def test_interrupted_publication_and_source_race_cannot_select_partial_state(ins
 @pytest.mark.parametrize('installed', [90], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
 def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(
-        installed, publication_consumer_reads):
+        installed, preparation_ddl_connection, publication_consumer_reads, monkeypatch):
     store, _ = installed
     originals = seed(store)
     owner = publication.OWNER
@@ -208,7 +215,7 @@ def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(
     assert store.rec_proposals.get_proposals('home_prepared') is None
     with pytest.raises(OSError):
         owner.publish(store.conn, stage=stage)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     publication.repair(store.conn, 'home_prepared')
     assert store.rec_proposals._proposal_json('home_prepared') == originals['home_prepared']
     owner.publish(store.conn, stage=stage)
@@ -220,13 +227,16 @@ def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(
         replace(preparation.ROOT_JOB, copy=failed, delete=failed).step(store.conn)
     checkpoint = preparation.ROOT_JOB.progress(store.conn)
     assert checkpoint.status == 'failed'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.ROOT_JOB.progress(store.conn) == checkpoint
     reopened = Store(store._db_path)
     try:
-        reopened.init_schema(defer_metadata=True)
-        preparation.ROOT_JOB.step(reopened.conn, retry=True)
-        owner.publish(reopened.conn, stage=ready(reopened.conn))
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(reopened.conn):
+            reopened.init_schema(defer_metadata=True)
+            with reuse_reporting_reader(reopened, monkeypatch):
+                preparation.ROOT_JOB.step(reopened.conn, retry=True)
+                owner.publish(reopened.conn, stage=ready(reopened.conn))
     finally:
         reopened.conn.close()
 

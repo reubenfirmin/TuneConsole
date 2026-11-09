@@ -33,6 +33,15 @@ def disable_periodic_library_sync():
     """Fixture SQL/file checks do not construct the web application."""
 
 
+@pytest.fixture(autouse=True)
+def private_clone_sql(native_sql_calls):
+    """Keep actual SQL, guards and files below single-threaded copy checks.
+
+    Handle coordination and diagnostics have independent owners in
+    test_db_thread_serialization and test_db_diagnostics.
+    """
+
+
 def test_file_coordinates_keep_physical_owners_quoted_names_and_logical_paths():
     with closing(sqlite3.connect(':memory:')) as conn:
         conn.execute('CREATE TABLE "owner""one" (filename TEXT, cache_filename TEXT, notfilename TEXT)')

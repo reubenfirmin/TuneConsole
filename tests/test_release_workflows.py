@@ -226,11 +226,11 @@ def test_release_timing_reads_only_this_attempts_flattened_candidate_status():
 
 def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
     jobs = workflow("ci")["jobs"]
-    for name in ("unit", "browser"):
+    for name, count in (("unit", 8), ("browser", 4)):
         job = jobs[name]
         assert job["strategy"]["fail-fast"] == "false"
-        assert job["strategy"]["matrix"]["shard"] == ["1", "2", "3", "4"]
-        assert job["env"]["SHARD_TOTAL"] == "4"
+        assert job["strategy"]["matrix"]["shard"] == [str(index) for index in range(1, count + 1)]
+        assert job["env"]["SHARD_TOTAL"] == str(count)
         commands = "\n".join(step.get("run", "") for step in job["steps"])
         assert "--ci-shard=${{ matrix.shard }}/$SHARD_TOTAL" in commands
         assert "--junitxml=evidence/junit.xml" in commands
@@ -270,7 +270,13 @@ def test_tests_and_measurements_can_only_run_on_prs():
         assert "github.event_name == 'pull_request'" in jobs[name]["if"]
     assert jobs["metrics"]["needs"] == ["plan", "coverage", "checks"]
     assert "always()" in jobs["metrics"]["if"]
-    assert all(' --total="$SHARD_TOTAL"' in line for line in jobs["coverage"]["steps"][-2]["run"].splitlines())
+    verification = jobs["coverage"]["steps"][-2]["run"].splitlines()
+    assert verification == [
+        'uv run python ci_test_shards.py evidence unit --total="$UNIT_SHARD_TOTAL"',
+        'uv run python ci_test_shards.py evidence browser --total="$BROWSER_SHARD_TOTAL"',
+    ]
+    assert jobs["coverage"]["env"]["UNIT_SHARD_TOTAL"] == "8"
+    assert jobs["coverage"]["env"]["BROWSER_SHARD_TOTAL"] == "4"
     # The reporting job must never become a prerequisite of the gate it measures.
     assert "metrics" not in jobs["checks"]["needs"]
 

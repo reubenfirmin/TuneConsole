@@ -10,6 +10,8 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_control_routes, home_routes_only, without_metadata_providers
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema
 
 
 class AlbumClient(FakeClient):
@@ -102,13 +104,29 @@ def test_artists_read_deadline_defers_without_background_error(store, monkeypatc
         assert client.get('/storage-maintenance/status').status_code == 200
 
 
-def test_home_card_deadline_preserves_the_board_and_recovers(file_backed_store, monkeypatch, caplog):
+@pytest.fixture
+def deadline_library(tmp_path):
+    # Keep instrumented handle admission, the actual SQL interrupt and a fresh
+    # private reader. This fixture does not replace the timeout/cancellation
+    # behavior checked below.
+    with bounded_consumer_schema(()) as schema:
+        with _file_consumer_store(tmp_path, schema) as store:
+            yield store
+
+
+@pytest.fixture
+def deadline_routes(home_control_routes, without_metadata_providers):
+    """Retain the actual card/control routers below request recovery."""
+
+
+def test_home_card_deadline_preserves_the_board_and_recovers(deadline_library, deadline_routes,
+                                                            monkeypatch, caplog):
     import sqlite3
     from tests.home_fixture_support import publish_menu, returning_listener
     from yt_playlist.core.activity import work_budget
     from yt_playlist.web.routes.home_views import HomeViews
 
-    store = file_backed_store
+    store = deadline_library
     store.accounts.upsert_account('main', 'cred', None, True)
     returning_listener(store, 'mixes', now=1000)
     publish_menu(store, now=1000)

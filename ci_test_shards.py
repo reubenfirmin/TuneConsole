@@ -47,6 +47,12 @@ def _replay(report, event):
     elif kind == 'end':
         report['active'] = None
     elif kind == 'finish':
+        report['exitstatus'] = event['exitstatus']
+        if 'elapsed_seconds' in event:  # Previously completed journals remain readable.
+            report['elapsed_seconds'] = event['elapsed_seconds']
+    elif kind == 'timing':
+        if 'exitstatus' not in report:
+            raise ValueError('Shard timing precedes session completion')
         report.update(exitstatus=event['exitstatus'], elapsed_seconds=event['elapsed_seconds'])
     else:
         raise ValueError('Unknown shard journal event')
@@ -77,6 +83,10 @@ def load_report(path):
                 raise ValueError('Shard journal source or sequence differs')
             _replay(report, event)
             sequence += 1
+    if 'exitstatus' in report and 'elapsed_seconds' not in report:
+        # Session completion alone excludes terminal synchronization and cleanup.
+        # A killed process without the final timing receipt cannot certify a run.
+        report['journal_incomplete'] = True
     if report.get('journal_incomplete'):
         report.pop('exitstatus', None)
     return report
@@ -119,6 +129,19 @@ def pytest_addoption(parser):
     group.addoption("--ci-duration-baseline", type=Path, default=BASELINE)
 
 
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_cmdline_main(config):
+    started = time.monotonic()
+    exitstatus = yield
+    shard = config.pluginmanager.get_plugin('isolated-ci-shard')
+    if shard is not None and not shard.journal_failed and 'exitstatus' in shard.report:
+        # The command has returned through sessionfinish and unconfigure,
+        # including journal synchronization, reports and registered cleanup.
+        # Only publication of this small timing receipt follows the clock read.
+        shard.event('timing', exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - started)
+    return exitstatus
+
+
 def pytest_configure(config):
     shard = config.getoption("ci_shard")
     if not shard:
@@ -154,7 +177,6 @@ class Shard:
             self.source_report = {'arguments': list(config.invocation_params.args),
                                   'sources': self.source_hashes()}
             self.write_sources()
-        self.started = time.monotonic()
         self.sequence = 0
         self.journal_failed = False
         self._sync = _journal_fsync
@@ -218,7 +240,7 @@ class Shard:
             self.report['journal_incomplete'] = True
             self.write()
             return
-        self.event('finish', exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - self.started)
+        self.event('finish', exitstatus=int(exitstatus))
         self.write()
         if self.source_path is not None:
             self.source_report['after_sources'] = self.source_hashes()
@@ -241,8 +263,9 @@ class Shard:
         if self.journal_failed:
             raise OSError('Shard journal is unavailable after a recording failure')
         event = {'event': kind, 'journal_id': self.report['journal_id'], 'sequence': self.sequence, **values}
-        # One bounded append per transition, never a rewrite of accumulated history.
-        # Close flushes Python buffers; fsync keeps observed receipts durable too.
+        # Flush every transition so a killed pytest process leaves recoverable
+        # receipts. Only synchronize the completed journal: per-event fsync
+        # turns runner disk latency into work in every measured test phase.
         try:
             with self.journal.open('ab') as stream:
                 # Own these callables independently of product fault injection
@@ -250,7 +273,8 @@ class Shard:
                 # propagate and leave the run explicitly incomplete.
                 stream.write((_journal_dumps(event, ensure_ascii=False) + '\n').encode())
                 stream.flush()
-                self._sync(stream.fileno())
+                if kind == 'finish':
+                    self._sync(stream.fileno())
         except BaseException:
             self.journal_failed = True
             self.report['journal_incomplete'] = True

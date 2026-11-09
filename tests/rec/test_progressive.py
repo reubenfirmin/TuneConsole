@@ -12,7 +12,7 @@ from tests.conftest import seed_catalog_track
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as svd_cache_store,
-    native_sql_calls, without_query_timing,
+    mock_snapshot_coordinator, native_sql_calls, without_query_timing,
 )
 from yt_playlist.core import catalog as catalog_writes
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
@@ -38,10 +38,12 @@ def _pristine_current_schema():
         yield schema
 
 
-def test_progressive_schema_input_keeps_completed_sql_and_real_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+@pytest.fixture
+def grouping_schedule_store(svd_cache_store, monkeypatch):
+    # Successful snapshot admission is a lower input to scheduling. The case
+    # still uses a separate SQL reader and actual content-file publications.
+    with mock_snapshot_coordinator(svd_cache_store, monkeypatch):
+        yield svd_cache_store
 
 
 def catalog(store, n=12):
@@ -389,9 +391,25 @@ def test_full_fit_memory_limit_preserves_previous_publication_and_pending_work(s
     assert store.rec_refresh.has_pending_changes()
 
 
-def test_grouping_settings_are_not_held_behind_metadata_accumulation(store, monkeypatch):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_grouping_settings_are_not_held_behind_metadata_accumulation(
+        grouping_schedule_store, monkeypatch, _pristine_current_schema):
+    store = grouping_schedule_store
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
     # Joint audio-model qualification is independent of grouping scheduling.
     monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
+    # Keep both real fits and their publications. Numerical mode clustering is
+    # below this scheduling contract; record the settings passed to that input.
+    initial_groups = rec_params.get_param(store, 'modes_k')
+    clustered_groups = []
+
+    def completed_modes(reader, *args, **kwargs):
+        clustered_groups.append(rec_params.get_param(reader, 'modes_k'))
+        return None
+
+    monkeypatch.setattr(model_refresh.taste_modes, 'prepare_modes', completed_modes)
     catalog(store, 96)
     p = Preparation(store)
     drain(p)
@@ -403,14 +421,17 @@ def test_grouping_settings_are_not_held_behind_metadata_accumulation(store, monk
     p.completed_full(p.full_checkpoint(1000))
     assert not p.due(1060) and not p.full_due(1060)
     rec_params.set_param(store, 'modes_k', 2)
+    changed_groups = rec_params.get_param(store, 'modes_k')
     assert p.due(1060) and p.full_due(1060)
     assert p.fit(1060)
     assert json.loads(store.settings.get_setting(BASIS_STATE))['reason'] == 'grouping-settings'
+    assert changed_groups != initial_groups
+    assert clustered_groups == [initial_groups, changed_groups]
 
 
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_baskets(svd_cache_store, monkeypatch):
-    from tests.rec.test_model_refresh import seed
+    from tests.model_refresh_support import seed
     store = svd_cache_store
     ids = seed(store)
     # This case owns the track SVD cache, content-input conflicts and changed

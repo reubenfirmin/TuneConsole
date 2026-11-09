@@ -336,8 +336,8 @@ def test_small_initial_groups_remain_visible_without_replacing_usable_startup_mi
     assert prepared and any(m['protos'] for m in prepared['menus'])
 
 
-def test_prepared_home_and_real_menu_capture_preserve_group_context(store, adaptive_library, group_pages):
-    _tracks, head = adaptive_library
+def test_prepared_home_and_real_menu_capture_preserve_group_context(adaptive_selection, group_pages, monkeypatch):
+    store, _tracks, head = adaptive_selection
     payload = home_prepared.prepare(store, 1200)
     assert payload and payload['group_policy'] == 'adaptive'
     assert home_prepared._valid(payload)
@@ -405,6 +405,9 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store, adapt
         assert undo['new_ytm'] == remote_id and undo['target_identity'] == identity
         assert undo['post']['videos'] == expected
         assert params['added'] == len(expected) and params['skipped'] == 0 and not params['partial']
+        # This consumer owns choice learning from the real captured menu.
+        # Its long-lived reporting lease leaves collection to retention tests.
+        monkeypatch.setattr(choice_evidence, 'maintain_storage', lambda *args, **kwargs: {})
         choice_evidence.daily(store, 1303)
         state = store.rec_proposals.get_proposals('group_choice_bandit')
         genres = {g.casefold() for g in mix_choices.expand(store.conn, options[0])['genres']}

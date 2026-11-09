@@ -10,6 +10,7 @@ import pytest
 from tests.core.test_discovery_owner_preparation import seed
 from tests.store_fixture_support import (
     guarded_numbered_store as unadmitted_installed,
+    native_sql_calls,
     numbered_store,
     numbered_store as installed,
     preparation_ddl_connection,
@@ -54,7 +55,7 @@ def ready(conn, size=8, *, installed=False):
 
 
 @pytest.mark.parametrize('unadmitted_installed', [79, 85, 86, 100], indirect=True)
-@pytest.mark.usefixtures('publication_consumer_reads')
+@pytest.mark.usefixtures('publication_consumer_reads', 'native_sql_calls')
 def test_selected_files_keep_installed_identity_counters_genres_and_preopened_readers(unadmitted_installed):
     store, _ = unadmitted_installed
     _, aid, _, _ = seed(store)
@@ -68,7 +69,9 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
     history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     other = Store(store._db_path)
     try:
-        other.init_schema(defer_metadata=True)
+        other.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(other.conn):
+            other.init_schema(defer_metadata=True)
         with other.read_snapshot() as snapshot:
             pinned = snapshot.store
             assert pinned.discovery.get_discovered_artists() == expected

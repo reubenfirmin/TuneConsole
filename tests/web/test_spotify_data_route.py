@@ -12,17 +12,32 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, _track
 from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
+    native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.rec import mode_surfaces, rec_params, transient
 from yt_playlist.web.app import create_app
 
 
 @pytest.fixture(scope='module')
-def _pristine_current_schema():
+def _pristine_current_schema(request):
     # Upload/matching/report consumers use Techno history and the House menu
     # supplied by their dashboard fixture. Taxonomy/admission have other owners.
-    with bounded_consumer_schema((('techno', 'Techno'), ('house', 'House'))) as schema:
+    with bounded_consumer_schema((('techno', 'Techno'), ('house', 'House')),
+                                 snapshot_guards=getattr(request, 'param', True)) as schema:
         yield schema
+
+
+@pytest.fixture
+def store(tmp_path, _pristine_current_schema, monkeypatch):
+    guarded = bool(getattr(_pristine_current_schema, '_revision_script', None))
+    with _file_consumer_store(tmp_path, _pristine_current_schema, snapshot_guards=guarded) as database:
+        # Sequential selection/confirmation consumes an uncontended coordinator.
+        # Import races elsewhere in this module retain actual revision guards.
+        readers = reuse_reporting_reader if guarded else mock_snapshot_coordinator
+        with readers(database, monkeypatch):
+            yield database
 
 
 @pytest.fixture(autouse=True)
@@ -269,11 +284,14 @@ def test_daily_only_spotify_history_can_be_removed(store, source_timezone, spoti
     assert 'Remove Spotify history' not in client.get('/setup?tab=import').text
 
 
+@pytest.mark.parametrize('_pristine_current_schema', [False], indirect=True, ids=['uncontended'])
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_account_data_requires_selection_preview_and_confirmation_before_writes(store, spotify_clients):
     identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = FakeClient(search_results=[_track("yt-song", "Song", "Artist")],
                         catalog={"yt-song": _track("yt-song", "Song", "Artist")})
-    web = spotify_clients(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000.0),
+    web = spotify_clients(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000.0,
+                                    background_work=False),
                      base_url="http://127.0.0.1:8123")
 
     token, response = _select_library(web)

@@ -8,7 +8,9 @@ from unicodedata import normalize
 ROOT = Path(__file__).resolve().parents[2]/'src'/'yt_playlist'
 OPERATIONS = {'open','read_text','read_bytes','write_text','write_bytes','unlink'}
 CALL_NAMES = OPERATIONS | {'load','dump','replace','rename','copy','copy2','copyfile','rmtree'}
-CALL_IDENTIFIER = re.compile(r'\b(?:' + '|'.join(sorted(CALL_NAMES)) + r')\b')
+CALL_IDENTIFIER = re.compile(
+    r'\b(?:' + '|'.join(sorted(CALL_NAMES)) + r')\b'
+    r'(?:\s|\\\r?\n|\#[^\r\n]*|\))*\(')
 
 # A boundary names the actual non-asset operation and its narrow owner. Adding
 # another raw file operation elsewhere requires an explicit inventory decision.
@@ -95,9 +97,10 @@ def inventory(root=ROOT, *, paths=None):
     results = []
     for path in sorted(root.rglob('*.py') if paths is None else paths):
         source = path.read_text()
-        # Any candidate's terminal identifier must occur in its source. Python
-        # normalizes identifiers, so normalize before this conservative filter.
-        # Comments and strings may keep an unnecessary parse, never hide a call.
+        # A candidate's terminal identifier precedes its call parentheses, with
+        # optional wrapping parentheses, whitespace, comments or continuations.
+        # Normalize Python identifiers before this conservative filter. Strings
+        # may keep an unnecessary parse, never hide a call.
         normalized = normalize('NFKC', source)
         if not CALL_IDENTIFIER.search(normalized):
             continue

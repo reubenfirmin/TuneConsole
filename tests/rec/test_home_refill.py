@@ -250,8 +250,10 @@ def test_worker_menu_is_recorded_intact_despite_later_feedback(
 
 
 @pytest.mark.parametrize('selection', ['include', 'avoid'])
+@pytest.mark.usefixtures('without_query_timing')
 def test_partial_genre_menu_keeps_worker_offers_while_refilling(
-        store, controlled_refill_inputs, selection, one_menu_per_attempt, monkeypatch):
+        menu_publication_store, controlled_refill_inputs, selection, one_menu_per_attempt, monkeypatch):
+    store = menu_publication_store
     # This consumer owns partial-menu publication, stable serving and later
     # feedback. Genre matching/ranking are lower-layer contracts retained in
     # test_stored_home and test_home_other_genres.
@@ -315,12 +317,14 @@ def test_partial_genre_menu_keeps_worker_offers_while_refilling(
 
 
 @pytest.fixture
-def controlled_refill_inputs(store, monkeypatch):
-    return publication_inputs(store, monkeypatch)
+def controlled_refill_inputs(menu_publication_store, monkeypatch):
+    return publication_inputs(menu_publication_store, monkeypatch)
 
 
+@pytest.mark.usefixtures('without_query_timing')
 def test_retry_reuses_completed_card_work_without_publishing_partial_set(
-        store, monkeypatch, one_menu_per_attempt):
+        menu_publication_store, monkeypatch, one_menu_per_attempt):
+    store = menu_publication_store
     # Retry owns completion and publication, with a controlled lower selection.
     # Real ranking/filtering is retained in test_stored_home and
     # test_home_other_genres; do not rebuild its 192 profiles for this failure.

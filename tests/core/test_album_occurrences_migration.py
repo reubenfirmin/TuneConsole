@@ -4,6 +4,8 @@ import sqlite3
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import albums, album_tracklists, genre_identity
 from yt_playlist.core.migrations import Migration, MigrationError, current, migrate, registry
 from yt_playlist.core.migrations import v099_album_occurrences
@@ -12,15 +14,29 @@ from yt_playlist.core.store import Store
 from yt_playlist.library.album_catalog import remember_album
 
 
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Album occurrence and migration checks start no HTTP application."""
+
+
 def installed_98(path):
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         # Construct the genuine empty predecessor atomically instead of
         # syncing each CREATE statement to disk before the seed transaction.
         store.conn.execute('BEGIN')
         for sql in current.statements(version=98):
             store.conn.execute(sql)
-        genre_identity.seed_catalog(store.conn)
+        # Album occurrence ownership does not depend on the shipped genre
+        # vocabulary. Keep the actual predecessor schema and genre relations,
+        # using bounded lower inputs beneath the genuine v99 conversion.
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch)
+            genre_identity.seed_catalog(store.conn)
         store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
         for sql in ('INSERT INTO rec_preparation VALUES (1,0,0)','INSERT INTO rec_group_clock VALUES (1,0)',
                     'INSERT INTO group_retention_state VALUES (1,0)'):
@@ -102,7 +118,12 @@ def test_occurrence_predecessor_keeps_real_98_history_and_owned_track_table(lega
 
 def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp_path,monkeypatch,legacy_owner_store):
     store = legacy_owner_store(tmp_path/'rollback.db', 98)
-    store.tracks.upsert_track('one','One','Artist',None,10,album_browse_id='release')
+    # This private predecessor needs committed SQL and a genuine disk reopen,
+    # without host power-loss durability or concurrent catalog readers.
+    store.conn.execute('PRAGMA synchronous=OFF')
+    store.conn.execute('PRAGMA wal_autocheckpoint=0')
+    with store._lock:
+        store.tracks.upsert_track('one','One','Artist',None,10,album_browse_id='release')
     before = [dict(r) for r in store.conn.execute('SELECT * FROM album_tracks')]
     original_dump = list(store.conn.iterdump())
     def interrupt(conn,context):
@@ -125,6 +146,8 @@ def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp
         migrate(reopened.conn, registry=original[:99])
         assert reopened.conn.execute('SELECT legacy_row_id FROM album_item_observations').fetchone()[0]==before[0]['id']
         assert reopened.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 99
+        # A supplied historical prefix applies the real conversion but does
+        # not perform the full registry's final schema validation.
         validate_version(reopened.conn, 99)
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
         assert reopened.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'

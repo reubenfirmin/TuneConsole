@@ -1,9 +1,22 @@
 """Sync job streams, failures and identity library reconciliation."""
 import json
 from functools import partial
+import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
+
+
+@pytest.fixture
+def sync_routes_only(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, sync
+
+    # Stream failure/retry ownership needs the actual sync router and its
+    # lifecycle, without constructing unrelated page and provider routers.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, sync)])
+
 
 def test_dashboard_and_sync(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
@@ -43,7 +56,7 @@ def test_sync_events_unknown_job_404(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     assert c.get("/sync/events/99999").status_code == 404
 
-def test_sync_reports_failure_in_stream(store, monkeypatch):
+def test_sync_reports_failure_in_stream(store, monkeypatch, sync_routes_only):
     from yt_playlist.library import sync
 
     waits = []

@@ -22,11 +22,12 @@ from tests.home_fixture_support import home_routes_only, publish_menu, returning
 from tests.home_prepared_support import publication_inputs as controlled_publication_inputs, seed
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 from tests.store_fixture_support import (bounded_consumer_schema, initialize_consumer,
-                                         mock_snapshot_coordinator, reuse_reporting_reader)
+                                         mock_snapshot_coordinator, reuse_reporting_reader,
+                                         without_query_timing)
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
-from yt_playlist.rec import candidate_refresh, home_cache, home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, surfaces
+from yt_playlist.rec import candidate_refresh, home_cache, home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, rec_params, surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 
@@ -1179,12 +1180,14 @@ def test_publication_acknowledges_commit_across_cleanup_deadline(
             assert result == stored
 
 
-@pytest.mark.usefixtures('native_sql_calls')
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_small_preparation_batches_accumulate_alternatives_across_attempts(publication_inputs, monkeypatch):
     """Complete every alternative through bounded retries without any exposure."""
-    from yt_playlist.core import json_cache
-
     store = publication_inputs.store
+    # No preference changes occur during these composition retries. Read the
+    # actual completed controls once below the retry/publication boundary.
+    parameters = {spec.name: rec_params.get_param(store, spec.name) for spec in rec_params.PARAMS}
+    monkeypatch.setattr(rec_params, 'get_param', lambda reader, name: parameters[name])
     # Catalog/modes remain fixed across these retries. Options are a completed
     # lower input to retry composition; retain their real first construction.
     options = service(store).options()
@@ -1200,19 +1203,14 @@ def test_small_preparation_batches_accumulate_alternatives_across_attempts(publi
     monkeypatch.setattr(home_prepared, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_menu)
-    # This case owns retry composition. SQL/file publication and its deadline
-    # rollback are exercised by the four real publication-boundary cases above.
-    published = {}
-    monkeypatch.setattr(home_cache, 'read', lambda reader, surface: deepcopy(published.get(surface)))
-    monkeypatch.setattr(home_cache, 'prepare',
-        lambda writer, surface, raw, now: (surface, json_cache.decode(raw)))
-    monkeypatch.setattr(home_cache, 'publish',
-        lambda writer, publication, **kwargs: published.__setitem__(*publication))
     for size in range(1, home_prepared.MAX_MENUS + 1):
         # Independent discovery/revisit summaries are not part of mix retries.
         payload = home_prepared.prepare_mixes(store, 1000 + size)
         assert payload is not None
         assert len(payload['menus']) == size
+        # The next attempt must consume the previous committed document, not
+        # merely a detached Python value from the calculation above.
+        assert home_cache.read(store, home_prepared.SURFACE) == payload
     assert len(payload['menus']) == home_prepared.MAX_MENUS
     assert [request.epoch for request in publication_inputs.requests] == list(range(home_prepared.MAX_MENUS))
     assert all(not request.record for request in publication_inputs.requests)

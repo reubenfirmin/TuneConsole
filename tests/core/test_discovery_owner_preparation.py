@@ -7,8 +7,8 @@ import sqlite3
 import pytest
 
 from tests.store_fixture_support import (
-    numbered_store as installed, preparation_ddl_connection,
-    publication_consumer_reads, reuse_reporting_reader,
+    mock_preparation_schema, native_sql_calls, numbered_store as installed, preparation_ddl_connection,
+    publication_consumer_reads, reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.core import collection_recovery, discovery_provenance as provenance, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -123,7 +123,8 @@ def test_frozen_upgrade_agrees_without_stamping_history(installed,tmp_path):
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
-def test_bounded_rows_continuing_writes_missing_owners_and_ambiguity(installed):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_bounded_rows_continuing_writes_missing_owners_and_ambiguity(installed, monkeypatch):
     store, _ = installed
     _, aid, rid, _ = seed(store)
     other = store.tracks.upsert_track('other','Other','Other',None,10)
@@ -134,6 +135,7 @@ def test_bounded_rows_continuing_writes_missing_owners_and_ambiguity(installed):
         store.conn.execute("INSERT INTO main.discovery_visible_impressions VALUES ('ambiguous','track','ambiguous',2)")
         store.conn.execute("INSERT INTO main.artist_scans VALUES ('unresolved',NULL,NULL)")
     rows.JOB.install(store.conn)
+    mock_preparation_schema(monkeypatch, rows.JOB, store.conn)
     assert rows.JOB.step(store.conn,batch_size=512).processed <= 16
     finish(rows.JOB,store.conn)
     assert store.conn.execute("SELECT resolution_reason FROM prepared_discovery_impression_rows WHERE view_id='ambiguous'").fetchone()[0] == 'ambiguous_owner'

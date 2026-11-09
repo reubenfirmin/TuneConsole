@@ -10,12 +10,17 @@ from yt_playlist.library.ops import PlaylistOps
 from yt_playlist.rec import measurement
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, reuse_reporting_reader,
+)
 
 
-def _client(store):
+def _client(store, *, background_work=True):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     fake = FakeClient()
-    return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0),
+    return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0,
+                                      background_work=background_work),
                             base_url="http://127.0.0.1")
 
 
@@ -161,19 +166,48 @@ def test_discovery_add_failed_acquisition_retains_confirmed_rating_and_can_retry
     assert saves == [True]
 
 
-def test_fragment_loads_do_not_count_as_album_or_artist_views(store):
+@pytest.fixture
+def fragment_library(tmp_path, monkeypatch, native_sql_calls):
+    # Counts are queried from actual SQL. This read-only consumer does not own
+    # ingestion, snapshot construction or concurrent-reader admission.
+    with bounded_consumer_schema(()) as schema:
+        with _file_consumer_store(tmp_path, schema) as store:
+            with reuse_reporting_reader(store, monkeypatch):
+                yield store
+
+
+@pytest.fixture
+def discovery_fragment_routes(monkeypatch, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, discovery, home_discovery
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    # Retain actual fragment admission/rendering and the pool page. Unrelated
+    # transport routes and metadata-provider wiring are below these requests.
+    def build(ctx):
+        return [app_update.build(ctx), audio_preview.build(ctx), discovery.build(ctx),
+                home_discovery.build(ctx, HomeViews(ctx))]
+
+    monkeypatch.setattr(webapp, 'build_all', build)
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+
+
+def test_fragment_loads_do_not_count_as_album_or_artist_views(fragment_library, discovery_fragment_routes):
     from tests.home_fixture_support import returning_listener
 
+    store = fragment_library
     returning_listener(store, 'mixes')
     store.discovery.upsert_discovered_album("album", "Artist", "Unseen album", "2026", None, 100.0)
     store.discovery.upsert_discovered_artist("New artist", 1.0, [], [], None, 100.0)
-    _, c = _client(store)
-    for _ in range(3):
-        assert c.get("/home/discover").status_code == 200
-        assert c.get("/home/new-artists").status_code == 200
-    assert store.discovery.get_discovered_albums()[0]["offered_count"] == 0
-    assert store.discovery.get_discovered_artists()[0]["offered_count"] == 0
-    assert "less than 1d ago" in c.get("/discovery").text
+    _, c = _client(store, background_work=False)
+    with c:
+        for _ in range(3):
+            assert c.get("/home/discover").status_code == 200
+            assert c.get("/home/new-artists").status_code == 200
+        assert store.discovery.get_discovered_albums()[0]["offered_count"] == 0
+        assert store.discovery.get_discovered_artists()[0]["offered_count"] == 0
+        assert "less than 1d ago" in c.get("/discovery").text
 
 
 def test_visible_tile_endpoint_counts_once_and_validates_kind(store):

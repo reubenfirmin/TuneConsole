@@ -5,7 +5,10 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from tests.store_fixture_support import (
+    mock_preparation_schema, native_sql_calls, numbered_store as installed,
+    preparation_ddl_connection,
+)
 from tests.store_fixture_support import publication_consumer_reads, without_query_timing
 from yt_playlist.core import albums, album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -116,12 +119,14 @@ def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(
 
 
 @pytest.mark.parametrize('installed',[104],indirect=True)
+@pytest.mark.usefixtures('native_sql_calls')
 def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exact(
         installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     capture(store.conn,tuple('video-'+str(index) for index in range(1040)))
     before = sources(store.conn)
     audit.JOB.install(store.conn)
+    mock_preparation_schema(monkeypatch, audit.JOB, store.conn)
     progress = audit.JOB.step(store.conn,batch_size=512)
     assert progress.processed <= 32
     progress = audit.JOB.step(store.conn,batch_size=512)
@@ -144,6 +149,8 @@ def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exa
     assert audit.JOB.progress(store.conn) == failed
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        mock_preparation_schema(monkeypatch, audit.JOB, reopened.conn)
         with pytest.raises(MigrationError,match='retry explicitly'):
             audit.JOB.step(reopened.conn)
         def interrupt(*args):

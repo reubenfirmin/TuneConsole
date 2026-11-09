@@ -28,7 +28,8 @@ from yt_playlist.core.proposal_codec import encode_proposals
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 from tests.store_fixture_support import (
-    bounded_consumer_schema, native_sql_calls, use_native_sql_calls, without_query_timing)
+    bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+    use_native_sql_calls, without_query_timing)
 
 DAY = 86400
 
@@ -63,12 +64,16 @@ def population_template(_pristine_current_schema):
 
 
 @pytest.fixture
-def database(tmp_path, population_template):
+def database(tmp_path, population_template, monkeypatch):
     # Every consumer owns private SQL/files; the unchanged admitted publication
     # is built once, without first cloning an empty Store for each consumer.
     with population_template.open(tmp_path / 'library.db') as store:
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
         store._fixture_cleanup_population = population_template.result
-        yield store
+        # Serving inventories use a separate real reader. Cleanup's captured
+        # snapshots keep their own connections, revisions and admission fences.
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store
 
 
 def populate(store, count=4):

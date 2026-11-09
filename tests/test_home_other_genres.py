@@ -9,16 +9,27 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.genre_catalog_support import bound_shipped_catalog
 from tests.home_fixture_support import home_routes_only, install_home_routes
 from tests.prepared_fixture_support import capture_template, prepared_template
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, native_sql_calls
+from yt_playlist.core import genre_identity
 from yt_playlist.rec import choice_evidence, home_cache, home_prepared, home_themes, measurement, mode_surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 from yt_playlist.rec import home_cards as home
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync(request, monkeypatch):
+    if 'backfill_library' not in request.fixturenames:
+        from yt_playlist.web import app as webapp
+
+        monkeypatch.setattr(webapp, '_background_sync_loop', lambda *args, **kwargs: None)
+        monkeypatch.setattr(webapp, 'BACKGROUND_WORK', False)
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -122,8 +133,12 @@ def template_bytecode(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
-def genre_routes(monkeypatch, home_routes_only, template_bytecode):
-    with genre_route_context(monkeypatch, template_bytecode):
+def genre_routes(request, monkeypatch):
+    if 'backfill_library' in request.fixturenames:
+        yield
+        return
+    request.getfixturevalue('home_routes_only')
+    with genre_route_context(monkeypatch, request.getfixturevalue('template_bytecode')):
         yield
 
 
@@ -212,7 +227,7 @@ def install_genre_http_inputs(monkeypatch):
                              'genres': owner.rec_proposals.get_proposals('home_genre_request')}))
 
 
-def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True):
+def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True, publish=True):
     bundles = genre_bundles(store, genres=genres, tracks_per_lane=tracks_per_lane, fresh=fresh)
     # Candidate consumers need completed membership and metadata, rather than
     # repeating provider ingestion and genre delivery for each input row.
@@ -221,8 +236,29 @@ def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True):
         track['video_id'] = track['key']
     discoveries = {item['key'] for item in bundles['all'].get('fresh', ())}
     seed_publication_subjects(store, tracks.values(), discoveries=discoveries)
-    publish_bundles(store, bundles, 1.0)
+    if publish:
+        publish_bundles(store, bundles, 1.0)
     return bundles
+
+
+@pytest.fixture(scope='module')
+def backfill_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def backfill_library(tmp_path, monkeypatch, backfill_schema, native_sql_calls):
+    # Keep all six modes, four lanes and twenty distinct recordings per lane.
+    # Each case publishes its modified pools itself; an earlier publication
+    # and a second Store/template/file copy are unrelated consumer setup.
+    bound_shipped_catalog(monkeypatch, ('jazz', 'techno', 'trance', 'indie rock', 'ambient', 'classical'))
+    with _file_consumer_store(tmp_path, backfill_schema) as store:
+        with store.conn:
+            genre_identity.seed_catalog(store.conn)
+        bundles = seed_genres(store, publish=False)
+        assert store.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 480
+        yield store, bundles
 
 
 def genre_bundles(store, *, genres=None, tracks_per_lane=20, fresh=True):
@@ -274,8 +310,8 @@ def test_genre_filter_uses_families_and_artist_fallback(store, monkeypatch):
     assert home_themes.matching_genres(store, items, avoid={genre_map.family("Jazz")}) == [items[-1]]
 
 
-def test_other_genres_never_backfills_the_previous_genres(store, genre_candidates):
-    bundles = genre_candidates
+def test_other_genres_never_backfills_the_previous_genres(backfill_library):
+    store, bundles = backfill_library
     for mid in range(1, 6):
         bundles[str(mid)] = {}
     # Thin new-genre buckets used to be topped up with arbitrary general-pool genres.
@@ -289,8 +325,8 @@ def test_other_genres_never_backfills_the_previous_genres(store, genre_candidate
     assert all(t["genre"] == "Jazz" for c in cards for t in c["tracks"])
 
 
-def test_other_genres_does_not_attribute_a_rethemed_card_to_the_old_mode(store, genre_candidates):
-    bundles = genre_candidates
+def test_other_genres_does_not_attribute_a_rethemed_card_to_the_old_mode(backfill_library):
+    store, bundles = backfill_library
     # The jazz-led mode has enough techno in its bucket to survive a track-only filter.
     # Showing those leftovers under the jazz mode would teach the wrong theme on a pick.
     for lane in mode_surfaces.CARD_SURFACES:
@@ -338,8 +374,8 @@ def test_genre_filter_resolves_library_metadata_without_mutating_candidates(stor
     assert items[0]["genre"] == "Jazz"
 
 
-def test_chosen_genres_filter_backfill_and_keep_mode_attribution(store, genre_candidates):
-    bundles = genre_candidates
+def test_chosen_genres_filter_backfill_and_keep_mode_attribution(backfill_library):
+    store, bundles = backfill_library
     for lane in mode_surfaces.CARD_SURFACES:
         # A jazz-led mode contains techno; a techno-led mode needs general backfill.
         bundles["0"][lane] += bundles["1"][lane]

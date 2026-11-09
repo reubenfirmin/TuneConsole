@@ -11,10 +11,13 @@ from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.publication_timing_support import publication_costs
 from tests.store_fixture_support import (
     guarded_numbered_store,
+    native_sql_calls,
     numbered_store as unadmitted_installed,
     preparation_ddl_connection,
+    publication_consumer_reads,
     publication_preparation_input,
     publication_schema_inspections,
+    without_query_timing,
 )
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -220,9 +223,11 @@ def test_source_writes_during_or_after_verification_reject_stale_cutover(install
     assert publication.OWNER.selected(store.conn) is None
 
 
-@pytest.mark.parametrize('installed', [89], indirect=True)
-def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_independent(installed, monkeypatch):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [89], indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'publication_consumer_reads')
+def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_independent(
+        unadmitted_installed, preparation_ddl_connection, monkeypatch):
+    store, _ = unadmitted_installed
     documents = seed(store)
     prepared(store.conn)
     publication.OWNER.install(store.conn)
@@ -268,7 +273,7 @@ def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_inde
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_listening_publication'").fetchone()
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,'independent_listening_publication',install,validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert preparation.JOB.progress(store.conn) == failed
     with pytest.raises(MigrationError, match='retry explicitly'):
         preparation.JOB.step(store.conn)
@@ -280,6 +285,7 @@ def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_inde
 
 
 @pytest.mark.parametrize('guarded_numbered_store', [89], indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_native_upgrade_preserves_files_and_requires_retained_custody_guards(guarded_numbered_store):
     store, _ = guarded_numbered_store
     path = store._db_path

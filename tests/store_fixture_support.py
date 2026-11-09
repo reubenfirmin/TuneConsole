@@ -350,6 +350,9 @@ def _numbered_input(version, tmp_path, monkeypatch, *, snapshot_guards=False):
         database._schema_recovery_pending = False
         database._bind_repositories()
         if snapshot_guards:
+            # These connection-local guards are one completed lower input.
+            # Install their real DDL together, as consumer_schema does.
+            database.conn.execute('BEGIN')
             database._snapshot_revisions = Revisions(database.conn)
         with schema_inspection.reuse_tables(database.conn):
             yield database, version

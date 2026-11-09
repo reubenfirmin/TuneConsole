@@ -1,8 +1,8 @@
 """Preference refreshes reuse the established models and update saved ranking provenance."""
 from pathlib import Path
-from contextlib import closing
+from contextlib import ExitStack, closing
 from copy import deepcopy
-import time
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -12,15 +12,17 @@ from fastapi.testclient import TestClient
 import numpy as np
 import pytest
 
-from tests.prepared_fixture_support import prepared_template
+from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import seed_publication_subjects
-from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
-from tests.rec.test_model_refresh import refresh_costs, seed
+from tests.model_refresh_support import seed
+from tests.rec.test_model_refresh import native_model_input_sql
 from tests.store_fixture_support import (
-    bounded_consumer_schema, initialize_consumer, native_sql_calls, reuse_reporting_reader,
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator,
+    native_sql_calls, reuse_reporting_reader,
     without_query_timing,
 )
 from yt_playlist.core.store import Store
+from yt_playlist.core import embeddings, model_contract
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, home_prepared, model_refresh, mode_surfaces, rec_params, surfaces
 from yt_playlist.util import genre_map
 
@@ -32,8 +34,33 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def candidate_schema():
-    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'), ('jazz', 'Jazz'))) as schema:
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'),
+                                 ('jazz', 'Jazz'), ('rock', 'Rock'))) as schema:
         yield schema
+
+
+@pytest.fixture(scope='module')
+def preference_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'),
+                                 ('jazz', 'Jazz'), ('rock', 'Rock')),
+                                 snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def preference_store(preference_schema, tmp_path, monkeypatch):
+    """Real preference SQL/ranking/publication below snapshot coordination.
+
+    The complete control sequences run synchronously with no competing writer.
+    Captured-input races retain actual guards in the worker workflows below.
+    """
+    database = Store(tmp_path / 'preference-controls.db')
+    with closing(database.conn):
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, preference_schema, snapshot_guards=False)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with mock_snapshot_coordinator(database, monkeypatch):
+            yield database
 
 
 @pytest.fixture
@@ -82,12 +109,81 @@ def library(store):
 
 
 @pytest.fixture(scope='module')
-def candidate_library_template(_pristine_current_schema, candidate_prefix_costs):
+def candidate_library_template(candidate_schema):
     """Only the initial real build; every later refresh remains a test subject."""
-    started = time.perf_counter()
-    with prepared_template(_pristine_current_schema, library) as template:
-        candidate_prefix_costs['candidate_cold_template_seconds'] = time.perf_counter() - started
+    with ExitStack() as resources:
+        with native_model_input_sql():
+            template = resources.enter_context(prepared_template(candidate_schema, library))
         yield template
+
+
+def _assert_library_matches(store, original):
+    assert len(store.rec_query.library_keys()) == 96
+    for name in ('library_keys', 'track_content', 'track_audio_features', 'play_counts'):
+        assert getattr(store.rec_query, name)() == getattr(original.rec_query, name)()
+    assert store.rec_evidence.rec_baskets() == original.rec_evidence.rec_baskets()
+    assert store.history.recent_plays_with_ts(limit=128) == original.history.recent_plays_with_ts(limit=128)
+    for name in embeddings.SPACES:
+        assert embeddings.rows(store.conn, name) == embeddings.rows(original.conn, name)
+    for name in {*model_contract.FIELDS, 'rec_dim', 'rec_refresh_version', 'rec_mode_fit_inputs'} - {
+            'rec_content_generation'}:
+        assert store.settings.get_setting(name) == original.settings.get_setting(name)
+    assert list(map(tuple, store.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id'))) == list(
+        map(tuple, original.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id')))
+    ranks = ('SELECT h.surface,m.mode_key,m.purpose,c.recording_id,c.rank,c.score,p.policy_version,'
+             'b.intensity_band,b.genre_key FROM recommendation_heads h '
+             'JOIN recommendation_surface_pools m ON m.generation_id=h.generation_id AND m.surface=h.surface '
+             'JOIN recommendation_pools p ON p.id=m.pool_id '
+             'JOIN recommendation_candidates c ON c.pool_id=p.id '
+             'LEFT JOIN recommendation_radio_bands b ON b.pool_id=p.id AND b.recording_id=c.recording_id '
+             'ORDER BY h.surface,m.mode_key,m.purpose,c.rank')
+    assert list(map(tuple, store.conn.execute(ranks))) == list(map(tuple, original.conn.execute(ranks)))
+    assert not store.rec_refresh.has_pending_changes()
+    assert not candidate_refresh.due(store, 2000)
+    assert store.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_prepared_candidate_copies_match_an_independent_producer_and_keep_private_files(
+        candidate_library_template, candidate_schema, tmp_path):
+    # The projection-upgrade workflow originally also owned producer parity
+    # and fixture isolation. Keep these actual SQL/model/file checks together;
+    # completed ranking inputs in the worker checks cannot establish them.
+    template = candidate_library_template
+    producer = Store(tmp_path / 'producer.db')
+    with closing(producer.conn):
+        producer.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(producer, candidate_schema)
+        producer.conn.execute('PRAGMA wal_autocheckpoint=0')
+        assert library(producer) == template.result
+        with template.source._lock, producer._lock:
+            _assert_library_matches(template.source, producer)
+    with template.open(':memory:') as memory, template.open(tmp_path / 'copy.db') as disk:
+        for current in (memory, disk):
+            # Compare private, quiescent stores under their actual locks.
+            # Reporting-reader admission is independent of copy equality.
+            with current._lock, template.source._lock:
+                _assert_library_matches(current, template.source)
+                assert current.recommendations.heads() == template.source.recommendations.heads()
+                assert current.rec_model.content_generation() == template.source.rec_model.content_generation()
+        assert len({current._evidence_key for current in (template.source, memory, disk)}) == 3
+        assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            template.source.conn.execute("INSERT INTO settings VALUES ('private_candidate_input','forbidden')")
+        destinations = [roots(current.conn) for current in (memory, disk)]
+        copied = 0
+        for name, source in template.files.items():
+            assert len({source, *(owned[name] for owned in destinations)}) == 3
+            for path in source.rglob('*'):
+                if path.is_file():
+                    paths = [path, *(owned[name] / path.relative_to(source) for owned in destinations)]
+                    assert all(private.read_bytes() == path.read_bytes() for private in paths)
+                    assert len({(private.stat().st_dev, private.stat().st_ino) for private in paths}) == 3
+                    copied += 1
+        assert copied
+        disk.rec_model.set_weight('genre:techno', 0.5, now=2000)
+        assert disk.rec_model.weight_records()
+        assert not memory.rec_model.weight_records() and not template.source.rec_model.weight_records()
 
 
 
@@ -135,44 +231,22 @@ def completed_ranking(store, completed_ranking_inputs):
 
 
 @pytest.mark.parametrize('projection', ['vibe', 'profile'])
-def test_projection_preparation_uses_current_versions_without_refitting(
-        store, monkeypatch, projection, completed_ranking_inputs):
-    from yt_playlist.rec import home_vibe, measurement, musical_character, vibe_pools
-
-    module = home_vibe if projection == 'vibe' else musical_character
-    monkeypatch.setattr(module, 'VERSION', module.VERSION + '-upgrade')
-    monkeypatch.setattr(measurement, 'serving_policy',
-                        lambda *args, **kwargs: ('projection-fixture', {'fixture': 'projection-upgrade'}))
-    with store.read_snapshot() as snapshot:
-        policies = measurement.PoolPolicies(snapshot.store, 2000)
-        bundle, _fresh = mode_surfaces._calculate_bundles(snapshot.store, 2000, policies)
-        vibe_pools.prepare(snapshot.store, bundle, 2000, policies)
-    prepared = bundle['_vibes']
-    assert prepared['version'] == home_vibe.VERSION
-    assert prepared['profile_version'] == musical_character.VERSION
-    assert set(prepared['pools']) == set(prepared['genres']) == set(home_vibe.PRESETS)
-    assert prepared['pools']['relax']['explore']
-    assert store.rec_model.get_rec_vectors() == completed_ranking_inputs
-    assert not store.recommendations.heads()
-
-
-@pytest.mark.parametrize('projection', ['vibe', 'profile'])
 def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(
         store, monkeypatch, projection, completed_ranking):
-    from yt_playlist.rec import home_vibe, measurement, musical_character
+    from yt_playlist.rec import home_vibe, measurement, musical_character, vibe_pools
 
-    # Completed preparation is the lower input. The independent check above
-    # owns its version derivation; this check owns actual worker admission,
-    # framing and native publication on both sides of the upgrade.
+    # Completed ranking is the lower input. Keep actual vibe preparation,
+    # version derivation and native publication together across the upgrade.
     calculate = mode_surfaces._calculate_bundles
 
     def with_vibes(reader, now, policies):
         bundle, fresh = calculate(reader, now, policies)
-        items = bundle['all']['wheelhouse']
-        bundle['_vibes'] = {
-            'version': home_vibe.VERSION, 'profile_version': musical_character.VERSION,
-            'pools': {preset: {'explore': policies.stamp(items, 'vibe:' + preset)}
-                      for preset in home_vibe.PRESETS}, 'genres': {}}
+        vibe_pools.prepare(reader, bundle, now, policies)
+        prepared = bundle['_vibes']
+        assert prepared['version'] == home_vibe.VERSION
+        assert prepared['profile_version'] == musical_character.VERSION
+        assert set(prepared['pools']) == set(prepared['genres']) == set(home_vibe.PRESETS)
+        assert prepared['pools']['relax']['explore']
         return bundle, fresh
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', with_vibes)
@@ -219,7 +293,7 @@ def completed_policy_inputs(store, monkeypatch):
     # and fitted vectors unchanged. Resolve those lower inputs once, rather
     # than reconstructing them for each publication of new scalar/facet
     # preferences. Policies still capture the actual edited SQL preferences
-    # and each refresh keeps its own guarded snapshot and durable publication.
+    # and each refresh keeps its actual ranking and durable publication.
     from yt_playlist.rec import measurement, transient
 
     with store.read_snapshot() as snapshot:
@@ -235,8 +309,9 @@ def completed_policy_inputs(store, monkeypatch):
 
 
 @pytest.fixture
-def genre_ranking(store, monkeypatch, taste_parameter_inputs):
+def genre_ranking(preference_store, monkeypatch, taste_parameter_inputs):
     """Native genre weighting/publication with completed lower model inputs."""
+    store = preference_store
     seed_publication_subjects(store, [
         {'key': f'genre {index}|artist', 'title': f'Genre {index}', 'artist': 'Artist',
          'video_id': f'genre-{index}', 'genre': genre}
@@ -264,25 +339,24 @@ def genre_ranking(store, monkeypatch, taste_parameter_inputs):
 
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(
-        genre_ranking, taste_controls):
+        genre_ranking):
     store, key, axis = genre_ranking
-    client, schedule = taste_controls
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
     original = candidate(store, key)
     assert original is not None and len(pool(store, 'wheelhouse')) == 4
     original_pool = pool(store, 'wheelhouse')
     vectors = store.rec_model.get_rec_vectors()
 
-    def rerank(**kwargs):
-        assert kwargs == {'full': False, 'bundles': True}
+    def rerank():
         assert candidate_refresh.due(store, 2000)
         assert mode_surfaces.prepare_bundles(store, 2000) is not None
 
-    schedule.side_effect = rerank
     for weight in (.5, 1.5, 0):
-        # Keep HTTP zero admission and worker scheduling in the same workflow
-        # as the actual mute/rerank, rather than a separate empty-store check.
-        assert client.post('/taste/weight', data={'axis': axis, 'weight': weight}).status_code == 200
+        # This original workflow owns persisted edits, real rank changes and
+        # publication provenance. The separate taste-control workflow owns
+        # HTTP requests and worker scheduling across those same transitions.
+        store.rec_model.set_weight(axis, weight, lo=0, now=2000)
+        rerank()
         assert store.rec_model.get_weights(now=2000)[axis] == weight
         row = candidate(store, key)
         if weight == 0:
@@ -298,25 +372,22 @@ def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(
         assert not candidate_refresh.due(store, 2000)
         assert store.rec_model.get_rec_vectors() == vectors
 
-    assert client.post('/taste/reset-weights').status_code == 200
+    store.rec_model.reset_weights()
+    rerank()
     assert axis not in store.rec_model.weight_records()
     assert pool(store, 'wheelhouse') == original_pool
     assert not candidate_refresh.due(store, 2000)
-    assert schedule.call_args_list == [call(full=False, bundles=True)] * 4
     store.rec_model.set_weight(axis, .5, now=2000)
-    # The HTTP controls already captured their initial starting point. Replace
-    # it deliberately when saving this later half-weight checkpoint.
-    store.rec_model.save_taste_settings('taste_settings_checkpoint_v1', [], 2000, replace=True)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    store.rec_model.save_taste_settings('taste_settings_checkpoint_v1', [], 2000)
+    rerank()
     saved = pool(store, 'wheelhouse')
     saved_score = candidate(store, key)['score']
     assert len(saved) == 4
     store.rec_model.set_weight(axis, 1.5, now=2000)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    rerank()
     assert candidate(store, key)['score'] != saved_score
     assert store.rec_model.restore_taste_settings('taste_settings_checkpoint_v1', [])
-    assert candidate_refresh.due(store, 2000)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    rerank()
     assert candidate(store, key)['score'] == saved_score
     assert pool(store, 'wheelhouse') == saved
     assert not candidate_refresh.due(store, 2000)
@@ -361,8 +432,9 @@ def test_completed_ranking_retains_captured_preferences_and_leaves_later_edits_d
 
 
 @pytest.fixture
-def small_taste_ranking(store, monkeypatch, taste_parameter_inputs):
+def small_taste_ranking(preference_store, monkeypatch, taste_parameter_inputs):
     """Real ranking controls/publications, with completed lower candidate inputs."""
+    store = preference_store
     iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     seed_publication_subjects(store, [
         {'key': f'song {i}|artist {i}', 'title': f'Song {i}', 'artist': f'Artist {i}',
@@ -401,17 +473,37 @@ def small_taste_ranking(store, monkeypatch, taste_parameter_inputs):
 
 
 @pytest.fixture
-def taste_controls(store):
+def taste_controls(preference_store, monkeypatch):
     """Exercise the real resource and worker entry point, without starting a model job."""
     from yt_playlist.rec.rec_worker import RecWorker
     from yt_playlist.web.routes import taste
 
+    store = preference_store
     worker = RecWorker.__new__(RecWorker)
     worker._schedule = Mock()
     ctx = SimpleNamespace(store=store, rec_worker=worker, now=lambda: 2000,
         templates=Jinja2Templates(directory=str(Path(taste.__file__).parents[1] / 'templates')))
     app = FastAPI()
-    app.include_router(taste.build(ctx))
+    # Keep the actual handlers and HTTP dispatch for this complete control
+    # sequence. Unrelated panels, model selection and chart routes need no
+    # dependency construction in a test that never requests them.
+    from fastapi import APIRouter
+
+    controls = {'/taste/checkpoint', '/taste/checkpoint/restore', '/taste/param',
+                '/taste/reset-param', '/taste/weight', '/taste/reset-weights',
+                '/taste/reset-all'}
+
+    class ControlRoutes(APIRouter):
+        def add_api_route(self, path, endpoint, **kwargs):
+            if path in controls and kwargs.get('methods') == ['POST']:
+                return super().add_api_route(path, endpoint, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(taste, 'APIRouter', ControlRoutes)
+        router = taste.build(ctx)
+    assert {(route.path, frozenset(route.methods)) for route in router.routes} == {
+        (path, frozenset({'POST'})) for path in controls}
+    app.include_router(router)
     with TestClient(app) as client:
         yield client, worker._schedule
 

@@ -9,13 +9,33 @@ import numpy as np
 import pytest
 
 from tests.rec.test_progressive import catalog, drain, _pristine_current_schema
-from tests.store_fixture_support import initialize_consumer
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import _file_consumer_store, initialize_consumer, reuse_reporting_reader
 from yt_playlist.rec import content_model, embedding_vectors, progressive, taste_modes
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core import activity, content_preparation_state
 from yt_playlist.core.store import Store
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.prepared_content import PreparedContentRepo
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Recovery checks do not construct the HTTP app or its sync daemon."""
+
+
+@pytest.fixture
+def audit_library(tmp_path, _pristine_current_schema, monkeypatch, native_sql_calls):
+    # This audit owns content-input recovery and aged-evidence publication.
+    # Joint audio-model qualification is an independent preparation branch;
+    # keep actual content capture, fitting, queues and snapshot guards here.
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock')))
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store
 
 
 def test_recovery_schema_input_keeps_completed_sql_and_real_guards(_pristine_current_schema):
@@ -515,7 +535,8 @@ def test_repeated_time_budget_failure_is_visible_and_retried(store, monkeypatch)
 
 
 @pytest.mark.parametrize('pool', ['library', 'discovered'])
-def test_audit_repairs_missing_inputs_for_previously_published_vectors(store, pool):
+def test_audit_repairs_missing_inputs_for_previously_published_vectors(audit_library, pool):
+    store = audit_library
     catalog(store, 12)
     if pool == 'discovered':
         store.discovery.upsert_discovered_track('guest|guest', 'guest', 'Guest', 'Guest', '', None,

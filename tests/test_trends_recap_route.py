@@ -12,6 +12,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from yt_playlist.core.store import Store
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.web.app import create_app
 from yt_playlist.rec.recap_details import slides
 from tests.conftest import FakeClient
@@ -147,7 +148,7 @@ def _client(_pristine_current_schema, tmp_path, monkeypatch):
     with ExitStack() as resources:
         identities = count()
 
-        def create(story, synced=True, now_fn=lambda: _NOW):
+        def create(story, synced=True, now_fn=lambda: _NOW, *, snapshot_guards=False):
             # Recap visibility owns actual settings/cache persistence and HTTP
             # rendering. Reader admission and snapshot revision coordination
             # sit below it; reuse a real committed reader of this private file.
@@ -155,6 +156,10 @@ def _client(_pristine_current_schema, tmp_path, monkeypatch):
             resources.callback(store.conn.close)
             store.conn.execute('PRAGMA synchronous=OFF')
             initialize_consumer(store, _pristine_current_schema, snapshot_guards=False)
+            if snapshot_guards:
+                # Worker admission fingerprints actual revision owners. Plain
+                # rendering consumers do not need these connection-local guards.
+                store._snapshot_revisions = Revisions(store.conn)
             resources.enter_context(schema_inspection.reuse_tables(store.conn))
             resources.enter_context(reuse_reporting_reader(store, monkeypatch))
             app = _recap_app(store, story, synced=synced, now_fn=now_fn)

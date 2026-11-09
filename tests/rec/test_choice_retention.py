@@ -2,6 +2,7 @@
 from tests.file_content_support import age_file
 import json
 from copy import deepcopy
+from contextlib import closing, contextmanager
 from functools import wraps
 import time
 from unittest.mock import Mock
@@ -9,12 +10,21 @@ from unittest.mock import Mock
 import pytest
 
 from tests.rec.test_choice_bandit import modes
-from yt_playlist.core import fao
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls,
+)
+from yt_playlist.core import fao, schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence as choices, choice_retention, comparison_storage
 from yt_playlist.rec.choice_context import checkpoint, learning_context, resolve_context
 
 DAY = 86400
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Retention owns SQL and file lifetimes without HTTP startup."""
 
 
 def captured_groups(store):
@@ -79,10 +89,43 @@ def retention_costs(monkeypatch, record_property):
         record_property(name + '_thread_cpu_s', cpu)
 
 
-def test_compaction_preserves_learning_predictions_withdrawals_and_restart(tmp_path):
-    path = tmp_path / 'library.db'
-    store = Store(path)
-    store.init_schema()
+@pytest.fixture
+def restarting_library(tmp_path, monkeypatch, native_sql_calls):
+    # Retention consumes admitted, unchanged SQL. Schema admission is owned by
+    # tests/core/test_migrations.py and tests/core/test_schema_contract.py.
+    # Keep actual startup repair, repository binding and private revision guards
+    # when reopening the persisted learning and diagnostic files below.
+    from yt_playlist.core import migrations, store as store_module
+
+    entries = (('jazz', 'Jazz'), ('house', 'House'))
+    bound_catalog(monkeypatch, entries=entries)
+    with bounded_consumer_schema(entries) as schema:
+        with _file_consumer_store(tmp_path, schema) as store:
+            monkeypatch.setattr(migrations, 'migrate', lambda *args, **kwargs: False)
+            # Reinstall the genuine trigger SQL in the reopened connection's
+            # private TEMP namespace, as for the initial consumer connection.
+            monkeypatch.setattr(store_module, 'Revisions', schema.bind_revisions)
+            # Reader construction/admission has independent db_reads owners.
+            # Reuse a real read-only connection while retaining actual file
+            # leases only during each report, so collection can run between
+            # reports. The reopened Store creates its own fresh readers.
+            reader = store._make_reader()
+
+            @contextmanager
+            def read_view(**kwargs):
+                with store._retained_readers():
+                    assert not reader.conn.in_transaction
+                    yield reader
+                    assert not reader.conn.in_transaction
+
+            monkeypatch.setattr(store, 'read_view', read_view)
+            with closing(reader.conn), schema_inspection.reuse_tables(reader.conn):
+                yield store
+
+
+def test_compaction_preserves_learning_predictions_withdrawals_and_restart(restarting_library):
+    store = restarting_library
+    path = store._db_path
     modes(store)
     original = captured(store)
     before = choices.compile_report(store, 103)
@@ -99,7 +142,9 @@ def test_compaction_preserves_learning_predictions_withdrawals_and_restart(tmp_p
     assert choices.replay(store, 103) == evaluated
     store.conn.close()
     store = Store(path)
-    store.init_schema()
+    store.conn.execute('PRAGMA synchronous=OFF')
+    with schema_inspection.reuse_tables(store.conn):
+        store.init_schema()
     try:
         assert choices.compile_report(store, 103)['bandit'] == before['bandit']
         choices.respond(store, 'menu', 'withdraw', 32 * DAY, details={'action_id': 'menu:pick'})

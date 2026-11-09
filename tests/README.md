@@ -17,7 +17,8 @@ uv run pytest -m '' -n 4 --test-lock-wait=60
 ```
 
 The first command selects unit tests; the second includes desktop/TV browser
-tests. Use `-m browser` for the browser suite, `-n 0` for serial execution or
+tests. Use `tests/browser -m browser` for the browser suite to avoid collecting
+unrelated unit tests, `-n 0` for serial execution or
 `-n N` for an explicit worker count. Coverage runs need explicit `-n 4` to use
 workers. Coordinate full-suite ownership under [AGENTS.md](../AGENTS.md).
 CI tests run only on pull requests; releases build and publish without tests.
@@ -25,6 +26,8 @@ Browser coverage has a 20-minute total pytest budget, including collection,
 fixtures and teardown. CI verifies the sum of all browser shards' elapsed
 times; adding runners does not increase the allowance. Select distinct useful
 desktop/TV behavior by measured cost, with no fixed test-count target.
+Shard timing includes final journal synchronization, report writing and pytest
+cleanup. A missing final timing receipt cannot establish passing coverage.
 
 ## Fixtures
 

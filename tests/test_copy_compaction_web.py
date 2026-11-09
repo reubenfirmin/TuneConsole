@@ -14,6 +14,11 @@ from tests.compaction_fixture_support import unfiltered_copy
 from tests.home_fixture_support import without_metadata_providers
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import historical_template, schema_definitions
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, use_native_sql_calls,
+    without_query_timing,
+)
 from tests.test_deferred_playback_feedback import playing
 from yt_playlist.core import db_handles, playback_feedback
 from yt_playlist.core.db_rebuild import build, job
@@ -254,6 +259,10 @@ def test_copy_browsing_stays_available_while_writers_are_fenced(library, monkeyp
 @pytest.mark.parametrize('browsing_input', [107], indirect=True)
 @pytest.mark.parametrize('failure', [False, True])
 def test_compaction_acceptance_drains_slow_radio_before_returning(browsing_input, radio_routes, monkeypatch, failure):
+    _compaction_acceptance(browsing_input, monkeypatch, failure)
+
+
+def _compaction_acceptance(browsing_input, monkeypatch, failure, *, wait_for_radio=True):
     scheduled, entered, draining = Future(), Future(), Future()
     release = threading.Event()
     contexts = []
@@ -310,7 +319,8 @@ def test_compaction_acceptance_drains_slow_radio_before_returning(browsing_input
             ctx.storage_maintenance.join(30)
             assert ctx.storage_maintenance.phase == 'done'
             assert client.get('/radio/status').status_code == 200
-            entered.result(timeout=5)
+            if wait_for_radio:
+                entered.result(timeout=5)
             # The failure happens after actual Radio entry. Context exit must
             # drain its managed thread before returning either result.
             ctx.storage_maintenance.join(30)
@@ -345,13 +355,21 @@ def test_compaction_drain_probe_reports_original_failure_before_radio():
         _acceptance_stage(acceptance, scheduled, 0, 'Radio scheduling after compaction')
 
 
-def test_compaction_drain_probe_rejects_return_without_radio():
-    # Challenge the probe independently of the real copy/Radio workflow above:
-    # ordinary completion cannot substitute for the required scheduling stage.
-    acceptance, scheduled = Future(), Future()
-    acceptance.set_result(None)
+@pytest.mark.parametrize('browsing_input', [107], indirect=True)
+def test_compaction_drain_probe_rejects_return_without_radio(browsing_input, radio_routes, monkeypatch):
+    original_app = create_app
+
+    def app_without_radio(*args, **kwargs):
+        app = original_app(*args, **kwargs)
+        monkeypatch.setattr(app.state.ctx.radio, 'prepare', lambda: None)
+        return app
+
+    monkeypatch.setattr(f'{__name__}.create_app', app_without_radio)
     with pytest.raises(AssertionError, match='Acceptance returned before Radio scheduling'):
-        _acceptance_stage(acceptance, scheduled, 0, 'Radio scheduling after compaction')
+        # Run real compaction, status HTTP and shutdown. The omitted producer
+        # cannot enter our controlled Radio task; let the probe catch completion
+        # rather than waiting for that test-only event inside the workflow.
+        _compaction_acceptance(browsing_input, monkeypatch, False, wait_for_radio=False)
 
 
 def replace(store, rollback, progress=lambda phase, detail: None):
@@ -404,8 +422,8 @@ def test_preconstructed_app_browses_legacy_readers_and_radio_after_reopen(browsi
             assert response.status_code == 200, (path, response.text[:200])
 
 
-def test_remote_confirmation_and_extension_frames_are_retained_with_main_handles_closed(library):
-    store, main, other, _, _ = library
+def test_remote_confirmation_and_extension_frames_are_retained_with_main_handles_closed(feedback_library):
+    store, main, other = feedback_library
     sent, next_sent, confirmed = threading.Event(), threading.Event(), threading.Event()
     remote = FakeClient()
     original_rate = remote.rate_song
@@ -454,8 +472,8 @@ def test_remote_confirmation_and_extension_frames_are_retained_with_main_handles
 
 
 @pytest.mark.parametrize('rollback',[False,True])
-def test_new_browse_waits_for_closed_handle_cutover_then_succeeds(library,monkeypatch,rollback):
-    store, main, other, _, _ = library
+def test_new_browse_waits_for_closed_handle_cutover_then_succeeds(cutover_library,monkeypatch,rollback):
+    store, main, other = cutover_library
     with store.read_view() as reader:
         assert reader.accounts.get_master_account().id==main
     app = create_app(store,lambda:{main:FakeClient(),other:FakeClient()},background_work=False)
@@ -484,3 +502,60 @@ def test_new_browse_waits_for_closed_handle_cutover_then_succeeds(library,monkey
             job.run(store,progress=progress)
         response = future.result(timeout=15)
         assert response.status_code==200,response.text[:200]
+
+
+@pytest.fixture
+def cutover_library(tmp_path, monkeypatch, copy_routes, without_query_timing):
+    from fastapi import APIRouter
+    from yt_playlist.core import db_revisions
+    from yt_playlist.core.db_rebuild import installed_format
+    from yt_playlist.core.migrations import current
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, playlists
+
+    # Closed-handle admission consumes an installed library and the real browse
+    # router. Bootstrap, ingestion and playback routers have independent owners.
+    # Keep actual replacement, rollback, reopen and reader admission. Installed
+    # format admission has its independent owner in
+    # test_db_rebuild_runtime_retention::test_rebuild_input_destination_sql_keeps_installed_contract.
+    entries = (('rock', 'Rock'), ('jazz', 'Jazz'))
+    bound_catalog(monkeypatch, entries=entries)
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, playlists)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    admitted_format = lambda conn: current.VERSION
+    monkeypatch.setattr(installed_format, 'validate', admitted_format)
+    monkeypatch.setattr(build, '_format', admitted_format)
+    with ExitStack() as resources:
+        # Only dependency preparation uses native SQL. Restore instrumented
+        # handle/thread admission before the actual cutover and HTTP request.
+        with pytest.MonkeyPatch.context() as patch:
+            use_native_sql_calls(patch)
+            schema = resources.enter_context(bounded_consumer_schema(entries))
+            store = resources.enter_context(_file_consumer_store(tmp_path, schema))
+            main = store.accounts.upsert_account('Main', 'bridge', None, True)
+            other = store.accounts.upsert_account('Other', 'bridge', 'other', False)
+            seed_publication_subjects(store, [dict(
+                key='song|artist', video_id='known', title='Song', artist='Artist', duration_s=180)])
+            store.playlists.upsert_playlist(main, 'LM', 'Liked Music', 0, '', 1)
+            store.settings.set_setting('onboard_setup_complete', '1')
+        # Reopen the unchanged installed shape with the same genuine guard
+        # definitions in a new private TEMP namespace. Guard construction is
+        # independently exercised by
+        # test_compaction_admitted_input_keeps_private_snapshot_guards.
+        monkeypatch.setattr(db_revisions, 'Revisions', schema.bind_revisions)
+        yield store, main, other
+
+
+@pytest.fixture
+def feedback_library(cutover_library, monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, bridge, likes
+
+    # The inbox consumes the same completed installed library. Preserve the
+    # real HTTP rating, bridge control and player-event entry points while the
+    # replacement closes its main handles.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, likes)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', bridge.build)
+    return cutover_library

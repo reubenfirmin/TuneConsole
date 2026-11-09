@@ -6,7 +6,11 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_control_routes, home_routes_only
-from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
+from tests.store_fixture_support import (
+    bounded_consumer_schema,
+    uncontended_file_consumer_store as store,
+    without_query_timing,
+)
 from tests.test_home_other_genres import (
     _publish_menu, genre_http_inputs, genre_routes, seed_genres,
     template_bytecode,
@@ -16,7 +20,7 @@ from yt_playlist.rec import graduation, mix_tuning, mode_surfaces, rec_params, s
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'tuning_routes', 'genre_http_inputs',
-                                    'native_sql_calls')
+                                    'native_sql_calls', 'without_query_timing')
 
 
 
@@ -74,6 +78,14 @@ def prepared_tuning(store, genre_http_inputs, monkeypatch):
     # original HTTP adjustment and real persisted state; genre ranking and
     # breadth-dependent selection retain their own tests.
     monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
+    # Breadth is the scalar this workflow edits. Supply the other registered
+    # parameters as completed lower inputs instead of rereading their unchanged
+    # settings during every fragment; breadth and all preference writes stay real.
+    get_param = rec_params.get_param
+    stable_parameters = {spec.name: get_param(store, spec.name) for spec in rec_params.PARAMS
+                         if spec.name != 'breadth_bias'}
+    monkeypatch.setattr(rec_params, 'get_param', lambda owner, name:
+        get_param(owner, name) if name == 'breadth_bias' else stable_parameters[name])
 
 
 def assert_cleared(store):

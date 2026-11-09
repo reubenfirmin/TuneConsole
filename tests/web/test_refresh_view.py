@@ -7,6 +7,8 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema
 
 
 class _StubBridge:
@@ -186,11 +188,32 @@ def test_move_that_deletes_source_posts_refresh_view(store,monkeypatch,tmp_path,
         assert 'refresh-view control not sent for PL1' in caplog.text
 
 
-def test_copy_only_move_does_not_fire_refresh_view(store):
+@pytest.fixture
+def copy_move_library(tmp_path, native_sql_calls):
+    with bounded_consumer_schema(()) as schema:
+        with _file_consumer_store(tmp_path, schema) as store:
+            yield store
+
+
+@pytest.fixture
+def copy_move_routes(monkeypatch, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, move
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, move)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+
+
+def test_copy_only_move_does_not_fire_refresh_view(copy_move_library, copy_move_routes):
     # copy_only leaves the source untouched on YouTube: nothing a tab could be viewing changed.
+    store = copy_move_library
     i1, i2, pid = _two_identity_move(store)
     bridge = _StubBridge()
-    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()}, bridge)
+    c = TestClient(create_app(store, lambda: {i1: FakeClient(), i2: FakeClient()},
+                              now_fn=lambda: 1.0, bridge=bridge, background_work=False),
+                   base_url='http://127.0.0.1')
 
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
 

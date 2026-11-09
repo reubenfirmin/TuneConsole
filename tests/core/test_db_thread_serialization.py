@@ -9,6 +9,11 @@ import time
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Connection handshakes construct no web application or its lifespan."""
+
+
 @pytest.mark.parametrize('factory,operation', [
     (factory, operation)
     for factory in ('Connection', 'DiagnosticConnection')
@@ -19,10 +24,13 @@ def test_callback_and_concurrent_bind_finish(factory, operation, tmp_path):
     # serialization stops the binder, rather than guessing from a short sleep.
     script = textwrap.dedent('''
         import faulthandler, sqlite3, sys, threading
-        from yt_playlist.core.db_handles import Connection
-        from yt_playlist.core.db_diagnostics import DiagnosticConnection
         native = sys.argv[1] == 'Native'
-        factory = sqlite3.Connection if native else globals()[sys.argv[1]]
+        if native:
+            factory = sqlite3.Connection
+        elif sys.argv[1] == 'Connection':
+            from yt_playlist.core.db_handles import Connection as factory
+        else:
+            from yt_playlist.core.db_diagnostics import DiagnosticConnection as factory
         operation = sys.argv[2]
         conn = factory(':memory:', check_same_thread=False)
         conn.execute('SELECT ?', (1,)).fetchall()

@@ -390,6 +390,10 @@ def _reference_contract(statements):
     reference = sqlite3.connect(':memory:')
     token = _REFERENCE_CONNECTION.set(reference)
     try:
+        # This private reference is discarded after its observations are read.
+        # Build all of its DDL in one transaction instead of committing SQLite's
+        # schema bookkeeping after every individual table, index and trigger.
+        reference.execute('BEGIN')
         for sql in statements:
             reference.execute(sql)
         return {

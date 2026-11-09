@@ -6,6 +6,11 @@ import pytest
 from yt_playlist.core import metadata
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Catalog SQL checks do not construct an HTTP application."""
+
+
 def test_current_provider_choice_and_reset_follow_label_without_changing_evidence(store):
     store.genres.configure_catalog()
     entry = store.tracks.upsert_track('v', 'Song', 'Artist', None, None)

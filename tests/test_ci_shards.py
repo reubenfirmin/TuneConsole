@@ -356,10 +356,22 @@ def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypat
 
     monkeypatch.chdir(tmp_path)
     shard = journal.Shard(None, 1, 1, Path('evidence/shard.json'), 'unit', {})
+    command = journal.pytest_cmdline_main(SimpleNamespace(
+        pluginmanager=SimpleNamespace(get_plugin=lambda name: shard)))
+    next(command)
+    syncs = []
+    synchronize = shard._sync
+
+    def sync(fd):
+        syncs.append(fd)
+        synchronize(fd)
+
+    shard._sync = sync
     product_directory = tmp_path / 'product'
     product_directory.mkdir()
     node = 'test_product.py::test_fault'
     shard.report.update(expected=[node], selected=[node], file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    shard.write()
     def fail(*args, **kwargs):
         raise OSError('product-only fault')
     with monkeypatch.context() as patch:
@@ -373,27 +385,58 @@ def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypat
             shard.event('phase', nodeid=node, phase=phase)
             shard.event('outcome', nodeid=node, phase=phase, result={'outcome': 'passed', 'seconds': .01})
         shard.event('end', nodeid=node)
+        # Every transition is visible before the terminal synchronization.
+        # A process interruption must never certify these unfinished receipts.
+        pending = load_report(shard.path)
+        assert pending['executions'] == [node]
+        assert set(pending['tests'][node]) == {'setup', 'call', 'teardown'}
+        assert 'exitstatus' not in pending and syncs == []
+        with pytest.raises(ValueError, match='did not pass'):
+            verify([pending], 'unit', total=1)
         shard.pytest_sessionfinish(None, 0)
+        # Losing the process during remaining pytest cleanup must not certify
+        # the pre-cleanup finish record as complete elapsed/budget evidence.
+        unfinished = load_report(shard.path)
+        assert unfinished['journal_incomplete'] and 'exitstatus' not in unfinished
+        with pytest.raises(ValueError, match='did not pass'):
+            verify([unfinished], 'unit', total=1)
+        with pytest.raises(StopIteration) as finished:
+            command.send(0)
+        assert finished.value.value == 0
     recovered = load_report(shard.path)
     assert verify([recovered], 'unit', total=1)['cases'] == 1
     events = [json.loads(line) for line in shard.journal.read_text().splitlines()]
     assert [event['sequence'] for event in events] == list(range(len(events)))
-    assert events[-1]['event'] == 'finish'
+    assert [event['event'] for event in events[-2:]] == ['finish', 'timing']
+    assert len(syncs) == 1
+    # Older completed journals carry elapsed time on finish instead. Keep
+    # those historical artifacts readable without requiring a timing event.
+    legacy = tmp_path / 'legacy.json'
+    legacy.write_bytes(shard.path.read_bytes())
+    events[-2]['elapsed_seconds'] = recovered['elapsed_seconds']
+    legacy.with_suffix('.events.jsonl').write_text('\n'.join(json.dumps(event) for event in events[:-1]) + '\n')
+    assert verify([load_report(legacy)], 'unit', total=1)['cases'] == 1
     assert shard.path == tmp_path / 'evidence/shard.json'
     assert not (product_directory / 'evidence').exists()
 
 
-def test_real_journal_sync_failure_propagates_without_reusing_sequence_or_certifying_completion(tmp_path, monkeypatch):
+def test_real_journal_append_failure_propagates_without_reusing_sequence_or_certifying_completion(tmp_path, monkeypatch):
     import ci_test_shards as journal
 
     shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
     shard.report.update(expected=['test_product.py::test_fault'], selected=['test_product.py::test_fault'],
                         file_owners={'test_product.py': 1}, estimated_seconds=[1])
-    def fail(fd):
-        raise OSError('actual journal sync failure')
-    monkeypatch.setattr(shard, '_sync', fail)
-    with pytest.raises(OSError, match='actual journal sync failure'):
-        shard.event('start', nodeid='test_product.py::test_fault')
+    shard.event('start', nodeid='test_product.py::test_fault')
+    open_file = Path.open
+
+    def fail(path, *args, **kwargs):
+        if path == shard.journal and args == ('ab',):
+            raise OSError('actual journal append failure')
+        return open_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'open', fail)
+    with pytest.raises(OSError, match='actual journal append failure'):
+        shard.event('phase', nodeid='test_product.py::test_fault', phase='setup')
     before = shard.journal.read_bytes()
     with pytest.raises(OSError, match='unavailable after a recording failure'):
         shard.event('end', nodeid='test_product.py::test_fault')
@@ -425,6 +468,94 @@ def test_failed_terminal_sync_cannot_certify_a_passing_shard(tmp_path, monkeypat
         shard.pytest_sessionfinish(None, 0)
     recovered = load_report(shard.path)
     assert recovered['journal_incomplete'] and 'exitstatus' not in recovered
+    with pytest.raises(ValueError, match='did not pass'):
+        verify([recovered], 'unit', total=1)
+
+
+@pytest.mark.parametrize('terminal_cost', ['sync', 'report', 'source', 'cleanup'])
+def test_terminal_work_is_in_recovered_elapsed_time_and_can_exceed_browser_budget(tmp_path, terminal_cost):
+    # Run the actual pytest lifecycle with real journal I/O. Only the clock is
+    # controlled: each selected terminal operation accounts for twenty seconds.
+    (tmp_path / 'pytest.ini').write_text('[pytest]\n')
+    (tmp_path / 'conftest.py').write_text('''
+from types import SimpleNamespace
+import pytest
+import ci_test_shards as journal
+
+clock = [1000.0]
+journal.time = SimpleNamespace(monotonic=lambda: clock[0])
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config):
+    shard = config.pluginmanager.get_plugin('isolated-ci-shard')
+    name = ''' + repr(terminal_cost) + '''
+    if name == 'cleanup':
+        config.add_cleanup(lambda: clock.__setitem__(0, clock[0] + 20))
+    else:
+        attribute = {'sync': '_sync', 'report': 'write', 'source': 'write_sources'}[name]
+        original = getattr(shard, attribute)
+        def charged(*args, **kwargs):
+            result = original(*args, **kwargs)
+            clock[0] += 20
+            return result
+        setattr(shard, attribute, charged)
+
+@pytest.fixture(autouse=True)
+def test_clock():
+    clock[0] = 2190.0
+''')
+    (tmp_path / 'test_probe.py').write_text('def test_probe():\n    assert True\n')
+    report = tmp_path / 'shard.json'
+    result = subprocess.run(
+        [sys.executable, '-m', 'pytest', '-p', 'ci_test_shards', '-c', str(tmp_path / 'pytest.ini'),
+         '--rootdir', str(tmp_path), str(tmp_path / 'test_probe.py'), '--ci-shard=1/1',
+         '--ci-suite=browser', '--ci-shard-report=' + str(report),
+         '--ci-source-report=' + str(tmp_path / 'source.json')],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=15,
+        env={**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1', 'PYTEST_ADDOPTS': ''})
+    assert result.returncode == 0, result.stdout + result.stderr
+    recovered = load_report(report)
+    assert recovered['elapsed_seconds'] == 1210
+    with pytest.raises(ValueError, match='aggregate.*1200s total budget'):
+        verify([recovered], 'browser', total=1)
+    recovered['suite'] = 'unit'
+    measured = verify([recovered], 'unit', total=1)
+    assert measured['shard_seconds'] == [1210]
+    assert measured['test_runner_minutes'] == pytest.approx(1210 / 60)
+
+
+@pytest.mark.parametrize('fault', ['cleanup', 'timing-append'])
+def test_failure_after_terminal_sync_cannot_certify_a_passing_shard(tmp_path, monkeypatch, fault):
+    import ci_test_shards as journal
+
+    shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
+    command = journal.pytest_cmdline_main(SimpleNamespace(
+        pluginmanager=SimpleNamespace(get_plugin=lambda name: shard)))
+    next(command)
+    node = 'test_product.py::test_fault'
+    shard.report.update(expected=[node], selected=[node], file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    shard.event('start', nodeid=node)
+    for phase in ('setup', 'call', 'teardown'):
+        shard.event('outcome', nodeid=node, phase=phase, result={'outcome': 'passed', 'seconds': .01})
+    shard.event('end', nodeid=node)
+    shard.pytest_sessionfinish(None, 0)
+    synchronized = shard.journal.read_bytes()
+    if fault == 'cleanup':
+        with pytest.raises(OSError, match='cleanup failed'):
+            command.throw(OSError('cleanup failed'))
+    else:
+        open_file = Path.open
+        def fail(path, *args, **kwargs):
+            if path == shard.journal and args == ('ab',):
+                raise OSError('timing append failed')
+            return open_file(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'open', fail)
+        with pytest.raises(OSError, match='timing append failed'):
+            command.send(0)
+    assert shard.journal.read_bytes() == synchronized
+    recovered = load_report(shard.path)
+    assert recovered['journal_incomplete'] and 'exitstatus' not in recovered
+    assert set(recovered['tests'][node]) == {'setup', 'call', 'teardown'}
     with pytest.raises(ValueError, match='did not pass'):
         verify([recovered], 'unit', total=1)
 

@@ -12,7 +12,6 @@ from tests.store_fixture_support import (
 
 import pytest
 from fastapi.testclient import TestClient
-from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
@@ -478,7 +477,9 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
         tmp_path, monkeypatch, request, format, _pristine_current_schema):
     from tests.conftest import seed_catalog_track
     from tests.onboarding_support import publish_personal_album, publish_personal_mix
+    from unittest.mock import Mock
     from yt_playlist.core import home_outputs, store as store_module
+    from yt_playlist.core import migrations
     from yt_playlist.rec import growth_readiness, onboarding
 
     # These two applications use Home and setup status; the broader page
@@ -501,8 +502,7 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
         if format == 'mixes':
             publish_personal_mix(first)
         with TestClient(create_app(first, lambda: {}, now_fn=lambda: 1000,
-                                  background_work=False), base_url='http://127.0.0.1',
-                        backend_options={'use_uvloop': True}) as client:
+                                  background_work=False), base_url='http://127.0.0.1') as client:
             assert client.get('/home/onboard/status').json()['setup']['complete']
         assert first.settings.get_setting(onboarding.SETUP_COMPLETE) == '1'
         # Disposable projections and offer-deduplication rows are not setup state.
@@ -511,16 +511,18 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
             home_outputs.clear(first.conn, ('home_prepared','home_tuned','home_choice','album_prepared'))
     restored = Store(path)
     restored.conn.execute('PRAGMA synchronous=OFF')
-    # Snapshot invalidation is a lower coordinator, independent of the durable
-    # setup setting. Keep actual startup admission, repair and file reopening;
-    # HTTP reads below still use a separate real read-only SQL connection.
-    monkeypatch.setattr(store_module, 'Revisions', lambda connection: None)
-    with schema_inspection.reuse_tables(restored.conn):
+    # Current-schema admission and snapshot coordination are lower collaborators
+    # of durable setup completion. Reopen the actual file and run Store startup,
+    # repair and HTTP reads without repeating independent schema validation.
+    admitted = Mock(return_value=False)
+    with monkeypatch.context() as startup:
+        startup.setattr(migrations, 'migrate', admitted)
+        startup.setattr(store_module, 'Revisions', lambda connection: None)
         restored.init_schema()
+    admitted.assert_called_once_with(restored.conn, defer_validation=False)
     with closing(restored.conn), reuse_reporting_reader(restored, monkeypatch):
         with TestClient(create_app(restored, lambda: {}, now_fn=lambda: 1100,
-                                  background_work=False), base_url='http://127.0.0.1',
-                        backend_options={'use_uvloop': True}) as client:
+                                  background_work=False), base_url='http://127.0.0.1') as client:
             setup = client.get('/home/onboard/status').json()['setup']
             assert setup['complete'] and setup['phase'] == 'ready'
             assert not setup['offers_ready']

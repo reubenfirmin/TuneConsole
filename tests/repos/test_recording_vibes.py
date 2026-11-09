@@ -295,6 +295,10 @@ def recording_vibe_predecessor():
             patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
             patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
             patch.delenv('DEEPSEEK_API_KEY', raising=False)
+            # The populated predecessor contains only Psybient. Run every
+            # genuine historical migration without repeating unrelated
+            # vocabulary curation beneath externalization and lineage checks.
+            bound_catalog(patch, entries=(('psybient', 'Psybient'),))
             source, value = legacy(directory / 'source.db')
             resources.callback(source.conn.close)
             template = capture_template(source, value)

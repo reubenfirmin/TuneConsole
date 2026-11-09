@@ -16,7 +16,7 @@ from yt_playlist.rec.rec_worker import Job
 def test_recap_refresh_is_owned_by_monthly_projection_and_coalesces(_client, monkeypatch, grouped):
     beats = [*_STORY['beats'][:-1], *deepcopy(_DETAIL_BEATS), _STORY['beats'][-1]]
     story = {**_STORY, 'beats': beats if grouped else slides(beats)}
-    client, store = _client(story)
+    client, store = _client(story, snapshot_guards=True)
     worker = _worker(store)
     original_worker = client.app.state.ctx.rec_worker
     launches = []

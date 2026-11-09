@@ -1,12 +1,22 @@
 """#40: alternate placement must survive YouTube indexing lag and failed moves."""
 import json
+from unittest.mock import Mock
 
 import pytest
 
 from tests.conftest import FakeClient, _track
-from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import migrations, schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_positions, sync
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Placement reconciliation does not start the HTTP application lifecycle."""
 
 
 @pytest.fixture(scope='module')
@@ -46,12 +56,20 @@ class LaggingClient(FakeClient):
         return super().edit_playlist(playlistId, **kw)
 
 
-def seed(store):
+def seed(store, *, completed_catalog=False):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks = [_track(vid, title, "Artist", set_video_id="set_" + vid)
               for vid, title in (("anchor", "Original"), ("next", "Next"),
                                  ("alt1", "Alternate one"), ("alt2", "Alternate two"))]
-    tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", "Alb", 200) for t in tracks[:2]]
+    if completed_catalog:
+        items = [dict(key=t['title'].lower() + '|artist', video_id=t['videoId'],
+                      title=t['title'], artist='Artist', album='Alb', duration_s=200)
+                 for t in tracks]
+        seed_publication_subjects(store, items, unowned={item['key'] for item in items[2:]})
+        tids = [store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                  (t['videoId'],)).fetchone()[0] for t in tracks[:2]]
+    else:
+        tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", "Alb", 200) for t in tracks[:2]]
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 2, "hash", 1)
     store.playlists.set_playlist_tracks(pid, tids)
     client = LaggingClient(playlists=[{"playlistId": "PL", "title": "Mix"}],
@@ -81,14 +99,25 @@ def test_add_positions_multiple_alternates_despite_lag(store, return_handles):
     assert client.added == [("PL", ["alt1", "alt2"])]
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path, consumer_store, monkeypatch):
     retry = playlist_positions.with_retry
     monkeypatch.setattr(playlist_positions, 'with_retry',
                         lambda fn, **kwargs: retry(fn, **kwargs, sleep=lambda delay: None))
     path = str(tmp_path / "library.db")
     store = consumer_store(path)
+    def known_track(video_id, *args, **kwargs):
+        row = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                 (video_id,)).fetchone()
+        assert row is not None, video_id
+        if kwargs.get('library', True):
+            with store.conn:
+                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                                   (row[0],))
+        return row[0]
     with reuse_reporting_reader(store, monkeypatch):
-        iid, pid, client, chosen = seed(store)
+        iid, pid, client, chosen = seed(store, completed_catalog=True)
+        monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
         client.return_handles = False
         client.hidden_reads = 100
         result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
@@ -101,9 +130,20 @@ def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path, c
     store.conn.close()
 
     store = Store(path)
-    store.init_schema()
     try:
-        with reuse_reporting_reader(store, monkeypatch):
+        # Reopen the real populated file and retain ordinary startup admission.
+        # Reuse table observations while the same connection reconciles it.
+        with schema_inspection.reuse_tables(store.conn), reuse_reporting_reader(store, monkeypatch):
+            admitted = Mock(return_value=False)
+            with monkeypatch.context() as startup:
+                # Schema admission is a completed lower input. Reopen, repair,
+                # repository binding and the persisted pending action stay real.
+                startup.setattr(migrations, 'migrate', admitted)
+                store.init_schema()
+            admitted.assert_called_once_with(store.conn, defer_validation=False)
+            # The same four completed catalog subjects are reconciled on every
+            # remote read. Placement owns membership/order, not metadata ingest.
+            monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
             # A sync during the lag must preserve the requested tracks and their pending move.
             sync.sync_identity(store, iid, client, 101)
             assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]

@@ -1,12 +1,16 @@
 """Typed genre/family feedback survives alias edits without touching history."""
+from contextlib import closing
 import sqlite3
 
 import pytest
 
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import genre_identity
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
+from yt_playlist.repos.rec_model import RecModelRepo
+from yt_playlist.repos.rec_signals import RecSignalsRepo
 
 
 @pytest.fixture(autouse=True)
@@ -25,39 +29,47 @@ def test_taste_axis_input_keeps_genuine_history_and_read_only_sql(_pristine_inst
     assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
-def test_upgrade_preserves_typed_axes_and_original_events(tmp_path, _pristine_installed_schema):
-    old = Store(tmp_path / 'axes.db')
-    try:
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_upgrade_preserves_typed_axes_and_original_events(_pristine_installed_schema):
+    # Alias conversion owns real SQL, events and continuing writes. It has no
+    # reopen or file-publication contract, so use a private SQLite database.
+    old = Store(':memory:')
+    # The upgrade and its assertions run synchronously on one private Store.
+    # Keep reads under its real lock instead of constructing reporting readers.
+    with closing(old.conn), old._lock:
         _pristine_installed_schema(87).backup(old.conn)
-        old._bind_repositories()
-        old.rec_model.set_lean('genre:Drum And Bass', 1.4, 10)
-        old.rec_model.hide_facet('genre:jazz')
-        old.rec_signals.bump_theme('genre:Drum And Bass', 2, 10)
-        old.rec_signals.log_graduation('genre:Drum And Bass', 'play', 2, 1.1, 1.1, 10)
-        old.rec_signals.set_play_graduated_day('genre:jazz', '2026-10-29')
-        old.rec_signals.set_play_graduated_day('genre:Drum And Bass', '2026-10-28')
-        old.rec_signals.set_play_graduated_day('genre:Drum & Bass', '2026-10-29')
-        old.rec_signals.bump_theme('genre:Drum & Bass', -0.5, 11)
+        # Construct the two real SQL consumers, rather than every unrelated
+        # controller/file owner in a fully bound application Store.
+        model, signals = RecModelRepo(old), RecSignalsRepo(old)
+        model.set_lean('genre:Drum And Bass', 1.4, 10)
+        model.hide_facet('genre:jazz')
+        signals.bump_theme('genre:Drum And Bass', 2, 10)
+        signals.log_graduation('genre:Drum And Bass', 'play', 2, 1.1, 1.1, 10)
+        signals.set_play_graduated_day('genre:jazz', '2026-10-29')
+        signals.set_play_graduated_day('genre:Drum And Bass', '2026-10-28')
+        signals.set_play_graduated_day('genre:Drum & Bass', '2026-10-29')
+        signals.bump_theme('genre:Drum & Bass', -0.5, 11)
         # v088 owns conversion of string axes and their retained events. The
         # installed-genre contract separately exercises later archive upgrades.
         migrate(old.conn, registry=registry.MIGRATIONS[:88])
-        old._bind_repositories()
-        assert old.rec_model.get_lean('genre:drum bass') == 1.4
-        assert old.rec_model.hidden_facets() == {'genre:jazz'}
-        assert old.rec_signals.get_theme('genre:drum bass') == 1.5
-        assert old.rec_signals.get_play_graduated_day('genre:jazz') == '2026-10-29'
-        assert old.rec_signals.get_play_graduated_day('genre:drum bass') == '2026-10-29'
+        # Keep the existing consumers across conversion. Their SQL resolves
+        # typed axes from the live schema; unrelated Store owners need no rebind.
+        assert model.get_lean('genre:drum bass') == 1.4
+        assert model.hidden_facets() == {'genre:jazz'}
+        assert signals.get_theme('genre:drum bass') == 1.5
+        assert signals.get_play_graduated_day('genre:jazz') == '2026-10-29'
+        assert signals.get_play_graduated_day('genre:drum bass') == '2026-10-29'
         assert old.conn.execute("SELECT count(*) FROM taste_axis_legacy WHERE table_name='rec_play_grad'").fetchone()[0] == 3
         assert old.conn.execute("SELECT genre_key FROM taste_axes WHERE kind='genre'").fetchone()[0] == 'drum bass'
         assert old.conn.execute("SELECT family_key FROM taste_axes WHERE kind='family'").fetchone()[0] == 'jazz'
         old.conn.execute("UPDATE genre_catalog SET name='Drums renamed' WHERE key='drum bass'")
         old.conn.commit()
-        assert old.rec_model.get_leans() == {'genre:drum bass': 1.4}
-        assert old.rec_signals.recent_graduations()[0]['axis'] == 'genre:drum bass'
+        assert model.get_leans() == {'genre:drum bass': 1.4}
+        assert signals.recent_graduations()[0]['axis'] == 'genre:drum bass'
         assert old.conn.execute("SELECT raw_axis FROM taste_axis_legacy WHERE table_name='rec_grad_log'").fetchone()[0] == 'genre:Drum And Bass'
+        signals.bump_theme('genre:drum bass', 0.5, 12)
+        assert signals.get_theme('genre:drum bass') == 2
         validate_version(old.conn, 88)
-    finally:
-        old.conn.close()
 
 
 def test_new_axes_constraints_and_unknown_evidence(store):

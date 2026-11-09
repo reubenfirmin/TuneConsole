@@ -19,6 +19,16 @@ def disable_periodic_library_sync():
     """Schema and clone checks do not construct an HTTP application."""
 
 
+@pytest.fixture(autouse=True)
+def schema_sql(native_sql_calls):
+    """Keep real replay/admission SQL below synchronous clone assertions.
+
+    Instrumented handle admission and cross-thread serialization are owned by
+    test_db_thread_serialization; slow-query reporting by test_db_diagnostics.
+    Historical replay, startup validation and private guards remain real here.
+    """
+
+
 def bind_consumer(store, version):
     if version < 79:
         # These predecessors need explicit later migrations. Match their

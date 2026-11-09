@@ -7,11 +7,15 @@ import pytest
 
 from tests.compaction_fixture_support import completed_installed as admitted_installed
 from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import home_offers
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
 from yt_playlist.core.preparation import offer_publication
 from yt_playlist.core.preparation.recommendation_state import BYTE_LIMITS, JOBS
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture
@@ -20,10 +24,11 @@ def disable_periodic_library_sync():
     pass
 
 
-@pytest.mark.parametrize('version', [79, 82])
-def test_offer_input_keeps_both_histories_and_private_snapshot_guards(compaction_inputs, version):
+@pytest.fixture
+def admitted_offer(admitted_installed, compaction_inputs):
     from yt_playlist.core.db_revisions import Revisions
 
+    store, version = admitted_installed
     source = compaction_inputs(version).source
     assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
@@ -32,6 +37,8 @@ def test_offer_input_keeps_both_histories_and_private_snapshot_guards(compaction
         (entry.version, entry.name) for entry in regular.CHANGES]
     assert isinstance(source._snapshot_revisions, Revisions)
     assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+    assert store._snapshot_revisions.conn is store.conn
+    yield store, version
 
 
 def prepare(store):
@@ -41,8 +48,8 @@ def prepare(store):
 
 
 @pytest.mark.parametrize('admitted_installed', [79, 82], indirect=True)
-def test_publication_and_continuing_writes_share_one_owner(admitted_installed):
-    store, _ = admitted_installed
+def test_publication_and_continuing_writes_share_one_owner(admitted_offer):
+    store, _ = admitted_offer
     revision = prepare(store)
     original = tuple(store.conn.execute("SELECT * FROM rec_proposals WHERE surface='home_shown'").fetchone())
     offer_publication.publish(store.conn, revision=revision)
@@ -111,8 +118,8 @@ def test_stale_corrupt_and_interrupted_publications_cannot_admit_a_head(installe
 
 
 @pytest.mark.parametrize('admitted_installed', [82], indirect=True)
-def test_retained_source_supports_the_explicit_frozen_upgrade(admitted_installed):
-    store, _ = admitted_installed
+def test_retained_source_supports_the_explicit_frozen_upgrade(admitted_offer):
+    store, _ = admitted_offer
     offer_publication.publish(store.conn, revision=prepare(store))
     store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['new']}, 200)
     store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['last', 'new']}, 300)

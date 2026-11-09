@@ -9,12 +9,18 @@ from tests.prepared_fixture_support import roots
 
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
 from tests.repos.test_recording_vibes import recording_vibe_predecessor
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from tests.test_audio_vibes import sample
 from yt_playlist.core import sample_files
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Evidence upgrades and read guards construct no HTTP application."""
 
 
 @pytest.fixture
@@ -39,6 +45,7 @@ def externalize_recording_vibes(store):
 
 
 @pytest.mark.parametrize('retain_alias', [True, False])
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_upgrade_unknown_video_cannot_change_an_existing_text_identity(legacy_recording_vibes, retain_alias):
     store, _value = legacy_recording_vibes('identity-upgrade')
     try:
@@ -82,6 +89,7 @@ def test_identical_retry_restores_measurement_after_missing_file_was_processed(s
     assert fits(store, target) == before
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_upgrade_last_good_scores_preserve_missing_times_and_contributors(legacy_recording_vibes):
     store, value = legacy_recording_vibes('last-good')
     try:
@@ -160,6 +168,7 @@ def test_upgrade_last_good_scores_preserve_missing_times_and_contributors(legacy
         store.conn.close()
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_v60_predecessor_copies_keep_inline_evidence_and_private_upgrade_files(
         recording_vibe_predecessor, legacy_recording_vibes):
     template = recording_vibe_predecessor

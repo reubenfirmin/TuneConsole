@@ -64,6 +64,19 @@ def test_v88_genre_input_keeps_exact_legacy_lean_and_numbered_history(earlier_te
     assert not earlier_template.execute('PRAGMA foreign_key_check').fetchone()
 
 
+@pytest.mark.parametrize('version', range(86, 92))
+def test_known_legacy_alternatives_match_the_complete_sqlite_contract(version):
+    # Independently execute the complete old layout. Reference construction
+    # may omit unchanged owners only when every accepted alternative still
+    # has exactly the observations produced by that full SQLite database.
+    statements = tuple(current.statements(version=version))
+    complete = current._schema_contract(repair.legacy_statements(statements))
+    reference, alternatives = repair._contracts(version)
+    assert reference == current._schema_contract(statements)
+    names = set((*repair.REPLACEMENTS, 'taste_axes', 'taste_axis_legacy')) & complete.keys()
+    assert alternatives == {name: complete[name] for name in names}
+
+
 def test_unknown_trigger_damage_is_rejected_without_repair(tmp_path, earlier_install):
     conn = earlier_install(tmp_path / 'damaged.db')
     try:

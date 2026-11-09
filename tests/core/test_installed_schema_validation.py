@@ -20,6 +20,11 @@ from yt_playlist.core.migrations import (
 )
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Installed SQL validation never constructs an HTTP application."""
+
+
 @pytest.fixture(scope='module')
 def installed_inputs():
     # Repeated admission owns real validation of private, mutable SQL. The

@@ -4,11 +4,16 @@ import logging
 import urllib.error
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator,
+    native_sql_calls, without_query_timing,
+)
+from yt_playlist.core import migrations, store as store_module
 from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.integrations.musicbrainz import MusicBrainzIAO
@@ -19,9 +24,23 @@ from yt_playlist.util import net
 from yt_playlist.util.matching import identity_key
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Enrichment retries do not construct the HTTP application lifecycle."""
+
+
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     with bounded_consumer_schema((('techno', 'Techno'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def provider_retry_schema():
+    # These sequential retries consume snapshot coordination. Snapshot races
+    # have separate owners; the complete queue, provider evidence and files
+    # below this worker still use private real SQL.
+    with bounded_consumer_schema((('techno', 'Techno'),), snapshot_guards=False) as schema:
         yield schema
 
 
@@ -63,32 +82,50 @@ def tracks(store, count):
     return [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_reuses_success(
-        tmp_path, consumer_store, monkeypatch):
+        tmp_path, provider_retry_schema, monkeypatch):
     path = tmp_path / "retries.db"
-    store = consumer_store(path)
+    store = Store(path)
+    store.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(store, provider_retry_schema, snapshot_guards=False)
+    store.conn.execute('PRAGMA wal_autocheckpoint=0')
     clock = [1000.0]
     def fail(track):
         if track["title"] in {f"Song {i}" for i in range(5)}:
             raise ValueError("malformed response")
     broken, healthy = Provider("musicbrainz", fail), Provider("deezer")
-    with reuse_reporting_reader(store, monkeypatch):
-        ids = tracks(store, 7)
-        w = worker(store, clock, [broken, healthy])
-        for _ in range(4):
-            w.drain_once(limit=2)
-            clock[0] += 31
-        assert {t["id"] for t in store.enrichment_reports.enriched_tracks()} == set(ids[5:])
-        assert healthy.calls == [f"Song {i}" for i in range(7)]
-        assert store.enrichment_reports.queue_remaining() == 5
-        assert "malformed response" in w.activity["warning"]
-        key = store.tracks.catalog_subject(ids[0])["identity_key"]
-        assert store.enrichment_state.enrichment_attempts(key)["deezer"]["fields"] == {"genre": "techno"}
-    # A new process uses saved deadlines and successful provider evidence.
-    store.conn.close()
-    store = Store(path); store.init_schema()
     try:
-        with reuse_reporting_reader(store, monkeypatch):
+        with mock_snapshot_coordinator(store, monkeypatch):
+            monkeypatch.setattr(store.enrichment_queue, 'read_snapshot', store.read_snapshot)
+            ids = tracks(store, 7)
+            w = worker(store, clock, [broken, healthy])
+            for _ in range(4):
+                w.drain_once(limit=2)
+                clock[0] += 31
+            assert {t["id"] for t in store.enrichment_reports.enriched_tracks()} == set(ids[5:])
+            assert healthy.calls == [f"Song {i}" for i in range(7)]
+            assert store.enrichment_reports.queue_remaining() == 5
+            assert "malformed response" in w.activity["warning"]
+            key = store.tracks.catalog_subject(ids[0])["identity_key"]
+            assert store.enrichment_state.enrichment_attempts(key)["deezer"]["fields"] == {"genre": "techno"}
+    finally:
+        store.conn.close()
+    # A new connection uses saved deadlines and successful provider evidence.
+    store = Store(path)
+    store.conn.execute('PRAGMA synchronous=OFF')
+    store.conn.execute('PRAGMA wal_autocheckpoint=0')
+    try:
+        # Admission is an independent completed input. Keep the new connection,
+        # real saved provider evidence, repair and continuing SQL writes.
+        admitted = Mock(return_value=False)
+        with monkeypatch.context() as startup:
+            startup.setattr(migrations, 'migrate', admitted)
+            startup.setattr(store_module, 'Revisions', lambda conn: None)
+            store.init_schema()
+        admitted.assert_called_once_with(store.conn, defer_validation=False)
+        with mock_snapshot_coordinator(store, monkeypatch):
+            monkeypatch.setattr(store.enrichment_queue, 'read_snapshot', store.read_snapshot)
             broken.fail = None
             w = worker(store, clock, [broken, healthy])
             clock[0] += 3600

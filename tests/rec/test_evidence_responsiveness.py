@@ -25,7 +25,7 @@ from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import returning_listener, without_metadata_providers
 from tests.onboarding_support import publish_personal_mix
 from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
     native_sql_calls, without_query_timing,
@@ -378,15 +378,20 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(restart_
 
 
 @pytest.fixture
-def playlist_library(tmp_path, _pristine_current_schema, monkeypatch, serving_routes):
+def playlist_library(tmp_path, _pristine_current_schema, monkeypatch, serving_routes, native_sql_calls):
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, playlists
 
     # Playlist rendering needs admitted SQL and independent snapshot readers,
     # without musical-group publication, choice evidence or Home routing.
+    # Store locking, reader admission and WAL visibility remain real; individual
+    # SQL-call diagnostics and replacement admission have independent owners.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
         module.build(ctx) for module in (app_update, audio_preview, playlists)])
     with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        # The playlist page consumes completed onboarding; readiness/growth
+        # calculations have separate owners and do not supply its row metadata.
+        store.settings.set_setting('onboard_setup_complete', '1')
         yield store
 
 
@@ -394,10 +399,17 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(p
     library = playlist_library
     main = library.accounts.upsert_account('Main', 'bridge-main', None, True)
     other = library.accounts.upsert_account('Other', 'bridge-other', None, False)
-    audio = library.tracks.upsert_track('playlist-audio', 'Audio', 'Artist', None, 100,
-        video_type='MUSIC_VIDEO_TYPE_ATV', thumbnail='/audio.png')
-    video = library.tracks.upsert_track('playlist-video', 'Video', 'Artist', None, 100,
-        video_type='MUSIC_VIDEO_TYPE_OMV', thumbnail='/video.png')
+    # Completed catalog input sits below playlist snapshot rendering. Provider
+    # ingestion, metadata evidence and artist inference have their own owners.
+    seed_publication_subjects(library, [
+        dict(key='audio|artist', video_id='playlist-audio', title='Audio', artist='Artist', duration_s=100),
+        dict(key='video|artist', video_id='playlist-video', title='Video', artist='Artist', duration_s=100)])
+    with library.conn:
+        library.conn.executemany('UPDATE youtube_items SET video_type=?,thumbnail=? WHERE video_id=?', [
+            ('MUSIC_VIDEO_TYPE_ATV', '/audio.png', 'playlist-audio'),
+            ('MUSIC_VIDEO_TYPE_OMV', '/video.png', 'playlist-video')])
+    audio = library.conn.execute("SELECT id FROM catalog_entries WHERE video_id='playlist-audio'").fetchone()[0]
+    video = library.conn.execute("SELECT id FROM catalog_entries WHERE video_id='playlist-video'").fetchone()[0]
     first = library.playlists.upsert_playlist(main, 'LM', 'Main liked', 1, '', 1,
                                              thumbnail='/main-cover.png')
     second = library.playlists.upsert_playlist(other, 'LM', 'Other liked', 1, '', 1)
@@ -431,8 +443,8 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(p
                 library.conn.rollback()
 
     with TestClient(app, base_url='http://127.0.0.1') as client:
-        # Warm templates through the unchanged normal route before holding SQL.
-        assert client.get('/playlists').status_code == 200
+        # The first request, including cold template rendering, must complete
+        # while the writer is held. No preliminary page load primes its reads.
         try:
             with ThreadPoolExecutor(2) as executor:
                 writer = executor.submit(hold_writer)

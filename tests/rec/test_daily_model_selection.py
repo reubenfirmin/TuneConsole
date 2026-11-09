@@ -1,5 +1,5 @@
 """Chronology, shared comparisons, daily admission and atomic serving changes."""
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack, nullcontext
 
 import sqlite3
 
@@ -10,7 +10,7 @@ from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema,
-    use_native_sql_calls, without_query_timing,
+    reuse_reporting_reader, use_native_sql_calls, without_query_timing,
 )
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core import embedding_files, schema_inspection
@@ -58,6 +58,7 @@ def daily_library_template(_pristine_current_schema):
         # that connection; actual ingestion/vector writes still commit normally.
         with pytest.MonkeyPatch.context() as patch, source._lock:
             use_native_sql_calls(patch)
+            patch.setattr(source, 'read_view', lambda **kwargs: nullcontext(source))
             return _seed_library(source, _seed_catalog(source))
 
     with prepared_template(_pristine_current_schema, seed) as template:
@@ -134,7 +135,25 @@ def complete(library, *, start=None):
     pytest.fail(f'Comparison did not finish: {result}')
 
 
-@pytest.mark.usefixtures('native_sql_calls')
+@pytest.fixture
+def comparison_reporting_reads(library, daily_library_template, file_backed_store, monkeypatch):
+    # These copies have one synchronous consumer. Reporting-reader construction
+    # is lower setup; daily comparison retains its actual guarded snapshots.
+    @contextmanager
+    def owned_reader(target):
+        with target._lock:
+            yield target
+
+    with ExitStack() as readers:
+        for target in (library['store'], daily_library_template.source, file_backed_store):
+            if target._db_path is not None:
+                readers.enter_context(reuse_reporting_reader(target, monkeypatch))
+            else:
+                monkeypatch.setattr(target, 'read_view', lambda target=target, **kwargs: owned_reader(target))
+        yield
+
+
+@pytest.mark.usefixtures('native_sql_calls', 'comparison_reporting_reads')
 def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
         library, daily_library_template, file_backed_store, monkeypatch):
     store, now = library['store'], library['now']
