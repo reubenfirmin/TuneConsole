@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls, without_query_timing
+from tests.recommendation_support import seed_publication_subjects
 
 
 @pytest.fixture(scope='session')
@@ -315,12 +316,34 @@ def test_add_tracks_inserts_below_anchor(store):
     assert fc.edited[-1] == ("PL1", {"moveItem": ("sv9", "sv1")})
 
 
-def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
+def test_add_tracks_inserts_below_anchor_despite_indexing_lag(
+        store, monkeypatch, native_sql_calls, without_query_timing):
+    from yt_playlist.library import playlist_positions
+
+    retry = playlist_positions.with_retry
+    monkeypatch.setattr(playlist_positions, 'with_retry',
+                        lambda fn, **kwargs: retry(fn, **kwargs, sleep=lambda delay: None))
     # #40: retain the requested order during readback lag, but expose the pending remote move.
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
-    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
-                                  store.tracks.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
+    seed_publication_subjects(store, [
+        dict(key='song a|x', video_id='v0', title='Song A', artist='X', album='Alb', duration_s=200),
+        dict(key='song b|y', video_id='v1', title='Song B', artist='Y', album='Alb', duration_s=200),
+        dict(key='song a (live)|x', video_id='v9', title='Song A (Live)', artist='X', duration_s=250),
+    ], unowned={'song a (live)|x'})
+    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+    store.playlists.set_playlist_tracks(a, [entries['v0'], entries['v1']])
+
+    def known_track(video_id, *args, **kwargs):
+        entry = store.conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=?',
+                                   (video_id,)).fetchone()
+        assert entry is not None, video_id
+        with store.conn:
+            store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                               (entry['recording_id'],))
+        return entry['id']
+
+    monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
     # the fake client knows only the pre-existing tracks; the freshly-added v9 has no catalog entry,
     # so add_playlist_items can't materialize it on the read-back, i.e. it stays invisible (lag).
     fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},

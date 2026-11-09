@@ -3,12 +3,16 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import genre_identity
+from yt_playlist.core import genre_identity, schema_inspection
 from yt_playlist.core.migrations import current, registry, migrate, Migration, MigrationError
-from yt_playlist.core.migrations import v104_domain_contracts as domains
+from yt_playlist.core.migrations import regular, v104_domain_contracts as domains
 from yt_playlist.core.store import Store
 from tests.genre_catalog_support import bound_catalog
 from tests.regular_schema_support import admit_regular_schema, captured
+from tests.store_fixture_support import install_regular_input, use_native_sql_calls, without_query_timing
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -16,6 +20,7 @@ def domain_catalog():
     # These cases own SQL domains and installed cutover, not vocabulary size.
     with pytest.MonkeyPatch.context() as patch:
         bound_catalog(patch)
+        use_native_sql_calls(patch)
         yield
 
 
@@ -61,6 +66,7 @@ def seed(conn):
 def constrained(tmp_path_factory, _pristine_current_schema):
     store = Store(tmp_path_factory.mktemp('domains')/'current.db')
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         _pristine_current_schema.backup(store.conn)
         store.init_schema()
         seed(store.conn)
@@ -137,6 +143,7 @@ def test_final_account_and_recipe_boundaries_keep_valid_exchange_and_reload(cons
 def installed(path):
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         # This constructs one predecessor, not hundreds of separate durable
         # DDL commits. Every test still runs its own admission and upgrade.
         with store.conn:
@@ -156,11 +163,16 @@ def installed(path):
 
 @pytest.fixture(scope='module')
 def admitted_predecessor(tmp_path_factory):
-    """Build regular DDL once; each domain failure still owns its database."""
+    """Completed regular SQL below each domain conversion and its real admission."""
     source = installed(tmp_path_factory.mktemp('domain-predecessor')/'installed.db')
     snapshot = sqlite3.connect(':memory:')
     try:
-        admit_regular_schema(source)
+        # First regular admission has its own complete test below. Invalid-domain
+        # conversions consume that finished input, then run their actual upgrade.
+        with source.conn:
+            source.conn.execute('BEGIN IMMEDIATE')
+            install_regular_input(source.conn, regular.CHANGES)
+        assert regular.validate(source.conn) == len(regular.CHANGES)
         from tests.prepared_fixture_support import coordinates
         assert not coordinates(source.conn), 'SQL-only predecessor retains external files'
         source.conn.backup(snapshot)
@@ -243,6 +255,7 @@ def test_invalid_predecessor_stops_with_exact_owner_and_retains_original_databas
         tmp_path,admitted_predecessor,table,column,bad):
     store = Store(tmp_path/'invalid.db')
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         admitted_predecessor.backup(store.conn)
         with store.conn:
             store.conn.execute(f'UPDATE {table} SET {column}=?',(bad,))
@@ -265,12 +278,13 @@ def assert_invalid_upgrade_retains_database(store,table,column):
 def test_first_regular_admission_preserves_invalid_domain_before_failed_conversion(tmp_path):
     store = installed(tmp_path/'first-admission.db')
     try:
-        with store.conn:
-            store.conn.execute('UPDATE recordings SET provisional=7')
-        # Keep the independent first-admission boundary covered with invalid
-        # data. The five owner-specific failures above reuse only its setup.
-        admit_regular_schema(store)
-        assert_invalid_upgrade_retains_database(store,'recordings','provisional')
+        with schema_inspection.reuse_tables(store.conn):
+            with store.conn:
+                store.conn.execute('UPDATE recordings SET provisional=7')
+            # Keep the independent first-admission boundary covered with invalid
+            # data. The five owner-specific failures above reuse only its setup.
+            admit_regular_schema(store)
+            assert_invalid_upgrade_retains_database(store,'recordings','provisional')
     finally:
         store.conn.close()
 

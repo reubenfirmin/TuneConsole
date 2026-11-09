@@ -4,11 +4,20 @@ import hashlib
 
 import pytest
 
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls, without_query_timing,
+)
 from yt_playlist.core.evidence_ledger import (
     EvidenceBudgetExceeded, EvidenceConflict, EvidenceLedger, canonical, library_byte_budget,
 )
 from yt_playlist.core.store import Store
 from yt_playlist.core import fao
+
+
+@pytest.fixture(scope='module')
+def evidence_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 def test_retry_conflict_restart_and_safe_paths(tmp_path):
@@ -50,11 +59,13 @@ def test_failed_publication_keeps_previous_evidence(tmp_path, monkeypatch):
     assert not list(tmp_path.rglob(".pending-*"))
 
 
-def test_repository_evidence_survives_restart_and_reader_uses_same_ledger(tmp_path):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_repository_evidence_survives_restart_and_reader_uses_same_ledger(tmp_path, evidence_schema):
     path = tmp_path / "state.db"
     context = {'saved': {'track_count': 1}, 'model': {'revision': 'original'}}
     first = Store(path)
-    first.init_schema()
+    first.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(first, evidence_schema)
     try:
         identity = first.rec_ledger.evidence().artifact(context)
         offer = {'id': 'one', 'context': identity, 'observed_at': 100}
@@ -65,6 +76,7 @@ def test_repository_evidence_survives_restart_and_reader_uses_same_ledger(tmp_pa
     finally:
         first.conn.close()
     second = Store(path)
+    second.conn.execute('PRAGMA synchronous=OFF')
     second.init_schema()
     try:
         assert second.rec_ledger.evidence().get('opportunity', 'one') == offer

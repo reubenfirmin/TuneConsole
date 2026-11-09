@@ -4,10 +4,21 @@ Generated membership quarantines learning evidence. It does not suppress a song
 that is independently eligible for recommendation.
 """
 import numpy as np
+import pytest
 from tests.derived_rating_support import seed_dislike
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.rec import mode_surfaces as ms
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Cached-card SQL and ranking do not start the HTTP application."""
 
 
 def _eye(i, d=4):
@@ -25,8 +36,8 @@ def _bundle(store, keys):
              for i, k in enumerate(keys)]
     payload = {"1": {s: list(items) for s in ms.CARD_SURFACES}}
     payload["_meta"] = {"comfort_pool": 100, "year_cuts": None}
-    from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-    seed_bundle_subjects(store, payload)
+    owned = store.rec_query.tracks_by_keys(keys)
+    seed_publication_subjects(store, [item for item in items if item['key'] not in owned])
     publish_bundles(store, payload, 1.0)
 
 
@@ -63,10 +74,10 @@ def test_generated_membership_preserves_independently_eligible_cached_candidates
 
 def test_cached_cards_honor_current_genre_mutes_without_rebuilding(store):
     keys = [f"song{i}|artist{i}" for i in range(20)]
-    for i, key in enumerate(keys):
-        title, artist = key.split("|")
-        tid = store.tracks.upsert_track(f"v{i}", title, artist, "", 200)
-        store.tracks.set_track_genre(tid, "House" if i < 6 else "Techno")
+    seed_publication_subjects(store, [
+        dict(key=key, video_id=f'v{i}', title=key.split('|')[0], artist=key.split('|')[1],
+             album='', duration_s=200, genre='House' if i < 6 else 'Techno')
+        for i, key in enumerate(keys)])
     _bundle(store, keys)
     cached = store.rec_proposals.get_proposals("mode_bundles")
     assert _offered(ms.assemble_cards(store, now=10, epoch=0)) & set(keys[:6])

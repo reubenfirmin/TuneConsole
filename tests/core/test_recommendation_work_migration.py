@@ -4,7 +4,8 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import _numbered_input, native_sql_calls, without_query_timing
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input, native_sql_calls, without_query_timing
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.migrations import v082_recommendation_work as migration
@@ -29,7 +30,17 @@ def predecessor(tmp_path, _pristine_installed_schema):
 @pytest.fixture
 def restart_input(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
     # This consumer needs the completed edge input, not replay of its prefix.
-    with _numbered_input(81, tmp_path, monkeypatch) as (store, _):
+    bound_catalog(monkeypatch)
+    store = Store(tmp_path / 'work-restart.db')
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        # Build once on the real private file; no intermediate SQL clone is used.
+        install_numbered_input(store.conn, 81)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._schema_compatibility = True
+        store._rebuild_source_version = None
+        store._schema_recovery_pending = False
+        store._bind_repositories()
         yield store
 
 

@@ -42,11 +42,13 @@ def store(tmp_path, _pristine_current_schema, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def spotify_routes(monkeypatch, home_page_bytecode, without_metadata_providers):
+    from fastapi import APIRouter
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, home, setup
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
         for module in (app_update, audio_preview, home, setup)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     templates = webapp.Jinja2Templates
 
@@ -174,6 +176,8 @@ def test_upload_imports_history_and_replaces_form_with_report(store, spotify_cli
     assert store.settings.get_setting("spotify_imported_at") == "1000.0"
 
 
+@pytest.mark.parametrize('_pristine_current_schema', [False], indirect=True, ids=['uncontended'])
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, monkeypatch, spotify_clients):
     now = 1704103200.0  # The export's timestamp, so its play participates in recent taste.
     store.accounts.upsert_account('main', 'bridge', None, True)
@@ -182,6 +186,19 @@ def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, 
     rec_params.set_param(store, 'source_w_play', 1.0)
     rec_params.set_param(store, 'theme_threshold', 0.2)
     app = create_app(store, lambda: {}, now_fn=lambda: now, background_work=False)
+    from fastapi.responses import HTMLResponse
+
+    render = app.state.ctx.templates.TemplateResponse
+
+    def template_response(request, name, context, **kwargs):
+        # This workflow checks Home reads and subsequent background learning.
+        # Keep both route/context builds; page markup has its own tests. Import
+        # reports retain their actual rendering and response-text assertions.
+        if name == 'home.html':
+            return HTMLResponse('Home')
+        return render(request, name, context, **kwargs)
+
+    monkeypatch.setattr(app.state.ctx.templates, 'TemplateResponse', template_response)
     refreshes = []
     monkeypatch.setattr(app.state.ctx.rec_worker, 'trigger', lambda: refreshes.append(True))
     client = spotify_clients(app, base_url='http://127.0.0.1:8123')

@@ -8,8 +8,10 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import home_routes_only, without_metadata_providers
-from tests.store_fixture_support import install_numbered_input, reuse_reporting_reader
-from yt_playlist.core import albums, artists, discovery_sources
+from tests.store_fixture_support import (
+    install_numbered_input, native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import albums, artists, discovery_sources, schema_inspection
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.preparation import subject_publication
 from tests.core.test_subject_publication import ready
@@ -22,7 +24,8 @@ NOW = 1700000000
 SUBJECTS = ('play_event_subjects', 'listening_observation_subjects')
 
 
-pytestmark = pytest.mark.usefixtures('listening_catalog', 'home_routes_only', 'without_metadata_providers')
+pytestmark = pytest.mark.usefixtures('listening_catalog', 'home_routes_only', 'without_metadata_providers',
+                                    'native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -61,7 +64,7 @@ def test_listening_input_keeps_numbered_history_and_absent_subjects(_pristine_in
 def installed(path, version, populated, schema):
     store = Store(path)
     try:
-        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA synchronous=OFF')
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
         schema.backup(store.conn)
         store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")
@@ -124,12 +127,13 @@ def deferred(path, version, populated, schema):
     setup.conn.close()
     store = Store(path)
     try:
-        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA synchronous=OFF')
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
-        store.init_schema(defer_metadata=True)
-        assert not store.activity_paused and not store._schema_recovery_pending
-        assert persisted(store.conn) == before
-        yield store
+        with schema_inspection.reuse_tables(store.conn):
+            store.init_schema(defer_metadata=True)
+            assert not store.activity_paused and not store._schema_recovery_pending
+            assert persisted(store.conn) == before
+            yield store
     finally:
         store.conn.close()
 

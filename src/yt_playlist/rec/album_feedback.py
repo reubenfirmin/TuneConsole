@@ -1,5 +1,6 @@
 """Resolve explicit release judgments without rewriting their original source evidence."""
 import logging
+import sqlite3
 
 from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_cancellable_work
@@ -28,8 +29,15 @@ def drain(store, *, limit=32):
     # Admission may become busy after any preceding check. Apply this policy
     # to every later repository/projection/writer acquisition, without owning
     # ServingLock during evidence reads or durable file publication.
-    with store._lock.nonblocking_admission():
-        return _drain(store, limit=limit)
+    try:
+        with store._lock.nonblocking_admission():
+            return _drain(store, limit=limit)
+    except sqlite3.OperationalError as exc:
+        # Translate an owned interruption before try_drain's retry warning.
+        # Unrelated SQL failures must retain their diagnostic traceback.
+        if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_INTERRUPT:
+            check_cancellable_work()
+        raise
 
 
 def _drain(store, *, limit):

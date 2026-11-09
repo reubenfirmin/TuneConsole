@@ -136,6 +136,31 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(replacement.nowPlaying.video_id, 'one');
   assert(rows[0].classList.contains('now-playing'));
   if (home) assert.equal(home.radioPlaybackState, 'playing');
+  // Saved Radio remains actionable through a lost status response. The
+  // deadline aborts that request and the next poll can recover normally.
+  const saved = {video_id:'saved', title:'Saved radio', paused:true,
+    playlist_ytm_id:'PLRADIO', radio_session_id:'episode'};
+  response = () => Promise.resolve({ok:true,json:async () => ({connected:true,radio_resume:saved})});
+  window.playbackStatus.refresh(); await flush();
+  assert.equal(replacement.nowPlaying.video_id,'saved');
+  assert.equal(replacement.resumeMode,'radio');
+  let timedOutSignal;
+  response = options => new Promise((resolve,reject) => {
+    timedOutSignal=options.signal;
+    options.signal.addEventListener('abort', () => reject(Error('timeout')), {once:true});
+  });
+  const beforeTimeout=count('/bridge/status');
+  window.playbackStatus.refresh(); tick(period);
+  assert.equal(count('/bridge/status'),beforeTimeout+1);
+  tick(7000); await flush();
+  assert(timedOutSignal.aborted);
+  assert.equal(replacement.nowPlaying.video_id,'saved');
+  assert.equal(replacement.nowPlaying.paused,true);
+  assert.equal(window.playbackStatus.snapshot.now_playing,undefined);
+  response = () => Promise.resolve({ok:true,json:async () => snapshot('one')});
+  tick(period); await flush();
+  assert.equal(replacement.resumeMode,null);
+  assert.equal(replacement.nowPlaying.video_id,'one');
   // Slow requests cannot overlap. Suspending the page aborts them and ignores stale completion.
   let release, signal;
   response = options => { signal = options.signal; return new Promise(resolve => { release = resolve; }); };

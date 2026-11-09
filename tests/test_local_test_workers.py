@@ -101,7 +101,7 @@ def _mini_suite(tmp_path):
     @contextmanager
     def start(*args, **env):
         child = subprocess.Popen(
-            [sys.executable, "-m", "pytest", "-p", "xdist.plugin", "-q", *args],
+            [sys.executable, "-m", "pytest", "-p", "xdist.plugin", "-q", "--assert=plain", *args],
             cwd=tmp_path,
             env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": "",
                  "CI": "", **env}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

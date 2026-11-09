@@ -15,6 +15,8 @@ from yt_playlist.rec.actions import CLEANUP_SURFACE
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 from tests.template_support import playlist_rows
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 
 
 def _client(store, provider):
@@ -208,7 +210,8 @@ def test_promote_still_works_when_youtube_refuses_the_edit(store):
     assert store.playlists.get_playlist_groups().get("PLG", "") != "Generated"
 
 
-def test_playlist_rows_use_song_artwork_when_no_cover_is_available(store):
+def test_playlist_rows_use_song_artwork_when_no_cover_is_available(
+        store, native_sql_calls, without_query_timing):
     import json
     import re
 
@@ -216,10 +219,15 @@ def test_playlist_rows_use_song_artwork_when_no_cover_is_available(store):
     cover = "https://example.com/cover.jpg"
     first = "https://example.com/first.jpg"
     second = "https://example.com/second.jpg"
-    no_art = store.tracks.upsert_track("none", "No art", "Artist", None, None)
-    blank_art = store.tracks.upsert_track("blank", "Blank art", "Artist", None, None, thumbnail="")
-    a = store.tracks.upsert_track("a", "First art", "Artist", None, None, thumbnail=first)
-    b = store.tracks.upsert_track("b", "Second art", "Artist", None, None, thumbnail=second)
+    subjects = [('none', 'No art', None), ('blank', 'Blank art', ''),
+                ('a', 'First art', first), ('b', 'Second art', second)]
+    seed_publication_subjects(store, [dict(key=title.lower() + '|artist', video_id=video,
+        title=title, artist='Artist') for video, title, _thumbnail in subjects])
+    with store.conn:
+        store.conn.executemany('UPDATE youtube_items SET thumbnail=? WHERE video_id=?',
+                               [(thumbnail, video) for video, _title, thumbnail in subjects])
+    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+    no_art, blank_art, a, b = [entries[video] for video, _title, _thumbnail in subjects]
     playlists = {}
     for ytm, thumbnail in (("new", None), ("generated", ""), ("covered", cover), ("empty", None)):
         pid = store.playlists.upsert_playlist(iid, ytm, ytm, 0, "", 1, thumbnail=thumbnail, created_at=1)

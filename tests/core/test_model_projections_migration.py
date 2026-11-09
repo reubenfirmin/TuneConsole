@@ -5,7 +5,17 @@ import sqlite3
 import pytest
 
 from tests.core.test_tv_state_migration import store, cutover
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import model_projections, recommendation_outputs
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Projection ownership is exercised directly without an HTTP lifespan."""
 
 
 def test_paired_display_last_good_rollback_file_backup_and_explicit_policy_roots(store, tmp_path):
@@ -74,10 +84,14 @@ def test_radio_seed_and_saved_queue_policies_have_sql_custody_without_json_scann
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_current_bootstrap_and_restart_reject_generic_recommendation_writes(tmp_path):
+def test_current_bootstrap_and_restart_reject_generic_recommendation_writes(tmp_path, monkeypatch):
     from yt_playlist.core.store import Store
+    # Keep both actual startup admissions and the real domain-write guard;
+    # the shipped genre vocabulary is independent of projection custody.
+    bound_catalog(monkeypatch)
     path = tmp_path / 'current-owners.db'
     store = Store(path)
+    store.conn.execute('PRAGMA synchronous=OFF')
     store.init_schema()
     try:
         with pytest.raises(sqlite3.IntegrityError, match='domain owner'), store.conn.atomic():
@@ -86,6 +100,7 @@ def test_current_bootstrap_and_restart_reject_generic_recommendation_writes(tmp_
     finally:
         store.conn.close()
     restarted = Store(path)
+    restarted.conn.execute('PRAGMA synchronous=OFF')
     try:
         restarted.init_schema()
         assert restarted._model_projections and restarted._clicked_library_pools

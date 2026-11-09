@@ -4,12 +4,17 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from tests.conftest import FakeClient, _track
 from tests.web_support import _client
+from tests.web_consumer_support import install_routes, route_schema, route_store
+
+
 @pytest.mark.parametrize("return_to, label", [
     ("/cleanup", "Back to cleanup"),
     ("/cleanup#overlaps", "Back to cleanup"),
     ("/playlists?sort=name#list", "Back to playlists"),
 ])
-def test_merge_apply_route(store, monkeypatch, tmp_path, return_to, label):
+def test_merge_apply_route(route_store, monkeypatch, tmp_path, return_to, label):
+    store = route_store
+    install_routes(monkeypatch, 'merge', 'actions')
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)

@@ -6,13 +6,22 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.test_audio_vibes import sample
 from tests import file_custody_support as custody
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import db_handles, fao, sample_files
 from yt_playlist.core.db_rebuild import job
 from yt_playlist.core.policy_documents import coordinate_updates
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Sample custody retains SQL, files and restart without HTTP startup."""
 
 
 def capture(store):
@@ -25,7 +34,7 @@ def capture(store):
 
 @pytest.mark.parametrize('installed', [79, 107], indirect=True)
 @pytest.mark.parametrize('kind', ['restored', 'snapshot'])
-def test_public_recovery_retains_samples_without_producer(installed, tmp_path, kind):
+def test_public_recovery_retains_samples_without_producer(installed, tmp_path, kind, native_sql_calls):
     store, _ = installed
     values = capture(store)
     original = list(store.conn.iterdump())
@@ -49,6 +58,7 @@ def test_public_recovery_retains_samples_without_producer(installed, tmp_path, k
     try:
         candidate = Store(candidate_path)
         try:
+            candidate.conn.execute('PRAGMA synchronous=OFF')
             candidate.init_schema(defer_metadata=True)
             assert candidate.audio_vibes.samples('captured-run') == values
             assert candidate.conn.execute('SELECT count(*) FROM sample_attributes').fetchone()[0] == 3

@@ -101,6 +101,8 @@ class RecWorker:
                 self._poll_choices()
                 self._retry_measurements()
                 self._poll_tv()
+            except WorkClosing:
+                return
             except Exception:
                 self.ctx.logger.warning('recommendation change polling failed', exc_info=True)
 
@@ -118,8 +120,11 @@ class RecWorker:
         from yt_playlist.rec import album_feedback
         if not self.enabled or self._stop.is_set() or not self.work.accepting:
             return 0
-        with cancellable_work(self._stop.is_set):
-            return self.work.wrap('album feedback responses', album_feedback.try_drain, self.ctx.store)()
+        def drain():
+            # Keep admission ownership through SQL cancellation translation.
+            with cancellable_work(self._stop.is_set):
+                return album_feedback.try_drain(self.ctx.store)
+        return self.work.wrap('album feedback responses', drain)()
 
     def _poll_refresh(self):
         from yt_playlist.rec import candidate_refresh

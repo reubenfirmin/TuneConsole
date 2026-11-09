@@ -1,5 +1,6 @@
 import pytest
 
+from tests.web_consumer_support import install_routes, route_schema, route_store
 from yt_playlist.providers import discogs, musicbrainz, release_notes, wikipedia, album_editorial, deepseek
 from yt_playlist.providers.album_editorial import lookup as editorial_lookup
 from yt_playlist.rec import album_notes
@@ -400,12 +401,14 @@ def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(sto
 
 
 @pytest.mark.parametrize('playing', [False, True])
-def test_home_worker_serves_explicit_album_page_demand_outside_its_menu(store, monkeypatch, playing):
+def test_home_worker_serves_explicit_album_page_demand_outside_its_menu(route_store, monkeypatch, playing):
     from types import SimpleNamespace
     from tests.test_album_web import _client
     from yt_playlist.rec import album_choices, home_prepared
     from yt_playlist.rec.worker_tasks import ServingTasks
 
+    store = route_store
+    install_routes(monkeypatch, 'album')
     client, _, _ = _client(store)
     assert client.get('/album?browse=MPREb_x').status_code == 200
     assert store.rec_proposals.get_proposals('album_note_requests')['MPREb_x']['requested_until'] > 1

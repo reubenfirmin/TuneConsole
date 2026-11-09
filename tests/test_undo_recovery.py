@@ -6,10 +6,22 @@ import pytest
 from ytmusicapi.exceptions import YTMusicServerError
 
 from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
+from tests.web_consumer_support import install_routes, route_schema, route_store
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_undo, playlist_backups
 from yt_playlist.library.undo_conflicts import playlist_state
 from yt_playlist.util.action_kinds import APPLY_MERGE, COPY_PLAYLIST, UNDO
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    """Recovery owns journals, remote state and reopens, without genre inputs."""
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 class RecoveryClient(FakeClient):
@@ -90,9 +102,8 @@ def _copy(store, client):
     return iid, aid
 
 
-def test_rejected_additions_resume_created_playlist_after_database_reopen(tmp_path):
-    store = Store(tmp_path / "recovery.db")
-    store.init_schema()
+def test_rejected_additions_resume_created_playlist_after_database_reopen(tmp_path, consumer_store):
+    store = consumer_store(tmp_path / "recovery.db")
     client = RecoveryClient({"SOURCE": ["a", "b"]})
     iid, aid = _deleted(store, client)
     client.reject_add = True
@@ -274,10 +285,10 @@ def test_incomplete_keeper_recovery_resumes_position_changes_without_duplicate_a
     assert len(client.added) == 1
 
 
-def test_simultaneous_undo_requests_have_one_owner_across_database_connections(tmp_path, monkeypatch):
+def test_simultaneous_undo_requests_have_one_owner_across_database_connections(
+        tmp_path, monkeypatch, consumer_store):
     database = tmp_path / "parallel.db"
-    store = Store(database)
-    store.init_schema()
+    store = consumer_store(database)
     client = RecoveryClient({"SOURCE": ["a", "b"]})
     iid, aid = _deleted(store, client)
     other = Store(database)
@@ -327,9 +338,11 @@ def test_abandoned_claim_resumes_after_crash_without_recreating_or_overwriting_e
     assert store.actions.get_action(aid).status == "undone"
 
 
-def test_partial_recovery_remains_visible_and_retryable_after_action_log_reload(store):
+def test_partial_recovery_remains_visible_and_retryable_after_action_log_reload(route_store, monkeypatch):
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
+    store = route_store
+    install_routes(monkeypatch, 'actions')
     client = RecoveryClient({"SOURCE": ["a", "b"]})
     iid, aid = _deleted(store, client)
     client.reject_add = True
@@ -348,10 +361,12 @@ def test_partial_recovery_remains_visible_and_retryable_after_action_log_reload(
     assert len(client.created) == 1
 
 
-def test_action_log_hides_native_recovery_diagnostic_and_resumes_saved_progress(store, monkeypatch, caplog):
+def test_action_log_hides_native_recovery_diagnostic_and_resumes_saved_progress(route_store, monkeypatch, caplog):
     from fastapi.testclient import TestClient
     from yt_playlist.core import fao
     from yt_playlist.web.app import create_app
+    store = route_store
+    install_routes(monkeypatch, 'actions')
 
     diagnostic = 'sqlite3.OperationalError: recovery lease corrupt [review-879-undo]'
     provider = RecoveryClient({'SOURCE': ['a', 'b']})

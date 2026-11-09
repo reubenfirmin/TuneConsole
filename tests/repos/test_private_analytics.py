@@ -6,9 +6,46 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
+)
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import charts as chart_routes
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """SQL reporting owners do not run an HTTP background lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    # Preserve fresh actual reporting connections, locks and revision guards.
+    # No reader reuse here: the concurrency tests own allocation and closure.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as database:
+        yield database
+
+
+@pytest.fixture
+def chart_http(monkeypatch, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, charts
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, charts)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
 
 @pytest.fixture
@@ -117,7 +154,8 @@ def test_album_context_memo_keeps_history_dependencies(library):
         assert not second.publish(lambda: pytest.fail('Memoized album context lost its evidence dependency'))
 
 
-def test_chart_sections_allow_commits_between_queries(library, monkeypatch):
+@pytest.mark.usefixtures('native_sql_calls')
+def test_chart_sections_allow_commits_between_queries(library, monkeypatch, chart_http):
     store, account, _ = library
     original, changed = chart_routes._build_ticker, []
 
@@ -142,7 +180,8 @@ def test_chart_sections_allow_commits_between_queries(library, monkeypatch):
     assert {song['title'] for song in following.context['songs']} == {'Song', 'Later'}
 
 
-def test_artist_report_reads_current_saved_flags_after_song_query(library, monkeypatch):
+@pytest.mark.usefixtures('native_sql_calls')
+def test_artist_report_reads_current_saved_flags_after_song_query(library, monkeypatch, chart_http):
     from yt_playlist.repos.charts import ChartsRepo
     store, _, _ = library
     original, changed = ChartsRepo.artist_songs, []

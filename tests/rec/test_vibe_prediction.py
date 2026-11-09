@@ -1,6 +1,6 @@
 """Vibe preparation learns only from measurements, with sparse, durable cohorts."""
 import json
-from contextlib import ExitStack
+from contextlib import closing
 from dataclasses import replace
 import time
 from uuid import uuid4
@@ -9,11 +9,14 @@ import pytest
 
 from tests.test_audio_vibes import sample
 from tests.genre_catalog_support import bound_shipped_catalog
-from tests.prepared_fixture_support import capture_template, historical_template, prepared_template
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
-from yt_playlist.core import catalog, fao, vibe_provenance
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import catalog, fao, schema_inspection, store as store_core, vibe_provenance
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
@@ -25,39 +28,65 @@ from yt_playlist.rec.progressive import Budget, Preparation
 pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """The two HTTP consumers explicitly construct apps without background work."""
+
+
 @pytest.fixture(scope='module')
 def prediction_schema():
-    with bounded_consumer_schema(()) as schema:
+    # TEMP guards belong to each physical consumer, not its immutable SQL seed.
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
         yield schema
 
 
-def test_prediction_consumer_input_keeps_sql_guards_without_prepared_outputs(prediction_schema):
+@pytest.fixture
+def prediction_input(prediction_schema, tmp_path, monkeypatch, native_sql_calls):
+    from yt_playlist.core import genre_identity
+    from yt_playlist.core.migrations import registry
+
     assert prediction_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert prediction_schema._revision_script
+    assert list(map(tuple, prediction_schema.execute(
+        'SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+            (entry.version, entry.name) for entry in registry.MIGRATIONS]
     assert prediction_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
     assert prediction_schema.execute('SELECT count(*) FROM recording_vibes').fetchone()[0] == 0
     assert prediction_schema.execute('SELECT count(*) FROM genre_catalog').fetchone()[0] == 0
     assert not prediction_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.fixture
-def prediction_store(prediction_schema, tmp_path, monkeypatch):
-    from yt_playlist.core import genre_identity
-
     # Keep the documented parent edges used by the categorical-prior check.
     bound_shipped_catalog(monkeypatch, ('psybient', 'detroit techno', 'electronic', 'techno', 'edm'))
     store = Store(tmp_path / 'predictions.db')
     try:
         # These consumers own committed prediction facts, not power-loss recovery.
-        store.conn.execute('PRAGMA synchronous=NORMAL')
-        initialize_consumer(store, prediction_schema)
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, prediction_schema, snapshot_guards=False)
+        store.conn.execute('BEGIN')
+        store._snapshot_revisions = Revisions(store.conn)
+        # Retain the generated SQL for the independent restart, without first
+        # generating and discarding an identical set on the immutable seed.
+        prediction_schema.capture_revisions(store._snapshot_revisions)
+        assert prediction_schema._revision_script
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
         with store.conn:
             genre_identity.seed_catalog(store.conn)
-        with reuse_reporting_reader(store, monkeypatch):
+        with schema_inspection.reuse_tables(store.conn):
             yield store
     finally:
         store.conn.close()
+
+
+@pytest.fixture
+def prediction_store(prediction_input, monkeypatch):
+    with reuse_reporting_reader(prediction_input, monkeypatch):
+        yield prediction_input
+
+
+@pytest.fixture
+def uncontended_prediction_store(prediction_input, monkeypatch):
+    with mock_snapshot_coordinator(prediction_input, monkeypatch):
+        yield prediction_input
 
 
 def track(store, name, genre='Psybient', artist='Shared artist'):
@@ -144,61 +173,13 @@ def relax_joint_channel(monkeypatch):
     monkeypatch.setattr(vibe_joint_preparation, 'VIBES', ('relax',))
 
 
-def test_prediction_schema_input_keeps_installed_sql_and_generated_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] > 0
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.fixture(scope='module')
-def cohort_inputs(_pristine_current_schema, tmp_path_factory):
-    cache = {}
-    with ExitStack() as resources:
-        def get(stage):
-            if stage not in cache:
-                def build(source):
-                    if stage == 'initial':
-                        tid, own = track(source, 'one')
-                        _, target = track(source, 'target')
-                        capture(source, 'one')
-                        drain(source).close()
-                        from yt_playlist.core import vibe_model_files
-
-                        prediction = source.conn.execute('SELECT v.prediction_id FROM recording_vibes v JOIN recordings r '
-                            "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
-                        return {'tid': tid, 'own': own, 'target': target,
-                            'counters': source.prepared_content.counters(),
-                            'score': fits(source, target)['relax']['score'],
-                            'generation': source.settings.get_setting(vibe_model_files.HEAD_PREFIX + 'relax'),
-                            'prediction': prediction, 'inputs': vibe_provenance.read(source.conn, prediction)['inputs']}
-                    capture(source, 'one', calm=False)
-                    drain(source, batch=2).close()
-                    return get('initial').result
-
-                with pytest.MonkeyPatch.context() as patch:
-                    patch.setattr(vibe_joint_preparation, 'VIBES', ('relax',))
-                    patch.setattr(vibe_joint_preparation, 'QUALIFICATIONS',
-                        {vibe_joint_preparation.config_identity(): 'controlled-cohort-fixture'})
-                    database = tmp_path_factory.mktemp('vibe-cohort-' + stage) / 'source.db'
-                    def with_private_reads(source):
-                        with reuse_reporting_reader(source, patch):
-                            return build(source)
-
-                    context = (prepared_template(_pristine_current_schema, with_private_reads, database=database)
-                        if stage == 'initial' else historical_template(_pristine_current_schema, with_private_reads,
-                            database=database, completed=get('initial')))
-                    cache[stage] = resources.enter_context(context)
-            return cache[stage]
-
-        yield get
-
-
-def test_cohort_input_keeps_real_model_identity_and_captured_evidence(cohort_inputs):
-    template = cohort_inputs('initial')
-    values = template.result
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert values['generation'] and values['prediction'] and values['inputs']
-    assert fits(template.source, values['target'])['relax']['recordings'] == 1
+@pytest.fixture
+def fixed_measurement_version(monkeypatch):
+    # These consumers change evidence and joint models, not shipped specialists.
+    # Read their real identities once rather than reopening the same files on
+    # every queue poll. Artifact replacement has separate rollout owners below.
+    version = vibe_preparation.version()
+    monkeypatch.setattr(vibe_preparation, 'version', lambda: version)
 
 
 def test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift(file_backed_store, monkeypatch):
@@ -569,43 +550,46 @@ def test_provider_classifiers_seed_predictions_without_captured_audio_or_prepare
     assert not store.audio_vibes.samples('provider')
 
 
-def test_equal_score_replay_changes_prediction_identity_without_an_extra_recording(
-        cohort_inputs, tmp_path, qualified_candidate, relax_joint_channel):
+def test_changed_measurement_and_subgenre_retract_old_cohort_and_notify_without_content_refit(
+        uncontended_prediction_store, qualified_candidate, relax_joint_channel, fixed_measurement_version):
     from yt_playlist.core import vibe_model_files, vibe_provenance
-    template = cohort_inputs('initial')
-    values = template.result
-    with template.open(tmp_path / 'replay.db') as store:
-        target = values['target']
-        capture(store, 'one')
-        drain(store, batch=1).close()
-        equal_prediction = store.conn.execute("SELECT v.prediction_id FROM recording_vibes v JOIN recordings r "
-            "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
-        assert fits(store, target)['relax']['score'] == values['score']
-        assert equal_prediction != values['prediction']
-        assert store.settings.get_setting(vibe_model_files.HEAD_PREFIX + 'relax') != values['generation']
-        assert vibe_provenance.read(store.conn, equal_prediction)['inputs'] != values['inputs']
-        assert fits(store, target)['relax']['recordings'] == 1
 
-
-def test_changed_measurement_and_subgenre_retract_old_cohort_and_notify_without_content_refit(cohort_inputs):
-    template = cohort_inputs('corrected')
-    store, values = template.source, template.result
-    assert fits(store, values['target'])['relax']['score'] < values['score']
-    assert store.prepared_content.counters() == values['counters']
+    store = uncontended_prediction_store
+    assert store._snapshot_revisions.conn is store.conn
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    tid, own = catalog_track(store, 'one')
+    _, target = catalog_track(store, 'target')
+    capture(store, 'one')
+    drain(store).close()
+    counters = store.prepared_content.counters()
+    before = fits(store, target)['relax']['score']
+    first_generation = store.settings.get_setting(vibe_model_files.HEAD_PREFIX + 'relax')
+    first_prediction = store.conn.execute("SELECT v.prediction_id FROM recording_vibes v JOIN recordings r "
+        "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
+    first_inputs = vibe_provenance.read(store.conn, first_prediction)['inputs']
+    assert first_generation and first_prediction and first_inputs
+    assert fits(store, target)['relax']['recordings'] == 1
+    # A replay changes provenance and model identity without adding a recording.
+    capture(store, 'one')
+    drain(store, batch=1).close()
+    equal_prediction = store.conn.execute("SELECT v.prediction_id FROM recording_vibes v JOIN recordings r "
+        "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
+    assert fits(store, target)['relax']['score'] == before
+    assert equal_prediction != first_prediction
+    assert store.settings.get_setting(vibe_model_files.HEAD_PREFIX + 'relax') != first_generation
+    assert vibe_provenance.read(store.conn, equal_prediction)['inputs'] != first_inputs
+    assert fits(store, target)['relax']['recordings'] == 1
+    capture(store, 'one', calm=False)
+    drain(store, batch=1).close()
+    assert fits(store, target)['relax']['score'] < before
+    assert store.prepared_content.counters() == counters
     assert store.rec_refresh.revision() is not None
-
-
-def test_subgenre_change_retracts_corrected_cohort_without_retracting_audio(
-        cohort_inputs, tmp_path, qualified_candidate, relax_joint_channel):
-    template = cohort_inputs('corrected')
-    values = template.result
-    with template.open(tmp_path / 'subgenre.db') as store:
-        with store.conn:
-            catalog.choose_field(store.conn, values['tid'], 'genre', 'Detroit Techno')
-        drain(store, batch=1).close()
-        assert fits(store, values['target'])['relax']['source'] == 'artist'
-        assert fits(store, values['own'])['relax']['source'] == 'audio_measurement'
-        assert store.rec_refresh.revision() is not None
+    with store.conn:
+        catalog.choose_field(store.conn, tid, 'genre', 'Detroit Techno')
+    drain(store, batch=1).close()
+    assert fits(store, target)['relax']['source'] == 'artist'
+    assert fits(store, own)['relax']['source'] == 'audio_measurement'
+    assert store.rec_refresh.revision() is not None
 
 
 @pytest.mark.parametrize('installed_version', [79, 98, 107])
@@ -771,83 +755,50 @@ def test_deferral_and_refresh_queue_roll_back_together(store, monkeypatch):
         'SELECT group_key,revision,cursor FROM rec_vibe_pending ORDER BY position')] == before
 
 
-def test_prediction_queue_input_keeps_admitted_history_and_real_guards(file_backed_store):
-    from yt_playlist.core.migrations import current, regular
-
-    current.validate(file_backed_store.conn)
-    regular.validate(file_backed_store.conn)
-    assert file_backed_store._snapshot_revisions.conn is file_backed_store.conn
-    assert not file_backed_store.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def prepare_interrupted_prediction(store):
-    track(store, 'one')
-    _tid, target = track(store, 'two')
-    capture(store, 'one')
+def test_prediction_queue_retries_after_committed_derived_state_and_restart(
+        prediction_input, prediction_schema, monkeypatch, individual_model_rollout, fixed_measurement_version):
     from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
+
+    store = prediction_input
+    assert store._snapshot_revisions.conn is store.conn
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    catalog_track(store, 'one')
+    _tid, target = catalog_track(store, 'two')
+    capture(store, 'one')
     original = VibePredictionsRepo.publish_prepared
     def fail(repo, *args, **kwargs):
         original(repo, *args, **kwargs)
         raise RuntimeError('interrupted prediction publication')
-    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(store, patch):
+    with pytest.MonkeyPatch.context() as patch, mock_snapshot_coordinator(store, patch):
         patch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
         patch.setattr(VibePredictionsRepo, 'publish_prepared', fail)
         with pytest.raises(RuntimeError, match='interrupted prediction'):
             Preparation(store).capture(1000)
     committed = {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY id')]
                  for table in ('measurements', 'predictions')}
-    return target, committed
-
-
-@pytest.fixture(scope='module')
-def interrupted_prediction_input(_pristine_current_schema, tmp_path_factory):
-    database = tmp_path_factory.mktemp('interrupted-prediction') / 'source.db'
-    with prepared_template(_pristine_current_schema, prepare_interrupted_prediction, database=database) as template:
-        yield template
-
-
-def test_prediction_publication_failure_preserves_committed_evidence_and_pending_retry(interrupted_prediction_input):
-    store = interrupted_prediction_input.source
-    _, committed = interrupted_prediction_input.result
     assert committed['measurements']
     assert store.conn.execute('SELECT 1 FROM recording_vibes').fetchone()
     assert store.prepared_content.has_pending()
     assert store.prepared_content.counters()[0] == 0
 
-
-@pytest.fixture(scope='module')
-def restarted_prediction_input(interrupted_prediction_input, tmp_path_factory):
-    database = tmp_path_factory.mktemp('restarted-prediction') / 'source.db'
-    with interrupted_prediction_input.open(database):
-        pass
-    store = Store(database)
-    try:
-        store.init_schema()
-        yield capture_template(store, interrupted_prediction_input.result)
-    finally:
-        store.conn.close()
-
-
-def test_prediction_queue_restart_keeps_committed_rows_and_pending_retry(restarted_prediction_input):
-    store = restarted_prediction_input.source
-    _, committed = restarted_prediction_input.result
-    for table, rows in committed.items():
-        assert [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY id')] == rows
-    assert store.prepared_content.has_pending()
-    assert store.prepared_content.counters()[0] == 0
-
-
-def test_prediction_queue_retries_after_committed_derived_state_and_restart(
-        restarted_prediction_input, tmp_path, monkeypatch, individual_model_rollout):
-    target, committed = restarted_prediction_input.result
-    with restarted_prediction_input.open(tmp_path / 'retry.db') as store, reuse_reporting_reader(store, monkeypatch):
+    path = store._db_path
+    store.conn.close()
+    reopened = Store(path)
+    with closing(reopened.conn), schema_inspection.reuse_tables(reopened.conn):
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        with monkeypatch.context() as patch:
+            patch.setattr(store_core, 'Revisions', prediction_schema.bind_revisions)
+            reopened.init_schema()
         for table, rows in committed.items():
-            assert [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY id')] == rows
-        drain(store, batch=1).close()
-        assert fits(store, target)['relax']['source'] == 'artist_genre'
-        assert not store.vibe_predictions.pending()
-        assert not store.prepared_content.has_pending()
-        measurements = {tuple(row) for row in store.conn.execute('SELECT * FROM measurements')}
+            assert [tuple(row) for row in reopened.conn.execute(f'SELECT * FROM {table} ORDER BY id')] == rows
+        assert reopened.prepared_content.has_pending()
+        assert reopened.prepared_content.counters()[0] == 0
+        with mock_snapshot_coordinator(reopened, monkeypatch):
+            drain(reopened, batch=1).close()
+        assert fits(reopened, target)['relax']['source'] == 'artist_genre'
+        assert not reopened.vibe_predictions.pending()
+        assert not reopened.prepared_content.has_pending()
+        measurements = {tuple(row) for row in reopened.conn.execute('SELECT * FROM measurements')}
         assert set(committed['measurements']) <= measurements
 
 
@@ -997,8 +948,8 @@ def test_played_catalog_recording_can_teach_library_before_it_is_saved(store):
 
 
 def test_provider_backlog_cannot_starve_vibe_bootstrap_or_dependency_fanout(
-        file_backed_store, individual_model_rollout):
-    store = file_backed_store
+        prediction_store, individual_model_rollout):
+    store = prediction_store
     # Three rows leave continuing source work after two single-row admissions.
     for index in range(3):
         tid, _key = track(store, f'song{index}')

@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.web_consumer_support import install_routes, route_schema, route_store
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
@@ -270,7 +271,9 @@ def test_live_checks_use_each_identity_through_the_browser_bridge(store, tmp_pat
         assert "Cannot access this brand account" in checked.text
 
 
-def test_removing_identity_updates_setup_menu_and_move_choices(store, tmp_path):
+def test_removing_identity_updates_setup_menu_and_move_choices(route_store, tmp_path, monkeypatch):
+    store = route_store
+    install_routes(monkeypatch, 'setup', 'playlists', 'move')
     runtime = Runtime(store, tmp_path / "config.toml", tmp_path)
     runtime.apply_setup([
         {"label": "main", "credential_ref": "browser.json", "is_master": True},

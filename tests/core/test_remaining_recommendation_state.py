@@ -4,21 +4,37 @@ import sqlite3
 import pytest
 
 from tests.core.test_tv_state_migration import store, cutover
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import _numbered_input, native_sql_calls, without_query_timing
 from yt_playlist.core import model_comparison_state
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.rec import library_pool, product_comparison
 
 
-def test_fresh_clicked_build_uses_staged_rank_publication_and_current_filters(store, monkeypatch):
-    from tests.conftest import seed_catalog_track
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Typed recommendation state has no HTTP lifecycle dependency."""
+
+
+@pytest.fixture
+def publication_predecessor(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # The unchanged v94 input is below publication. Keep the actual v95
+    # cutover and its subsequent startup admission in the consuming test.
+    with _numbered_input(94, tmp_path, monkeypatch) as (database, _version):
+        yield database
+
+
+def test_fresh_clicked_build_uses_staged_rank_publication_and_current_filters(publication_predecessor, monkeypatch):
     from tests.rec.test_choice_bandit import modes
     from yt_playlist.rec.surfaces import ForYouItem
+    store = publication_predecessor
     cutover(store)
     modes(store)
     store._snapshot_revisions = Revisions(store.conn)
+    seed_publication_subjects(store, [dict(key=f'song {index}|artist', title=f'Song {index}',
+        artist='Artist', video_id=f'video{index}') for index in range(8)])
     ranked = []
     for index in range(8):
-        seed_catalog_track(store, f'song {index}|artist', f'Song {index}', 'Artist', video_id=f'video{index}')
         ranked.append(ForYouItem(f'Song {index}', 'Artist', '', f'video{index}', None, 0,
                                 'Controlled scorer result', key=f'song {index}|artist'))
     def score(reader, *args, **kwargs):

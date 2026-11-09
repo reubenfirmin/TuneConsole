@@ -21,6 +21,7 @@ from yt_playlist.repos.cluster_evidence import ConnectionEvidence, PlaylistNeigh
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.web_consumer_support import install_routes, route_schema, route_store
 
 
 def _client(store):
@@ -150,7 +151,9 @@ def test_explain_route_returns_headline_from_shared_playlist(store):
     assert res["title"] == "Train"
 
 
-def test_explain_route_falls_back_to_bridge(store):
+def test_explain_route_falls_back_to_bridge(route_store, monkeypatch):
+    store = route_store
+    install_routes(monkeypatch, 'clusters')
     c, iid = _client(store)
     child = _track(store, "Edge", "A")
     seed = _track(store, "Root", "B")

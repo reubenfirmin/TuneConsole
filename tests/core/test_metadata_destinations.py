@@ -10,7 +10,7 @@ from tests.core.test_metadata_owner_cutover import predecessor, seed
 from tests.core.test_metadata_preparation import finish
 from tests.metadata_provenance_support import metadata_provenance
 from tests.core.test_metadata_publication import publish as read_publication
-from tests.store_fixture_support import native_sql_calls, without_query_timing
+from tests.store_fixture_support import mock_preparation_schema, native_sql_calls, without_query_timing
 from yt_playlist.core import catalog
 from yt_playlist.core.migrations import MigrationError, regular, migrate, registry
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_destinations as publication
@@ -197,10 +197,14 @@ def test_interrupted_head_selection_is_atomic_and_restart_keeps_serving(predeces
         reopened.conn.close()
 
 
-def test_profile_mismatch_blocks_selection_and_source_write_withdraws_it(predecessor):
+@pytest.mark.usefixtures('admitted_preparation_input', 'native_sql_calls')
+def test_profile_mismatch_blocks_selection_and_source_write_withdraws_it(predecessor, monkeypatch):
     conn = predecessor.conn
     seed(predecessor)
     preparation.JOB.install(conn)
+    # Source projection and publication validation stay live throughout all
+    # three revisions. The worker consumes its already admitted table layout.
+    mock_preparation_schema(monkeypatch, preparation.JOB, conn)
     identity = stage(conn)
     source = conn.execute('SELECT source_key,payload FROM rec_musical_sources LIMIT 1').fetchone()
     with conn:

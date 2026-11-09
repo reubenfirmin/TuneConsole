@@ -349,9 +349,13 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_coalesced_notifications_survive_restart_and_do_not_acknowledge_later_changes(
-        file_backed_store, model_catalog_template):
-    store = file_backed_store
+        store, model_catalog_template, monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'), ('jazz', 'Jazz'),
+                                      ('rock', 'Rock'), ('house', 'House')))
     path = store._db_path
     model_catalog_template.restore(store)
     assert store.conn.execute('SELECT COUNT(*) FROM rec_change_queue').fetchone()[0] == 1
@@ -362,6 +366,7 @@ def test_coalesced_notifications_survive_restart_and_do_not_acknowledge_later_ch
     store.conn.close()
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         store.init_schema()
         assert store.rec_refresh.has_pending_changes()
         assert model_refresh.rebuild(store, 2000)

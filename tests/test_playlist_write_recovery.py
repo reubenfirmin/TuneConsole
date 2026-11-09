@@ -1,5 +1,6 @@
 """An uncertain write must never be replayed or reported as a rejected occurrence."""
 import pytest
+from tests.web_consumer_support import install_routes, route_schema, route_store
 from yt_playlist.library import playlist_creation, playlist_generated
 
 from yt_playlist.library.playlist_writes import add_items, add_items_resilient, PlaylistAddUncertain
@@ -230,12 +231,14 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
 
 
 @pytest.mark.parametrize("operation", ["copy", "generated"])
-def test_http_result_exposes_partial_destination_and_recovery(store, monkeypatch, operation):
+def test_http_result_exposes_partial_destination_and_recovery(route_store, monkeypatch, operation):
     import json
     from fastapi.testclient import TestClient
     from tests.conftest import FakeClient, _track
     from yt_playlist.web.app import create_app
 
+    store = route_store
+    install_routes(monkeypatch, 'playlists', 'home_generation', 'actions')
     identity = store.accounts.upsert_account("Main", "cred", None, True)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]

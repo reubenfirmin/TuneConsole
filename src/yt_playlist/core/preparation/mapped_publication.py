@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import time
 
 from ..schema_contract import MigrationError
+from ..schema_inspection import definitions as schema_definitions
 from .selection import invalidators
 
 
@@ -102,11 +103,12 @@ class MappedPublication:
         # retained maps and their custody guards still require exact definitions.
         retired = ({name for name, _ in invalidators(self.table('head'), {self.name:self.job})}
                    if self.native(conn) else set())
-        for name, sql in self.definitions():
-            row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
-            if row is None and name in retired:
+        expected = tuple(self.definitions())
+        observed = schema_definitions(conn, [name for name, _ in expected])
+        for name, sql in expected:
+            if name not in observed and name in retired:
                 continue
-            if row is None or _tokens(row[0]) != _tokens(transform(sql) if renamed else sql):
+            if name not in observed or _tokens(observed[name]) != _tokens(transform(sql) if renamed else sql):
                 raise MigrationError('Incompatible mapped publication object: '+name)
         if not conn.execute('SELECT 1 FROM '+self.table('epoch')+' WHERE id=1').fetchone():
             raise MigrationError('Mapped publication requires its custody revision')
@@ -115,11 +117,12 @@ class MappedPublication:
         from ..schema_contract import tokens as _tokens
         optional = {f'prepare_{self.job.name}_dependency_{owner}_{operation}'
             for owner in self.job.optional_dependencies for operation in ('insert', 'update', 'delete')}
-        for name, sql in self.job.definitions(conn):
-            row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
-            if row is None and name in optional:
+        expected = tuple(self.job.definitions(conn))
+        observed = schema_definitions(conn, [name for name, _ in expected])
+        for name, sql in expected:
+            if name not in observed and name in optional:
                 continue
-            if row is None or _tokens(row[0]) != _tokens(sql):
+            if name not in observed or _tokens(observed[name]) != _tokens(sql):
                 raise MigrationError('Incompatible preparation object: '+name)
 
     def validate_installed(self, conn):

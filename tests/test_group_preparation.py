@@ -5,10 +5,37 @@ from dataclasses import replace
 import pytest
 
 from tests.group_support import recordings
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
+)
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import prepared_inputs
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import group_discovery, group_preparation, musical_profiles
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Group preparation owns SQL/files, without the web lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('death-metal', 'Death Metal'), ('pop', 'Pop'),
+                                  ('house', 'House'), ('jazz', 'Jazz'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, _pristine_current_schema):
+    # Keep real private readers, guarded snapshots, source-change rejection,
+    # cancellation and file publication. A file reader avoids copying the
+    # entire in-memory catalog for every preparation turn.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as database:
+        yield database
 
 
 def seed(store, tracks):

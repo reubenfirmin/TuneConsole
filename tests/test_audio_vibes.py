@@ -13,8 +13,10 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import audio_vibe_prediction, home_vibe
 from yt_playlist.web.app import create_app
 from tests.store_fixture_support import (
-    _file_consumer_store, bounded_consumer_schema, reuse_reporting_reader,
+    _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
+    native_sql_calls, reuse_reporting_reader, without_query_timing,
 )
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
 
 
 @pytest.fixture(scope='module')
@@ -45,6 +47,38 @@ def feedback_restart_routes(monkeypatch):
 def feedback_restart_store(tmp_path, _pristine_current_schema, feedback_restart_routes):
     with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
         yield store
+
+
+@pytest.fixture(scope='module')
+def audio_flag_schema():
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def audio_flag_store(tmp_path, audio_flag_schema, monkeypatch, native_sql_calls,
+                     without_query_timing, home_page_bytecode, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, audio_vibes, charts, home, playlists
+
+    # Keep the complete rendered flag and origin workflow in one actual app.
+    # Other route registration and snapshot conflict handling have their own owners.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
+                        (app_update, audio_preview, audio_vibes, charts, home, playlists)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
+    with _file_consumer_store(tmp_path, audio_flag_schema, snapshot_guards=False) as store:
+        with mock_snapshot_coordinator(store, monkeypatch):
+            yield store
 
 
 def attributes():
@@ -92,7 +126,8 @@ def test_local_switch_defaults_off_and_explicit_environment_wins(tmp_path, monke
     assert features.audio_vibes_enabled()
 
 
-def test_rating_flag_off_keeps_collection_ui_loaded(store):
+def test_flag_gates_rating_ui_and_feedback_but_not_collection(audio_flag_store, monkeypatch):
+    store = audio_flag_store
     with TestClient(create_app(store, lambda: {}, background_work=False),
                     base_url='http://127.0.0.1') as client:
         html = client.get('/').text
@@ -101,11 +136,6 @@ def test_rating_flag_off_keeps_collection_ui_loaded(store):
         assert 'audio-vibe-banner.css' not in html
         assert 'data-audio-vibe-banner' not in html
         assert 'data-vibe-choice=' not in html
-
-
-def test_rating_flag_off_keeps_collection_apis_without_annotation_writes(store):
-    with TestClient(create_app(store, lambda: {}, background_work=False),
-                    base_url='http://127.0.0.1') as client:
         value = sample()
         statements = []
         store.conn.set_trace_callback(statements.append)
@@ -123,39 +153,18 @@ def test_rating_flag_off_keeps_collection_apis_without_annotation_writes(store):
         assert client.get('/audio-vibes/runs/' + str(uuid4())).status_code == 200
         store.conn.set_trace_callback(None)
         assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
-
-
-@pytest.mark.parametrize('path', ('/', '/playlists', '/charts'))
-def test_rating_flag_on_exposes_all_six_choices(store, monkeypatch, path):
-    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
-    with TestClient(create_app(store, lambda: {}, background_work=False),
-                    base_url='http://127.0.0.1') as client:
-        response = client.get(path)
-        assert response.status_code == 200
-        html = response.text
-        assert 'audio-vibe-collection.js' in html and 'data-audio-vibe-banner' in html
-        for key in home_vibe.PRESETS:
-            assert f'data-vibe-choice="{key}"' in html and audio_vibe_prediction.ATTRIBUTE_LABELS[key] in html
-        assert 'data-vibe-choice=""' not in html
-
-
-def test_preview_collects_and_home_survives_a_missing_template_flag(store, monkeypatch):
-    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
-    with TestClient(create_app(store, lambda: {}, background_work=False),
-                    base_url='http://127.0.0.1') as client:
+        monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
+        for path in ('/', '/playlists', '/charts'):
+            response = client.get(path)
+            assert response.status_code == 200
+            html = response.text
+            assert 'audio-vibe-collection.js' in html and 'data-audio-vibe-banner' in html
+            for key in home_vibe.PRESETS:
+                assert f'data-vibe-choice="{key}"' in html and audio_vibe_prediction.ATTRIBUTE_LABELS[key] in html
+            assert 'data-vibe-choice=""' not in html
         preview = client.get('/audio-preview').text
         assert 'audio-vibe-collection.js' in preview and 'data-audio-vibe-collection' in preview
         assert 'data-audio-vibe-banner' in preview
-        # A live dev process may own older route globals while Jinja reloads.
-        del client.app.state.ctx.templates.env.globals['audio_vibes_enabled']
-        assert client.get('/').status_code == 200
-
-
-def test_extension_collection_access_does_not_grant_feedback_or_other_mutations(store, monkeypatch):
-    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
-    with TestClient(create_app(store, lambda: {}, background_work=False),
-                    base_url='http://127.0.0.1') as client:
-        value = sample()
         from yt_playlist.web.routes.bridge import EXTENSION_ORIGINS
         for origin in EXTENSION_ORIGINS:
             assert client.post('/audio-vibes/samples', json=value, headers={'Origin': origin}).status_code == 200
@@ -165,6 +174,9 @@ def test_extension_collection_access_does_not_grant_feedback_or_other_mutations(
             assert client.post('/audio-vibes/samples', json=value, headers={'Origin': origin}).status_code == 403
         assert client.post('/audio-vibes/samples', json=value, headers={
             'Origin': next(iter(EXTENSION_ORIGINS)), 'Host': 'evil.example'}).status_code == 400
+        # A live dev process may own older route globals while Jinja reloads.
+        del client.app.state.ctx.templates.env.globals['audio_vibes_enabled']
+        assert client.get('/').status_code == 200
 
 
 def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(store, monkeypatch):

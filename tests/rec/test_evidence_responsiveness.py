@@ -6,12 +6,12 @@ from html.parser import HTMLParser
 import hashlib
 import json
 import logging
+import multiprocessing
+import os
 from pathlib import Path
 import signal
 import sqlite3
-import subprocess
 import sys
-import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -72,7 +72,7 @@ def serving_bytecode(tmp_path_factory):
     return FileSystemBytecodeCache(str(tmp_path_factory.mktemp('evidence-template-bytecode')))
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def serving_routes(monkeypatch, serving_bytecode, without_metadata_providers):
     install_serving_routes(monkeypatch, serving_bytecode)
 
@@ -176,12 +176,6 @@ def seed_evidence_library(store):
 
 
 @pytest.fixture(scope='module')
-def evidence_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, seed_evidence_library) as template:
-        yield template
-
-
-@pytest.fixture(scope='module')
 def historical_evidence_template(_pristine_installed_schema, tmp_path_factory):
     # Admit one genuine installed v94 source, retaining its physical owners and
     # history. Consumers receive private SQL/files, not a relabelled new schema.
@@ -226,16 +220,6 @@ def recovery_worker(store, now):
         client_provider=lambda: {}, logger=logging.getLogger(__name__),
         storage_maintenance=StorageMaintenance(store))
     return RecWorker(context, debounce_s=0)
-
-
-def test_evidence_input_keeps_published_groups_choices_and_read_only_sql(evidence_template):
-    source = evidence_template.source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.taste_groups.head_generation() == 'first'
-    assert source.taste_groups.definition('first-leaf', generation='first')
-    opportunity, = source.rec_ledger.evidence().records('opportunity')
-    assert [option['id'] for option in opportunity['options']] == ['one', 'two']
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_correction_identity_and_current_learning_descriptors_match_the_published_head(library, monkeypatch):
@@ -325,6 +309,13 @@ def restart_library(tmp_path, monkeypatch, native_sql_calls):
         with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
             with monkeypatch.context() as patch, mock_snapshot_coordinator(store, patch):
                 seed_evidence_library(store)
+            with store.read_view() as source:
+                assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+                assert source.taste_groups.head_generation() == 'first'
+                assert source.taste_groups.definition('first-leaf', generation='first')
+                opportunity, = source.rec_ledger.evidence().records('opportunity')
+                assert [option['id'] for option in opportunity['options']] == ['one', 'two']
+                assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
             yield store
 
 
@@ -711,42 +702,48 @@ def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(fi
     worker.join(0)
 
 
-@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX application interruption signals')
-@pytest.mark.parametrize('termination', [signal.SIGINT, signal.SIGKILL])
-def test_process_interruption_releases_publication_and_restart_finishes_recovery(library, tmp_path, termination):
-    gate = tmp_path / 'historical-definition-entered'
-    code = textwrap.dedent('''
-        import sys, threading
-        from pathlib import Path
-        from yt_playlist.core.store import Store
-        from yt_playlist.rec import choice_evidence, choice_retention
-        store = Store(sys.argv[1])
-        store.init_schema()
+def interruptible_recovery(source, gate):
+    # Keep a real OS process and independent Store admission, with no inherited
+    # open connection. Interpreter import/bootstrap is below the signal check.
+    path = source._db_path
+    source.conn.close()
+    store = Store(path)
+    try:
+        store.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(store.conn):
+            store.init_schema()
         original = choice_retention.correction_context
         def held(*args, **kwargs):
             value = original(*args, **kwargs)
-            Path(sys.argv[2]).write_text('Compact correction prepared under publication admission')
+            gate.write_text('Compact correction prepared under publication admission')
             threading.Event().wait(30)
             return value
         choice_retention.correction_context = held
-        try:
-            choice_evidence.maintain_storage(store, 100)
-        except KeyboardInterrupt:
-            sys.exit(130)
-        finally:
-            store.conn.close()
-    ''')
-    process = subprocess.Popen([sys.executable, '-c', code, str(library._db_path), str(gate)],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        choice_evidence.maintain_storage(store, 100)
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    finally:
+        store.conn.close()
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX application interruption signals')
+@pytest.mark.parametrize('termination', [signal.SIGINT, signal.SIGKILL])
+def test_process_interruption_releases_publication_and_restart_finishes_recovery(restart_library, tmp_path, termination):
+    library = restart_library
+    gate = tmp_path / 'historical-definition-entered'
+    process = multiprocessing.get_context('fork').Process(
+        target=interruptible_recovery, args=(library, gate))
+    process.start()
     try:
         deadline = time.monotonic() + 10
         while not gate.exists():
-            assert process.poll() is None, process.communicate()[1]
+            assert process.is_alive(), process.exitcode
             assert time.monotonic() < deadline, 'Child did not enter historical definition processing'
-            time.sleep(.02)
-        process.send_signal(termination)
-        _stdout, stderr = process.communicate(timeout=10)
-        assert process.returncode == (130 if termination == signal.SIGINT else -signal.SIGKILL), stderr
+            time.sleep(.002)
+        os.kill(process.pid, termination)
+        process.join(10)
+        assert not process.is_alive()
+        assert process.exitcode == (130 if termination == signal.SIGINT else -signal.SIGKILL)
         reopened = Store(library._db_path)
         try:
             reopened.conn.execute('PRAGMA synchronous=OFF')
@@ -772,6 +769,7 @@ def test_process_interruption_releases_publication_and_restart_finishes_recovery
         finally:
             reopened.conn.close()
     finally:
-        if process.poll() is None:
+        if process.is_alive():
             process.kill()
-            process.communicate(timeout=10)
+        process.join(10)
+        process.close()

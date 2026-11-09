@@ -4,7 +4,10 @@ from types import SimpleNamespace
 import pytest
 
 from tests.home_fixture_support import returning_listener, without_metadata_providers
-from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, reuse_reporting_reader
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.core.store import Store
 from yt_playlist.integrations.deepseek import DeepSeekIAO
 from yt_playlist.providers import deepseek
@@ -12,6 +15,15 @@ from yt_playlist.rec import album_descriptions as copy
 
 ALBUM = {'browse_id': 'first-id', 'artist': 'Patrice Bäumel',
          'title': 'Global Underground #42: Berlin (DJ Mix)', 'year': '2019'}
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 @pytest.fixture
@@ -46,8 +58,7 @@ def access_boundary(monkeypatch):
 
 
 @pytest.fixture
-def generated(store, monkeypatch):
-    own_album(store)
+def description_provider(monkeypatch):
     monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'secret-key')
     calls = []
     def describe(album, send):
@@ -57,6 +68,12 @@ def generated(store, monkeypatch):
                 'model': deepseek.MODEL, 'prompt_version': 1, 'usage': {'total_tokens': 319}}
     monkeypatch.setattr(deepseek, 'describe', describe)
     return calls
+
+
+@pytest.fixture
+def generated(store, description_provider):
+    own_album(store)
+    return description_provider
 
 
 def test_refresh_alternate_id_disable_and_key_change_reuse_paid_copy(store, generated, monkeypatch):
@@ -77,7 +94,8 @@ def test_refresh_alternate_id_disable_and_key_change_reuse_paid_copy(store, gene
     assert copy.identity(ALBUM) != copy.identity({**ALBUM, 'title': ALBUM['title'].replace('DJ Mix', 'Unmixed')})
 
 
-def test_durable_copy_survives_database_reopen_and_home_cache_eviction(file_backed_store, generated):
+def test_durable_copy_survives_database_reopen_and_home_cache_eviction(file_backed_store, description_provider):
+    generated = description_provider
     first = file_backed_store
     path = first._db_path
     own_album(first)
@@ -91,6 +109,7 @@ def test_durable_copy_survives_database_reopen_and_home_cache_eviction(file_back
     first.conn.close()
     second = Store(path)
     try:
+        second.conn.execute('PRAGMA synchronous=OFF')
         second.init_schema()
         assert copy.get(second, ALBUM, 99999999)[0] == description
         assert len(generated) == 1
@@ -99,7 +118,7 @@ def test_durable_copy_survives_database_reopen_and_home_cache_eviction(file_back
 
 
 def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_key(
-        file_backed_store, generated, monkeypatch):
+        file_backed_store, description_provider, monkeypatch):
     store = file_backed_store
     path = store._db_path
     own_album(store)
@@ -112,6 +131,7 @@ def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_
     store.conn.close()
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         store.init_schema()
         monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'another-key')
         store.album_notes.wake(200)

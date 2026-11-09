@@ -54,6 +54,7 @@ class ReservationConnection(sqlite3.Connection):
 def installed(tmp_path, regular_layout):
     path = tmp_path / 'installed.db'
     with closing(sqlite3.connect(path, factory=ReservationConnection)) as conn:
+        conn.execute('PRAGMA synchronous=OFF')
         regular_layout.backup(conn)
         yield path, conn
 
@@ -110,6 +111,7 @@ def completed_regular(regular_layout):
 def completed_installed(tmp_path, completed_regular):
     path = tmp_path / 'completed-regular.db'
     with closing(sqlite3.connect(path, factory=ReservationConnection)) as conn:
+        conn.execute('PRAGMA synchronous=OFF')
         completed_regular.backup(conn)
         yield path, conn
 
@@ -138,9 +140,10 @@ def contents(conn):
 
 
 def test_regular_session_inspects_each_unchanged_table_once(
-        tmp_path, _pristine_installed_schema, monkeypatch):
+        tmp_path, regular_layout, monkeypatch):
     with closing(sqlite3.connect(tmp_path / 'installed.db')) as conn:
-        _pristine_installed_schema(93).backup(conn)
+        conn.execute('PRAGMA synchronous=OFF')
+        regular_layout.backup(conn)
         statements, validations = [], []
         original = regular.validate_version
 
@@ -287,6 +290,7 @@ def interrupted_change(conn, failed, failure, changes, *, predecessor=None):
 @pytest.mark.parametrize('failed', regular.CHANGES[:-1], ids=lambda change: f'{change.version}-{change.name}')
 def test_each_change_rolls_back_and_can_retry(tmp_path, regular_prefixes, failed, monkeypatch):
     with closing(sqlite3.connect(tmp_path / 'retry.db')) as conn:
+        conn.execute('PRAGMA synchronous=OFF')
         regular_prefixes(failed.version - 1).backup(conn)
         # This unit owns the selected change's SQL, validation and rollback.
         # Its genuine prefix is built by the unmodified runner above. Historical

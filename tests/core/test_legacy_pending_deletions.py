@@ -10,9 +10,15 @@ from ytmusicapi.exceptions import YTMusicServerError
 
 from tests.core.test_action_work_migration import legacy_account, legacy_playlist
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input, reuse_reporting_reader
+from tests.store_fixture_support import (
+    install_numbered_input,
+    mock_regular_numbered_input,
+    native_sql_calls,
+    reuse_reporting_reader,
+    without_query_timing,
+)
 from tests.test_undo_recovery import RecoveryClient
-from yt_playlist.core import action_work, fao
+from yt_playlist.core import action_work, fao, schema_inspection
 from yt_playlist.core.migrations import migrate, registry, regular
 from yt_playlist.core.preparation.deletion_readback import JOB
 from yt_playlist.core.store import Store
@@ -36,7 +42,7 @@ def controlled_provider_retry_clock(monkeypatch):
 
 
 @pytest.fixture
-def deletion_inputs(monkeypatch):
+def deletion_inputs(monkeypatch, native_sql_calls, without_query_timing):
     """Completed lower SQL; each test owns its actual conversion and reopens."""
     bound_catalog(monkeypatch)
     with ExitStack() as resources:
@@ -102,6 +108,7 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
     store = private_store(path)
     resources = ExitStack()
     try:
+        resources.enter_context(schema_inspection.reuse_tables(store.conn))
         # Completed empty SQL and regular guards are lower inputs. Each case
         # publishes its own backup, interrupted intent and actual buggy cutover.
         deletion_inputs(97).backup(store.conn)
@@ -150,11 +157,16 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
                 patch.setattr(action_work,'imported_pending',lambda *args: False)
                 migrate(store.conn,registry=registry.MIGRATIONS[:98])
             assert (_step(store,action.id)['phase'],_step(store,action.id)['outcome'])==('pending','not_sent')
+        # Numbered conversion is complete. Admit that fixed input once on each
+        # physical connection below startup's real regular DDL and validators.
+        mock_regular_numbered_input(monkeypatch, store.conn, same_database=True)
         store.conn.close()
         store = private_store(path)
+        resources.enter_context(schema_inspection.reuse_tables(store.conn))
         store.init_schema()
         store.conn.close()
         store = private_store(path)
+        resources.enter_context(schema_inspection.reuse_tables(store.conn))
         store.init_schema()
         version = 98 if already_converted else 97
         resources.enter_context(reuse_reporting_reader(store, monkeypatch))

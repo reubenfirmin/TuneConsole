@@ -8,15 +8,42 @@ import time
 import pytest
 
 from tests.core.test_metadata_runtime_preparation import seeded, run
+from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, roots
-from tests.store_fixture_support import initialize_consumer
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema,
+    initialize_consumer, native_sql_calls, without_query_timing,
+)
 from tests.metadata_provenance_support import metadata_provenance
-from yt_playlist.core import catalog, fao, metadata_runtime_files as files
+from yt_playlist.core import catalog, fao, metadata_runtime_files as files, schema_inspection
 from yt_playlist.core.db_rebuild import build
 from yt_playlist.core.metadata_deliveries import Delivery, record_many
 from yt_playlist.core.migrations import current
 from yt_playlist.core.preparation import metadata_locators as retirement, metadata_runtime as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync(monkeypatch):
+    """Retirement owns actual SQL/files, independently of the HTTP lifecycle."""
+    bound_catalog(monkeypatch, entries=(('rock', 'Rock'), ('jazz', 'Jazz')))
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    # Collection owns reader lifetime: closing each real view must release its
+    # file leases before the restarted collector can remove an orphan.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
 
 
 def schema(conn):
@@ -30,11 +57,13 @@ def locator_templates(tmp_path_factory, _pristine_current_schema):
         (root / 'source').mkdir()
         source = Store(root / 'source' / 'library.db')
         resources.callback(source.conn.close)
+        source.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(source, _pristine_current_schema)
         _, entry = seeded(source)
         progress = root / 'progress.json'
-        run(source, progress)
-        preparation.activate(source.conn, progress)
+        with schema_inspection.reuse_tables(source.conn):
+            run(source, progress)
+            preparation.activate(source.conn, progress)
         history = list(map(tuple, source.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
         with source.conn:
             source.conn.execute('BEGIN')
@@ -44,6 +73,7 @@ def locator_templates(tmp_path_factory, _pristine_current_schema):
         build.build(source._db_path, path)
         target = Store(path)
         resources.callback(target.conn.close)
+        target.conn.execute('PRAGMA synchronous=OFF')
         files.restore(target.conn, manifest)
         target.init_schema()
         yield (capture_template(source, entry), capture_template(target, history), manifest)
@@ -57,6 +87,7 @@ def candidate(locator_templates, file_backed_store, tmp_path, _pristine_current_
     (tmp_path / 'candidate').mkdir()
     target = Store(tmp_path / 'candidate' / 'library.db')
     try:
+        target.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(target, _pristine_current_schema)
         history = target_template.restore(target)
         # The recovery manifest and its members are independent custody, outside
@@ -121,6 +152,7 @@ def test_retirement_removes_physical_fields_and_preserves_reopen_writes_recovery
     report = custody.snapshot_library(target._db_path, tmp_path / 'recovered')
     restored = Store(Path(report['restored']))
     try:
+        restored.conn.execute('PRAGMA synchronous=OFF')
         restored.init_schema()
         assert retirement.retired(restored.conn)
         assert metadata_provenance(restored, entry)['decisions']

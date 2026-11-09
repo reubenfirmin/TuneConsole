@@ -10,7 +10,9 @@ from tests.web.test_road_trip_routes import road_trip_schema as _pristine_curren
 from yt_playlist.rec import road_trip
 from yt_playlist.web.routes import road_trip as routes
 from tests.home_fixture_support import without_metadata_providers
-from tests.store_fixture_support import uncontended_file_consumer_store, without_query_timing
+from tests.store_fixture_support import (
+    native_sql_calls, uncontended_file_consumer_store, without_query_timing,
+)
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing')
@@ -124,7 +126,7 @@ def test_slow_worker_cannot_replace_or_finish_newer_work(store, monkeypatch, rep
 
 
 def test_overlapping_edits_invalidate_queued_workers_and_current_failure_settles(
-        uncontended_file_consumer_store, monkeypatch):
+        native_sql_calls, uncontended_file_consumer_store, monkeypatch):
     # The queued jobs own draft generations and revisions. Library-snapshot
     # coordination is a completed lower input; draft SQL and files stay real.
     store = uncontended_file_consumer_store
@@ -165,7 +167,7 @@ def test_overlapping_edits_invalidate_queued_workers_and_current_failure_settles
     assert client.app.state.ctx.work.wait(0)
 
 
-def test_repository_rejects_old_revision_and_deleted_draft(store):
+def test_repository_rejects_old_revision_and_deleted_draft(native_sql_calls, store):
     store.accounts.upsert_account('main', 'cred', None, True)
     rid = _recipe(store)
     store.road_trip.save_road_trip_draft(rid, {'revision': 'new', 'value': 'new'}, 100)
@@ -179,7 +181,7 @@ def test_repository_rejects_old_revision_and_deleted_draft(store):
 
 
 @pytest.mark.parametrize('replacement', ['build', 'balance', 'delete', 'delete-recipe'])
-def test_remote_save_completion_does_not_replace_newer_or_deleted_draft(store, monkeypatch, replacement):
+def test_remote_save_completion_does_not_replace_newer_or_deleted_draft(native_sql_calls, store, monkeypatch, replacement):
     from types import SimpleNamespace
     from yt_playlist.core.activity import Activity
     from yt_playlist.web.road_trip_drafts import RoadTripDrafts

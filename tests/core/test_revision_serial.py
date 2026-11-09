@@ -172,6 +172,42 @@ def test_revision_rebind_after_an_external_migration_retires_a_table(tmp_path):
         reader.close()
 
 
+@pytest.mark.parametrize('already_in_transaction', [False, True])
+def test_guard_construction_allows_external_writes_and_rebinds_changed_schema(tmp_path, already_in_transaction):
+    path = tmp_path / 'guard-construction.db'
+    with closing(sqlite3.connect(path)) as conn, closing(sqlite3.connect(path, timeout=0)) as writer:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)')
+        changed, errors = [], []
+
+        def concurrent_write(sql):
+            if not changed and sql.startswith('CREATE TEMP TRIGGER'):
+                changed.append(True)
+                try:
+                    with writer:
+                        writer.execute("INSERT INTO settings VALUES ('concurrent','saved')")
+                        writer.execute('CREATE TABLE added(value)')
+                except Exception as exc:
+                    errors.append(exc)
+
+        if already_in_transaction:
+            conn.execute('BEGIN')
+        conn.set_trace_callback(concurrent_write)
+        try:
+            revisions = Revisions(conn)
+        finally:
+            conn.set_trace_callback(None)
+        assert changed and not errors
+        assert not conn.in_transaction
+        assert conn.execute('SELECT value FROM settings').fetchone() == ('saved',)
+        revisions.refresh()
+        assert 'added' in revisions.tables
+        before = revisions.capture({('added', '')})
+        with conn:
+            conn.execute("INSERT INTO added VALUES ('after binding')")
+        assert revisions.capture({('added', '')}) != before
+
+
 def test_revision_unbind_tolerates_a_trigger_retired_after_enumeration():
     """A controlled stale catalog entry must not prevent real SQLite cleanup."""
     from types import SimpleNamespace

@@ -1,8 +1,18 @@
 """Trends remain usable while the installed listening owners await conversion."""
 import json
+import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.rec import trend_rollups
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Rollups retain actual SQL and publication without HTTP startup."""
+
 
 DAY = 86400
 STAMP = 1704844800  # 2024-01-10 UTC

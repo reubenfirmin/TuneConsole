@@ -10,10 +10,27 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_undo_recovery import RecoveryClient
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, without_query_timing
 from yt_playlist.core import fao
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_backups, playlist_deletion, playlist_undo, playlist_generated
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    """Deletion consumes empty admitted SQL; genre preparation is independent."""
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
 
 
 @pytest.fixture
@@ -30,6 +47,7 @@ def deletion(file_backed_store, tmp_path, monkeypatch):
 
 def _reopen(database):
     store = Store(database)
+    store.conn.execute('PRAGMA synchronous=OFF')
     store.init_schema()
     return store
 
@@ -178,6 +196,7 @@ def test_deletion_admission_covers_lookup_backup_and_transport_across_stores(del
 
 
 @pytest.mark.parametrize("operation", ["manual", "empty", "planned", "generated"])
+@pytest.mark.usefixtures('native_sql_calls')
 def test_backup_and_intent_are_committed_before_transport_and_survive_lost_reply(deletion, operation):
     store, database, identity, source, keeper, client = deletion
     if operation == "empty":

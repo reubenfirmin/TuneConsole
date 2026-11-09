@@ -74,6 +74,7 @@
   function refresh() {
     if (inFlight) return inFlight.promise;
     const request = {controller: new AbortController(), promise: null};
+    const deadline = setTimeout(() => request.controller.abort(), 7000);
     inFlight = request;
     request.promise = fetch('/bridge/status', {signal: request.controller.signal})
       .then(response => {
@@ -86,11 +87,16 @@
       })
       .catch(() => {
         if (inFlight !== request) return;
-        // Retain Home's connection knowledge on a transient failure, but clear stale playback,
-        // the radio indicator and sensor details until a fresh snapshot arrives.
-        publish({connected: !!window.playbackStatus.snapshot?.connected});
+        // Keep an explicit recovery control through transient status failures.
+        // Saved state never supplies a live playback sample or radio indicator.
+        publish({connected: !!bridgeSnapshot?.connected,
+          resumable_player: bridgeSnapshot?.resumable_player,
+          radio_resume: bridgeSnapshot?.radio_resume});
       })
-      .finally(() => { if (inFlight === request) inFlight = null; });
+      .finally(() => {
+        clearTimeout(deadline);
+        if (inFlight === request) inFlight = null;
+      });
     return request.promise;
   }
 

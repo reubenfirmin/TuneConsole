@@ -11,6 +11,8 @@ from tests.core.test_ranked_state_preparation import seed
 from tests.store_fixture_support import (
     _numbered_input,
     guarded_numbered_store as installed,
+    mock_preparation_schema,
+    mock_regular_numbered_input,
     mock_snapshot_coordinator,
     native_sql_calls,
     preparation_ddl_connection,
@@ -35,6 +37,18 @@ def disable_periodic_library_sync():
 def unadmitted_installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
     with _numbered_input(request.param, tmp_path, monkeypatch) as value:
         yield value
+
+
+@pytest.fixture(autouse=True)
+def completed_pair_schema(request, monkeypatch):
+    fixture = 'unadmitted_installed' if 'unadmitted_installed' in request.fixturenames else 'installed'
+    store, _ = request.getfixturevalue(fixture)
+    # These consumers change pair data, files and roots, keeping job SQL fixed.
+    # Admit that lower input once while retaining actual preparation and checks.
+    preparation.JOBS['pairs'].install(store.conn)
+    preparation.ROOT_JOB.install(store.conn)
+    for job in (preparation.JOBS['pairs'].definition, preparation.ROOT_JOB):
+        mock_preparation_schema(monkeypatch, job, store.conn)
 
 
 def roots(store, run_id):
@@ -82,7 +96,7 @@ def ready(conn, size=8):
 @pytest.mark.parametrize('unadmitted_installed', [79, 93, 94], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
 def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_roots(
-        unadmitted_installed):
+        unadmitted_installed, monkeypatch):
     store, _ = unadmitted_installed
     originals, run_id = seed(store)
     roots(store, run_id)
@@ -106,6 +120,7 @@ def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_ro
             ' m JOIN '+preparation.ORIGINALS+' o ON o.owner=m.owner AND o.source_key=m.source_key AND o.digest=m.source_digest '
             "WHERE m.stage=? AND m.owner='unresolved_group_contexts'", (stage,)).fetchall()
         assert any(json.loads(row[0])['source_context'] == 'original:unavailable' for row in contexts)
+        mock_regular_numbered_input(monkeypatch, other.conn)
         regular.migrate(other.conn)
     reopened = Store(store._db_path)
     with closing(reopened.conn), schema_inspection.reuse_tables(reopened.conn):

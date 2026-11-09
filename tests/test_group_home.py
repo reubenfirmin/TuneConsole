@@ -20,6 +20,7 @@ from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, reuse_reporting_reader,
     native_sql_calls, without_query_timing,
 )
+from tests.web_consumer_support import route_schema, route_store
 from yt_playlist.core import mix_choices
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
@@ -583,8 +584,10 @@ def test_definitions_survive_regrouping_and_held_offers_keep_their_context(
     assert store.taste_groups.definition(original.protos[0]['group_version'])
 
 
-def test_taste_main_views_show_served_graph_and_hide_fixed_count_controls(store, adaptive_library, group_pages):
-    _tracks, head = adaptive_library
+def test_taste_main_views_show_served_graph_and_hide_fixed_count_controls(
+        route_store, adaptive_library_template, group_pages):
+    store = route_store
+    _tracks, head = adaptive_library_template.restore(store)
     view = group_viz.mode_layers(store, 1200, group_viz.prepared(store))
     assert view['adaptive']
     assert sum(m['size'] for m in view['modes']) == 64

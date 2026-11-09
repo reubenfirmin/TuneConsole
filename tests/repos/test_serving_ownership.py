@@ -6,7 +6,15 @@ import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.rec import scorecard
 from tests.publication_support import plan, publish, stage
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, native_sql_calls
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Synchronous reporting/publication owners do not construct the web app."""
 
 
 @pytest.fixture(scope='module')
@@ -17,6 +25,7 @@ def publication_schema():
 
 def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path, publication_schema):
     store = Store(tmp_path / "report.db")
+    store.conn.execute('PRAGMA synchronous=OFF')
     initialize_consumer(store, publication_schema)
     try:
         iid = store.accounts.upsert_account("main", "credential", None, True)
@@ -37,6 +46,7 @@ def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path, pu
 @pytest.mark.parametrize("fail", [False, True])
 def test_proposals_and_policies_commit_before_the_publication_marker(tmp_path, fail, publication_schema):
     store = Store(tmp_path / "publish.db")
+    store.conn.execute('PRAGMA synchronous=OFF')
     initialize_consumer(store, publication_schema)
     try:
         old = publish(store, plan(store, 'old', value={'generation': 1}))

@@ -31,6 +31,15 @@ def build(ctx):
             "session": state, "tracks": tracks,
         })
 
+    @router.post('/radio/resume')
+    async def resume(data: dict = Body(...)):
+        fields = ('playlist_id', 'video_id', 'episode_id')
+        if any(not isinstance(data.get(key), str) or not data[key] for key in fields):
+            return {'ok': False}
+        intent = ctx.bridge.begin_playback_intent()
+        return await radio.work.to_thread(radio.resume_playback,
+            data['playlist_id'], data['video_id'], data['episode_id'], intent=intent)
+
     @router.post("/radio/start")
     async def start(request: Request):
         try:

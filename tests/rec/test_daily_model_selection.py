@@ -283,6 +283,14 @@ def test_insufficient_activity_skips_all_fits(library):
 def test_initial_insufficient_attempt_does_not_require_another_30_plays(
         store, monkeypatch, initial_targets, new_targets, expected,
         request, _pristine_current_schema):
+    # Scheduling consumes synchronous reporting reads. Keep the actual guarded
+    # candidate snapshots and every numerical fit below, without copying the
+    # in-memory database again for each uncontended reporting lookup.
+    @contextmanager
+    def reporting_view(**kwargs):
+        with store._lock:
+            yield store
+
     if (initial_targets, new_targets) == (26, 24):
         daily_catalog_template = request.getfixturevalue('daily_catalog_template')
         value = daily_catalog_template.restore(store)
@@ -326,6 +334,7 @@ def test_initial_insufficient_attempt_does_not_require_another_30_plays(
         assert len(daily_catalog_template.result['videos']) == 160
         assert store.settings.get_setting('private_catalog') is None
         assert daily_catalog_template.source.settings.get_setting('private_catalog') is None
+    monkeypatch.setattr(store, 'read_view', reporting_view)
     active_days = 6 if initial_targets == 26 else 8
     for index, key in enumerate(keys[20:20 + initial_targets]):
         store.history.record_play_event(account, key, videos[key],

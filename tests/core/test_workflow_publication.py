@@ -10,7 +10,7 @@ import pytest
 
 from tests.core.test_workflow_receipt_preparation import seed
 from tests.store_fixture_support import (
-    _numbered_input, native_sql_calls,
+    _numbered_input, mock_preparation_schema, mock_regular_numbered_input, native_sql_calls,
     publication_consumer_reads, without_query_timing,
 )
 from yt_playlist.core import workflow_settings
@@ -258,6 +258,8 @@ def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(unadm
     store, _ = unadmitted_installed
     _, originals, _, source = seed(store)
     owner = publication.OWNERS['playlists']
+    owner.worker.install(store.conn)
+    mock_preparation_schema(monkeypatch, owner.worker.definition, store.conn)
     identity = stage(owner, store.conn)
     owner.publish(store.conn, stage=identity)
     header = owner.capture(store.conn, identity, source)
@@ -268,6 +270,7 @@ def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(unadm
     with pytest.raises(OSError):
         store.settings.get_setting(source)
     store.init_schema(defer_metadata=True)
+    mock_regular_numbered_input(monkeypatch, store.conn)
     regular.migrate(store.conn)
     publication.repair('playlists', store.conn, source)
     owner.publish(store.conn, stage=identity)

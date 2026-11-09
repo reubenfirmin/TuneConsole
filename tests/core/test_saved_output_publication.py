@@ -9,7 +9,9 @@ from tests.core.test_collection_control_preparation import finish
 from tests.store_fixture_support import guarded_numbered_store as installed
 from tests.store_fixture_support import numbered_store as unadmitted_installed
 from tests.core.test_saved_output_preparation import head, seed
-from tests.store_fixture_support import native_sql_calls, preparation_ddl_connection, publication_consumer_reads
+from tests.store_fixture_support import (
+    native_sql_calls, preparation_ddl_connection, publication_consumer_reads, without_query_timing,
+)
 from yt_playlist.core import recommendation_setting_outputs as outputs
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import saved_output_publication as publication, saved_outputs as preparation
@@ -38,12 +40,15 @@ def publish(conn,name):
 
 
 @pytest.mark.parametrize('installed',[79,94],indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_preopened_and_reopened_readers_match_frozen_native_files(installed,tmp_path,monkeypatch):
     store,_ = installed
     sources,_ = seed(store)
     other = Store(store._db_path)
     native = Store(tmp_path/'reference.db')
     try:
+        other.conn.execute('PRAGMA synchronous=OFF')
+        native.conn.execute('PRAGMA synchronous=OFF')
         other.init_schema(defer_metadata=True)
         store.conn.backup(native.conn)
         runner.migrate(native.conn,registry=registry.MIGRATIONS[:95])
@@ -71,6 +76,7 @@ def test_preopened_and_reopened_readers_match_frozen_native_files(installed,tmp_
         native.conn.close()
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema(defer_metadata=True)
         assert {source:reopened.settings.get_setting(source) for source in sources} == sources
     finally:

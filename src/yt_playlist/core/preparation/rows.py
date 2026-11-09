@@ -11,6 +11,7 @@ import time
 
 from ..schema_admission import history, validate_version
 from ..schema_contract import MigrationError
+from ..schema_inspection import definitions as schema_definitions
 
 
 def _json(value):
@@ -126,11 +127,12 @@ class Job:
 
     def validate(self, conn):
         from ..schema_contract import tokens as _tokens
-        for name, sql in self.definitions(conn):
-            row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
-            if row is None and name in dict(self.additive_destinations):
+        expected = tuple(self.definitions(conn))
+        observed = schema_definitions(conn, [name for name, _ in expected])
+        for name, sql in expected:
+            if name not in observed and name in dict(self.additive_destinations):
                 continue
-            if row is None or _tokens(row[0]) != _tokens(sql):
+            if name not in observed or _tokens(observed[name]) != _tokens(sql):
                 raise MigrationError('Incompatible preparation object: ' + name)
 
     def progress(self, conn):

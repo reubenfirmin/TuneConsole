@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.library.album_fetch import UPLOAD_RELEASE_PREFIX, fetch_album, is_upload_album
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.web_consumer_support import install_routes, route_schema, route_store
 
 UPLOAD_ID = UPLOAD_RELEASE_PREFIX + "b_po_XYZ"
 
@@ -155,9 +156,11 @@ def test_upload_album_folds_all_live_tracks_into_the_library(store):
     assert len(store.charts.album_tracks_detail(UPLOAD_ID)) == 2   # the missing track got folded in
 
 
-def test_album_hides_the_artist_tag_when_there_is_no_album_artist(store):
+def test_album_hides_the_artist_tag_when_there_is_no_album_artist(route_store, monkeypatch):
     """A compilation upload has no single album artist, so YouTube returns none. Rendering the amber
     tag anyway leaves an empty pill in the header."""
+    store = route_store
+    install_routes(monkeypatch, 'album')
     iid = store.accounts.upsert_account("main", "cred", None, True)
     no_artist = dict(_UPLOAD_ALBUM, artists=[])
     fc = _StrictClient(uploads={UPLOAD_ID: no_artist})

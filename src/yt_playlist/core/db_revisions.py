@@ -81,6 +81,10 @@ class Revisions:
 
     def __init__(self, conn):
         self.conn = conn
+        # This constructor already commits its completed guards below. Group
+        # their TEMP DDL instead of opening one SQLite transaction per trigger.
+        if not conn.in_transaction:
+            conn.execute('BEGIN')
         # If external DDL races binding, this older epoch forces another bind
         # and prevents readers using a newer definition from trusting counters.
         self.schema_version = conn.execute('PRAGMA main.schema_version').fetchone()[0]

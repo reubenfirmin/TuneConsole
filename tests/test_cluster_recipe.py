@@ -14,8 +14,13 @@ from yt_playlist.rec import recipes
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import without_metadata_providers
 from tests.playlist_fixture_support import library_catalog
 from tests.repository_mock_support import no_database, repository_store
+from tests.store_fixture_support import (
+    file_consumer_store as cluster_store, native_sql_calls, without_query_timing,
+)
+from tests.web_consumer_support import install_routes
 
 
 @pytest.fixture
@@ -151,7 +156,10 @@ def test_save_tags_cluster_recipe(store):
     assert recipe["journey"] == "energy_arc"
 
 
-def test_save_without_seeds_or_whitelist_still_tags_cluster(store):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing', 'without_metadata_providers')
+def test_save_without_seeds_or_whitelist_still_tags_cluster(cluster_store, monkeypatch):
+    store = cluster_store
+    install_routes(monkeypatch, 'clusters')
     c, iid = _client(store)
     a = _track(store, "v1", "X", "A", genre="acid techno")
     b = _track(store, "v2", "Y", "B", genre="detroit techno")

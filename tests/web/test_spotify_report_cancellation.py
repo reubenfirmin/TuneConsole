@@ -7,10 +7,38 @@ import httpx
 import pytest
 
 from tests.test_spotify_album_import import AlbumClient, album_zip
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, without_query_timing
+from tests.web_consumer_support import install_routes
 from tests.web.test_spotify_data_route import _select_library
 from yt_playlist.library.spotify_library import import_spotify_library, SPOTIFY_REPORT_SCHEMA
 from yt_playlist.web.app import create_app
 from yt_playlist.web.spotify_import import JOB_KEY, load_job, save_job
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def report_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, report_schema):
+    # Retain real guards, independent readers and instrumented admission across
+    # the cancelled awaiter and its still-running publication worker.
+    with _file_consumer_store(tmp_path, report_schema) as database:
+        yield database
+
+
+@pytest.fixture(autouse=True)
+def report_routes(monkeypatch, without_metadata_providers):
+    install_routes(monkeypatch, 'setup')
+    # This owner checks cancellation and publication after a terminal provider
+    # result. Retry backoff is a lower collaborator with independent coverage.
+    monkeypatch.setattr('yt_playlist.library.spotify_library.with_retry', lambda operation: operation())
 
 
 @pytest.mark.parametrize('operation', ['find-album-candidates', 'resolve-album'])

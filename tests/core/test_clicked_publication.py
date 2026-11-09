@@ -10,8 +10,10 @@ from tests.core.test_ranked_state_preparation import seed
 from tests.store_fixture_support import (
     guarded_numbered_store as guarded_installed,
     numbered_store as installed,
+    native_sql_calls,
     preparation_ddl_connection,
     publication_consumer_reads,
+    without_query_timing,
 )
 from yt_playlist.core import library_pool_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
@@ -51,13 +53,14 @@ def rejection_inputs(store, conn):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-@pytest.mark.usefixtures('publication_consumer_reads')
+@pytest.mark.usefixtures('publication_consumer_reads', 'native_sql_calls', 'without_query_timing')
 def test_preopened_readers_preserve_all_lanes_unknown_clock_and_original_bytes(installed, monkeypatch):
     store, _ = installed
     originals, _ = seed(store)
     owner = publication.OWNER
     other = Store(store._db_path)
     try:
+        other.conn.execute('PRAGMA synchronous=OFF')
         other.init_schema(defer_metadata=True)
         stage = ready(store.conn, size=1)
         assert owner.stage(store.conn, stage).copied == 4
@@ -79,6 +82,7 @@ def test_preopened_readers_preserve_all_lanes_unknown_clock_and_original_bytes(i
         other.conn.close()
     reopened = Store(store._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema(defer_metadata=True)
         assert reopened.rec_proposals.get_proposals('home_pool:wheelhouse') == json.loads(originals['home_pool:wheelhouse'])
     finally:

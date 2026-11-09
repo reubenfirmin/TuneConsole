@@ -219,6 +219,7 @@ def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_r
 
 
 @pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_empty_predecessor_selection_and_native_fresh_bootstrap(installed,tmp_path):
     store,_ = installed
     identity = ready(store.conn)
@@ -227,6 +228,7 @@ def test_empty_predecessor_selection_and_native_fresh_bootstrap(installed,tmp_pa
     assert all(store.rec_proposals.get_proposals(surface) is None for surface in VALUES)
     current = Store(tmp_path/'fresh.db')
     try:
+        current.conn.execute('PRAGMA synchronous=OFF')
         current.init_schema(defer_metadata=True)
         assert publication.selected(current.conn) is None
         for surface,value in VALUES.items():

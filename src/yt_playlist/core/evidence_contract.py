@@ -2,8 +2,11 @@
 import json
 
 
+_ENCODER = json.JSONEncoder(sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return _ENCODER.encode(value).encode("utf-8")
 
 
 def artifact_components(node):

@@ -9,27 +9,49 @@ from yt_playlist.rec import rec_params
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 from tests.taste_support import _client
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
+from tests.recommendation_support import seed_publication_subjects
+from tests.home_fixture_support import without_metadata_providers
 
 
 @pytest.fixture
-def duration_store(monkeypatch):
-    """Track-length controls need settings and playlist SQL, not a vocabulary import."""
+def checkpoint_controls(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
-    from yt_playlist.core.store import Store
+    from yt_playlist.rec import candidate_refresh
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import taste
+    from yt_playlist.web.routes import app_update, audio_preview, taste
 
-    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [taste.build(ctx)])
+    # Checkpoint persistence owns the real controls and rendered checkpoint;
+    # background candidate ranking and other feature routers are lower inputs.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, taste)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(candidate_refresh, 'due', lambda *args: False)
+
+
+@pytest.fixture(scope='module')
+def controls_schema():
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def duration_store(monkeypatch, tmp_path, controls_schema, without_metadata_providers):
+    """Real control SQL and rendering, below vocabulary and reader admission."""
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, taste
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, taste)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
-    with bounded_consumer_schema(()) as schema:
-        database = Store(':memory:')
-        try:
-            initialize_consumer(database, schema)
+    with _file_consumer_store(tmp_path, controls_schema, snapshot_guards=False) as database:
+        with reuse_reporting_reader(database, monkeypatch):
             yield database
-        finally:
-            database.conn.close()
 
 def test_retired_source_weight_cannot_be_saved_or_learned(store):
     client = _client(store)
@@ -239,7 +261,9 @@ def test_taste_reset_all_clears_weights_and_params(store):
     assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
-def test_recommendation_controls_are_all_available_and_rendered_once(store):
+def test_recommendation_controls_are_all_available_and_rendered_once(
+        duration_store, native_sql_calls, without_query_timing):
+    store = duration_store
     class RecommendationPanel(HTMLParser):
         def __init__(self):
             super().__init__()
@@ -275,9 +299,11 @@ def test_recommendation_controls_are_all_available_and_rendered_once(store):
         assert 'hx-get="/taste/panels/recommendations"' in client.get("/taste" + query).text
 
 
-def test_first_change_saves_recovery_point_and_later_changes_keep_it(store):
+def test_first_change_saves_recovery_point_and_later_changes_keep_it(
+        store, native_sql_calls, without_query_timing, checkpoint_controls):
     client = _client(store)
-    store.tracks.upsert_track("checkpoint-song", "Song", "Artist", None, 200)
+    seed_publication_subjects(store, [dict(key='song|artist', video_id='checkpoint-song',
+        title='Song', artist='Artist', duration_s=200)])
     store.rec_model.set_weight("genre:rock", 0, lo=0, now=-1000)
     store.rec_model.set_weight("era:1990s", 1.7, now=-500)
     original_weights = store.rec_model.weight_records()

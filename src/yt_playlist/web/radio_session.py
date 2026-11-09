@@ -17,6 +17,8 @@ from uuid import uuid4
 from weakref import ref
 from types import SimpleNamespace
 
+from starlette.websockets import WebSocketDisconnect
+
 from yt_playlist.core.activity import (activity_for, cancellable_work, check_stopping, WorkClosing)
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.bridge import BridgeError
@@ -289,8 +291,8 @@ class PlaylistRadio:
                 s = None
         if s:
             self._persist(s)
-        elif launch_id is not None:
-            self.persistence.stop_launch(launch_id)
+        else:
+            self.persistence.stop_saved(launch_id)
         return {"ok": True, **self.status()}
 
     def suspend(self):
@@ -299,6 +301,26 @@ class PlaylistRadio:
             if self.session:
                 self.session.stop.set()
                 self.session.wake.set()
+
+    def resume_playback(self, playlist, video, episode, *, intent):
+        """An explicit Play may reclaim the saved session; reconnect alone never navigates."""
+        with self.persistence.lock:
+            state = self.state()
+            with self.lock:
+                if self.session is not None:
+                    state = self.status()
+                target = state.get('resume_player')
+                if (not self.ctx.bridge.connected or not target or
+                        (target['playlist_ytm_id'], target['video_id'], target['radio_session_id'])
+                        != (playlist, video, episode)):
+                    return {'ok': False}
+                try:
+                    sent = self.playback.navigate(playlist, video, intent=intent)
+                except BridgeError:
+                    logger.debug('Radio resume deferred', exc_info=True)
+                    return {'ok': False}
+        # Scheduling a navigation is not confirmation that playback has started.
+        return {'ok': bool(sent)}
 
     @staticmethod
     def _target(s):
@@ -410,8 +432,9 @@ class PlaylistRadio:
             if not confirmed_player:
                 self.listening.observe(s)
                 player = self.listening.player(s)
-            if player and not player.get('paused') and player.get("video_id") in ids:
-                self.listening.record(s, ids.index(player["video_id"]))
+            position = self.listening.position(s, player.get('video_id')) if player else None
+            if position is not None and not player.get('paused'):
+                self.listening.record_player(s, position, player)
             # An acknowledged write can have raced a song change. Replan the
             # unsent future only after pending readback has settled that write.
             view, history = s.candidate_view(), s.history_view()
@@ -420,7 +443,7 @@ class PlaylistRadio:
                 tail.proposed = self.policy.replenish(view, history, valid, tail.slot, excluded=tail.excluded)
                 tail.choice_id = None
                 self._persist(s)
-            decision = tail.plan(remote, s.playlist_view(self.ctx.now_fn()), player)
+            decision = tail.plan(remote, s.playlist_view(self.ctx.now_fn()), self.listening.queue_player(s, player))
             # The target is playable as soon as its addition is confirmed. Remove
             # the old future while Music loads it, rather than delaying playback
             # for that independent write and its readback.
@@ -916,7 +939,8 @@ class PlaylistRadio:
                             if s.replacement or s.requested_direction or s.pending:
                                 s.stop.wait(.25)
                                 continue
-                        index = ids.index(video_id) if video_id in ids else -1
+                        queued = self.listening.queue_player(s, player).get('video_id')
+                        index = ids.index(queued) if queued in ids else -1
                         if index >= 0 and index + 1 < len(ids):
                             successor = ids[index + 1]
                             status, result = 0, {"error": "Native queue is still refreshing"}
@@ -978,7 +1002,13 @@ class PlaylistRadio:
                         if s.initial_tracks:
                             self._complete_start(s)
                         else:
-                            self.listening.observe(s)
+                            try:
+                                self.listening.observe(s)
+                            except WebSocketDisconnect:
+                                if (s.stop.is_set() or self.work.closing_reason == 'shutdown'
+                                        or not self.ctx.bridge.connected):
+                                    break
+                                raise
                             if s.halted:
                                 # A conflict pauses mutations, not the radio UI.
                                 # Resume only after readback returns to a state
@@ -1009,8 +1039,10 @@ class PlaylistRadio:
                         if not s.playback_confirmed:
                             s.stop.set()
                     self._persist(s)
+                except WorkClosing:
+                    break
                 except Exception as exc:
-                    logger.warning("Radio Session append failed", exc_info=True)
+                    logger.warning("Radio Session maintenance failed", exc_info=True)
                     with self.lock:
                         s.error = str(exc)
         finally:
@@ -1058,11 +1090,10 @@ class PlaylistRadio:
             if not self._finish_replacement(s):
                 return
         player = self.listening.player(s)
-        position = next((i for i, t in enumerate(s.tracks)
-                         if player and t["video_id"] == player.get("video_id")), None)
+        position = self.listening.position(s, player.get('video_id')) if player else None
         if position is None:
             return
-        self.listening.record(s, position)
+        self.listening.record_player(s, position, player)
         changed = self.listening.feedback(s)
         if position < s.furthest:
             self.listening.update(s, force=changed)
@@ -1086,11 +1117,10 @@ class PlaylistRadio:
             player = self.listening.player(s)
             if s.stop.is_set() or player is None:
                 return
-            position = next((i for i, t in enumerate(s.tracks)
-                             if t["video_id"] == player.get("video_id")), None)
+            position = self.listening.position(s, player.get('video_id'))
             if position is None:
                 return
-            self.listening.record(s, position)
+            self.listening.record_player(s, position, player)
             self.listening.update(s)
             if len(s.tracks) - position - 1 >= LOOKAHEAD:
                 s.error = None

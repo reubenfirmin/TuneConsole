@@ -5,11 +5,28 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls
 from yt_playlist.core import recommendation_pools as pools
 from yt_playlist.core.db_rebuild import build as rebuild
 from yt_playlist.core.store import Store
 from yt_playlist.repos import recommendation_publication as publication
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """The compactor operates on private files without application workers."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Copying owns installed rows, retained files and reference/format checks;
+    # genre inference and initial application admission are lower inputs.
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 @pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
@@ -95,11 +112,10 @@ def test_unknown_reference_owner_preserves_generation_and_complete_pool(ranked,t
         assert not copied.execute('PRAGMA foreign_key_check').fetchone()
 
 
-def test_metadata_retirement_refuses_an_unaudited_history_reference(tmp_path):
+def test_metadata_retirement_refuses_an_unaudited_history_reference(tmp_path, consumer_store):
     from yt_playlist.core import metadata_runtime
-    store = Store(tmp_path/'history.db')
+    store = consumer_store(tmp_path/'history.db')
     try:
-        store.init_schema()
         with store.conn:
             metadata_runtime.activate(store.conn)
             store.conn.execute('CREATE TABLE future_metadata_owner(id INTEGER PRIMARY KEY,'

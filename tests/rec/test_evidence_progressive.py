@@ -9,7 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.rec.test_evidence_responsiveness import evidence_template, library
+from tests.rec.test_evidence_responsiveness import (
+    _pristine_current_schema, evidence_genres, library,
+)
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from yt_playlist.core import fao, playback_feedback
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
 from yt_playlist.core.evidence_ledger import EvidenceLedger
@@ -100,6 +103,7 @@ def test_publication_contention_cannot_outlast_the_workers_slice(tmp_path):
     assert not ledger.maintain(0).get('deferred')
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_checkpoint_stage_uses_multiple_prefixes_then_resumes_after_restart(library, monkeypatch):
     for index in range(8):
         choice_evidence.issue(library, 'mixes', [{'id': 'one'}], 20 + index, context={'at': 20 + index})
@@ -121,6 +125,7 @@ def test_checkpoint_stage_uses_multiple_prefixes_then_resumes_after_restart(libr
     monkeypatch.setattr(choice_retention, 'acknowledge', acknowledge)
     reopened = Store(library._db_path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema()
         result = choice_evidence.maintain_storage(reopened, 100)
         assert not result.get('deferred')

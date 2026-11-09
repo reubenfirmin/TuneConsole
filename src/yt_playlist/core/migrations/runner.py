@@ -408,9 +408,15 @@ def _migrate(conn, registry, clock, defer_validation, inspections):
                     # adapters. Inspect structure on one committed read snapshot;
                     # neither a writer reservation nor full data scans belong
                     # before HTTP admission, even when no migration is pending.
-                    validate_version(conn, current, foreign_keys=False, data=False)
                     from . import regular
-                    applied = regular.validate(conn)
+                    from ..schema_inspection import reuse_objects
+
+                    # Admission reads one pinned schema. Share that catalog
+                    # across both sets of validators, then discard it before
+                    # rollback or any pending regular DDL.
+                    with reuse_objects(conn):
+                        validate_version(conn, current, foreign_keys=False, data=False)
+                        applied = regular.validate(conn)
                     conn.rollback()
                     # Both histories and their installed owners were checked
                     # on the same read snapshot. Only pending changes need the

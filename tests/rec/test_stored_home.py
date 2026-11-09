@@ -7,7 +7,10 @@ import pytest
 from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
 from tests.repos.test_typed_recommendation_publication import publish, plan
 from tests.rec.test_stored_fresh import fresh, forbid_legacy
-from tests.store_fixture_support import native_sql_calls, reuse_reporting_reader
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
+    native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.rec import bundle_storage, mode_surfaces, rec_params
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
@@ -57,8 +60,20 @@ def keys(cards):
             for card in cards]
 
 
-def test_real_initial_import_prepares_and_serves_home_before_modes_without_legacy_documents(store, monkeypatch):
-    from tests.rec.test_home_prepared import service
+@pytest.fixture
+def initial_import_store(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # This workflow imports 24 actual catalog entries with no genre metadata.
+    # Schema admission, taxonomy curation and snapshot races have other owners.
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
+            with mock_snapshot_coordinator(store, monkeypatch):
+                yield store
+
+
+def test_real_initial_import_prepares_and_serves_home_before_modes_without_legacy_documents(
+        initial_import_store, monkeypatch):
+    store = initial_import_store
+    from tests.home_fixture_support import service
     from yt_playlist.rec import home_prepared, surfaces
     for index in range(24):
         store.tracks.upsert_track(f'import-{index}', f'Song {index}', f'Artist {index}', None, None)

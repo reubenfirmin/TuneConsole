@@ -12,6 +12,8 @@ import pytest
 from tests.core.test_home_output_preparation import seed, root_rows
 from tests.store_fixture_support import (
     _numbered_input,
+    mock_preparation_schema,
+    mock_regular_numbered_input,
     mock_snapshot_coordinator,
     native_sql_calls,
     preparation_ddl_connection,
@@ -19,7 +21,6 @@ from tests.store_fixture_support import (
     reuse_reporting_reader,
     without_query_timing,
 )
-from tests.store_fixture_support import numbered_store as unadmitted_installed
 from tests.store_fixture_support import publication_preparation_input
 from yt_playlist.core import group_evidence, recommendation_custody, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -36,14 +37,21 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture
+def unadmitted_installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
+        yield value
+
+
+@pytest.fixture
 def installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
     with _numbered_input(request.param, tmp_path, monkeypatch, snapshot_guards=True) as value:
         yield value
 
 
-def prepare(conn):
+def prepare(conn, *, install=True):
     for job in (preparation.JOB, preparation.ROOT_JOB):
-        job.install(conn)
+        if install:
+            job.install(conn)
         for _ in range(2000):
             if job.step(conn, batch_size=8).status == 'prepared':
                 break
@@ -51,13 +59,22 @@ def prepare(conn):
             pytest.fail('Home preparation did not finish bounded fixture')
 
 
-def ready(conn, size=8):
-    prepare(conn)
+def ready(conn, size=8, *, install=True):
+    prepare(conn, install=install)
     for _ in range(2000):
         stage = publication.OWNER.step(conn, batch_size=size)
         if stage.complete:
             return stage.id
     pytest.fail('Home publication did not finish bounded fixture')
+
+
+def completed_preparation_schema(conn, monkeypatch):
+    # Publication owns data/file verification and retained roots. Its unchanged
+    # preparation SQL is a lower input, admitted once on this connection.
+    for job in (preparation.JOB, preparation.ROOT_JOB):
+        job.install(conn)
+        definition = getattr(job, 'definition', job)
+        mock_preparation_schema(monkeypatch, definition, conn)
 
 
 def real_roots(store):
@@ -78,12 +95,13 @@ def real_roots(store):
         recommendation_custody.retain(store.conn, 'prepared', 'proposal:home_prepared:recommendations', generation)
 
 
-@pytest.mark.parametrize('installed', [79, 90], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [79, 90], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
-def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(installed):
-    store, _ = installed
+def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(unadmitted_installed, monkeypatch):
+    store, _ = unadmitted_installed
     originals = seed(store)
     real_roots(store)
+    completed_preparation_schema(store.conn, monkeypatch)
     roots = root_rows(store.conn)
     other = Store(store._db_path)
     try:
@@ -91,7 +109,7 @@ def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(
         with other.read_snapshot() as snapshot:
             pinned = snapshot.store
             assert pinned.rec_proposals.get_proposals('home_prepared') == json.loads(originals['home_prepared'])
-            stage = ready(store.conn, size=1)
+            stage = ready(store.conn, size=1, install=False)
             publication.OWNER.publish(store.conn, stage=stage)
             assert publication.OWNER.selected(pinned.conn) is None
         def deny_source(action, owner, column, *_):
@@ -112,6 +130,7 @@ def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(
         assert root_rows(store.conn) == roots
         assert publication.OWNER.root_stage(store.conn, stage)['copied'] == sum(map(len, roots.values()))
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+        mock_regular_numbered_input(monkeypatch, other.conn)
         regular.migrate(other.conn)
     finally:
         other.conn.close()
@@ -211,14 +230,15 @@ def test_interrupted_publication_and_source_race_cannot_select_partial_state(ins
     owner.publish(store.conn, stage=ready(store.conn))
 
 
-@pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [90], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
 def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(
-        installed, preparation_ddl_connection, publication_consumer_reads, monkeypatch):
-    store, _ = installed
+        unadmitted_installed, preparation_ddl_connection, publication_consumer_reads, monkeypatch):
+    store, _ = unadmitted_installed
     originals = seed(store)
+    completed_preparation_schema(store.conn, monkeypatch)
     owner = publication.OWNER
-    stage = ready(store.conn)
+    stage = ready(store.conn, install=False)
     owner.publish(store.conn, stage=stage)
     filename = store.conn.execute('SELECT filename FROM '+preparation.PARTS+" WHERE surface='home_prepared'").fetchone()[0]
     Path(filename).unlink()
@@ -244,9 +264,10 @@ def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(
         reopened.conn.execute('PRAGMA synchronous=OFF')
         with schema_inspection.reuse_tables(reopened.conn):
             reopened.init_schema(defer_metadata=True)
+            completed_preparation_schema(reopened.conn, monkeypatch)
             with reuse_reporting_reader(reopened, monkeypatch):
                 preparation.ROOT_JOB.step(reopened.conn, retry=True)
-                owner.publish(reopened.conn, stage=ready(reopened.conn))
+                owner.publish(reopened.conn, stage=ready(reopened.conn, install=False))
     finally:
         reopened.conn.close()
 
@@ -288,12 +309,13 @@ def test_interrupted_root_copy_resumes_from_another_connection(installed):
         other.conn.close()
 
 
-@pytest.mark.parametrize('installed', [90], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [90], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
-def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installed, monkeypatch):
-    store, _ = installed
+def test_slow_file_verification_leaves_writer_and_regular_schema_usable(unadmitted_installed, monkeypatch):
+    store, _ = unadmitted_installed
     seed(store)
-    stage = ready(store.conn)
+    completed_preparation_schema(store.conn, monkeypatch)
+    stage = ready(store.conn, install=False)
     blocked, release = threading.Event(), threading.Event()
     read = publication.files._read
     def slow(*args, **kwargs):
@@ -305,7 +327,10 @@ def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installe
     monkeypatch.setattr(publication.files, '_read', slow)
     other = Store(store._db_path)
     try:
+        other.conn.execute('PRAGMA synchronous=OFF')
         other.init_schema(defer_metadata=True)
+        completed_preparation_schema(other.conn, monkeypatch)
+        mock_regular_numbered_input(monkeypatch, other.conn)
         with ThreadPoolExecutor(max_workers=1) as pool:
             publisher = pool.submit(publication.OWNER.publish, store.conn, stage=stage)
             assert blocked.wait(2)
@@ -326,7 +351,7 @@ def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installe
             with pytest.raises(MigrationError):
                 publisher.result(2)
         assert publication.OWNER.selected(other.conn) is None
-        publication.OWNER.publish(other.conn, stage=ready(other.conn))
+        publication.OWNER.publish(other.conn, stage=ready(other.conn, install=False))
     finally:
         other.conn.close()
 

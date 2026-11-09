@@ -2,6 +2,7 @@
 from yt_playlist.rec import radio_tuning
 from yt_playlist.rec.radio_directions import decay_progress
 from yt_playlist.web.radio_state import Session, selected_slot
+from yt_playlist.web.radio_recovery import observed_queue, resume_player
 
 
 def home_view(bootstrap):
@@ -32,9 +33,10 @@ def home_view(bootstrap):
 
 def history_tracks(tracks, heard, position, furthest):
     """Keep observed playback even when a racing suffix edit removed that song."""
+    indices = {track['video_id']: i for i, track in enumerate(tracks)}
+    tracks = observed_queue(tracks, heard)
     end = min(len(tracks), max(1, furthest + 1, position + 1))
     prefix = tracks[:end]
-    indices = {track["video_id"]: i for i, track in enumerate(prefix)}
     history, seen, cursor = [], set(), 0
 
     def append(track):
@@ -43,13 +45,12 @@ def history_tracks(tracks, heard, position, furthest):
             seen.add(track["video_id"])
 
     for track in heard:
-        index = indices.get(track["video_id"])
+        index = indices.get(track.get('_radio_queue_video_id', track['video_id']))
         if index is not None:
-            for previous in prefix[cursor:index + 1]:
+            for previous in prefix[cursor:index]:
                 append(previous)
             cursor = max(cursor, index + 1)
-        else:
-            append(track)
+        append(track)
     for track in prefix[cursor:]:
         append(track)
     return history
@@ -71,6 +72,8 @@ def status_view(s: Session | None, *, active: bool, connected: bool, now: float)
         "title": s.title if s else None,
         "playlist_url": f"https://music.youtube.com/playlist?list={s.playlist}" if s and s.playlist else None,
         "position": s.position if s else -1,
+        "resume_player": resume_player(s.tracks, s.heard, s.position, playlist=s.playlist,
+            title=s.title, episode=s.episode_id, stopped=s.stopped_by_user) if s else None,
         "ahead": max(0, len(s.tracks) - s.position - 1) if s and s.position >= 0 else None,
         "tracks": list(s.tracks) if s else [],
         "history": history, "history_count": len(history),
@@ -101,6 +104,9 @@ def saved_view(saved: dict, *, active: bool) -> dict:
         "starting": bool(active and saved.get("initial_tracks")), "local_id": saved.get("local_id"),
         "playlist_id": saved.get("playlist"), "title": saved.get("title"), "tracks": tracks,
         "position": saved.get("position", -1), "menu_id": plan.get("menu_id"),
+        "resume_player": resume_player(tracks, saved.get('heard', []), saved.get('position', -1),
+            playlist=saved.get('playlist'), title=saved.get('title'), episode=saved.get('episode_id'),
+            stopped=saved.get('stopped')),
         "tuning": saved.get("tuning", radio_tuning.DEFAULTS), "metadata_revision": 0,
         "history": history, "history_count": len(history),
         "updating": bool(replacement), "pending_slot": replacement["slot"] if replacement else None,

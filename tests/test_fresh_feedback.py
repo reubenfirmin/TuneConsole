@@ -4,18 +4,31 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec import mode_surfaces as ms
+from yt_playlist.rec import home_cards, mode_surfaces as ms
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.test_mode_cards_route import prepare_home
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.home_fixture_support import (
+    home_control_routes, home_routes_only, publish_cards, service, without_metadata_providers,
+)
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, uncontended_file_consumer_store as store, without_query_timing,
+)
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_control_routes',
+                                    'without_metadata_providers', 'native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+        yield schema
 
 
 def _client(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
+    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0,
+                                 background_work=False),
                       base_url="http://127.0.0.1")
 
 
@@ -31,9 +44,13 @@ def test_fresh_cold_item_gets_feedback_radio_does_not(store):
              "artist": f"Cold Artist {i}", "album": "", "thumbnail": None,
              "plays": 0, "reason": "New", "lane": "cold", "genre": "House"} for i in range(6)]
     payload = {"1": {surf: (cold if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    seed_bundle_subjects(store, payload, fresh=cold)
+    seed_publication_subjects(store, cold, discoveries=[item['key'] for item in cold])
     publish_bundles(store, payload, 1000.0, fresh=cold)
-    prepare_home(store)
+    # Render a real assembled fresh menu. Repeated worker menu preparation is
+    # below this HTTP-control boundary and has its own preparation owners.
+    result = service(store).cards(home_cards.CardsRequest(1000, record=False))
+    assert result.protos
+    publish_cards(store, result, 1000)
     c = _client(store)
     html = c.get("/home/cards").text
     assert "Cold Song 0" in html

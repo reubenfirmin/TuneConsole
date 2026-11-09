@@ -3,6 +3,8 @@ import sqlite3
 
 import pytest
 
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.store_fixture_support import _numbered_input, native_sql_calls, without_query_timing
 from yt_playlist.core import tv_recommendation_state as owner
 from yt_playlist.core import entity_names
 from yt_playlist.core.migrations import v095_recommendation_state as migration
@@ -10,20 +12,26 @@ from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.store import Store
 from yt_playlist.library import tv_stream
 from yt_playlist.rec import tv_artwork
-from tests.test_tv_stream import stream, video
+from tests.test_tv_stream import install_catalog_inputs, stream, video
+
+
+pytestmark = pytest.mark.usefixtures('home_routes_only', 'without_metadata_providers',
+                                    'native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def stream_catalog_inputs(request, monkeypatch):
+    if 'stream' in request.fixturenames:
+        install_catalog_inputs(request.getfixturevalue('store'), monkeypatch)
 
 
 @pytest.fixture
-def store(tmp_path, _pristine_installed_schema):
-    result = Store(tmp_path / 'tv.db')
-    try:
-        _pristine_installed_schema(94).backup(result.conn)
-        # Backup excludes TEMP views. Ordinary admission must recreate these
-        # for this connection while retaining the genuine v94 physical owners.
+def store(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    with _numbered_input(94, tmp_path, monkeypatch) as (result, _):
+        # Supply completed physical owners. Ordinary startup still creates its
+        # connection-local read views and keeps the original installed history.
         admit(result, through=94)
         yield result
-    finally:
-        result.conn.close()
 
 
 def history(store):

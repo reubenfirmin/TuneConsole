@@ -17,6 +17,7 @@ from yt_playlist.rec.radio_candidates import POLICY_VERSION
 from yt_playlist.web.radio_playback import PlaybackObservation, PlaybackRequest, PlaybackUnavailable
 from yt_playlist.web.radio_playlist_io import PlaylistPending
 from yt_playlist.web.radio_state import selected_slot
+from yt_playlist.web.radio_recovery import native_position, observed_queue, playback_position
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class RadioListening:
         refresh_at = self.now_fn() if refresh else None
         try:
             observation = self.playback.observe(PlaybackRequest(
-                s.playlist, tuple(t["video_id"] for t in s.tracks), refresh))
+                s.playlist, tuple(t["video_id"] for t in observed_queue(s.tracks, s.heard)), refresh))
         except PlaybackUnavailable as exc:
             s.observer_error = str(exc)
             logger.debug("Radio observer reconnecting: %s", exc)
@@ -70,11 +71,24 @@ class RadioListening:
             self.report(s, result)
         if observation.player(s.playlist) is None:
             return
-        position = next((i for i, track in enumerate(s.tracks)
-                         if player.get("playlist_ytm_id") == s.playlist
-                         and track["video_id"] == player.get("video_id")), None)
+        video = player.get('video_id')
+        position = self.position(s, video)
+        if position is None:
+            position = native_position(s.tracks, s.heard, s.playlist, result)
+            if position is not None:
+                # Read exact-upload metadata; queue evidence establishes only the
+                # occurrence. The saved playlist and mutation journal stay intact.
+                track = self.upload(s, video)
+                if track is not None:
+                    track = {**track, '_radio_queue_video_id': s.tracks[position]['video_id']}
+                    with self.lock:
+                        s.candidates.retain([track])
+                    self.record(s, position, track=track)
+                    self.update(s)
+                    return
+                position = None
         if position is not None and (position != s.position or s.observed_video != player.get("video_id")):
-            self.record(s, position)
+            self.record_player(s, position, player)
             self.update(s)
         elif position is None and player.get("playlist_ytm_id") == s.playlist:
             video = player.get("video_id")
@@ -84,6 +98,37 @@ class RadioListening:
             if video in owned and video in s.candidates.by_video:
                 self.record(s, -1, track=s.candidates.by_video[video])
                 self.update(s)
+
+    @staticmethod
+    def position(s, video):
+        return playback_position(s.tracks, s.heard, video)
+
+    def upload(self, s, video):
+        track = s.candidates.by_video.get(video) or self.store.radio_catalog.details([video]).get(video)
+        if track is not None:
+            return track
+        playing = self.playback.current()
+        if (playing.get('video_id') != video or playing.get('playlist_ytm_id') != s.playlist
+                or playing.get('metadata_verified') is not True or not playing.get('title')
+                or getattr(self.store, 'activity_paused', False)):
+            return None
+        # Admit the exact observed upload as its own catalog entry. Matching
+        # titles never establish that it is the saved upload's recording.
+        self.store.tracks.observe_track(video, playing['title'], playing.get('artist') or '',
+            thumbnail=playing.get('thumbnail'), now=self.now_fn())
+        return self.store.radio_catalog.details([video]).get(video)
+
+    def queue_player(self, s, player):
+        """Locate native playback for saved-queue edits without changing its identity."""
+        position = self.position(s, player.get('video_id')) if player else None
+        return {**player, 'video_id': s.tracks[position]['video_id']} if position is not None else player
+
+    def record_player(self, s, position, player):
+        video = player.get('video_id')
+        track = next((t for t in reversed(s.heard) if t['video_id'] == video), s.tracks[position])
+        # Also record a return to the saved upload, replacing an earlier native
+        # occurrence mapping while retaining both actual listens in history.
+        self.record(s, position, track={**track, '_radio_queue_video_id': s.tracks[position]['video_id']})
 
     @staticmethod
     def report(s, result):

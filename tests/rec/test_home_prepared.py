@@ -209,6 +209,41 @@ def full_cached_menu(menu_publication_store, monkeypatch):
 
 
 @pytest.fixture
+def choice_menus(menu_publication_store, monkeypatch):
+    """Completed alternatives below feedback-sensitive whole-menu selection.
+
+    Keep twelve distinct four-card menus, all six actual modes and four tracks
+    per card. Worker enumeration/ranking belongs to the preparation owners;
+    this consumer still reads, scores and selects from actual persisted menus.
+    """
+    store = menu_publication_store
+    menus = []
+    with monkeypatch.context() as producer:
+        inputs = controlled_publication_inputs(store, producer, tracks_per_card=4, stable_options=True)
+        for epoch in range(home_prepared.MAX_MENUS):
+            order = tuple((offset + epoch) % 6 for offset in range(6))
+            if epoch >= 6:
+                order = tuple(reversed(order))
+            result = inputs.cards(service(store), home_cards.CardsRequest(
+                1000, epoch=epoch, mode_order=order, record=False))
+            home_prepared.remember(store, None, result, 1000)
+            payload = home_cache.read(store, 'home_tuned')
+            menus.append(payload['menus'][0])
+    payload.update(menus=menus, modes=[
+        {**mode, 'centroid': list(map(float, mode['centroid']))}
+        for mode in store.modes.list_modes()])
+    assert len({tuple(proto['experiment_id'] for proto in menu['protos'])
+                for menu in menus}) == home_prepared.MAX_MENUS == 12
+    assert all(len(menu['protos']) == 4 and all(len(proto['tracks']) == 4 for proto in menu['protos'])
+               for menu in menus)
+    assert home_prepared._valid(payload)
+    home_cache.put(store, home_prepared.SURFACE, payload, 1000)
+    home_cache.put(store, 'home_tuned', None, 1000)
+    home_cache.put(store, 'home_choice', {}, 1000)
+    return store, payload
+
+
+@pytest.fixture
 def publication_inputs(store, monkeypatch):
     return controlled_publication_inputs(store, monkeypatch)
 
@@ -318,8 +353,9 @@ def test_replacement_keeps_collection_fallback_without_restoring_its_profiles(st
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == payload
 
 
-def test_history_diagnostics_do_not_change_generation_but_effective_allocation_does(store):
+def test_history_diagnostics_do_not_change_generation_but_effective_allocation_does(menu_publication_store):
     from yt_playlist.rec import choice_bandit, group_learning, group_serving
+    store = menu_publication_store
     head = publish_groups(store, grouped_recordings([('Jazz', 20, .1), ('Techno', 20, .9)]), now=90)
     groups = [group for group in head['groups'] if group['leaf']]
     assert len(groups) == 2
@@ -1045,14 +1081,8 @@ def test_cached_discovery_honors_unavailability_and_current_tile_metadata(store,
     assert home_prepared.discovery(store, tiles, 1002)["discovery_albums"] == []
 
 
-def test_feedback_changes_the_next_choice_and_tracks_can_repeat(store, prepared):
-    # A bounded worker slice can publish only one menu. Accumulate alternatives
-    # through normal continuation before testing a draw between different menus.
-    for _ in range(home_prepared.MAX_MENUS):
-        if len(prepared['menus']) == home_prepared.MAX_MENUS:
-            break
-        prepared = home_prepared.prepare(store, 1000)
-        assert prepared is not None
+def test_feedback_changes_the_next_choice_and_tracks_can_repeat(choice_menus):
+    store, prepared = choice_menus
     assert len(prepared['menus']) == home_prepared.MAX_MENUS
     first = home_prepared.cards(store, prepared, 1000, service(store), record=False)
     first_modes = {p["mode_id"] for p in first.protos if p.get("mode_id") is not None}

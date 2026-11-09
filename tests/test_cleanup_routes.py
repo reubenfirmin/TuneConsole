@@ -8,6 +8,7 @@ from yt_playlist.rec.actions import CLEANUP_SURFACE
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 from tests.web_support import _client
+from tests.web_consumer_support import install_routes, route_schema, route_store
 def test_dupe_detail_renders(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
@@ -177,7 +178,9 @@ def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypat
     assert not list(tmp_path.glob("backups/*"))
 
 
-def test_overlap_ignore_excludes_playlist(store):
+def test_overlap_ignore_excludes_playlist(route_store, monkeypatch):
+    store = route_store
+    install_routes(monkeypatch, 'cleanup')
     iid = store.accounts.upsert_account("main", "cred", None, True)
     fav = store.playlists.upsert_playlist(iid, "PLFAV", "Big Mixtape", 3, "h", 1.0)
     a = store.playlists.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)

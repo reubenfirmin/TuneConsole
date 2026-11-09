@@ -10,7 +10,7 @@ import pytest
 
 from tests.prepared_fixture_support import capture_template, coordinates, historical_template, prepared_template, roots
 from tests.rec.test_home_prepared import service
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
 from yt_playlist.core import profile_files
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_prepared, musical_profiles
@@ -34,7 +34,7 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture(autouse=True)
-def private_clone_sql(native_sql_calls):
+def private_clone_sql(native_sql_calls, without_query_timing):
     """Keep actual SQL, guards and files below single-threaded copy checks.
 
     Handle coordination and diagnostics have independent owners in
@@ -377,22 +377,26 @@ def test_home_seed_templates_keep_matching_unprepared_inputs(
     assert set(library) | set(discovery) == keys
     heads = template.source.recommendations.heads()
     for target in (template.source, store, file_backed_store):
-        assert target.rec_query.tracks_by_keys(keys) == library
-        assert target.discovery.discovered_tracks_by_keys(keys) == discovery
-        assert target.musical_profiles.by_keys(keys) == profiles
-        assert target.recommendations.heads() == heads
-        assert target.rec_proposals.has_proposals('mode_bundles') == published
-        assert target.rec_proposals.get_proposals(home_prepared.SURFACE) is None
-        assert target.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 18 * tracks_per_lane
-        assert target.conn.execute('SELECT count(*) FROM discovery_memberships').fetchone()[0] == 6 * tracks_per_lane
-        modes = target.modes.list_modes()
-        assert len(modes) == 6
-        for mid, (mode, genre) in enumerate(zip(modes, genres)):
-            assert (mode['mode_id'], mode['label'], mode['size']) == (mid, genre, 50)
-            assert mode['families'] == mode['rep_keys'] == []
-            np.testing.assert_array_equal(mode['centroid'], np.eye(6, dtype=np.float32)[mid])
+        # Each clone's full comparison belongs to one private committed view;
+        # rebuilding the same memory snapshot for every field adds no custody
+        # or isolation evidence.
+        with target.read_view() as reader:
+            assert reader.rec_query.tracks_by_keys(keys) == library
+            assert reader.discovery.discovered_tracks_by_keys(keys) == discovery
+            assert reader.musical_profiles.by_keys(keys) == profiles
+            assert reader.recommendations.heads() == heads
+            assert reader.rec_proposals.has_proposals('mode_bundles') == published
+            assert reader.rec_proposals.get_proposals(home_prepared.SURFACE) is None
+            assert reader.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 18 * tracks_per_lane
+            assert reader.conn.execute('SELECT count(*) FROM discovery_memberships').fetchone()[0] == 6 * tracks_per_lane
+            modes = reader.modes.list_modes()
+            assert len(modes) == 6
+            for mid, (mode, genre) in enumerate(zip(modes, genres)):
+                assert (mode['mode_id'], mode['label'], mode['size']) == (mid, genre, 50)
+                assert mode['families'] == mode['rep_keys'] == []
+                np.testing.assert_array_equal(mode['centroid'], np.eye(6, dtype=np.float32)[mid])
+            assert reader.conn.execute('PRAGMA foreign_key_check').fetchall() == []
         assert getattr(target, '_fixture_bundle_payload', {}) == template.bundles
-        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     with pytest.raises(sqlite3.OperationalError, match='readonly'):
         template.source.settings.set_setting('private_home_seed', 'forbidden')
@@ -438,10 +442,13 @@ def test_home_candidate_templates_keep_private_complete_inputs(
     assert len({template.source._evidence_key, store._evidence_key, file_backed_store._evidence_key}) == 3
     bundle = template.bundles
     keys = {item['key'] for items in bundle['all'].values() for item in items}
-    library = template.source.rec_query.tracks_by_keys(keys)
-    discovery = template.source.discovery.discovered_tracks_by_keys(keys)
+    with template.source.read_view() as reader:
+        library = reader.rec_query.tracks_by_keys(keys)
+        discovery = reader.discovery.discovered_tracks_by_keys(keys)
+        home = reader.rec_proposals.get_proposals(home_prepared.SURFACE)
+        heads = reader.recommendations.heads()
+        accounts = reader.accounts.get_accounts()
     assert set(library) | set(discovery) == keys
-    home = template.source.rec_proposals.get_proposals(home_prepared.SURFACE)
     if template_name == 'adaptive_library_template':
         from yt_playlist.rec import group_serving
         assert len(template.result[0]) == 64
@@ -459,12 +466,13 @@ def test_home_candidate_templates_keep_private_complete_inputs(
 
     for target in (store, file_backed_store):
         assert target._fixture_bundle_payload == bundle
-        assert target.recommendations.heads() == template.source.recommendations.heads()
-        assert target.rec_query.tracks_by_keys(keys) == library
-        assert target.discovery.discovered_tracks_by_keys(keys) == discovery
-        assert target.rec_proposals.get_proposals(home_prepared.SURFACE) == home
-        assert target.accounts.get_accounts() == template.source.accounts.get_accounts()
-        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        with target.read_view() as reader:
+            assert reader.recommendations.heads() == heads
+            assert reader.rec_query.tracks_by_keys(keys) == library
+            assert reader.discovery.discovered_tracks_by_keys(keys) == discovery
+            assert reader.rec_proposals.get_proposals(home_prepared.SURFACE) == home
+            assert reader.accounts.get_accounts() == accounts
+            assert reader.conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     with pytest.raises(sqlite3.OperationalError, match='readonly'):
         template.source.settings.set_setting('private_home_candidate', 'forbidden')
@@ -601,29 +609,32 @@ def test_measured_sounds_template_keeps_complete_private_inputs(
         486 if variant == 'browser' else 480)
     assert len(template.source.rec_query.library_keys()) == (366 if variant == 'browser' else 360)
     assert len(template.source.discovery.discovered_tracks_by_keys(keys)) == 120
-    profiles = template.source.musical_profiles.by_keys(keys)
+    with template.source.read_view() as reader:
+        profiles = reader.musical_profiles.by_keys(keys)
+        heads = reader.recommendations.heads()
+        expected_home = reader.rec_proposals.get_proposals('home_prepared')
     assert len(profiles) == len(keys)
-    heads = template.source.recommendations.heads()
     assert {head['surface'] for head in heads} >= {'vibe:' + preset for preset in home_vibe.PRESETS}
     for target in (template.source, first, second):
-        assert target.musical_profiles.by_keys(keys) == profiles
-        assert target.recommendations.heads() == heads
-        assert len(target.accounts.get_accounts()) == (0 if variant == 'inputs' else 1)
-        home = target.rec_proposals.get_proposals('home_prepared')
-        if variant == 'inputs':
-            assert not home
-        else:
-            assert home == template.source.rec_proposals.get_proposals('home_prepared')
-            assert home['menus'] and len(home['menus'][0]['protos']) == 4
-        if variant == 'browser':
-            playlists = target.playlists.get_playlists()
-            assert len(playlists) == 1
-            assert (playlists[0].provider_playlist_id, playlists[0].title,
-                    playlists[0].track_count) == ('PLZ', 'Old Mix', 3)
-        assert target.settings.get_setting(home_vibe.SETTING) is None
-        assert target.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
-        assert target.rec_model.get_leans() == {}
-        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        with target.read_view() as reader:
+            assert reader.musical_profiles.by_keys(keys) == profiles
+            assert reader.recommendations.heads() == heads
+            assert len(reader.accounts.get_accounts()) == (0 if variant == 'inputs' else 1)
+            home = reader.rec_proposals.get_proposals('home_prepared')
+            if variant == 'inputs':
+                assert not home
+            else:
+                assert home == expected_home
+                assert home['menus'] and len(home['menus'][0]['protos']) == 4
+            if variant == 'browser':
+                playlists = reader.playlists.get_playlists()
+                assert len(playlists) == 1
+                assert (playlists[0].provider_playlist_id, playlists[0].title,
+                        playlists[0].track_count) == ('PLZ', 'Old Mix', 3)
+            assert reader.settings.get_setting(home_vibe.SETTING) is None
+            assert reader.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
+            assert reader.rec_model.get_leans() == {}
+            assert reader.conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert first._fixture_bundle_payload == second._fixture_bundle_payload == bundle
     assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     with pytest.raises(sqlite3.OperationalError, match='readonly'):

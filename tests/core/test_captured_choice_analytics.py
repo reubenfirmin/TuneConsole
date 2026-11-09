@@ -10,6 +10,7 @@ import pytest
 
 from tests.genre_catalog_support import bound_catalog
 from tests.rebuild_startup_support import startup_destination, startup_development_source
+from tests.store_fixture_support import use_native_sql_calls
 from yt_playlist.core import db_handles, evidence_ledger, fao, home_outputs, mix_choices
 from yt_playlist.core.db_rebuild import build, destination, job, mix_history, mix_verification
 from yt_playlist.core.migrations import runner
@@ -30,6 +31,10 @@ def isolated_app_home(tmp_path_factory):
         patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
         patch.delenv('DEEPSEEK_API_KEY', raising=False)
         bound_catalog(patch)
+        # These synchronous analytics owners retain actual SQL, transactions,
+        # custody files, installer and restart. Query diagnostics and per-call
+        # SQL admission are below their captured-evidence boundary.
+        use_native_sql_calls(patch)
         yield
 
 
@@ -85,6 +90,7 @@ def choice_branch(request, startup_development_source, choice_contract, tmp_path
     new_format, legacy, damage = request.param
     path = tmp_path_factory.mktemp('captured-choice-branch') / 'source.db'
     with closing(sqlite3.connect(path)) as conn:
+        conn.execute('PRAGMA synchronous=OFF')
         startup_development_source.backup(conn)
         conn.row_factory = sqlite3.Row
         mix_choices.install(conn)
@@ -104,6 +110,7 @@ def choice_branch(request, startup_development_source, choice_contract, tmp_path
                     for kind in ('artifact', 'opportunity')
                     for file in (ledger.directory / kind).glob('*/*.json')}
     store = Store(path)
+    store.conn.execute('PRAGMA synchronous=OFF')
     branch = dict(store=store, path=path, record=record, expected=expected,
                   legacy=legacy, damage=damage, new_format=new_format, published=False)
     try:
@@ -203,6 +210,7 @@ def reopened_analytics(analytics_interrupted):
     if not branch['damage']:
         branch['store'].conn.close()
         branch['store'] = Store(branch['path'])
+        branch['store'].conn.execute('PRAGMA synchronous=OFF')
         branch['store'].init_schema()
     return branch
 
@@ -241,6 +249,7 @@ def test_fresh_completed_store_reopen_preserves_accepted_display_and_choice_mean
     branch['store'].conn.close()
     branch['store'] = Store(branch['path'])
     store = branch['store']
+    store.conn.execute('PRAGMA synchronous=OFF')
     store.init_schema()
     assert not db_handles.state(branch['path'])['analytics_pending']
     assert store.rec_proposals.get_proposals('home_choice')['protos'][0]['label'] == 'New accepted card'

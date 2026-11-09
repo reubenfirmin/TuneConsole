@@ -1,7 +1,6 @@
 """Independent durable-state observations across bounded staging transactions."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
-from dataclasses import replace
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -10,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.publication_support import plan, publish
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.publication_support import output_plan, plan, publish
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls,
     reuse_reporting_reader,
@@ -40,16 +39,6 @@ def output_staging_store(tmp_path, staging_schema, native_sql_calls, monkeypatch
     with _file_consumer_store(tmp_path, staging_schema) as store:
         with reuse_reporting_reader(store, monkeypatch):
             yield store
-
-
-def output_plan(store, key, count):
-    return replace(plan(store, key, count=3), outputs=tuple(
-        prepared_output(index) for index in range(count)))
-
-
-def prepared_output(index):
-    key = f'chunk-{index:02d}'
-    return publication.Output('home', key, outputs.encode('home', key, {'title': f'Output {index}'}))
 
 
 def manifest(store, generation):
@@ -192,8 +181,8 @@ def test_cancellation_between_manifest_rows_rolls_back_the_whole_batch(file_back
     assert len(manifest(store, build.generation_id)) == 17
 
 
-def test_process_exit_before_manifest_commit_resumes_its_committed_prefix(file_backed_store):
-    store = file_backed_store
+def test_process_exit_before_manifest_commit_resumes_its_committed_prefix(output_staging_store):
+    store = output_staging_store
     previous = publish(store, plan(store, 'previous'))
     prepared = output_plan(store, 'process-exit', 35)
     build = store.recommendations.claim(prepared)
@@ -202,12 +191,13 @@ def test_process_exit_before_manifest_commit_resumes_its_committed_prefix(file_b
     child = subprocess.run([sys.executable, '-c', '''
 import os
 import sys
-from tests.repos.test_recommendation_staging_boundaries import output_plan
-from yt_playlist.core import recommendation_outputs as outputs
+from tests.publication_support import output_plan
+from yt_playlist.core import recommendation_outputs as outputs, schema_inspection
 from yt_playlist.core.store import Store
 
 store = Store(sys.argv[1])
-store.init_schema()
+with schema_inspection.reuse_tables(store.conn):
+    store.init_schema()
 prepared = output_plan(store, 'process-exit', 35)
 build = store.recommendations.claim(prepared, owner=sys.argv[2])
 original, produced = outputs.publish, []
@@ -325,6 +315,7 @@ def test_staging_checkpoint_failure_keeps_durable_success_and_original_policy(fi
     assert store.recommendations.output('home', 'chunk-16') == {'title': 'Output 16'}
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_staging_keeps_installed_layouts_writable_without_changing_migration_history(installed):
     store, _ = installed
     first = publish(store, plan(store, 'last-good'))

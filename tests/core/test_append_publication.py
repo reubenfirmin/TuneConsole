@@ -30,19 +30,20 @@ def disable_periodic_library_sync():
     pass
 
 
-def prepare(owner, conn):
-    owner.worker.install(conn)
+def prepare(owner, conn, *, install=True, size=128):
+    if install:
+        owner.worker.install(conn)
     for _ in range(1000):
-        progress = owner.worker.step(conn, batch_size=128)
+        progress = owner.worker.step(conn, batch_size=size)
         if progress.status == 'prepared':
             return progress
     pytest.fail('Append preparation did not finish bounded fixture')
 
 
-def stage(owner, conn):
-    prepare(owner, conn)
+def stage(owner, conn, *, install=True, preparation_size=128, publication_size=32):
+    prepare(owner, conn, install=install, size=preparation_size)
     for _ in range(100):
-        result = owner.step(conn, batch_size=32)
+        result = owner.step(conn, batch_size=publication_size)
         if result.complete:
             return result.id
     pytest.fail('Append publication map did not finish')
@@ -119,13 +120,18 @@ def test_incorrect_operation_state_members_coverage_or_files_cannot_publish(inst
 
 @pytest.mark.parametrize('installed', [93, 97], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
-def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations(installed):
+def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations(installed, monkeypatch):
     store, version = installed
     names, sources, recipe, state = seed(store, version, count=8192)
     originals, identities = {}, {}
     for name, source in zip(names, sources):
         owner = publication.OWNERS[name]
-        identity = stage(owner, store.conn)
+        # Large member lists exercise bounded copying and continuing writes.
+        # Their unchanged job SQL is completed lower input, admitted once.
+        owner.worker.install(store.conn)
+        mock_preparation_schema(monkeypatch, owner.worker.definition, store.conn)
+        # Keep all 8,192 members and multiple real batches in each phase.
+        identity = stage(owner, store.conn, install=False, preparation_size=512, publication_size=128)
         owner.publish(store.conn, stage=identity)
         originals[name], identities[name] = owner.value(store.conn, identity, source), identity
     tv = publication.OWNERS[names[0]]
@@ -135,7 +141,7 @@ def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations
         store.playlist_recipes.set_recipe('TV', completed, 4)
         assert not snapshot.publish(lambda:None)
     assert tv.selected(store.conn) is None
-    tv.publish(store.conn, stage=stage(tv, store.conn))
+    tv.publish(store.conn, stage=stage(tv, store.conn, install=False, preparation_size=512, publication_size=128))
     assert store.playlist_recipes.get_recipe('TV') == completed
     radio = publication.OWNERS[names[1]]
     with store.read_snapshot() as snapshot:
@@ -149,7 +155,7 @@ def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations
                 radio_storage.save(store.conn, newer, expected=revision, now=4)
         assert not snapshot.publish(lambda:None)
     assert radio.selected(store.conn) is None
-    radio.publish(store.conn, stage=stage(radio, store.conn))
+    radio.publish(store.conn, stage=stage(radio, store.conn, install=False, preparation_size=512, publication_size=128))
     assert radio_storage.load(store.conn)[0] == newer
     for name, source in zip(names, sources):
         owner = publication.OWNERS[name]

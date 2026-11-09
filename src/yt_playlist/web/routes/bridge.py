@@ -168,6 +168,7 @@ def build(ctx) -> APIRouter:
             now_playing = {**now_playing, "source": source,
                            "snapshot_age": max(0, time.monotonic() - seen_at) if seen_at is not None else 0}
         return {"connected": bridge.connected, "now_playing": now_playing,
+                "radio_resume": session.get('resume_player'),
                 "resumable_player": bridge.resumable_player if bridge.connected and
                 bridge.resumable_player and bridge.resumable_player.get("paused") else None,
                 "sensor_health": getattr(bridge, "sensor_health", None),

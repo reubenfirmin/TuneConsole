@@ -170,11 +170,12 @@ class RadioPersistence:
             state.update(operation_values(operation))
             self._write(json.dumps(state, sort_keys=True))
 
-    def stop_launch(self, launch_id: str):
-        """Cancel the matching saved launch without requiring live playback."""
+    def stop_saved(self, launch_id: str | None = None):
+        """Cancel saved recovery without requiring a live native player."""
         with self.lock:
             state = self.load()
-            if not state or state.get('launch_id') != launch_id or state.get('stopped'):
+            if (not state or state.get('stopped')
+                    or (launch_id is not None and state.get('launch_id') != launch_id)):
                 return
             # Retain queue contents and any uncertain operation journal. The
             # ordinary compare-and-save token fences a concurrent replacement.

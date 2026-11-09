@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.repos.test_bundle_storage import bundle_template, recommendations
+from tests.repos.test_bundle_storage import recommendations
 from tests.repos.test_typed_recommendation_publication import collect, plan, publish as publish_plan
 from yt_playlist.rec import measurement, mode_surfaces
 from yt_playlist.repos import recommendation_publication as publication

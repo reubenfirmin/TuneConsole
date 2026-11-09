@@ -5,8 +5,36 @@ from dataclasses import replace
 import pytest
 
 from tests.group_support import publish, recordings
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+    without_query_timing,
+)
 from yt_playlist.core import fao
 from yt_playlist.rec import choice_evidence as choices, group_learning
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Group learning owns publication and evidence, without an HTTP lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def learning_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, learning_schema, monkeypatch):
+    with _file_consumer_store(tmp_path, learning_schema) as database:
+        # Learning owns immutable definitions and frozen contributions. Reuse
+        # an independent real reader below those synchronous consumers; keep
+        # actual snapshot guards, preparation, publication and evidence files.
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 
 def menu(store, head, ids, *, at=1100, oid='groups'):

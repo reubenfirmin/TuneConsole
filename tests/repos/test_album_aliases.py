@@ -5,7 +5,9 @@ import threading
 
 import pytest
 
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as store, without_query_timing,
+)
 from yt_playlist.core import album_aliases, albums, legacy_evidence, album_tracklists
 from yt_playlist.core.migrations import registry
 from yt_playlist.core.migrations.runner import validate_version
@@ -14,6 +16,14 @@ from yt_playlist.core.store import Store
 
 OLD = 'MPREb_KUo26z3y6bY'
 ALIAS = 'MPREb_JVmmhCojzaW'
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Album SQL and worker races do not start application background jobs."""
 
 
 @pytest.fixture(scope='module')

@@ -264,9 +264,17 @@ def bounded_timer(self, delay, interval=0):
     start_timer(self, delay, interval)
     if isinstance(self, pytest_time_limit.RuntimeTarget):
         signal.setitimer(signal.ITIMER_REAL, .01, .01)
+    else:
+        # The blocked probe arms the actual alarm after the parent has read
+        # both live progress receipts, independent of worker startup speed.
+        signal.setitimer(signal.ITIMER_REAL, 0)
 def pytest_configure(config):
+    # These probes block in Python, SQLite and coverage. They never create a
+    # browser; installing Playwright's transport adapters is an unrelated input.
+    pytest_time_limit.SessionLimit.protect_browser_transport = lambda self: None
     if os.environ['PROBE_PACE'] == '1':
         pytest_time_limit._monotonic = lambda: 10. if Path('expire').exists() else 0.
+    if os.environ['PROBE_PACE'] == '1' or os.environ['PROBE_DEADLINE'] == '1':
         pytest_time_limit.SessionLimit.start_timer = bounded_timer
 def pytest_sessionstart(session):
     if not hasattr(session.config, 'workerinput'):
@@ -348,7 +356,8 @@ def test_unstarted():
     assert False
 ''')
     command = [sys.executable, "-m", "pytest", "-p", "pytest_coverage_guard", "-p", "pytest_progress", "-p", "pytest_time_limit", "-p", "pytest_cov.plugin",
-               "-q", "--tb=no", "--test-progress=" + str(progress), "--cov=subject", "--cov-context=test",
+               "-p", "no:doctest", "-p", "no:unittest",
+               "-q", "--assert=plain", "--tb=no", "--test-progress=" + str(progress), "--cov=subject", "--cov-context=test",
                "--cov-report=", "--cov-config=" + str(tmp_path / "coverage.ini"),
                "--fixture-root=" + str(tmp_path / "fixtures")]
     if workers:
@@ -381,9 +390,20 @@ def test_unstarted():
             assert (tmp_path / "entered").exists(), output.read_text()
             # Both terminal and JSONL must already be readable while the call
             # is still blocked, rather than only after a session finishes.
+            # A worker can enter before the coordinator receives its report.
+            expected_event = "phase" if blocked_phase == "call" else "start"
+            live = []
+            while child.poll() is None and time.monotonic() < deadline:
+                if progress.exists():
+                    live = [json.loads(line) for line in progress.read_text().splitlines(keepends=True)
+                            if line.endswith("\n")]
+                if ("start test_probe.py::test_block" in output.read_text()
+                        and live and live[-1]["event"] == expected_event
+                        and live[-1]["nodeid"].endswith("test_block")):
+                    break
+                time.sleep(.002)
             assert "start test_probe.py::test_block" in output.read_text()
-            live = [json.loads(line) for line in progress.read_text().splitlines()]
-            assert live[-1]["event"] == ("phase" if blocked_phase == "call" else "start")
+            assert live[-1]["event"] == expected_event
             assert live[-1]["nodeid"].endswith("test_block")
             assert sum(row['event'] == 'end' for row in live) == 3
             assert child.poll() is None

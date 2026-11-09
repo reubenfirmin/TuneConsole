@@ -13,6 +13,7 @@ from tests.conftest import seed_catalog_track
 from tests.home_fixture_support import without_metadata_providers
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+    without_query_timing,
 )
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
@@ -175,6 +176,7 @@ def test_conflicting_publication_retries_with_backoff_and_keeps_last_good(store,
     assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
 
 
+@pytest.mark.usefixtures('without_query_timing')
 def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(summary_store, monkeypatch):
     store = summary_store
     path = store._db_path

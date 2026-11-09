@@ -7,6 +7,20 @@ from yt_playlist.core.store import Store
 from yt_playlist.library import ratings
 from tests.taste_support import _client
 from tests.derived_rating_support import seed_dislike, seed_like
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import native_sql_calls, without_query_timing
+from tests.home_fixture_support import without_metadata_providers
+
+
+@pytest.fixture
+def retained_rating_routes(monkeypatch, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, taste
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, taste)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
 def test_taste_page_lists_and_clears_bans(store):
     store.tracks.upsert_track("banned-video", "Song", "Band", "An Album", None,
@@ -78,13 +92,15 @@ def test_feedback_summary_explains_signals_and_excludes_learning_markers(store):
 
 
 @pytest.mark.parametrize('clock', ['normal', 'frozen', 'backwards'])
-def test_unban_survives_retained_ratings_sync_and_restart_then_accepts_new_dislike(tmp_path, clock, consumer_store):
+def test_unban_survives_retained_ratings_sync_and_restart_then_accepts_new_dislike(
+        tmp_path, clock, consumer_store, native_sql_calls, without_query_timing, retained_rating_routes):
     path = tmp_path / 'unban.db'
     store = consumer_store(path)
     main = store.accounts.upsert_account('main', 'cred', None, True)
     other = store.accounts.upsert_account('Other', 'cred', 'other', False)
-    store.tracks.upsert_track('banned', 'Banned', 'Artist', '', None)
-    store.tracks.upsert_track('unrelated', 'Unrelated', 'Artist', '', None)
+    seed_publication_subjects(store, [dict(key=title.lower() + '|artist', video_id=video,
+        title=title, artist='Artist', album='') for video, title in
+        (('banned', 'Banned'), ('unrelated', 'Unrelated'))])
     key = store.tracks.identity_key_for_video('banned')
     ratings.record_confirmed(store, main, 'banned', 'DISLIKE', 100)
     ratings.record_confirmed(store, other, 'banned', 'DISLIKE', 110 if clock != 'backwards' else 250)
@@ -105,6 +121,7 @@ def test_unban_survives_retained_ratings_sync_and_restart_then_accepts_new_disli
     store.conn.close()
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         store.init_schema()
         ratings.reconcile_pending(store, main, None)
         ratings.reconcile_pending(store, other, None)

@@ -87,6 +87,27 @@ def remote(client):
     return [t["videoId"] for t in client._tracks["PL"]]
 
 
+@pytest.fixture
+def completed_placement_catalog(store, monkeypatch, native_sql_calls, without_query_timing):
+    inputs = seed(store, completed_catalog=True)
+
+    def known_track(video_id, *args, **kwargs):
+        entry = store.conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=?',
+                                   (video_id,)).fetchone()
+        assert entry is not None, video_id
+        if kwargs.get('library', True):
+            with store.conn:
+                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                                   (entry['recording_id'],))
+        return entry['id']
+
+    monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
+    retry = playlist_positions.with_retry
+    monkeypatch.setattr(playlist_positions, 'with_retry',
+                        lambda fn, **kwargs: retry(fn, **kwargs, sleep=lambda delay: None))
+    return inputs
+
+
 @pytest.mark.parametrize("return_handles", [True, False])
 def test_add_positions_multiple_alternates_despite_lag(store, return_handles):
     _, pid, client, chosen = seed(store)
@@ -240,11 +261,12 @@ def test_later_explicit_edit_cancels_pending_placement(store, edit):
     assert store.actions.get_action(action.id).status == "cancelled"
 
 
-def test_merge_removal_then_undo_and_sync_never_resume_the_old_placement(store, monkeypatch, tmp_path):
+def test_merge_removal_then_undo_and_sync_never_resume_the_old_placement(
+        store, monkeypatch, tmp_path, completed_placement_catalog):
     from yt_playlist.library.playlist_undo import undo_action
 
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid, pid, client, chosen = seed(store)
+    iid, pid, client, chosen = completed_placement_catalog
     client.fail_moves = True
     executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
     placement = store.actions.get_actions()[0]

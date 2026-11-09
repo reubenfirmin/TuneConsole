@@ -8,10 +8,15 @@ import numpy as np
 import pytest
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_control_routes, home_routes_only, without_metadata_providers
 from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import without_query_timing
 from yt_playlist.core import catalog, genre_identity
 from yt_playlist.rec import home_cards, home_prepared, mix_tuning, onboarding, rec_params, surfaces, taste_analysis, taste_viz
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 def _library(store):
@@ -65,7 +70,8 @@ def _families(name, result):
 
 @pytest.mark.parametrize('installed', [93, 107], indirect=True)
 @pytest.mark.parametrize('commit', [False, True], ids=['rollback', 'commit'])
-def test_live_home_tuning_calculates_privately_then_publishes(installed, monkeypatch, caplog, commit):
+def test_live_home_tuning_calculates_privately_then_publishes(
+        installed, monkeypatch, caplog, commit, home_control_routes, without_metadata_providers):
     from tests.test_home import _publish_existing_listener_mix
     from tests.recommendation_support import publish_bundles
 
@@ -78,7 +84,8 @@ def test_live_home_tuning_calculates_privately_then_publishes(installed, monkeyp
     publish_bundles(store, {'all': {'wheelhouse': pool, 'explore': pool, 'comfort': pool},
                            '_meta': {'full_pools': True, 'unmodeled': True}}, 1000)
     assert not store.rec_proposals.get_proposals('home_tuned')
-    client = TestClient(create_app(store, lambda: {account: FakeClient()}, now_fn=lambda: 1000),
+    client = TestClient(create_app(store, lambda: {account: FakeClient()}, now_fn=lambda: 1000,
+                                  background_work=False),
                         base_url='http://127.0.0.1')
     start, entered, release = (threading.Event() for _ in range(3))
     observed, published = [], []

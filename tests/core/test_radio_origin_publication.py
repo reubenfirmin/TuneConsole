@@ -32,9 +32,10 @@ def installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_ti
         yield value
 
 
-def prepare(conn):
-    preparation.JOB.install(conn)
-    return finish(conn,size=128).prepared_revision
+def prepare(conn, *, install=True, size=128):
+    if install:
+        preparation.JOB.install(conn)
+    return finish(conn,size=size).prepared_revision
 
 
 @pytest.mark.parametrize('installed',[79,93],indirect=True)
@@ -240,12 +241,12 @@ def test_long_repeated_lists_and_absent_sources_preserve_runtime_order(installed
     store.settings.set_setting(preparation.KEYS[0],raw)
     preparation.JOB.install(store.conn)
     mock_preparation_schema(monkeypatch, preparation.JOB.definition, store.conn)
-    publication.publish(store.conn,revision=prepare(store.conn))
+    publication.publish(store.conn,revision=prepare(store.conn,install=False,size=512))
     assert radio_provenance.ids(store.conn) == ['first','missing']
     assert store.settings.get_setting(preparation.KEYS[0]) == raw
     assert store.settings.get_setting(preparation.KEYS[1],'absent') == 'absent'
     assert store.conn.execute('SELECT count(*) FROM '+preparation.ORIGINS).fetchone()[0] == 8100
     store.settings.delete_setting(preparation.KEYS[0])
-    publication.publish(store.conn,revision=prepare(store.conn))
+    publication.publish(store.conn,revision=prepare(store.conn,install=False,size=512))
     assert radio_provenance.ids(store.conn) == []
     assert store.settings.get_setting(preparation.KEYS[0],'absent') == 'absent'

@@ -5,8 +5,31 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from tests.test_song_actions import SONG, songs  # noqa: F401 - shared fixture
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import native_sql_calls, without_query_timing
+from tests.test_song_actions import SONG, _pristine_current_schema, songs, store  # noqa: F401 - shared fixtures
 from yt_playlist.web.track_links import track_url
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing',
+                                    'without_metadata_providers')
+
+
+@pytest.fixture(autouse=True)
+def detail_routes(request, monkeypatch):
+    if request.node.originalname in {
+        'test_saved_album_and_song_titles_link_to_details',
+        'test_suggestion_objects_link_to_track_details',
+    }:
+        # These two cases own links from the other real feature pages.
+        return
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, track
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, track)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
 
 def test_musical_evidence_uses_saved_profiles_without_foreground_preparation(songs, monkeypatch):

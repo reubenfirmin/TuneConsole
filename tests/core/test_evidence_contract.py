@@ -1,4 +1,5 @@
 """Persisted evidence bytes and correction limits survive helper extraction."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 
@@ -38,6 +39,19 @@ def test_recursive_references_preserve_order_duplicates_and_exact_reference_shap
 def test_nonfinite_evidence_remains_rejected(value):
     with pytest.raises(ValueError):
         evidence_contract.canonical({'value': value})
+
+
+def test_rejected_circular_record_does_not_poison_later_encoding():
+    circular = []
+    circular.append(circular)
+    with pytest.raises(ValueError, match='Circular reference'):
+        evidence_contract.canonical(circular)
+    assert evidence_contract.canonical(VALUE) == ENCODED
+
+
+def test_concurrent_records_keep_the_exact_installed_bytes():
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        assert list(workers.map(evidence_contract.canonical, [VALUE] * 32)) == [ENCODED] * 32
 
 
 @pytest.mark.parametrize('contract', ['choice-correction-v1', 'choice-correction-v2'])

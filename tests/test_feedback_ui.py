@@ -1,8 +1,38 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.home_fixture_support import publish_menu, returning_listener
+from tests.home_fixture_support import (
+    home_routes_only, publish_menu, returning_listener, without_metadata_providers,
+)
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls,
+    uncontended_file_consumer_store as store, without_query_timing,
+)
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing',
+                                    'feedback_routes', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def feedback_routes(monkeypatch, home_routes_only):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home_board, suggest
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    def build(ctx):
+        return [app_update.build(ctx), audio_preview.build(ctx),
+                home_board.build(ctx, HomeViews(ctx)), suggest.build(ctx)]
+
+    monkeypatch.setattr(webapp, 'build_all', build)
 
 
 def _seed(store):
@@ -13,7 +43,8 @@ def _seed(store):
     store.history.record_history_plays(iid, now - 100, ["hit|fav"], source_timezone="UTC")
     store.history.record_history_plays(iid, now - 50, ["hit|fav"], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", str(now))     # synced -> Home renders the rec feed
-    return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
+    return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now,
+                                     background_work=False),
                            base_url="http://127.0.0.1")
 
 

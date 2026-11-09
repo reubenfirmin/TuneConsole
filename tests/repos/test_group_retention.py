@@ -60,13 +60,8 @@ def database(tmp_path, retention_predecessor, native_sql_calls):
         yield store, prepared
 
 
-@pytest.fixture(autouse=True)
-def retention_io(database, monkeypatch):
-    store, _ = database
-    # Keep real WAL transactions, cleanup and explicit snapshot guards. These
-    # retention cases do not own power-loss durability or automatic checkpoints.
-    store.conn.execute('PRAGMA synchronous=NORMAL')
-    store.conn.execute('PRAGMA wal_autocheckpoint=0')
+@pytest.fixture
+def retention_reader_repositories(monkeypatch):
     bind = Store._bind_repositories
 
     def bind_retention_reader(reader):
@@ -78,6 +73,15 @@ def retention_io(database, monkeypatch):
         reader.group_retention = GroupRetentionRepo(reader)
 
     monkeypatch.setattr(Store, '_bind_repositories', bind_retention_reader)
+
+
+@pytest.fixture(autouse=True)
+def retention_io(database, monkeypatch, retention_reader_repositories):
+    store, _ = database
+    # Keep real WAL transactions, cleanup and explicit snapshot guards. These
+    # retention cases do not own power-loss durability or automatic checkpoints.
+    store.conn.execute('PRAGMA synchronous=NORMAL')
+    store.conn.execute('PRAGMA wal_autocheckpoint=0')
     # These inputs own group and policy documents. Keep both real file leases
     # without opening unrelated application domains for every private snapshot.
     monkeypatch.setattr(store, '_retained_readers', store.taste_groups.files.retained)

@@ -3,13 +3,14 @@ from types import SimpleNamespace
 from tests.derived_rating_support import seed_like
 from tests.conftest import seed_catalog_track
 from tests.enrichment_support import seed_enrichment
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls, without_query_timing
 from yt_playlist.util.matching import identity_key
 
 import pytest
 
 from tests.test_radio_catalog import catalog_track
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events
 from yt_playlist.rec import eligibility, radio_tuning
@@ -176,16 +177,16 @@ def test_a_file_backed_restart_retains_the_break(tmp_path, consumer_store):
 
 
 @pytest.mark.parametrize('energy', [0, .5, 1])
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_live_skip_removes_a_cached_radio_choice_and_cannot_return_on_refill(store, listener, energy):
-    tracks = []
-    for i in range(32):
-        video, artist = f'radio-{i}', f'Artist radio-{i}'
-        key = identity_key(video, artist)
-        entry = seed_catalog_track(store, key, video, artist, video_id=video)
-        seed_enrichment(store, entry, 'Downtempo', '2001')
-        with store.conn:
-            store.conn.execute('UPDATE youtube_items SET duration_s=200 WHERE video_id=?', (video,))
-        tracks.append(dict(key=key, video_id=video, title=video, artist=artist, genre='Downtempo'))
+    tracks = [dict(key=identity_key(f'radio-{i}', f'Artist radio-{i}'), video_id=f'radio-{i}',
+                   title=f'radio-{i}', artist=f'Artist radio-{i}', genre='Downtempo') for i in range(32)]
+    with atomic_write(store):
+        seed_publication_subjects(store, [{**track, 'year': '2001', 'duration_s': 200}
+                                         for track in tracks])
+        for entry, artist in store.conn.execute(
+                'SELECT c.id,y.artist FROM catalog_entries c JOIN youtube_items y ON y.video_id=c.video_id'):
+            store.artists.observe(entry, artist, source='fixture')
     publish_bundles(store, {'all': {'wheelhouse': tracks}})
     candidates = RadioCandidates(store, 100, {**radio_tuning.DEFAULTS, 'energy': energy})
     directions = RadioDirections(candidates, tracks[0])

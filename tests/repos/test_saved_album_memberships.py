@@ -1,17 +1,39 @@
 """Album reconciliation needs successful observations of its original account cohort."""
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
+)
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync(monkeypatch):
+    """Membership/reopen consumers have no taxonomy or HTTP lifecycle input."""
+    bound_catalog(monkeypatch, entries=())
+
+
+@pytest.fixture(scope='module')
+def membership_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def membership_store(tmp_path, membership_schema):
+    with _file_consumer_store(tmp_path, membership_schema) as store:
+        yield store
 
 
 def album(browse):
     return dict(browse=browse,title=browse,artist='Artist')
 
 
-def test_unobserved_legacy_owner_survives_deactivation_and_restart(tmp_path):
-    path = tmp_path / 'library.db'
-    store = Store(path)
-    store.init_schema()
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_unobserved_legacy_owner_survives_deactivation_and_restart(membership_store):
+    store = membership_store
+    path = store._db_path
     first = store.accounts.upsert_account('Main','bridge',None,True)
     second = store.accounts.upsert_account('Other','bridge','other',False)
     store.collection.add_saved_album(album('unknown'))
@@ -21,6 +43,7 @@ def test_unobserved_legacy_owner_survives_deactivation_and_restart(tmp_path):
     store.conn.close()
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         store.init_schema()
         store.collection.replace_saved_album_snapshots({first:[]},now=2)
         assert store.collection.saved_album_ids()=={'unknown'}
@@ -78,12 +101,12 @@ def test_added_legacy_evidence_invalidates_older_fetches_and_observations(store)
     assert store.collection.saved_album_ids()==set()
 
 
-def test_stale_snapshot_is_rejected_across_store_connections(tmp_path):
-    path = tmp_path / 'library.db'
-    first,second = Store(path),Store(path)
+def test_stale_snapshot_is_rejected_across_store_connections(membership_store):
+    path = membership_store._db_path
+    first,second = membership_store,Store(path)
     try:
-        first.init_schema()
         owner = first.accounts.upsert_account('Main','bridge',None,True)
+        second.conn.execute('PRAGMA synchronous=OFF')
         second.init_schema()
         revision = first.collection.saved_album_revision(owner)
         second.collection.add_saved_album(album('saved'),account_id=owner)

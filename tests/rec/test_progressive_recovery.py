@@ -1,4 +1,5 @@
 """Recovery must work without a new sync and preserve exact model behavior."""
+from contextlib import closing
 from dataclasses import replace
 import json
 import logging
@@ -11,12 +12,12 @@ import pytest
 from tests.rec.test_progressive import catalog, drain
 from tests.genre_catalog_support import bound_catalog
 from tests.store_fixture_support import (
-    _file_consumer_store, bounded_consumer_schema, initialize_consumer,
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator,
     native_sql_calls, reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.rec import content_model, embedding_vectors, progressive, taste_modes
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.core import activity, content_preparation_state
+from yt_playlist.core import activity, content_preparation_state, schema_inspection, store as store_core
 from yt_playlist.core.store import Store
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.prepared_content import PreparedContentRepo
@@ -50,6 +51,21 @@ def _pristine_current_schema():
         assert source._revision_script
         assert not source.execute('PRAGMA foreign_key_check').fetchone()
         yield source
+
+
+@pytest.fixture
+def completed_vibe_input(monkeypatch):
+    # This workflow owns lost content-input queues and exact content refits.
+    # Vibe inference is an independent producer, as in the musical-profile
+    # tests. Keep real content/musical capture, snapshots and both publications.
+    def recording_steps(reader, rows, musical, **kwargs):
+        yield from ()
+        return musical, ({}, {}, [])
+
+    monkeypatch.setattr(progressive.vibe_preparation, 'due', lambda *args: False)
+    monkeypatch.setattr(progressive.vibe_preparation, 'step', lambda *args, **kwargs: False)
+    monkeypatch.setattr(progressive.vibe_preparation, 'recording_steps', recording_steps)
+    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
 
 
 def test_preallocated_encoding_preserves_exact_vectors_and_empty_rows():
@@ -129,7 +145,7 @@ def _repair_after_losing_a_queue_prefix(store):
 
 
 def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(
-        audit_library, tmp_path, monkeypatch, record_property):
+        audit_library, completed_vibe_input, tmp_path, monkeypatch, record_property):
     # Real queue scans, fitting and publication continue on the same writer.
     # Only the budget clock is controlled; deadline rejection has its own case.
     store = audit_library
@@ -139,10 +155,6 @@ def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(
     monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
     monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
     monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
-    # This workflow does not replace model artifacts. Resolve the real lower
-    # release identity once, keeping capture, prediction and publication live.
-    vibe_version = progressive.vibe_preparation.version()
-    monkeypatch.setattr(progressive.vibe_preparation, 'version', lambda: vibe_version)
     record_property('work_budget_clock', 'controlled; production budget values unchanged')
     p = _repair_after_losing_a_queue_prefix(store)
     assert not store.conn.in_transaction
@@ -346,56 +358,51 @@ def test_repair_fences_each_read_owner_and_ignores_independent_owners(store, mon
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.fixture(scope='module')
-def blocked_memory_input(tmp_path_factory, _pristine_current_schema):
-    path = tmp_path_factory.mktemp('memory-recovery') / 'recovery.db'
+def test_memory_deferral_survives_restart_and_recovers_without_new_activity(
+        tmp_path, _pristine_current_schema, native_sql_calls, without_query_timing,
+        completed_vibe_input, monkeypatch):
+    path = tmp_path / 'recovery.db'
+    monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path / 'app-home'))
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
     store = Store(path)
-    try:
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(store, _pristine_current_schema)
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv('YT_PLAYLIST_HOME', str(path.parent / 'app-home'))
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-            patch.delenv('DEEPSEEK_API_KEY', raising=False)
-            patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+        with mock_snapshot_coordinator(store, monkeypatch):
             catalog(store, 12)
             # Admit all inputs, then reject the real encoder/clustering peak.
             p = progressive.Preparation(store, budget=replace(progressive.Budget(), memory_bytes=128 * 1024))
             drain(p)
             assert not p.fit(1000)
-        warning = progressive.maintenance_view(store)
-    finally:
-        store.conn.close()
-    return path, warning
-
-
-def test_memory_deferral_persists_exact_budget_and_retry_inputs(blocked_memory_input):
-    path, warning = blocked_memory_input
+            warning = progressive.maintenance_view(store)
     assert warning['blocked'] and warning['reason'] == 'matrix-memory-budget'
     assert warning['next_attempt_at'] == 1900
     assert set(warning['phase_bytes']) == {'encoding', 'clustering', 'publication'}
     # Inspect the closed writer's durable state independently before reopening.
-    with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as conn:
+    with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         raw = content_preparation_state.get(conn, progressive.FIT_STATE)
         persisted = json.loads(raw)
         assert persisted['reason'] == warning['reason']
         assert persisted['next_attempt_at'] == 1900
         assert conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 12
-
-
-def test_memory_deferral_survives_restart_and_recovers_without_new_activity(blocked_memory_input, monkeypatch):
-    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
-    store = Store(blocked_memory_input[0])
-    try:
-        store.init_schema()
-        reopened = progressive.Preparation(store)
-        assert not reopened.due(1899) and not reopened.fit(1899)
-        assert reopened.due(1900) and reopened.fit(1900)
-        assert not progressive.maintenance_view(store)['blocked']
-        assert progressive.maintenance_view(store)['state'] == 'ready'
-    finally:
-        store.conn.close()
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        # Restart consumes unchanged SQL. Install the complete generated TEMP
+        # guards on this new connection; admission, repair and fitting remain
+        # real, including snapshot publication against these private guards.
+        with monkeypatch.context() as patch:
+            patch.setattr(store_core, 'Revisions', _pristine_current_schema.bind_revisions)
+            store.init_schema()
+        with mock_snapshot_coordinator(store, monkeypatch):
+            reopened = progressive.Preparation(store)
+            assert not reopened.due(1899) and not reopened.fit(1899)
+            assert reopened.due(1900) and reopened.fit(1900)
+            assert not progressive.maintenance_view(store)['blocked']
+            assert progressive.maintenance_view(store)['state'] == 'ready'
 
 
 def test_worker_polls_for_lost_input_work_without_a_catalog_write(store, monkeypatch):

@@ -11,6 +11,8 @@ import pytest
 from tests.core.test_discovery_owner_preparation import seed
 from tests.store_fixture_support import (
     _numbered_input,
+    mock_preparation_schema,
+    mock_regular_numbered_input,
     native_sql_calls,
     numbered_store,
     numbered_store as installed,
@@ -76,6 +78,9 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
         else:
             store.conn.execute("UPDATE main.discovered_artists SET genre_key=NULL,unresolved_genre='Captured Unknown Genre'")
     expected = store.discovery.get_discovered_artists()
+    worker = publication.owner(store.conn).worker
+    worker.install(store.conn)
+    mock_preparation_schema(monkeypatch, worker.definition, store.conn)
     originals = list(map(dict, store.conn.execute('SELECT * FROM main.discovered_artists ORDER BY artist')))
     history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     other = Store(store._db_path)
@@ -86,7 +91,7 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
             pinned = snapshot.store
             with schema_inspection.reuse_tables(pinned.conn):
                 assert pinned.discovery.get_discovered_artists() == expected
-                owner, stage = ready(store.conn)
+                owner, stage = ready(store.conn, installed=True)
                 owner.publish(store.conn, stage=stage)
                 assert owner.selected(pinned.conn) is None
                 assert pinned.discovery.get_discovered_artists() == expected
@@ -104,6 +109,7 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
         assert other.discovery.get_discovered_artists() == expected
         assert list(map(dict, store.conn.execute('SELECT * FROM main.discovered_artists ORDER BY artist'))) == originals
         assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
+        mock_regular_numbered_input(monkeypatch, other.conn)
         regular.migrate(other.conn)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 

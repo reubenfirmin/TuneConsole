@@ -1,34 +1,44 @@
 // Document-wide keyboard and browser media controls share the existing extension commands.
 (function () {
   if (window.playbackControls) return;
-  let nextPending = false;
+  let nextPending = false, controlPending = false;
 
   function command(action) {
     if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command(action);
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && (status.now_playing || status.resumable_player);
+    const playing = status?.connected && (status.now_playing || status.resumable_player || status.radio_resume);
     if (!playing?.video_id) return false;
     const resume = !status.now_playing;
     if (resume && action === 'next') return false;
     if ((action === 'play' && playing.paused === false) ||
         (action === 'pause' && playing.paused === true)) return true;
     const next = action === 'next';
-    if (next && nextPending) return true;
-    const options = {method: 'POST'};
+    if (next ? nextPending : controlPending) return true;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 12000);
+    const options = {method: 'POST', signal: controller.signal};
     if (next) {
       nextPending = true;
       options.headers = {'Content-Type': 'application/json'};
       options.body = JSON.stringify({videoId: playing.video_id});
     }
     let url = next ? '/now-playing/next' : '/now-playing/toggle';
-    if (!next && (resume || action !== 'toggle')) {
+    if (resume && !status.resumable_player) {
+      url = '/radio/resume';
+      options.headers = {'Content-Type': 'application/json'};
+      options.body = JSON.stringify({playlist_id: playing.playlist_ytm_id,
+        video_id: playing.video_id, episode_id: playing.radio_session_id});
+    } else if (!next && (resume || action !== 'toggle')) {
       url += '?action=' + encodeURIComponent(action);
       if (resume) url += '&resume=true&videoId=' + encodeURIComponent(playing.video_id);
     }
+    if (!next) controlPending = true;
     fetch(url, options)
       .catch(() => {})
       .finally(() => {
+        clearTimeout(deadline);
         if (next) nextPending = false;
+        else controlPending = false;
         window.playbackStatus.refresh();
       });
     return true;
@@ -61,7 +71,7 @@
       return;
     }
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && (status.now_playing || status.resumable_player);
+    const playing = status?.connected && (status.now_playing || status.resumable_player || status.radio_resume);
     const active = !!playing?.video_id;
     session.playbackState = active && typeof playing.paused === 'boolean' ?
       (playing.paused ? 'paused' : 'playing') : 'none';

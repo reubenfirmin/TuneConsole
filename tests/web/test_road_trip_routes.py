@@ -19,7 +19,10 @@ from yt_playlist.web.app import create_app
 from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient, _track
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
+from tests.store_fixture_support import (
+    bounded_consumer_schema, initialize_consumer, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 
@@ -52,8 +55,8 @@ def road_trip_schema():
 def store(tmp_path, road_trip_schema, monkeypatch):
     database = Store(tmp_path / 'road-trip.db')
     try:
+        database.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(database, road_trip_schema)
-        database.conn.execute('PRAGMA synchronous=NORMAL')
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
         with reuse_reporting_reader(database, monkeypatch), schema_inspection.reuse_tables(database.conn):
             yield database
@@ -247,7 +250,7 @@ def test_save_list_and_delete_recipe(store):
     assert store.road_trip.list_road_trip_recipes() == []
 
 
-def test_build_makes_an_on_screen_draft_and_touches_no_playlist(store, monkeypatch):
+def test_build_makes_an_on_screen_draft_and_touches_no_playlist(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     client = FakeClient()
     c, _ = _app(store, client, monkeypatch)
@@ -263,7 +266,7 @@ def test_build_makes_an_on_screen_draft_and_touches_no_playlist(store, monkeypat
     assert "Mine 0" in r.text or any("Mine" in t["title"] for t in road_trip_rec.draft_tracks(state))
 
 
-def test_a_thin_blend_pool_explains_the_missing_song_share(store, monkeypatch):
+def test_a_thin_blend_pool_explains_the_missing_song_share(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store, own_count=2)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store, genres=["Rock"], target_minutes=60)
@@ -342,7 +345,7 @@ def test_build_missing_recipe_404s(store):
     assert c.post("/road_trip/recipes/999/build").status_code == 404
 
 
-def test_mix_slider_repicks_without_rebuilding(store, monkeypatch):
+def test_mix_slider_repicks_without_rebuilding(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
@@ -363,7 +366,7 @@ def test_mix_slider_repicks_without_rebuilding(store, monkeypatch):
     assert store.road_trip.get_road_trip_draft(rid)['picks'] == selection
 
 
-def test_recipe_balance_updates_saved_recipe_and_draft_at_both_extremes(store, monkeypatch):
+def test_recipe_balance_updates_saved_recipe_and_draft_at_both_extremes(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
@@ -381,7 +384,7 @@ def test_recipe_balance_updates_saved_recipe_and_draft_at_both_extremes(store, m
     assert store.road_trip.get_road_trip_recipe(rid)['own_pct'] == 0
 
 
-def test_editing_the_recipe_steers_the_draft_in_place(store, monkeypatch):
+def test_editing_the_recipe_steers_the_draft_in_place(native_sql_calls, store, monkeypatch):
     """The form is a control panel, not a create dialog: editing the recipe a draft is showing
     re-steers that draft rather than starting a new one."""
     _stub_pools(monkeypatch, store)
@@ -403,7 +406,7 @@ def test_editing_the_recipe_steers_the_draft_in_place(store, monkeypatch):
     assert len(store.road_trip.list_road_trip_recipes()) == 1        # and not a second recipe
 
 
-def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store, monkeypatch):
+def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(native_sql_calls, store, monkeypatch):
     c, _ = _app(store)
     genres = ["Rock", "Pop", "Jazz"]
     rid = _recipe(store, own_pct=0, artists=[], genres=genres, target_minutes=100)
@@ -450,7 +453,7 @@ def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store
     assert not any(row["genre"] == "Funk" for row in removed["pool"])
 
 
-def test_adding_an_artist_automatically_adds_and_balances_its_genre(store, monkeypatch):
+def test_adding_an_artist_automatically_adds_and_balances_its_genre(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
@@ -475,7 +478,7 @@ def test_adding_an_artist_automatically_adds_and_balances_its_genre(store, monke
             worker()
 
 
-def test_removing_an_artist_takes_their_tracks_out_of_the_draft(store, monkeypatch):
+def test_removing_an_artist_takes_their_tracks_out_of_the_draft(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store, artists=["Tame Impala"])
@@ -501,7 +504,7 @@ def test_edit_loads_a_recipe_into_the_form(store):
 
 
 @pytest.mark.parametrize('selection', ['unbuilt', 'discarded', 'newly_saved'])
-def test_explicit_recipe_without_draft_never_shows_another_draft(store, monkeypatch, selection):
+def test_explicit_recipe_without_draft_never_shows_another_draft(native_sql_calls, store, monkeypatch, selection):
     _stub_pools(monkeypatch, store)
     client, _ = _app(store, monkeypatch=monkeypatch)
     first = _recipe(store, name='First route')
@@ -529,7 +532,7 @@ def test_explicit_recipe_without_draft_never_shows_another_draft(store, monkeypa
     assert _editor_recipe_id(initial.text) == first
 
 
-def test_explicit_recipe_switch_preserves_each_existing_draft(store, monkeypatch):
+def test_explicit_recipe_switch_preserves_each_existing_draft(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     client, _ = _app(store, monkeypatch=monkeypatch)
     first = _recipe(store, name='First route')
@@ -543,7 +546,7 @@ def test_explicit_recipe_switch_preserves_each_existing_draft(store, monkeypatch
         assert f'/road_trip/draft/{other}/' not in response.text
 
 
-def test_tilting_a_genre_to_zero_drops_it_from_the_playlist(store, monkeypatch):
+def test_tilting_a_genre_to_zero_drops_it_from_the_playlist(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
@@ -564,7 +567,7 @@ def test_tilting_a_genre_to_zero_drops_it_from_the_playlist(store, monkeypatch):
     assert store.road_trip.get_road_trip_draft(rid)["stats"]["their_count"] > 0
 
 
-def test_a_slider_past_the_pool_kicks_off_a_search(store, monkeypatch):
+def test_a_slider_past_the_pool_kicks_off_a_search(native_sql_calls, store, monkeypatch):
     """Dragging a genre past what was drawn queues YouTube searches and keeps the panel polling,
     rather than settling for the pool it happens to have."""
     _stub_pools(monkeypatch, store, other_count=1)     # one 5-min track against a 15-min half
@@ -606,7 +609,7 @@ def test_crossing_out_a_slot_refills_it(store, monkeypatch):
     assert before[1] in store.road_trip.get_road_trip_draft(rid)["banned"]
 
 
-def test_shuffle_redraws_from_the_same_pool(store, monkeypatch):
+def test_shuffle_redraws_from_the_same_pool(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
@@ -620,7 +623,7 @@ def test_shuffle_redraws_from_the_same_pool(store, monkeypatch):
     assert [c["video_id"] for c in after["pool"]] == [c["video_id"] for c in before["pool"]]
 
 
-def test_saving_the_draft_creates_the_generated_playlist(store, monkeypatch):
+def test_saving_the_draft_creates_the_generated_playlist(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     client = FakeClient()
     c, _ = _app(store, client, monkeypatch)
@@ -673,7 +676,7 @@ def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch
 
 
 @pytest.mark.parametrize("failure", ["youtube", "account", "missing"])
-def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, monkeypatch, failure):
+def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(native_sql_calls, store, monkeypatch, failure):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
@@ -705,7 +708,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
         assert not draft_after.get('saved_playlist_id')
 
 
-def test_draft_survives_a_reload_and_is_discardable(store, monkeypatch):
+def test_draft_survives_a_reload_and_is_discardable(native_sql_calls, store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)

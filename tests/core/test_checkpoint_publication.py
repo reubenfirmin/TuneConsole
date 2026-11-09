@@ -9,7 +9,7 @@ from tests.core.test_collection_control_preparation import finish
 from tests.core.test_model_checkpoint_preparation import seed
 from tests.group_support import publish as publish_groups
 from tests.publication_fixture_support import installed, installed_reader
-from tests.store_fixture_support import publication_consumer_reads, without_query_timing
+from tests.store_fixture_support import native_sql_calls, publication_consumer_reads, without_query_timing
 from yt_playlist.core import content_preparation_state, group_preparation_state, ranking_checkpoints, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import checkpoint_publication as publication, model_checkpoints as preparation
@@ -53,6 +53,7 @@ def prepare(store, name):
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 @pytest.mark.parametrize('name', tuple(preparation.JOBS))
+@pytest.mark.usefixtures('native_sql_calls')
 def test_existing_and_reopened_readers_match_the_historical_runtime(installed, name, tmp_path, monkeypatch):
     store, _ = installed
     sources = seed(store)

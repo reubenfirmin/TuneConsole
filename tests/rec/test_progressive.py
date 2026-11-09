@@ -12,7 +12,8 @@ from tests.conftest import seed_catalog_track
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as svd_cache_store,
-    mock_snapshot_coordinator, native_sql_calls, without_query_timing,
+    initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.core import catalog as catalog_writes
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
@@ -233,31 +234,36 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store, mon
     np.testing.assert_array_equal(np.frombuffer(new[key], np.float32), expected)
 
 
-def test_pending_and_accepted_work_survive_restart_and_timestamp_only_reenrichment(tmp_path):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_pending_and_accepted_work_survive_restart_and_timestamp_only_reenrichment(
+        tmp_path, _pristine_current_schema, monkeypatch):
     path = tmp_path / 'library.db'
     store = Store(path)
-    store.init_schema()
+    store.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(store, _pristine_current_schema)
     ids = catalog(store, 6)
     p = Preparation(store, budget=replace(Budget(), batch=2))
     assert p.capture(1000)
     before = p.status()
     store.conn.close()
     store = Store(path)
+    store.conn.execute('PRAGMA synchronous=OFF')
     store.init_schema()
     try:
-        p = Preparation(store)
-        assert p.status()['pending'] == before['pending'] == 4
-        assert p.status()['prepared'] == before['prepared'] == 2
-        drain(p)
-        assert p.fit(1000)
-        generation = store.rec_model.content_generation()
-        with store.conn:
-            store.conn.execute('UPDATE recordings SET last_enriched_at=1100')
-        assert not p.due(1100)
-        assert store.rec_model.content_generation() == generation
-        # A provider re-read with the same values retains every accepted row.
-        seed_enrichment(store, ids[0], 'Techno', None)
-        assert not p.due(1101)
+        with reuse_reporting_reader(store, monkeypatch):
+            p = Preparation(store)
+            assert p.status()['pending'] == before['pending'] == 4
+            assert p.status()['prepared'] == before['prepared'] == 2
+            drain(p)
+            assert p.fit(1000)
+            generation = store.rec_model.content_generation()
+            with store.conn:
+                store.conn.execute('UPDATE recordings SET last_enriched_at=1100')
+            assert not p.due(1100)
+            assert store.rec_model.content_generation() == generation
+            # A provider re-read with the same values retains every accepted row.
+            seed_enrichment(store, ids[0], 'Techno', None)
+            assert not p.due(1101)
     finally:
         store.conn.close()
 
@@ -310,7 +316,9 @@ def test_deferred_or_cancelled_fit_keeps_last_good_generation(store, monkeypatch
     assert after == before
 
 
-def test_larger_fit_waits_for_accumulated_changes_or_aged_evidence(store):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_larger_fit_waits_for_accumulated_changes_or_aged_evidence(svd_cache_store):
+    store = svd_cache_store
     ids = catalog(store, 20)
     p = Preparation(store)
     drain(p)
@@ -351,7 +359,9 @@ def test_stable_corpus_can_repair_missing_or_obsolete_encoder(store, repair):
     assert p.status()['library_vectors'] == 12
 
 
-def test_bootstrap_never_replaces_a_larger_published_cohort_with_partial_inputs(store):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_bootstrap_never_replaces_a_larger_published_cohort_with_partial_inputs(svd_cache_store):
+    store = svd_cache_store
     catalog(store, 12)
     assert model_refresh.rebuild(store, 1000)
     before = store.rec_model.content_generation()

@@ -7,8 +7,32 @@ import logging
 import pytest
 
 from tests.home_fixture_support import publish_menu
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import fao, home_outputs, json_cache
 from yt_playlist.rec import home_cache, home_cards, home_prepared
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Display publication owns SQL/files, without an HTTP lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    # Keep actual fresh readers and revision guards for invalidation checks.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as database:
+        yield database
 
 
 def cards(store, payload, *, record=False):

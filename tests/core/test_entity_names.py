@@ -1,16 +1,32 @@
 """Genuine installed naming cutover, stable identifiers and external formats."""
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import json
 import sqlite3
 
 import pytest
 
-from yt_playlist.core import entity_names, genre_identity, schema_transforms
+from yt_playlist.core import entity_names, genre_identity, schema_inspection, schema_transforms
 from yt_playlist.core.migrations import current, registry
 from yt_playlist.core.migrations.v103_entity_names import transform
 from yt_playlist.core.store import Store
 from tests.prepared_fixture_support import capture_template
 from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import mock_regular_numbered_input, native_sql_calls, without_query_timing
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Naming and local runtime checks do not construct the web application."""
+
+
+@pytest.fixture
+def names_input(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # This restart owns one populated predecessor and a newly opened Store.
+    # Template copying is independent of its physical writer/read projections.
+    bound_catalog(monkeypatch, entries=(('jazz', 'Jazz'),))
+    source = installed_predecessor(tmp_path / 'deferred.db')
+    with closing(source.conn):
+        yield source
 
 
 def rows(conn):
@@ -92,6 +108,7 @@ def test_pretyped_album_context_keeps_historical_document_and_current_account_fi
 
 def installed_predecessor(path):
     store = Store(path)
+    store.conn.execute('PRAGMA synchronous=OFF')
     # The predecessor is one fixture, not a separate durable publication for
     # each of its hundreds of DDL statements. The tested cutover commits itself.
     store.conn.execute('BEGIN IMMEDIATE')
@@ -119,16 +136,32 @@ def test_name_predecessor_input_keeps_physical_ids_and_original_numbered_history
 
 
 def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_ddl(
-        tmp_path, legacy_names):
+        tmp_path, names_input, monkeypatch):
     from yt_playlist.core import entity_names
+    from yt_playlist.core import storage_maintenance
     from yt_playlist.core.storage_maintenance import StorageMaintenance
-    setup = legacy_names(tmp_path/'deferred.db')
+
+    class DisposableWorkerConnection(storage_maintenance.DiagnosticConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # Preserve real worker transactions and independent visibility.
+            # This private input does not exercise host power-loss durability.
+            self.execute('PRAGMA synchronous=OFF')
+
+    monkeypatch.setattr(storage_maintenance, 'DiagnosticConnection', DisposableWorkerConnection)
+    setup = names_input
+    assert setup.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 102
+    assert tuple(setup.conn.execute('SELECT id,label FROM identities').fetchone()) == (3, 'Main')
+    assert tuple(setup.conn.execute('SELECT id,scope_ref FROM playlist_membership_refs').fetchone()) == (55, '@account:3:LM')
+    assert not setup.conn.execute('PRAGMA foreign_key_check').fetchone()
     setup.conn.execute('PRAGMA journal_mode=WAL')
     setup.conn.close()
     store = Store(tmp_path/'deferred.db')
     maintenance = StorageMaintenance(store)
     try:
-        store.init_schema(defer_metadata=True)
+        store.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(store.conn):
+            store.init_schema(defer_metadata=True)
         assert store._schema_compatibility and not store.activity_paused
         assert store.accounts.get_master_account().id==3
         assert store.playlists.get_playlist(55).playlist_scope_id=='@account:3:LM'
@@ -140,6 +173,7 @@ def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_d
         with pytest.raises(sqlite3.OperationalError,match='view'):
             store.conn.execute("UPDATE accounts SET label='Hidden write'")
         assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==102
+        mock_regular_numbered_input(monkeypatch, store.conn, same_database=True)
         maintenance.start()
         maintenance.join(30)
         assert not maintenance.active and not store._schema_recovery_pending

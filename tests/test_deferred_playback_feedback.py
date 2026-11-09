@@ -12,12 +12,44 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import without_metadata_providers
 from tests.playback_feedback_support import held_copy
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, without_query_timing
 from yt_playlist.core import playback_feedback
 from yt_playlist.core.store import Store
 from yt_playlist.library import live_plays, player_events, ratings
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.bridge import _now_playing_snapshot
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def feedback_routes(monkeypatch, without_metadata_providers):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, discovery, likes, sync, track
+
+    # Preserve the actual bridge, maintenance middleware and every requested
+    # route. Unrelated pages and idle shutdown are below the feedback boundary.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
+                        (app_update, audio_preview, discovery, likes, sync, track)])
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    """Playback/inbox owners consume real private SQL without genre preparation."""
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    # Keep instrumented SQL, independent readers, WAL and real revision guards:
+    # these cases deliberately hold writers and replace/reopen the database.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
 
 
 @pytest.fixture
@@ -211,6 +243,7 @@ def test_rating_skull_and_next_acknowledge_while_writer_is_held_and_survive_rest
     store.conn.close()
     resumed = Store(path)
     try:
+        resumed.conn.execute('PRAGMA synchronous=OFF')
         resumed.init_schema()
         assert playback_feedback.drain(resumed) == 7
         assert not playback_feedback.inbox(resumed).pending()
@@ -253,6 +286,7 @@ def test_replay_receipt_survives_crash_after_main_commit_before_inbox_ack(librar
     store.conn.close()
     resumed = Store(path)
     try:
+        resumed.conn.execute('PRAGMA synchronous=OFF')
         resumed.init_schema()
         assert playback_feedback.drain(resumed) == 1
         assert playback_feedback.drain(resumed) == 0
@@ -369,6 +403,7 @@ def test_discovery_heart_and_later_unlike_survive_maintenance_and_restart(librar
     store.conn.close()
     resumed = Store(path)
     try:
+        resumed.conn.execute('PRAGMA synchronous=OFF')
         resumed.init_schema()
         assert playback_feedback.drain(resumed) == 2
         assert resumed.tracks.item_rating(main, 'discovered')['status'] == 'INDIFFERENT'

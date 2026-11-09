@@ -6,11 +6,38 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener, without_metadata_providers
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as file_backed_store,
+    native_sql_calls, without_query_timing,
+)
 from yt_playlist.rec import home_cache, home_cards, home_prepared
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.home import ROTATING_CARDS
 from yt_playlist.web.routes.home_views import HomeViews
 from yt_playlist.web.spotify_import import load_job, save_job
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing',
+                                    'composition_routes', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Composition consumes already installed SQL and completed menus. Keep
+    # real revision guards and private readers for the metadata-update race.
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def composition_routes(monkeypatch, home_routes_only):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, setup
+
+    # The import notice is part of this composition. Construct its actual
+    # setup route together with Home, without unrelated feature routers.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, setup)])
 
 
 def client_for(store):

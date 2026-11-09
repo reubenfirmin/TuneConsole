@@ -64,7 +64,8 @@ def browsing_input(request, tmp_path, monkeypatch, without_query_timing):
             store.conn.execute('BEGIN')
             store._snapshot_revisions = db_revisions.Revisions(store.conn)
             schema = resources.enter_context(closing(sqlite3.connect(':memory:', factory=PristineSchema)))
-            store.conn.backup(schema)
+            # This holder only retains the generated TEMP guard SQL/state.
+            # Reopening uses the real replacement file, never a SQL seed copy.
             schema.capture_revisions(store._snapshot_revisions)
             schema.execute('PRAGMA query_only=ON')
             account = store.accounts.upsert_account('Main', 'main.json', None, True)

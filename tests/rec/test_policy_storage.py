@@ -36,12 +36,17 @@ def _publish(store, now=1, rankers=('first', 'second'), body=None):
 
 
 @pytest.fixture
-def legacy_policy_store(tmp_path):
+def legacy_policy_store(tmp_path, monkeypatch):
     """The genuine SQL-policy predecessor for its retained cleanup contracts."""
     from tests.legacy_policy_support import open_legacy as _open_legacy
+    from tests.genre_catalog_support import bound_catalog
 
+    # Policy byte accounting consumes the frozen layout, independently of the
+    # unrelated complete genre vocabulary. Keep the genuine historical replay.
+    bound_catalog(monkeypatch)
     store = _open_legacy(tmp_path / 'legacy-policies.db')
     try:
+        store.conn.execute('PRAGMA synchronous=OFF')
         yield store
     finally:
         store.conn.close()
@@ -324,6 +329,7 @@ def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(legacy_polic
     assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] == 0
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_orphan_body_collection_also_limits_payload_work(legacy_policy_store, monkeypatch):
     store = legacy_policy_store
     monkeypatch.setattr(policy_config, 'SCAN_BYTES', 8 * 1024)

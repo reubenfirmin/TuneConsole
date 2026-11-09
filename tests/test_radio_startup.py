@@ -5,9 +5,10 @@ import pytest
 
 from tests.radio_session_support import (
     completed_poc as poc, completed_radio_schema, completed_radio_store, play,
-    controlled_radio_checkpoints, uncontended_poc as owned_poc,
+    controlled_radio_checkpoints,
 )
-from tests.store_fixture_support import without_query_timing
+from tests.test_radio_start_overlap import poc as owned_poc, radio_schema
+from tests.store_fixture_support import reuse_reporting_reader, use_native_sql_calls, without_query_timing
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.library import playlist_generated
@@ -26,11 +27,15 @@ def owned_playback(owned_poc, monkeypatch):
     from yt_playlist.core.bridge import Bridge
 
     controller, remote, frames, *_ = owned_poc
+    # These three playback-intent consumers are synchronous; checkpoint storage
+    # is supplied below them, so they need no optimistic snapshot guards.
+    use_native_sql_calls(monkeypatch)
     bridge = Bridge()
     bridge._send = frames.append
     monkeypatch.setattr('yt_playlist.core.bridge.asyncio.run_coroutine_threadsafe', lambda frame, loop: None)
     controller.ctx.bridge = controller.playback.bridge = bridge
-    return controller, remote, frames, bridge
+    with reuse_reporting_reader(controller.ctx.store, monkeypatch):
+        yield controller, remote, frames, bridge
 
 
 def test_newer_direct_play_survives_older_radio_creation(owned_playback, monkeypatch):

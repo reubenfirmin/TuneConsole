@@ -12,12 +12,17 @@ from tests.core.test_metadata_preparation import finish
 from tests.core.test_metadata_publication import publish as read_publication
 from tests import file_custody_support as custody
 from tests.prepared_fixture_support import capture_template, roots
-from tests.store_fixture_support import install_numbered_input, reuse_reporting_reader
+from tests.store_fixture_support import (
+    install_numbered_input, mock_preparation_schema, native_sql_calls, reuse_reporting_reader,
+    use_native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import metadata_delivery_files as files, metadata_destination_files as recovery
 from yt_playlist.core import policy_documents, schema_inspection
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.preparation import metadata_destinations as destinations, metadata_evidence
 from yt_playlist.core.store import Store
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
@@ -25,9 +30,13 @@ def disable_periodic_library_sync():
     """File recovery does not construct the HTTP lifecycle."""
 
 
-def prepared(store, *, unfinished=False):
+def prepared(store, *, unfinished=False, monkeypatch):
     entry, recording, key = seed(store)
     metadata_evidence.JOB.install(store.conn)
+    # Recovery consumes admitted preparation structures. Keep real fields,
+    # delivery files, range verification and publication, without re-admitting
+    # the same SQL definitions on every fixture preparation slice.
+    mock_preparation_schema(monkeypatch, metadata_evidence.JOB, store.conn)
     if unfinished:
         finish(store.conn)
         identity = read_publication(store.conn)
@@ -46,6 +55,7 @@ def destination_templates(tmp_path_factory):
     templates = {}
     with ExitStack() as resources:
         patch = resources.enter_context(pytest.MonkeyPatch.context())
+        use_native_sql_calls(patch)
         bound_catalog(patch, entries=(('rock', 'Rock'), ('jazz', 'Jazz'), ('blues', 'Blues')))
 
         def template(kind):
@@ -54,7 +64,7 @@ def destination_templates(tmp_path_factory):
                 directory.mkdir()
                 source = Store(directory / 'source.db')
                 resources.callback(source.conn.close)
-                source.conn.execute('PRAGMA synchronous=NORMAL')
+                source.conn.execute('PRAGMA synchronous=OFF')
                 if kind == 'native-precedence':
                     result = template('selected').restore(source)
                     migrate(source.conn, registry=registry.MIGRATIONS)
@@ -63,7 +73,7 @@ def destination_templates(tmp_path_factory):
                     source.conn.execute('PRAGMA journal_mode=WAL')
                     source._bind_repositories()
                     with reuse_reporting_reader(source, patch), schema_inspection.reuse_tables(source.conn):
-                        result = prepared(source, unfinished=kind == 'unfinished')
+                        result = prepared(source, unfinished=kind == 'unfinished', monkeypatch=patch)
                 source._bind_repositories()
                 templates[kind] = capture_template(source, result)
             return templates[kind]
@@ -78,6 +88,7 @@ def prepared_source(destination_templates, tmp_path):
             directory = tmp_path / f'{kind}-{len(sources)}'
             directory.mkdir()
             source = Store(directory / 'source.db')
+            source.conn.execute('PRAGMA synchronous=OFF')
             sources.append(source)
             resources.callback(source.conn.close)
             result = destination_templates(kind).restore(source)
@@ -120,6 +131,7 @@ def test_recovered_ranges_reads_and_continuation_survive_missing_source(prepared
         else:
             database = Path(report['restored'])
     candidate = Store(database)
+    candidate.conn.execute('PRAGMA synchronous=OFF')
     hidden = source_root.with_name(source_root.name + '-unavailable')
     source_root.rename(hidden)
     try:

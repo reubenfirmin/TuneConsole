@@ -5,7 +5,16 @@ from tests.derived_rating_support import remove_rating, seed_dislike
 from tests.conftest import seed_catalog_track
 from tests.onboarding_support import publish_personal_mix
 from tests.test_growth_readiness import fresh_reserve, prepared_taste
+from tests.store_fixture_support import bounded_consumer_schema
+from tests.web_consumer_support import install_routes, route_store
 from yt_playlist.rec import account_growth, home_prepared, home_vibe
+
+
+@pytest.fixture(scope='module')
+def route_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz')),
+                                 snapshot_guards=False) as schema:
+        yield schema
 
 
 def early_journey(store):
@@ -85,9 +94,11 @@ def test_optional_revisit_and_provider_work_do_not_block_the_main_formats(store)
     assert not any(current[key]['ready'] for key in ('takeout', 'lastfm', 'deepseek'))
 
 
-def test_routes_and_remembered_vibe_cannot_bypass_the_serial_gate(store):
+def test_routes_and_remembered_vibe_cannot_bypass_the_serial_gate(route_store, monkeypatch):
     from tests.test_onboarding_routes import _client
 
+    store = route_store
+    install_routes(monkeypatch, 'home')
     _, client = _client(store)
     publish_personal_mix(store)
     store.settings.set_setting('home_format', 'mixes')
@@ -249,10 +260,12 @@ def test_radio_checkpoint_probe_serializes_with_concurrent_home_reads(store, mon
     assert len(owners) == 1
 
 
-def test_radio_starter_exception_requires_the_current_offer_and_incomplete_setup(store, monkeypatch):
+def test_radio_starter_exception_requires_the_current_offer_and_incomplete_setup(route_store, monkeypatch):
     from tests.test_onboarding_routes import _client
     from yt_playlist.rec import onboarding
 
+    store = route_store
+    install_routes(monkeypatch, 'home', 'radio_session')
     _, client = _client(store)
     radio = client.app.state.ctx.radio
     monkeypatch.setattr(radio, 'bootstrap', lambda: {

@@ -36,7 +36,11 @@ def catalog_inputs(request, monkeypatch):
     if 'store' not in request.fixturenames:
         return
     database = request.getfixturevalue('store')
+    install_catalog_inputs(database, monkeypatch)
 
+
+def install_catalog_inputs(database, monkeypatch):
+    """Supply completed playable subjects beneath stream ordering and receipts."""
     def ingest(video_id, title, artist, album=None, duration_s=None, *, thumbnail=None, library=True):
         existing = database.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (video_id,)).fetchone()
         if existing:

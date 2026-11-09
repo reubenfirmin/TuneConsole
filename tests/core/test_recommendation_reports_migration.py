@@ -6,19 +6,25 @@ import sqlite3
 
 import pytest
 
+from tests.store_fixture_support import (
+    _numbered_input, mock_regular_numbered_input, native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import recommendation_outputs, recommendation_reports as owner
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.migrations import migrate, registry, v093_choice_learning
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These SQL/file owners never start the web application or sync loop."""
+
+
 @pytest.fixture
-def predecessor(tmp_path, _pristine_installed_schema):
-    store = Store(tmp_path / 'reports.db')
-    store.conn.execute('PRAGMA journal_mode=WAL')
-    _pristine_installed_schema(92).backup(store.conn)
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+def predecessor(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # The report upgrade consumes completed v92 SQL, not earlier conversions.
+    with _numbered_input(92, tmp_path, monkeypatch) as (store, _):
+        yield store
 
 
 def upgrade(store):
@@ -75,8 +81,12 @@ def test_lost_report_files_do_not_erase_typed_format_usage_or_replace_last_good(
     assert owner.checkpoint(predecessor.conn, 'listening_choices')['watermark'] == 'old-evidence'
 
 
-def test_backup_restart_and_rollback_retain_owned_report_files(predecessor, tmp_path):
-    upgrade(predecessor)
+def test_backup_restart_and_rollback_retain_owned_report_files(predecessor, tmp_path, monkeypatch):
+    migrate(predecessor.conn, registry=registry.MIGRATIONS[:93])
+    # Both startups keep their real regular changes and admission. The completed
+    # numbered input is checked once per physical connection beneath that work.
+    mock_regular_numbered_input(monkeypatch, predecessor.conn, same_database=True)
+    predecessor.init_schema(defer_metadata=True)
     value = {**report(), 'detail': 'é' * 180000}
     predecessor.rec_proposals.put_proposals('listening_choices', value, 12)
     raw = owner.encoded(predecessor.conn, 'listening_choices')
@@ -91,9 +101,11 @@ def test_backup_restart_and_rollback_retain_owned_report_files(predecessor, tmp_
     recommendation_outputs.restore(predecessor.conn, backup)
     reopened = Store(predecessor._db_path)
     try:
-        reopened.init_schema()
-        assert reopened.rec_proposals.get_proposals('listening_choices') == value
-        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(reopened.conn):
+            reopened.init_schema()
+            assert reopened.rec_proposals.get_proposals('listening_choices') == value
+            assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         reopened.conn.close()
 

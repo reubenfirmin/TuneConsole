@@ -11,15 +11,32 @@ import pytest
 from tests import file_custody_support as custody
 from tests import paid_request_support as album_description_requests
 from tests.schema.actual_library import copy_readonly_library
+from tests.store_fixture_support import consumer_schema, native_sql_calls, without_query_timing
 from yt_playlist.core import (albums, audio_annotation_files, audio_annotations,
-    album_description_files, evidence_ledger, fao)
+    album_description_files, evidence_ledger, fao, schema_inspection)
 from yt_playlist.core.store import Store
 
 
-def test_export_restores_all_annotation_revisions_and_paid_results_independently(tmp_path, monkeypatch):
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """File export and recovery do not start the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Export owns SQL and paid/annotation files, without any genre vocabulary.
+    # All three recovered Stores below still perform their actual admission.
+    with consumer_schema(entries=(), snapshot_guards=False) as template:
+        yield template
+
+
+def test_export_restores_all_annotation_revisions_and_paid_results_independently(
+        tmp_path, monkeypatch, consumer_store):
     source = tmp_path / 'source.db'
-    store = Store(source)
-    store.init_schema()
+    store = consumer_store(source, snapshot_guards=False)
     version = 'audio-session-targets-1'
     with store.conn:
         store.conn.execute("INSERT INTO recordings(id,identity_key) VALUES (1,'recording')")
@@ -75,9 +92,11 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
     for database in (Path(snapshot['restored']), separate, readonly_copy):
         candidate = Store(database)
         try:
+            candidate.conn.execute('PRAGMA synchronous=OFF')
             if database == separate:
                 custody.restore_files(candidate.conn, manifests)
-            candidate.init_schema()
+            with schema_inspection.reuse_tables(candidate.conn):
+                candidate.init_schema()
             actual = {row[0]: audio_annotation_files.read(row[1]) for row in candidate.conn.execute(
                 'SELECT id,model_output_filename FROM audio_annotations')}
             assert actual == originals
@@ -97,10 +116,9 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
             candidate.conn.close()
 
 
-def test_export_failure_preserves_source_and_propagates_the_failure(tmp_path, monkeypatch):
+def test_export_failure_preserves_source_and_propagates_the_failure(tmp_path, monkeypatch, consumer_store):
     source = tmp_path / 'source.db'
-    store = Store(source)
-    store.init_schema()
+    store = consumer_store(source, snapshot_guards=False)
     store.conn.close()
     original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     def interrupted(*_args, **_kwargs):

@@ -2,6 +2,7 @@
 from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -9,9 +10,12 @@ import uuid
 
 import pytest
 
-from tests.core.test_collection_owner_writes import feedback_writer_templates, feedback_writer_prefix
+from tests.core.test_collection_owner_writes import (
+    feedback_writer_templates, feedback_writer_prefix, seed_feedback_writers,
+)
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from yt_playlist.core import album_feedback_outbox as outbox, album_feedback_storage
+from tests.store_fixture_support import native_sql_calls, without_query_timing
+from yt_playlist.core import album_feedback_outbox as outbox, album_feedback_storage, schema_inspection
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded, WorkClosing, cancellable_work
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
@@ -20,6 +24,11 @@ from yt_playlist.rec.rec_worker import RecWorker
 
 
 pytestmark = pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Feedback replay workers run directly without an HTTP lifespan."""
 
 
 def test_outbox_schema_input_keeps_numbered_history_and_private_revision_guards(installed):
@@ -41,13 +50,18 @@ def test_feedback_prefix_keeps_three_releases_and_the_original_response(installe
 
 
 @pytest.fixture
-def pair(installed, feedback_writer_prefix):
+def pair(installed, without_query_timing):
     store, _ = installed
+    # The outbox owns actual overlapping stores, not a copied intermediate
+    # fixture. Seed the same three releases and baseline response in place.
+    seed_feedback_writers(store)
     other = Store(store._db_path)
     try:
-        other.init_schema(defer_metadata=True)
-        assert group_roots.enabled(store) and group_roots.enabled(other)
-        yield store, other
+        other.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(other.conn):
+            other.init_schema(defer_metadata=True)
+            assert group_roots.enabled(store) and group_roots.enabled(other)
+            yield store, other
     finally:
         other.conn.close()
 
@@ -65,18 +79,22 @@ def withdrawal(action):
     return uuid.uuid5(uuid.NAMESPACE_URL, 'album-feedback-withdrawal:' + action).hex
 
 
-def test_busy_publication_retains_exact_feedback_past_old_deadline(pair, installed):
+@pytest.mark.usefixtures('native_sql_calls')
+def test_busy_publication_retains_exact_feedback_past_old_deadline(pair, monkeypatch):
     store, other = pair
+    elapsed = 0
+    monotonic, wall_time = time.monotonic, time.time
+    monkeypatch.setattr(time, 'monotonic', lambda: monotonic() + elapsed)
+    monkeypatch.setattr(time, 'time', lambda: wall_time() + elapsed)
     with group_roots.admission(store):
         album_feedback.set_feedback(other, 'first-release', 'more', 3, 'first-release')
         intent, = pending(other)
         original = album_feedback_storage.original(other.conn)['first-release']
         assert original['kind'] == 'more' and original['action_id'] == intent['action_id']
         assert not responses(other)
-        # One real historical arm deliberately exceeds the removed one-second
-        # retry window; the other formats need not repeat that elapsed wait.
-        if installed[1] == 93:
-            time.sleep(1.05)
+        # Cross the old retry deadline without spending a second idle. Both
+        # clocks advance; the judgment's original observation stays unchanged.
+        elapsed = 1.05
         assert album_feedback.drain(other) == 0
         assert pending(other) == [intent]
     assert album_feedback.drain(other) == 1
@@ -121,6 +139,7 @@ def test_replacement_clear_and_repeated_clear_keep_unique_original_actions(pair)
     assert {row['id']: row for row in responses(other)} == actual
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_publish_before_acknowledgement_failure_is_deduplicated_after_reopen(pair, monkeypatch):
     store, other = pair
     with monkeypatch.context() as interrupted:
@@ -134,6 +153,7 @@ def test_publish_before_acknowledgement_failure_is_deduplicated_after_reopen(pai
     other.conn.close()
     reopened = Store(store._db_path)
     with closing(reopened.conn):
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema(defer_metadata=True)
         assert pending(reopened) == [intent]
         assert album_feedback.drain(reopened) == 1
@@ -189,6 +209,100 @@ def test_pause_cancellation_and_shutdown_keep_intents_for_next_worker(pair):
             assert not resumed.jobs.measurements
         finally:
             resumed.shutdown()
+
+
+@pytest.mark.parametrize('stop', ['admission', 'worker'])
+def test_shutdown_during_feedback_sql_keeps_intent_for_restart(pair, monkeypatch, caplog, stop):
+    store, other = pair
+    with group_roots.admission(store):
+        album_feedback.set_feedback(other, 'first-release', 'more', 3, 'first-release')
+    retained = pending(other)
+    worker = RecWorker(SimpleNamespace(store=other, work=Activity(),
+        logger=logging.getLogger(__name__), now_fn=lambda: 10))
+    interruptions, waits = [], []
+
+    def stop_during_query():
+        assert worker.work.active == ('album feedback responses',)
+        interruptions.append(stop)
+        if stop == 'admission':
+            worker.work.close_admission()
+            assert not worker._stop.is_set()
+        else:
+            worker.shutdown()
+        return 0
+
+    other.conn.create_function('stop_feedback', 0, stop_during_query)
+
+    def interrupted_read(conn):
+        # Exercise the Store's actual progress handler during an admitted read.
+        conn.execute('WITH RECURSIVE n(x) AS (VALUES(stop_feedback()) UNION ALL '
+            'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
+        pytest.fail('Shutdown did not interrupt feedback SQL')
+
+    def bounded_wait(timeout):
+        waits.append(timeout)
+        return len(waits) > 1
+
+    with monkeypatch.context() as shutdown:
+        shutdown.setattr(outbox, 'available', interrupted_read)
+        shutdown.setattr(worker._stop, 'wait', bounded_wait)
+        with caplog.at_level(logging.WARNING):
+            worker._maintenance_loop()
+    worker.shutdown()
+    assert interruptions == [stop] and waits == [0.5]
+    assert not [record for record in caplog.records if record.name in {
+        __name__, 'yt_playlist.rec.album_feedback'} and record.levelno >= logging.WARNING]
+    assert worker.work.wait(0) and not other.conn.in_transaction
+    assert pending(other) == retained and not responses(other)
+    other.conn.close()
+    reopened = Store(store._db_path)
+    with closing(reopened.conn):
+        reopened.init_schema(defer_metadata=True)
+        resumed = RecWorker(SimpleNamespace(store=reopened, work=Activity(),
+            logger=logging.getLogger(__name__), now_fn=lambda: 10))
+        try:
+            assert resumed._poll_album_feedback() == 1
+            assert resumed._poll_album_feedback() == 0
+            assert not pending(reopened)
+            response, = responses(reopened)
+            assert (response['id'], response['observed_at'], response['details']) == (
+                retained[0]['action_id'], 3, {'kind': 'more'})
+        finally:
+            resumed.shutdown()
+
+
+@pytest.mark.parametrize('failure', ['interrupted', 'missing-table-during-shutdown'])
+def test_unexpected_feedback_sql_failure_keeps_warning(pair, monkeypatch, caplog, failure):
+    _, other = pair
+    worker = RecWorker(SimpleNamespace(store=other, work=Activity(),
+        logger=logging.getLogger(__name__), now_fn=lambda: 10))
+    other.conn.create_function('interrupt_feedback', 0, lambda: (other.conn.interrupt(), 0)[1])
+
+    def failed_read(conn):
+        if failure == 'interrupted':
+            conn.execute('SELECT interrupt_feedback()').fetchone()
+        else:
+            worker.work.close_admission()
+            conn.execute('SELECT * FROM missing_feedback_table').fetchall()
+        pytest.fail('Controlled SQL failure was not raised')
+
+    try:
+        with monkeypatch.context() as failed:
+            failed.setattr(outbox, 'available', failed_read)
+            with caplog.at_level(logging.WARNING, logger='yt_playlist.rec.album_feedback'):
+                if failure == 'interrupted':
+                    assert worker._poll_album_feedback() == 0
+                else:
+                    with pytest.raises(WorkClosing):
+                        worker._poll_album_feedback()
+        warning, = [record for record in caplog.records
+                    if record.message == 'Retained album feedback awaits evidence publication']
+        assert isinstance(warning.exc_info[1], sqlite3.OperationalError)
+        assert warning.exc_info[1].sqlite_errorcode == (
+            sqlite3.SQLITE_INTERRUPT if failure == 'interrupted' else sqlite3.SQLITE_ERROR)
+        assert worker.work.wait(0)
+    finally:
+        worker.shutdown()
 
 
 def test_failed_intent_capture_rolls_back_judgment_and_emits_nothing(pair, monkeypatch):
@@ -424,6 +538,7 @@ def test_replay_batch_is_bounded_and_missing_offer_does_not_starve_next_intent(p
     assert len(actual) == 1 and actual[0]['details'] == {'kind': 'known'}
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 def test_invalid_option_retains_its_intent_without_starving_another_judgment(pair):
     store, other = pair
     with group_roots.admission(store):

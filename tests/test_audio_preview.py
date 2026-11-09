@@ -10,9 +10,12 @@ from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import audio_preview
 from scripts.audio_model.bundle import prepare
 from tests.audio_model_fixtures import write_model_fixture
+from tests.web_consumer_support import install_routes, route_schema, route_store
 
 
-def test_preview_receives_metadata_and_exposes_no_audio_or_model_endpoints(store, tmp_path, monkeypatch):
+def test_preview_receives_metadata_and_exposes_no_audio_or_model_endpoints(route_store, tmp_path, monkeypatch):
+    store = route_store
+    install_routes(monkeypatch, 'home')
     for name in audio_preview.ASSETS:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)

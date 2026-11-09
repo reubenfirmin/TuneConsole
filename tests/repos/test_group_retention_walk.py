@@ -1,5 +1,6 @@
 """Durable retirement closure survives interruption and changing evidence."""
 from copy import deepcopy
+import json
 from pathlib import Path
 import sqlite3
 import threading
@@ -7,14 +8,11 @@ import time
 
 import pytest
 
-from tests.repos.test_compact_group_publication import (
-    bounded_compact_group_template as compact_group_template,
-    database,
-    finish,
+from tests.repos.test_compact_group_publication import finish
+from tests.repos.test_group_retention import (
+    context, enable, drain, retention_reader_repositories,
 )
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_group_retention import context, enable, drain
-from tests.store_fixture_support import reuse_reporting_reader
+from tests.store_fixture_support import _numbered_input, mock_snapshot_coordinator, native_sql_calls, without_query_timing
 from yt_playlist.core import group_documents, group_evidence, group_reads, group_retention_policy, group_retention_progress, recommendation_outputs
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_revisions import Revisions
@@ -29,16 +27,54 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture
-def walking(database):
-    store, prepared = database
-    # Walk slices and their real rollback/reopen contracts keep WAL commits;
-    # automatic checkpoint scheduling and power-loss durability are separate.
-    store.conn.execute('PRAGMA synchronous=NORMAL')
-    store.conn.execute('PRAGMA wal_autocheckpoint=0')
-    with store.conn:
-        group_retention_progress.install(store.conn)
-    enable(store)
-    return store, prepared
+def walking(tmp_path, monkeypatch, retention_reader_repositories, native_sql_calls):
+    # Retention consumes published history, not a replay of earlier migrations.
+    # Keep both original generations, aliases, members and unresolved inputs.
+    with _numbered_input(79, tmp_path, monkeypatch) as (store, _):
+        with store.conn:
+            group_retention_progress.install(store.conn)
+            store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)', [(1, 'one'), (2, 'two')])
+        with monkeypatch.context() as seed, mock_snapshot_coordinator(store, seed):
+            for name, serial, parent in [('first', 1, None), ('second', 2, 'first')]:
+                prepared = history_preparation(name, serial, parent)
+                owner = store.taste_groups.stage(prepared)
+                finish(store, prepared, owner)
+                with store.conn:
+                    store.conn.execute('INSERT INTO group_assignments SELECT g.id,2,a.group_version_id,.7,.6,?,? '
+                        'FROM group_generations g CROSS JOIN group_version_aliases a '
+                        'WHERE g.external_key=? AND a.external_version=?',
+                        ('profile-digest', serial, name, name + '-leaf'))
+        assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
+        assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 3
+        assert store.conn.execute('SELECT count(*) FROM group_version_aliases').fetchone()[0] == 4
+        assert store.conn.execute('SELECT count(*) FROM group_lineage').fetchone()[0] == 1
+        store.conn.execute('BEGIN')
+        store._snapshot_revisions = Revisions(store.conn)
+        # Walk slices and their real rollback/reopen contracts keep WAL commits;
+        # automatic checkpoint scheduling and power-loss durability are separate.
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        enable(store)
+        yield store, history_preparation('third', 3, 'second')
+
+
+def history_preparation(name, serial, parent):
+    groups = []
+    for group, members in [('parent', [('one', .9, .8), ('two', .7, .6)]), ('leaf', [('one', .9, .8)])]:
+        groups.append({'version': name + '-' + group, 'group_id': group,
+            'parent_version': name + '-parent' if group == 'leaf' else None,
+            'legacy_mode_id': None, 'members': members,
+            'payload': json.dumps({'name': group, 'leaf': group == 'leaf', 'legacy': False,
+                'membership_known': True, 'size': len(members), 'depth': int(group == 'leaf'),
+                'rep_keys': ['one'], 'naming_policy': 'naming-1', 'genres': [['House', 1.0]]})})
+    return {'generation': name, 'policy': '{"algorithm":"grouping-1"}', 'fingerprint': 'input-fingerprint',
+        'at': serial, 'serial': serial, '_stage_parent': parent, 'groups': groups,
+        'payload': json.dumps({'recording_inputs': {'one': '1' * 64, 'two': '2' * 64, 'unknown-old-key': '3' * 64},
+                              'last_structure_at': 1, 'diagnostics': {'at': serial}}),
+        'unknown': [('unknown-old-key', 'unmeasured')],
+        'edges': [('one', 'two', .8, .7), ('one', 'unknown-old-key', .6, .5)],
+        'lineage': [(parent + '-leaf', name + '-leaf', 'continuation',
+            '{"old_share":1,"new_share":1,"overlap":1,"compatible":true}')] if parent else []}
 
 
 def ready(store):
@@ -50,15 +86,21 @@ def ready(store):
     pytest.fail('Durable closure never completed')
 
 
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_closure_beyond_old_limit_resumes_after_reopen_with_exact_history(walking, monkeypatch):
     store, prepared = walking
+    store.conn.execute('PRAGMA synchronous=OFF')
+    # This private history owns group and policy files. Keep their actual
+    # leases without opening unrelated empty domains for every walk slice.
+    monkeypatch.setattr(store, '_retained_readers', store.taste_groups.files.retained)
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         group_evidence.retain(store.conn, 'offer', 'historical', context(), 10)
     parent, source = 'second', 'second-leaf'
-    # Populate the real long chain below the closure/reopen boundary. Release
-    # this reporting reader before walking, reopening or collecting artifacts.
-    with reuse_reporting_reader(store, monkeypatch):
+    # Populate all fourteen real publications below the closure/reopen boundary.
+    # Their uncontended snapshot admission is a lower input; release its reader
+    # before exercising the real walk, reopen and artifact collection.
+    with monkeypatch.context() as seed, mock_snapshot_coordinator(store, seed):
         for serial in range(3, 17):
             next_prepared = deepcopy(prepared)
             next_prepared.update(generation=f'chain-{serial}', at=serial, serial=serial, _stage_parent=parent)
@@ -83,9 +125,11 @@ def test_closure_beyond_old_limit_resumes_after_reopen_with_exact_history(walkin
     path = store.conn.execute('PRAGMA database_list').fetchone()[2]
     reopened = Store(path)
     try:
-        reopened.conn.execute('PRAGMA synchronous=NORMAL')
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.conn.execute('PRAGMA wal_autocheckpoint=0')
         reopened._bind_repositories()
+        monkeypatch.setattr(reopened, '_retained_readers', reopened.taste_groups.files.retained)
+        reopened.conn.execute('BEGIN')
         reopened._snapshot_revisions = Revisions(reopened.conn)
         assert tuple(reopened.conn.execute('SELECT * FROM group_retention_walk').fetchone()) == progress
         ready(reopened)

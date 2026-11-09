@@ -5,13 +5,20 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_tv_state_preparation import finish, head
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 from tests.test_tv_stream import video
 from yt_playlist.core.preparation import tv_publication as publication, tv_state as preparation
 
 
-pytestmark = pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+pytestmark = [pytest.mark.parametrize('installed', [79, 93, 94], indirect=True),
+              pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')]
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Continuation preparation owns SQL/files, without an HTTP lifecycle."""
 
 
 def staged_rows(conn):

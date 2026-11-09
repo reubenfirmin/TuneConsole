@@ -6,6 +6,7 @@ import pytest
 from yt_playlist.core import collection_recovery, discovery_provenance as provenance
 from yt_playlist.core.migrations import current
 from yt_playlist.core.store import Store
+from tests.store_fixture_support import native_sql_calls, without_query_timing
 
 
 def discover(store,video='song',source='discovery',now=1):
@@ -105,9 +106,9 @@ def test_account_and_import_withdrawal_preserves_independent_sources_and_lifetim
     assert store.conn.execute('SELECT count(*) FROM discovery_artist_sources').fetchone()[0]==1
 
 
-def test_candidate_output_backup_restore_and_orphan_cleanup(tmp_path):
-    store = Store(tmp_path/'source.db')
-    store.init_schema()
+def test_candidate_output_backup_restore_and_orphan_cleanup(
+        tmp_path, consumer_store, native_sql_calls, without_query_timing):
+    store = consumer_store(tmp_path/'source.db')
     try:
         store.discovery.upsert_discovered_artist('Candidate',1,['Anchor'],['Playlist'],None,1)
         store.conn.execute('BEGIN')
@@ -117,6 +118,7 @@ def test_candidate_output_backup_restore_and_orphan_cleanup(tmp_path):
         store.conn.rollback()
         copied = Store(tmp_path/'copy.db')
         try:
+            copied.conn.execute('PRAGMA synchronous=OFF')
             collection_recovery.restore(copied.conn,manifest)
             copied.init_schema()
             assert copied.discovery.get_discovered_artists()[0]['fits']==['Playlist']

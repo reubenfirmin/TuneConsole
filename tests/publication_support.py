@@ -1,4 +1,6 @@
 """Controlled current recommendation publications, without retired cache writes."""
+from dataclasses import replace
+
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.repos import recommendation_publication as publication
 
@@ -54,3 +56,13 @@ def publish(store, prepared):
     build = stage(store, prepared)
     store.recommendations.publish(build, 11)
     return build
+
+
+def prepared_output(index):
+    key = f'chunk-{index:02d}'
+    return publication.Output('home', key, outputs.encode('home', key, {'title': f'Output {index}'}))
+
+
+def output_plan(store, key, count):
+    return replace(plan(store, key, count=3), outputs=tuple(
+        prepared_output(index) for index in range(count)))

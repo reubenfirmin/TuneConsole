@@ -5,8 +5,35 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_spotify_album_import import AlbumClient, album_zip
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
+)
+from tests.web_consumer_support import install_routes
 from tests.web.test_spotify_data_route import _prepare_library, _wait_for_library_job
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def album_import_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, album_import_schema, native_sql_calls):
+    # Confirmation still executes actual worker lifetime admission, SQL and
+    # files with fresh readers; per-query handle diagnostics have other owners.
+    with _file_consumer_store(tmp_path, album_import_schema) as database:
+        yield database
+
+
+@pytest.fixture(autouse=True)
+def album_import_routes(monkeypatch, without_metadata_providers):
+    install_routes(monkeypatch, 'setup')
 
 
 def web_client(store, clients):

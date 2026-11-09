@@ -138,20 +138,27 @@ def mock_preparation_schema(monkeypatch, job, conn):
     monkeypatch.setattr(type(job), 'validate', admitted)
 
 
-def mock_regular_numbered_input(monkeypatch, conn):
+def mock_regular_numbered_input(monkeypatch, conn, *, same_database=False):
     """Admit the fixed numbered input once below a regular-DDL consumer.
 
     Every regular history check, change and owner validator remains real. Use
-    only after numbered upgrades finish; other connections still admit normally.
+    only after numbered upgrades finish. A maintenance worker can opt in to the
+    same fixed input on its separate connection, which is admitted once too.
     """
     from yt_playlist.core.migrations import registry, regular
 
     validate = regular.validate_version
-    validate(conn, regular.history(conn, registry.MIGRATIONS))
+    validate(conn, regular.history(conn, registry.MIGRATIONS), foreign_keys=False, data=False)
+    admitted_connections = {conn}
+    path = conn.execute('PRAGMA database_list').fetchone()[2] if same_database else None
 
     def admitted(target, *args, **kwargs):
-        if target is not conn:
-            return validate(target, *args, **kwargs)
+        if target in admitted_connections:
+            return
+        result = validate(target, *args, **kwargs)
+        if path and target.execute('PRAGMA database_list').fetchone()[2] == path:
+            admitted_connections.add(target)
+        return result
 
     monkeypatch.setattr(regular, 'validate_version', admitted)
 
@@ -358,9 +365,9 @@ def _numbered_input(version, tmp_path, monkeypatch, *, snapshot_guards=False):
         # Preparation keeps real SQL transactions and files. Power-loss
         # durability of this disposable input is outside those tests.
         database.conn.execute('PRAGMA synchronous=OFF')
-        with closing(sqlite3.connect(':memory:')) as schema:
-            install_numbered_input(schema, version)
-            schema.backup(database.conn)
+        # This fixture owns one private file. Construct its fixed SQL there
+        # directly instead of building and then copying an unused second DB.
+        install_numbered_input(database.conn, version)
         database._fixture_numbered_input_version = version
         database.conn.execute('PRAGMA journal_mode=WAL')
         database._schema_compatibility = version < 103

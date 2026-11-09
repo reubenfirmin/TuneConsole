@@ -6,16 +6,16 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tests.radio_session_support import (
-    completed_poc as poc, completed_radio_schema, completed_radio_store,
-)
+# Both request-race modules consume the same completed catalog and checkpoint
+# storage. SQLite admission, fresh readers and the HTTP concurrency stay real.
+from tests.test_radio_start_overlap import poc, radio_schema, controlled_radio_checkpoints
 from tests.store_fixture_support import without_query_timing
 from yt_playlist.rec import account_growth
 from yt_playlist.web.routes import radio_session
 from yt_playlist.web.routes.bridge import build as bridge_routes
 
 
-pytestmark = pytest.mark.usefixtures('without_query_timing')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'controlled_radio_checkpoints')
 
 
 @pytest.fixture(autouse=True)

@@ -3,17 +3,33 @@ import pytest
 
 from yt_playlist.rec import embedding_vectors as embed, scoring, surfaces
 from tests import model_support
+from tests.recommendation_support import seed_publication_subjects
 from tests.retained_rating_support import apply_model_ratings
+from tests.store_fixture_support import native_sql_calls, without_query_timing
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Scoring traces retain actual model fitting and SQL without HTTP startup."""
 
 
 def _model(store, album=None, thumbnail=None):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    a = [store.tracks.upsert_track(f"a{i}", f"A{i}", "Alpha", album, None, thumbnail=thumbnail) for i in range(8)]
-    b = [store.tracks.upsert_track(f"b{i}", f"B{i}", "Beta", album, None, thumbnail=thumbnail) for i in range(8)]
-    for track in a:
-        store.tracks.set_track_genre(track, "Techno")
-    for track in b:
-        store.tracks.set_track_genre(track, "Folk")
+    # Scoring consumes completed catalog facts; provider ingestion is below its
+    # boundary. Keep all sixteen songs and the actual playlist/history fit.
+    seed_publication_subjects(store, [
+        dict(key=f'{prefix}{i}|{artist.lower()}', video_id=f'{prefix}{i}',
+             title=f'{prefix.upper()}{i}', artist=artist, album=album, genre=genre)
+        for prefix, artist, genre in (('a', 'Alpha', 'Techno'), ('b', 'Beta', 'Folk'))
+        for i in range(8)])
+    with store.conn:
+        store.conn.execute('UPDATE youtube_items SET thumbnail=?', (thumbnail,))
+    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+    a = [entries[f'a{i}'] for i in range(8)]
+    b = [entries[f'b{i}'] for i in range(8)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "Night drive", 8, "a", 1.0), a)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "Sunday", 8, "b", 1.0), b)
     store.history.record_history_plays(iid, 100.0, [f"a{i}|alpha" for i in range(4)], source_timezone="UTC")

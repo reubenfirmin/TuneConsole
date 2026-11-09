@@ -9,11 +9,10 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from tests.onboarding_support import publish_personal_mix
-from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, initialize_consumer, native_sql_calls,
-    mock_snapshot_coordinator, reuse_reporting_reader)
+    mock_snapshot_coordinator, reuse_reporting_reader, without_query_timing)
 from yt_playlist.core.store import Store
 from yt_playlist.rec import account_growth, tv
 from yt_playlist.web.app import create_app
@@ -34,9 +33,11 @@ def tv_launch_schema():
 
 
 @pytest.fixture
-def tv_home_store(tmp_path, tv_launch_schema, monkeypatch, native_sql_calls):
+def tv_home_store(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
     """Real Home SQL/files below independent snapshot conflict detection."""
-    with _file_consumer_store(tmp_path, tv_launch_schema, snapshot_guards=False) as database:
+    schema = request.getfixturevalue(
+        'tv_journey_schema' if 'tv_journey_inputs' in request.fixturenames else 'tv_launch_schema')
+    with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
         with mock_snapshot_coordinator(database, monkeypatch):
             yield database
 
@@ -44,7 +45,7 @@ def tv_home_store(tmp_path, tv_launch_schema, monkeypatch, native_sql_calls):
 @pytest.fixture
 def store(request, tmp_path, monkeypatch):
     if 'tv_journey_inputs' in request.fixturenames:
-        yield request.getfixturevalue('store')
+        yield request.getfixturevalue('tv_home_store')
         return
     database = Store(tmp_path / 'tv.db')
     with closing(database.conn):
@@ -125,16 +126,18 @@ def prepare_tv_journey(store, *, mixes=4):
 
 
 @pytest.fixture(scope='module')
-def early_journey_template(_pristine_current_schema):
-    from tests.test_growth_journey import early_journey
-
-    with prepared_template(_pristine_current_schema, early_journey) as template:
-        yield template
+def tv_journey_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz')), snapshot_guards=False) as schema:
+        yield schema
 
 
 @pytest.fixture
-def tv_journey_inputs(store, early_journey_template):
-    early_journey_template.restore(store)
+def tv_journey_inputs(store):
+    from tests.test_growth_journey import early_journey
+
+    # Home consumes one complete early journey. Its SQL/files are private; no
+    # immutable intermediate library and copy are needed before serving it.
+    early_journey(store)
 
 
 @pytest.fixture

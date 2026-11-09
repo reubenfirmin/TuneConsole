@@ -8,7 +8,7 @@ import pytest
 
 from tests.genre_catalog_support import bound_shipped_catalog
 from tests.regular_schema_support import register_independent_ddl
-from tests.store_fixture_support import install_numbered_input, without_query_timing
+from tests.store_fixture_support import install_numbered_input, native_sql_calls, without_query_timing
 from yt_playlist.core import albums, genre_identity, schema_inspection
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import MigrationError, regular, runner
@@ -25,13 +25,13 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture
-def installed(request, tmp_path, monkeypatch):
+def installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
     """Real predecessor SQL and shipped labels beneath the preparation worker."""
     version = request.param
     bound_shipped_catalog(monkeypatch, ('drum bass', 'synth pop', 'jazz', 'rock'))
     store = Store(tmp_path / 'genres.db')
     with closing(store.conn), schema_inspection.reuse_tables(store.conn):
-        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA synchronous=OFF')
         install_numbered_input(store.conn, version)
         store._schema_compatibility = True
         store._bind_repositories()
