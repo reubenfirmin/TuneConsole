@@ -121,6 +121,57 @@ def apply(conn, states, *, dislike_seconds=None, prior_feedback=None):
     return new_likes
 
 
+def feedback_changes(states, rows, *, dislike_seconds):
+    """Project ordinary, already-aggregated rating observations without SQL."""
+    existing = {(row['surface'], row['item_key'], row['kind']): row for row in rows if row['scope'] == ''}
+    deleted, actions, inserted, likes = [], [], [], {}
+    for key, rating in states.items():
+        if not key or rating.status not in PRIORITY:
+            continue
+        kind = rating.status.lower()
+        deleted.append((key, kind))
+        if rating.status == 'INDIFFERENT':
+            continue
+        surface = 'like' if kind == 'like' else 'sync'
+        if (surface, key, kind) in existing:
+            if kind == 'like' and rating.provenance == 'action':
+                actions.append((key,))
+            continue
+        until = rating.observed_at + dislike_seconds if kind == 'dislike' else None
+        inserted.append((surface, key, kind, rating.provenance if kind == 'like' else None, until, rating.observed_at))
+        if kind == 'like':
+            likes[key] = Rating('LIKE', rating.observed_at, rating.provenance)
+    return deleted, actions, inserted, likes
+
+
+def association_changes(states, rows, prior_feedback):
+    """Relocate established feedback without renewing expiry or replaying learning."""
+    existing = {(row['surface'], row['item_key'], row['kind']): row for row in rows if row['scope'] == ''}
+    deleted, actions, inserted, ages, guards = [], [], [], [], []
+    for key, rating in states.items():
+        if not key or rating.status not in PRIORITY:
+            continue
+        prior = prior_feedback.get(key, ())
+        guard = _earliest([row for row in prior if row['kind'] == 'like_grad'])
+        if guard is not None:
+            guards.append((key, guard['reason'], guard['created_at']))
+        kind = rating.status.lower()
+        deleted.append((key, kind))
+        if rating.status == 'INDIFFERENT':
+            continue
+        surface = 'like' if kind == 'like' else 'sync'
+        current = existing.get((surface, key, kind))
+        donor = _earliest([row for row in prior if row['kind'] == kind] + ([current] if current else []))
+        if current:
+            ages.append((donor['created_at'], donor['until'], surface, key))
+            if kind == 'like' and rating.provenance == 'action':
+                actions.append((key,))
+        elif prior and (kind != 'dislike' or donor is not None):
+            inserted.append((surface, key, kind, rating.provenance if kind == 'like' else None,
+                donor['until'] if kind == 'dislike' else None, donor['created_at'] if donor else rating.observed_at))
+    return deleted, actions, inserted, ages, guards
+
+
 def feedback_rows(conn, keys):
     keys = sorted(set(keys) - {None})
     result = []

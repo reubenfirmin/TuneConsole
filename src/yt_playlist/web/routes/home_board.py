@@ -7,10 +7,11 @@ from yt_playlist.rec import home_cards, home_prepared, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.context import request_form
 from yt_playlist.web.routes.home_onboarding import sample_fragment
+from yt_playlist.web.routes.home_access import mix_guard
 
 
 def build(ctx, views):
-    router = APIRouter()
+    router = APIRouter(dependencies=[Depends(mix_guard(ctx))])
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
     recommendations = views.recommendations
 
@@ -35,7 +36,6 @@ def build(ctx, views):
         if proto is None:
             return Response(status_code=204)
         recommendations.record_modes([proto], result.epoch, now)
-        recommendations.record_offer([proto], now, epoch=result.epoch)
         response = templates.TemplateResponse(request, "_partials/generated_playlist.html",
                                                {"p": proto, "regenerating": True})
         recommendations.audit([proto], now, request.url.path)

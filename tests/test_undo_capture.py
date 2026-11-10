@@ -73,7 +73,7 @@ def test_forward_copy_remains_recorded_when_capture_fails(store, monkeypatch):
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor, undo_capture
 
-    identity = store.identities.upsert_identity("Main", "cred", None, True)
+    identity = store.accounts.upsert_account("Main", "cred", None, True)
     tid = store.tracks.upsert_track("a", "Song", "Artist", None, 200)
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 1, "", 1)
     store.playlists.set_playlist_tracks(source, [tid])
@@ -95,7 +95,7 @@ def test_merge_retry_does_not_claim_an_external_addition(store, monkeypatch):
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor, playlist_undo, undo_capture
 
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     keeper = store.playlists.upsert_playlist(iid, 'KEEP', 'Keeper', 1, '', 1)
     other = store.playlists.upsert_playlist(iid, 'OTHER', 'Other', 1, '', 1)
     client = FakeClient(tracks={'KEEP': [_track('a', 'A', 'Artist')],

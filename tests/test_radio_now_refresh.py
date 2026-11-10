@@ -5,17 +5,84 @@ import time
 import numpy as np
 import pytest
 
-from tests.radio_session_support import poc, play
-from tests.test_radio_tuning import prepared
-from yt_playlist.rec import embedding_vectors as embed, radio_tuning, rec_params
+from tests.radio_session_support import controlled_radio_checkpoints, poc, play
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from yt_playlist.core.store import Store
+from yt_playlist.rec import embedding_vectors as embed, measurement, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.web import radio_session
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These controller tests construct no HTTP application or sync service."""
+
+
+@pytest.fixture(scope='module')
+def now_schema():
+    # NOW consumes two fixed styles; taxonomy/bootstrap admission have their own
+    # owners. Keep actual candidate SQL and connection-local revision guards.
+    with bounded_consumer_schema((('ambient', 'Ambient'), ('techno', 'Techno'))) as schema:
+        yield schema
+
+
+
+def prepare_now_candidates(store):
+    # NOW consumes clustered candidates and the captured vectors below. Musical
+    # profile preparation/intensity have independent owners in test_radio_tuning.
+    # Controller consumers add their own account and listening evidence later.
+    modes, bundles, tracks = [], {}, []
+    for mode, genre in enumerate(('Ambient', 'Techno'), 1):
+        modes.append({'mode_id': mode, 'label': genre.lower(), 'families': [[genre.lower(), 1]],
+                      'centroid': np.eye(2, dtype=np.float32)[mode - 1], 'size': 6, 'rep_keys': []})
+        rows = [{'key': f'm{mode}-{index}|artist m{mode}-{index}', 'video_id': f'm{mode}-{index}',
+                 'title': f'm{mode}-{index}', 'artist': f'Artist m{mode}-{index}', 'genre': genre}
+                for index in range(6)]
+        tracks.extend(rows)
+        bundles[str(mode)] = {'wheelhouse': rows[:3], 'fresh': rows[3:]}
+    seed_publication_subjects(store, tracks)
+    store.modes.replace_modes(modes, retired_ids=[], now=1)
+    # Policy hashing is a lower-layer input to these NOW refresh cases. The
+    # real NOW policy (including the concurrent gain change) remains live.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                      ('now-fixture', {'schema': 4, 'algorithm': 'now-fixture'}))
+        publish_bundles(store, bundles)
+    return tracks
+
+
 @pytest.fixture
-def active(poc, prepared, monkeypatch):
+def store(now_schema, tmp_path, monkeypatch):
+    source = Store(tmp_path / 'now.db')
+    try:
+        initialize_consumer(source, now_schema)
+        source.conn.execute('PRAGMA synchronous=NORMAL')
+        source.conn.execute('PRAGMA wal_autocheckpoint=0')
+        source._fixture_radio_pool = []
+        with reuse_reporting_reader(source, monkeypatch):
+            yield source
+    finally:
+        source.conn.close()
+
+
+@pytest.fixture
+def prepared(store, monkeypatch):
+    tracks = prepare_now_candidates(store)
+    entries = store.tracks.track_ids_for_videos([track['video_id'] for track in tracks])
+    # Playlist confirmation consumes these already observed uploads. Preserve
+    # actual membership/publication SQL without repeating metadata ingestion.
+    monkeypatch.setattr(store.tracks, 'upsert_track', lambda video, *args, **kwargs: entries[video])
+    return tracks
+
+
+@pytest.fixture
+def active(controlled_radio_checkpoints, poc, prepared, monkeypatch):
     controller, remote, _, workers, _ = poc
     store = controller.ctx.store
+    # Ordinary reads are lower-layer inputs; the refresh worker retains its
+    # real isolated read_snapshot and revision fencing. Reader lifetime has
+    # separate coverage in core/test_reporting_reads.
     clock = [100_000.]
     controller.ctx.now_fn = lambda: clock[0]
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
@@ -24,7 +91,7 @@ def active(poc, prepared, monkeypatch):
     neutral_style = neutral.next_track([])["genre"]
     preferred = [t for t in prepared if t["genre"] != neutral_style][:3]
     keys = [t["key"] for t in preferred]
-    vector = [1., 0.] if preferred[0]["genre"] == "ambient" else [0., 1.]
+    vector = [1., 0.] if preferred[0]["genre"] == "Ambient" else [0., 1.]
     reads = []
 
     def vectors(*args, **kwargs):
@@ -32,9 +99,9 @@ def active(poc, prepared, monkeypatch):
         return keys, np.array([vector] * len(keys), dtype=np.float32), {k: i for i, k in enumerate(keys)}
 
     monkeypatch.setattr(embed, "load_content_vectors", vectors)
-    iid = store.identities.get_master_identity().id
-    for i, track in enumerate(preferred):
-        store.history.record_play_event(iid, track["key"], track["video_id"], clock[0] - i * 60)
+    iid = store.accounts.get_master_account().id
+    store.history.import_play_events(iid, [(track['key'], track['video_id'], clock[0] - i * 60)
+                                         for i, track in enumerate(preferred)])
     assert controller.start(prepared[0]["video_id"])["ok"]
     play(controller, remote.ids[0])
     assert controller.session.candidates.now_posterior

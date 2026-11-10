@@ -3,12 +3,11 @@ import json
 
 import pytest
 
-from yt_playlist.core.migrations import registry
-from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import musical_preparation, vibe_preparation
 from yt_playlist.rec.progressive import Preparation
 from tests.musical_support import prepare_profiles
+from yt_playlist.rec import musical_profiles
 
 
 def deliver(store, entry, entities, run):
@@ -38,8 +37,23 @@ def source_rows(store):
 
 
 def versions(store):
-    return json.loads(store.conn.execute(
-        "SELECT payload FROM rec_musical_profiles WHERE identity_key='song|artist'").fetchone()[0])['source_versions']
+    return store.musical_profiles.by_keys(['song|artist'])['song|artist']['source_versions']
+
+
+def test_profiles_drain_after_a_bounded_capture_defers(store, monkeypatch):
+    entry = store.tracks.upsert_track('video', 'Song', 'Artist', '', 200)
+    deliver(store, entry, ('a',), 'initial')
+    original = Preparation.capture
+    calls = []
+
+    def defer_once(self, now):
+        calls.append(now)
+        return False if len(calls) == 1 else original(self, now)
+
+    monkeypatch.setattr(Preparation, 'capture', defer_once)
+    settled(store)
+    assert len(calls) > 1
+    assert set(versions(store)) == {source_rows(store)['a']['digest']}
 
 
 @pytest.mark.parametrize(('initial', 'corrected'), [(('a', 'b'), ('a',)), (('a',), ('b',))])
@@ -54,43 +68,15 @@ def test_delivery_contraction_and_replacement_rebuild_from_current_links(store, 
     if len(initial) == 2:
         assert source_rows(store) == before
         assert store.musical_profiles.pending() is None
-        assert not vibe_preparation.due(store)
+        # Removing a source link invalidates the joint model's masked metadata
+        # inputs immediately, even though no source profile needs rebuilding.
+        from yt_playlist.rec import vibe_joint_preparation
+        assert store.vibe_predictions.pending() is None
+        assert vibe_preparation.due(store) == vibe_joint_preparation.due(store)
     settled(store)
     current = source_rows(store)
     assert set(versions(store)) == {current[entity]['digest'] for entity in corrected}
     assert all(current[entity] == row for entity, row in before.items())
     assert store.prepared_content.counters() == counters
-    assert store.conn.execute("SELECT COUNT(*) FROM metadata_findings WHERE provider='fixture-retraction'").fetchone()[0] == len(initial) + len(corrected)
-
-
-@pytest.mark.parametrize('contracted', [False, True])
-def test_schema_63_upgrade_recovers_only_stranded_retracted_profiles(tmp_path, monkeypatch, contracted):
-    path = tmp_path / 'library.db'
-    store = Store(path)
-    with monkeypatch.context() as patch:
-        patch.setattr(registry, 'MIGRATIONS', tuple(m for m in registry.MIGRATIONS if m.version <= 63))
-        store.init_schema()
-    entry = store.tracks.upsert_track('video', 'Song', 'Artist', '', 200)
-    deliver(store, entry, ('a', 'b'), 'initial')
-    settled(store)
-    before, old_versions = source_rows(store), versions(store)
-    if contracted:
-        deliver(store, entry, ('a',), 'old-contraction')
-        assert not store.prepared_content.has_pending() and source_rows(store) == before
-        assert versions(store) == old_versions
-    store.conn.close()
-
-    reopened = Store(path)
-    try:
-        reopened.init_schema()
-        assert reopened.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] >= 64
-        assert source_rows(reopened) == before and versions(reopened) == old_versions
-        assert [row[0] for row in reopened.prepared_content.pending(32)] == (['song|artist'] if contracted else [])
-        settled(reopened)
-        assert set(versions(reopened)) == {before[entity]['digest'] for entity in (('a',) if contracted else ('a', 'b'))}
-        assert source_rows(reopened) == before
-        reopened.init_schema()
-        assert not reopened.prepared_content.has_pending()
-        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        reopened.conn.close()
+    observations = store.enrichment_state.metadata_observations('song|artist')
+    assert len([row for row in observations if row['provider'] == 'fixture-retraction']) == len(initial) + len(corrected)

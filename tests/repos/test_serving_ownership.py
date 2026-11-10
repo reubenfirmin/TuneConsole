@@ -5,13 +5,30 @@ import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec import scorecard
+from tests.publication_support import plan, publish, stage
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, native_sql_calls
 
 
-def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path):
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Synchronous reporting/publication owners do not construct the web app."""
+
+
+@pytest.fixture(scope='module')
+def publication_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path, publication_schema):
     store = Store(tmp_path / "report.db")
-    store.init_schema()
+    store.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(store, publication_schema)
     try:
-        iid = store.identities.upsert_identity("main", "credential", None, True)
+        iid = store.accounts.upsert_account("main", "credential", None, True)
         store.tracks.upsert_track("video", "Song", "Artist", None, 200)
         store.rec_ledger.record_served_impressions("shown", "home", [{
             "key": "song|artist", "rank": 1,
@@ -27,36 +44,38 @@ def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_proposals_policies_and_settings_share_the_outer_publication(tmp_path, fail):
+def test_proposals_and_policies_commit_before_the_publication_marker(tmp_path, fail, publication_schema):
     store = Store(tmp_path / "publish.db")
-    store.init_schema()
+    store.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(store, publication_schema)
     try:
-        store.rec_proposals.put_proposals("mode_bundles", {"generation": 1}, 1)
-        store.rec_proposals.put_proposals("fresh_pool", ["old"], 1)
+        old = publish(store, plan(store, 'old', value={'generation': 1}))
+        build = stage(store, plan(store, 'new', value={'generation': 2}))
         store.settings.set_setting("publication-marker", "old")
         with store.read_snapshot() as snapshot:
             for owner in ("rec_ledger", "rec_proposals", "rec_signals",
                           "playlist_recipes", "artist_similarity"):
-                repo = getattr(snapshot.store, owner)
+                repo = getattr(snapshot.store, owner).repository
                 assert repo.conn is snapshot.store.conn
                 assert repo._lock is snapshot.store._lock
 
-            def publish():
+            def finish():
                 store.rec_ledger.publish_prepared_policies([("new-policy", "{}", 2)])
-                store.rec_proposals.publish_prepared_bundles('{"generation":2}', '["new"]', 2)
-                store.settings.publish_values({"publication-marker": "new"})
+                store.recommendations.publish(build, 2)
                 if fail:
                     raise sqlite3.IntegrityError("later owner failed")
+                store.settings.publish_values({"publication-marker": "new"})
 
             if fail:
                 with pytest.raises(sqlite3.IntegrityError, match="later owner failed"):
-                    snapshot.publish(publish)
+                    snapshot.publish_ordered(finish)
             else:
-                assert snapshot.publish(publish)
+                assert snapshot.publish_ordered(finish)
         assert not store.conn.in_transaction
-        assert store.rec_proposals.get_proposals("mode_bundles") == {"generation": 1 if fail else 2}
-        assert store.rec_proposals.get_proposals("fresh_pool") == ["old" if fail else "new"]
+        assert store.recommendations.output('home', 'fixture') == {'generation': 2}
+        for surface in ('home', 'fresh'):
+            assert store.recommendations.head(surface)['id'] == build.generation_id
         assert store.settings.get_setting("publication-marker") == ("old" if fail else "new")
-        assert bool(store.conn.execute("SELECT 1 FROM rec_serving_policies").fetchone()) is not fail
+        assert store.rec_ledger.policy_configuration('new-policy') == {}
     finally:
         store.conn.close()

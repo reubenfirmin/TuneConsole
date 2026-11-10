@@ -3,7 +3,7 @@ from yt_playlist.rec import taste_analysis
 
 
 def test_breadth_is_play_weighted(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     techno = [store.tracks.upsert_track(f"t{i}", f"T{i}", "A", None, None) for i in range(6)]
     folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "B", None, None) for i in range(6)]
     for t in techno:

@@ -1,35 +1,20 @@
-"""Graduation: turn sustained transient signals (likes, dislikes, plays, held sliders) into lasting
-permanent-weight nudges, gated by the THEME_THRESHOLD ledger. apply_dislikes folds a sync's like/
-dislike statuses into the model."""
+"""Project recording ratings and graduate sustained positive signals and held sliders.
+
+Permanent-weight nudges are gated by the registered theme_threshold.
+"""
 import math
 import time
 
 from yt_playlist.rec import mix_tuning, rec_params, transient
-from yt_playlist.core.rating_feedback import Rating
-
-
-def apply_dislikes(store, status_map, now, provenance="sync") -> None:
-    """Fold per-track likeStatus into the model. A first-seen DISLIKE retains a global suppression
-    and durable negative-vector evidence. A first-seen LIKE -> a positive graduation contribution
-    (plus, for 'action' provenance only, transient participation via the like row itself). A
-    no-longer-disliked/liked track has its suppression/like cleared. NO direct permanent axis nudge.
-    Graduation owns that. Idempotent.
-
-    `provenance`: 'sync' when the statuses come from the library sync's bulk rated map (no real
-    action time; likes stay out of the transient model and graduate at the low source_w_like_synced
-    weight), 'action' when observed live through the extension (real event time; full transient
-    participation, normal source_w_like weight). INDIFFERENT must come from a confirmed rating
-    request or a complete library sync. Unconfirmed player readouts can show INDIFFERENT before
-    YTM hydrates the real rating (see live_plays/player_events).
-
-    Graduation is additionally gated by a once-EVER per-key stamp (mark_graduated_once) that
-    survives clear/re-record cycles: without it, a likeStatus flap deleted the like row and let the
-    next sync re-graduate the same like daily, ratcheting artist weights to the cap."""
-    apply_ratings(store, {key: Rating(status, now, provenance) for key, status in status_map.items()})
 
 
 def apply_ratings(store, states):
-    """Project combined recording evidence, graduating a positive contribution at most once."""
+    """Project combined recording evidence, graduating a positive contribution at most once.
+
+    Ratings carry their own observation time and sync/action provenance. Dislikes
+    retain suppression and durable negative evidence; neutral ratings clear the
+    projected state. Callers reconcile confirmed observations before projection.
+    """
     with store._lock:
         new_likes = store.rec_model.apply_rating_feedback(
             states, dislike_seconds=rec_params.get_param(store, "dislike_suppress_days") * 86400)
@@ -43,8 +28,8 @@ def apply_ratings(store, states):
 
 def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -> None:
     """Accumulate one facet's signed event into the graduation ledger; when its running total
-    crosses THEME_THRESHOLD, graduate it (a gentle permanent weight nudge, then a smooth reset).
-    `source` is the signal's SOURCE_W_* weight (graduation speed). `source_label` names the driving
+    crosses theme_threshold, graduate it (a gentle permanent weight nudge, then a smooth reset).
+    `source` is the signal's registered source weight (graduation speed). `source_label` names the driving
     signal for the §1c graduation log. Model-only. NEVER suppresses."""
     threshold = rec_params.get_param(store, "theme_threshold")
     score = store.rec_signals.bump_theme(axis, signed * source, now)
@@ -59,7 +44,7 @@ def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -
 
 def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") -> None:
     """Accumulate a transient-feeding event into the per-facet graduation ledger (presence-weighted),
-    graduating each facet that crosses the threshold. `source` is the signal's SOURCE_W_* weight,
+    graduating each facet that crosses the threshold. `source` is the signal's registered source weight,
     `source_label` names it for the graduation log. Model-only. NEVER suppresses. `signed` carries
     intensity (±1, ±2 on 'a lot').
 
@@ -84,8 +69,8 @@ def _utc_day(now) -> str:
 
 
 def graduate_slider_exposure(store, now) -> None:
-    """Once per distinct held-day per axis, a held standing lean adds lean_magnitude * SOURCE_W_SLIDER
-    to its graduation ledger. On crossing THEME_THRESHOLD: a permanent nudge_weight step, then migrate
+    """Once per distinct held-day per axis, a held standing lean adds lean_magnitude * source_w_slider
+    to its graduation ledger. On crossing theme_threshold: a permanent nudge_weight step, then migrate
     by dividing the lean by the actual permanent ratio so the displayed effective multiplier
     (permanent x lean) is conserved (sticky). Returning a slider to neutral (magnitude 0) stops all
     accrual."""
@@ -124,7 +109,7 @@ def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
 
     Plays feed only the transient model (sync stores history; transient.play_facet_leans reads it).
     Here, once per UTC day per axis, the sustained play-derived lean contributes lean_magnitude *
-    SOURCE_W_PLAY to the rec_theme ledger; crossing THEME_THRESHOLD nudges the permanent weight.
+    source_w_play to the rec_theme ledger; crossing theme_threshold nudges the permanent weight.
     Unlike sliders there is NO migration step: plays are not a displayed handle to keep sticky, and
     the play lean self-decays on the wall clock (#85) when listening stops, so the daily
     contribution falls to ~0 on its own.

@@ -2,7 +2,7 @@
 import json
 import time
 
-from . import artists
+from . import artists, artist_credits, legacy_evidence, album_tracklists
 
 
 def lookup(conn, browse_id):
@@ -19,32 +19,39 @@ def _credit_subject(conn, album_id, previous):
         return previous
     other_albums = [r[0] for r in conn.execute('SELECT album_id FROM album_artists '
                     'WHERE artist_id=? AND album_id<>?',(previous,album_id))]
-    other_entries = [r[0] for r in conn.execute('SELECT ta.entry_id FROM track_artists ta '
+    other_entries = [r[0] for r in conn.execute(f'SELECT ta.entry_id FROM {artist_credits.projection_table(conn)} ta '
         'WHERE ta.artist_id=? AND NOT EXISTS(SELECT 1 FROM album_tracks at '
         'WHERE at.album_id=? AND at.entry_id=ta.entry_id)',(previous,album_id))]
     if other_albums or other_entries:
-        conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
-            ('ambiguous_album_artist',str(previous),json.dumps({'artist_id':previous,'album_id':album_id,
+        legacy_evidence.retain(conn,
+            'ambiguous_album_artist',str(previous),json.dumps({'artist_id':previous,'album_id':album_id,
                 'other_albums':other_albums,'other_entries':other_entries}),
-             'exact release identifies only its own unresolved credit; shared-name state remains ambiguous'))
+             'exact release identifies only its own unresolved credit; shared-name state remains ambiguous')
+        legacy_evidence.mark_artist_ambiguity(conn, previous)
     return None if artists.ambiguous_context(conn,previous) else previous
 
 
 def observe(conn, browse_id, *, title=None, artist=None, year=None, type=None,
             thumbnail=None, genre=None, credits=None, artist_id=None, rank=0):
+    from . import genre_classifications
     if not browse_id:
         raise ValueError('An album requires a YouTube browse ID.')
     aid = lookup(conn,browse_id)
-    values = tuple(None if v=='' else v for v in (title,artist,str(year) if year is not None else None,type,thumbnail,genre))
+    keyed_genres = genre_classifications.available(conn)
+    fields = ('title','artist','year','type','thumbnail') + (() if keyed_genres else ('genre',))
+    inputs = (title,artist,str(year) if year is not None else None,type,thumbnail) + (() if keyed_genres else (genre,))
+    values = tuple(None if v=='' else v for v in inputs)
     previous_rank = None
     if aid is None:
-        aid = conn.execute('INSERT INTO albums(title,artist,year,type,thumbnail,genre,metadata_rank) VALUES (?,?,?,?,?,?,?)', (*values,rank)).lastrowid
+        aid = conn.execute(f'INSERT INTO albums({",".join(fields)},metadata_rank) VALUES (' + ','.join('?' for _ in range(len(fields)+1)) + ')', (*values,rank)).lastrowid
         conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id) VALUES ('youtube',?,?)", (browse_id,aid))
     else:
         previous_rank = conn.execute('SELECT metadata_rank FROM albums WHERE id=?', (aid,)).fetchone()[0]
-        fields = ('title','artist','year','type','thumbnail','genre')
         assignments = ','.join(f'{f}=COALESCE(?,{f})' if rank>=previous_rank else f'{f}=COALESCE({f},?)' for f in fields)
         conn.execute(f'UPDATE albums SET {assignments},metadata_rank=MAX(metadata_rank,?) WHERE id=?', (*values,rank,aid))
+    if keyed_genres and genre not in (None, '') and (previous_rank is None or rank >= previous_rank
+            or genre_classifications.read(conn, 'albums', aid) in (None, '')):
+        genre_classifications.write(conn, 'albums', aid, genre)
     has_credits = conn.execute('SELECT * FROM album_artists WHERE album_id=?', (aid,)).fetchall()
     if (credits or artist_id is not None or artist) and (not has_credits or ((credits or artist_id is not None) and (previous_rank is None or rank>=previous_rank))):
         structured = [c for c in (credits or []) if isinstance(c,dict) and c.get('name')]
@@ -70,14 +77,16 @@ def link(conn, entry_id, browse_id=None, *, title=None, artist=None, source='you
     if not browse_id:
         return None
     aid = observe(conn,browse_id,title=title,artist=artist)
-    if not conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND entry_id=?', (aid,entry_id)).fetchone():
+    if album_tracklists.available(conn):
+        album_tracklists.associate(conn,aid,entry_id,source)
+    elif not conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND entry_id=?', (aid,entry_id)).fetchone():
         conn.execute('INSERT INTO album_tracks(album_id,entry_id,is_full,source) VALUES (?,?,0,?)', (aid,entry_id,source))
     # A single identified performer on this exact release can identify its formerly
     # anonymous credit. Reconcile that provisional subject and retain its handle.
     credit = conn.execute('SELECT aa.artist_id,aa.credit,a.provisional FROM album_artists aa JOIN artists a ON a.id=aa.artist_id WHERE aa.album_id=?', (aid,)).fetchall()
     if len(credit)==1 and credit[0]['provisional']:
         subjects = {r[0] for r in conn.execute(
-            'SELECT DISTINCT ta.artist_id FROM album_tracks at JOIN track_artists ta ON ta.entry_id=at.entry_id '
+            f'SELECT DISTINCT ta.artist_id FROM album_tracks at JOIN {artist_credits.projection_table(conn)} ta ON ta.entry_id=at.entry_id '
             'JOIN artist_provider_ids p ON p.artist_id=ta.artist_id WHERE at.album_id=?', (aid,))}
         if len(subjects)==1:
             subject = next(iter(subjects))
@@ -89,16 +98,23 @@ def link(conn, entry_id, browse_id=None, *, title=None, artist=None, source='you
     return aid
 
 
-def save(conn, data, *, identity_id=None):
+def save(conn, data, *, account_id=None):
+    from . import album_memberships
     aid = observe(conn,data['browse'],title=data.get('title'),artist=data.get('artist'),
                   year=data.get('year'),type=data.get('type'),thumbnail=data.get('thumbnail'),
                   credits=data.get('credits'),rank=2)
-    conn.execute("INSERT OR IGNORE INTO album_library_memberships(album_id,identity_id,source) VALUES (?,?,'youtube')", (aid,identity_id))
+    if album_memberships.available(conn):
+        album_memberships.save(conn, aid, account_id)
+    else:
+        conn.execute("INSERT OR IGNORE INTO album_library_memberships(album_id,account_id,source) VALUES (?,?,'youtube')", (aid,account_id))
     return aid
 
 
 def cache_full(conn, browse_id, title, artist, thumbnail, keys, *, entries=None, credits=None, year=None, album_type=None, now=None):
     aid = observe(conn,browse_id,title=title,artist=artist,thumbnail=thumbnail,credits=credits,year=year,type=album_type,rank=3)
+    if album_tracklists.available(conn):
+        album_tracklists.cache(conn,aid,browse_id,keys,entries=entries,now=now)
+        return aid
     if entries is not None:
         rows = [(e['entry_id'],None,None,i,e.get('disc_number'),e.get('track_number')) for i,e in enumerate(entries)]
     else:

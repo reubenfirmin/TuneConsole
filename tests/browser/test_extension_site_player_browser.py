@@ -146,6 +146,8 @@ def test_real_extension_reuses_player_tab_in_another_window(playwright, browser_
             content_type="text/html", body=HEADER))
         context.route(f"http://{host}:8765/**", lambda route: route.fulfill(
             content_type="text/html", body="<h1>Local player</h1>"))
+        context.route("https://unrelated.example/**", lambda route: route.fulfill(
+            content_type="text/html", body="<title>Private browsing tab</title>"))
         worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker")
         # Let fresh-install navigation finish before arranging inactive player tabs.
         # Otherwise its initial connection wait can activate the player during this test.
@@ -172,7 +174,9 @@ def test_real_extension_reuses_player_tab_in_another_window(playwright, browser_
         # content scripts, and runtime messaging all use the installed extension and real APIs.
         player = context.new_page()
         player.goto(f"http://{host}:8765/playlists?sort=recent")
-        context.new_page()  # Leave the player inactive within its own window.
+        # Leave the player inactive, with an unrelated tab whose metadata Chrome must hide.
+        unrelated = context.new_page()
+        unrelated.goto("https://unrelated.example/private")
         with context.expect_page() as new_page:
             worker.evaluate("chrome.windows.create({url: 'about:blank'})")
         site = new_page.value
@@ -184,7 +188,15 @@ def test_real_extension_reuses_player_tab_in_another_window(playwright, browser_
         badge = site.get_by_role("link", name="Local Player, running", exact=True)
         expect(badge).to_be_visible()
         before = worker.evaluate("chrome.tabs.query({})")
+        permissions = worker.evaluate("chrome.permissions.getAll()")
+        assert "tabs" not in permissions["permissions"]
+        assert "history" not in permissions["permissions"]
         player_tab = next(tab for tab in before if tab.get("url") == player.url)
+        unrelated_tab = next(tab for tab in before
+                             if tab["windowId"] == player_tab["windowId"] and tab["active"])
+        assert unrelated.title() == "Private browsing tab"
+        assert all(field not in unrelated_tab
+                   for field in ("url", "pendingUrl", "title", "favIconUrl"))
         assert not player_tab["active"]
         badge.click()
         # Observe the real handler's result without invoking a second open request in the test.

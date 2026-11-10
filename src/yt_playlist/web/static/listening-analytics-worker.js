@@ -123,7 +123,7 @@ async function prepared(filters,id) {
         if(id!==request) return null;
         let item=cache.get(chunk.key);
         if(!item) {
-            const response=await fetch('/charts/listening-chunk/'+chunk.key);
+            const response=await fetch('/charts/listening-chunk/'+chunk.key, {signal: AbortSignal.timeout(20000)});
             if(!response.ok) throw new Error('Generation changed');
             const encoded=await response.text(); item={data:JSON.parse(encoded),bytes:encoded.length*2};
             if(item.bytes>1048576) throw new Error('Oversized listening partition');

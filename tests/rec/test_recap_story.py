@@ -78,6 +78,11 @@ class _FakeTrends:
 
 class _FakeStore:
     trends = _FakeTrends()
+    class genres:
+        @staticmethod
+        def feature_axes(labels):
+            from yt_playlist.util import genre_map
+            return {label:(genre_map.family(label),genre_map.subgenre(label)) for label in labels if label}
 
 
 def test_build_story_assembles_cover_personality_and_closing():

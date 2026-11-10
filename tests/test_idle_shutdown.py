@@ -179,6 +179,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
         logger=SimpleNamespace(warning=lambda *a, **kw: None))
     app.state.ctx = ctx
     started, finish = threading.Event(), threading.Event()
+    stages = []
     pending = [{"id": 42}]
     client = TestClient(app)
     clock[0] = 160
@@ -187,8 +188,12 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
     def blocking(*args, **kwargs):
         if kind in ("playlist_enrichment", "album_enrichment"):
             assert args[0] is ctx.store and args[1] == pending
+        if kind == "fresh_pool":
+            stages.append("populating")
         started.set()
         assert finish.wait(5)
+        if kind == "fresh_pool":
+            stages.append("populated")
 
     if kind in ("playlist_enrichment", "album_enrichment"):
         def pending_for(scope):
@@ -211,9 +216,29 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
             assert job.album_browse == "BID" and job.playlist_id is None
     elif kind == "fresh_pool":
         from yt_playlist.rec import fresh_pool
+
+        def head(kind):
+            assert kind == 'fresh' and stages == ["populating", "populated"]
+            assert ctx.work.active and not ctx.work.accepting
+            return {'id': 'published-fresh'}
+
+        def prepare(store, now):
+            assert store is ctx.store and now == 1000
+            assert stages == ["populating", "populated"]
+            assert ctx.work.active and not ctx.work.accepting
+            stages.append("prepared")
+            return {}  # A controlled successful, empty bundle publication.
+
+        def refresh(**kwargs):
+            assert kwargs == {"force": True}
+            assert stages == ["populating", "populated", "prepared"]
+            assert ctx.work.active and not ctx.work.accepting
+            stages.append("refreshed")
+
         monkeypatch.setattr(fresh_pool, "populate", blocking)
-        monkeypatch.setattr(fresh_pool, "prepare", lambda *a: None)
-        ctx.rec_worker = SimpleNamespace(trigger_home_refresh=lambda **kw: None)
+        monkeypatch.setattr(fresh_pool, "prepare", prepare)
+        ctx.store.recommendations = SimpleNamespace(head=head)
+        ctx.rec_worker = SimpleNamespace(trigger_home_refresh=refresh)
         ctx.now_fn = lambda: 1000
         job = jobs.start_fresh_pool(ctx, {})
     else:
@@ -231,6 +256,8 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
         if clock[0] == 202:
             assert not kills and not ctx.work.accepting
             assert ctx.work.active
+            if kind == "fresh_pool":
+                assert stages == ["populating"]
             if job:
                 assert not job.done
             with pytest.raises(WorkClosing):
@@ -246,6 +273,9 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
     try:
         monitor()
         assert kills == [(203, signal.SIGTERM)]
+        if kind == "fresh_pool":
+            assert stages == ["populating", "populated", "prepared", "refreshed"]
+            assert job.result == {'generation': 'published-fresh', 'requested_at': 1000}
     finally:
         finish.set()
         assert ctx.work.wait(5)

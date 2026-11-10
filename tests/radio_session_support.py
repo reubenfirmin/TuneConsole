@@ -1,12 +1,106 @@
 """Function-scoped radio controller fixture with deterministic playlist I/O."""
 import json
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 from yt_playlist.library import playlist_generated
 from yt_playlist.web import radio_session
 from yt_playlist.web.radio_session import PlaylistRadio
+
+
+@pytest.fixture
+def controlled_radio_checkpoints(monkeypatch):
+    """Supply checkpoint storage beneath actual session encoding and journaling.
+
+    File custody/recovery contracts stay in core/test_radio_publication.py and
+    core/test_radio_choice_persistence.py. Genre controllers consume committed
+    snapshots without exercising database/file publication on every tune.
+    """
+    return control_radio_checkpoints(monkeypatch)
+
+
+def control_radio_checkpoints(monkeypatch):
+    """Install the controller's completed checkpoint-storage collaborator."""
+    from yt_playlist.controllers.radio_checkpoints import RadioCheckpoints
+
+    saves = []
+
+    def load(controller):
+        if not saves:
+            return None, None
+        state = json.loads(saves[-1])
+        return state, (state['episode_id'], len(saves))
+
+    def save(controller, encoded, *, expected, predecessor=None):
+        saves.append(encoded)
+        return json.loads(encoded)['episode_id'], len(saves)
+
+    monkeypatch.setattr(RadioCheckpoints, 'load', load)
+    monkeypatch.setattr(RadioCheckpoints, 'save', save)
+    return saves
+
+
+def seed_pool(store):
+    pool = [{"key": f"k{i}", "video_id": f"v{i}", "title": f"Song {i}", "artist": f"Artist {i}"}
+            for i in range(1, 33)]
+    for track in pool:
+        tid = store.tracks.upsert_track(track["video_id"], track["title"], track["artist"], "", None)
+        track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
+    return pool
+
+
+def seed_completed_pool(store):
+    """The same 32 catalog subjects below controller tests, without ingestion."""
+    from tests.recommendation_support import seed_publication_subjects
+    from yt_playlist.util.matching import identity_key
+
+    pool = [{'key': identity_key(f'Song {i}', f'Artist {i}'), 'video_id': f'v{i}',
+             'title': f'Song {i}', 'artist': f'Artist {i}'} for i in range(1, 33)]
+    seed_publication_subjects(store, pool)
+    return pool
+
+
+@pytest.fixture(scope='module')
+def completed_radio_schema():
+    from tests.store_fixture_support import bounded_consumer_schema
+
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def completed_radio_store(tmp_path, completed_radio_schema, monkeypatch):
+    """Keep actual writer/readers and checkpoint publication below consumers."""
+    from tests.store_fixture_support import _file_consumer_store, use_native_sql_calls
+
+    with _file_consumer_store(tmp_path, completed_radio_schema) as store:
+        # Catalog ingestion is a lower input. Restore instrumented SQL before
+        # the subject so writer admission and concurrent reads remain real.
+        with monkeypatch.context() as inputs:
+            use_native_sql_calls(inputs)
+            store._fixture_radio_pool = seed_completed_pool(store)
+        yield store
+
+
+@pytest.fixture
+def completed_poc(completed_radio_store, monkeypatch):
+    with radio_controller(monkeypatch, completed_radio_store,
+                          completed_radio_store._fixture_radio_pool) as state:
+        yield state
+
+
+@pytest.fixture
+def uncontended_poc(completed_radio_store, monkeypatch):
+    """Real checkpoint SQL/files below synchronous controller consumers."""
+    from tests.store_fixture_support import reuse_reporting_reader, use_native_sql_calls
+
+    use_native_sql_calls(monkeypatch)
+    with reuse_reporting_reader(completed_radio_store, monkeypatch):
+        with radio_controller(monkeypatch, completed_radio_store,
+                              completed_radio_store._fixture_radio_pool) as state:
+            yield state
 
 
 class Playlist:
@@ -49,8 +143,17 @@ class Playlist:
 
 @pytest.fixture
 def poc(monkeypatch, store):
+    pool = (seed_pool(store) if hasattr(store, '_fixture_intensity')
+            else store._fixture_radio_pool)
+    with radio_controller(monkeypatch, store, pool) as state:
+        yield state
+
+
+@contextmanager
+def radio_controller(monkeypatch, store, pool):
+    """Exercise the real controller with explicit catalog inputs and playlist I/O."""
     remote, frames, workers = Playlist(), [], []
-    identity = store.identities.upsert_identity("main", "ref", None, True)
+    identity = store.accounts.upsert_account("main", "ref", None, True)
     from yt_playlist.core.bridge import Bridge
     ownership = Bridge()
 
@@ -87,14 +190,10 @@ def poc(monkeypatch, store):
     controller = PlaylistRadio(ctx)
     ctx.radio = controller
     monkeypatch.setattr(controller.work, "start_thread", lambda *args, **kw: workers.append((args, kw)))
-    pool = [{"key": f"k{i}", "video_id": f"v{i}", "title": f"Song {i}", "artist": f"Artist {i}"}
-            for i in range(1, 33)]
-    for track in pool:
-        tid = store.tracks.upsert_track(track["video_id"], track["title"], track["artist"], "", None)
-        track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
-
     class Candidates:
         def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
+            self.store = store
+            self.prepared = None
             self.comparison = getattr(now_source, 'comparison', comparison)
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now
@@ -117,6 +216,9 @@ def poc(monkeypatch, store):
 
         def refresh_metadata(self, tracks):
             return False
+
+        def close(self):
+            pass
 
         def fits(self, track, anchor=None):
             return True
@@ -146,7 +248,7 @@ def poc(monkeypatch, store):
 
     def create(store, title, tracks, client, now, identity):
         assert title.startswith("Radio Session · ")
-        assert identity == store.identities.get_master_identity().id
+        assert identity == store.accounts.get_master_account().id
         remote.ids = [t["video_id"] for t in tracks]
         bridge.native_ids = list(remote.ids)
         pid = store.playlists.upsert_playlist(identity, "PLSESSION", title, len(tracks), "", now)
@@ -156,8 +258,12 @@ def poc(monkeypatch, store):
 
     monkeypatch.setattr(playlist_generated, "create_generated_playlist", create)
     yield controller, remote, frames, workers, pool
-    controller.stop()
-    controller.work.stop_executor()
+    # Fixture disposal is not an explicit user Stop. A restart may have
+    # replaced this controller's checkpoint; do not persist its stale session.
+    try:
+        controller.suspend()
+    finally:
+        controller.work.stop_executor()
 
 
 def play(controller, video, playlist="PLSESSION", **extra):

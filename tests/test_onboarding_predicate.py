@@ -1,12 +1,6 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
+from tests.retained_rating_support import observe_rating
 from yt_playlist.rec import onboarding
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:"); s.init_schema(); return s
 
 
 def _synced_thin(store):
@@ -14,7 +8,7 @@ def _synced_thin(store):
     store.settings.set_setting("last_sync_at", "999")
     from tests.conftest import seed_catalog_track
     track_id = seed_catalog_track(store,'a|x','T','A')
-    store.conn.execute("UPDATE tracks SET first_enriched_at=1 WHERE identity_key='a|x'")
+    store.conn.execute("UPDATE recordings SET first_enriched_at=1 WHERE identity_key='a|x'")
     store.conn.commit()
     return track_id
 
@@ -34,23 +28,23 @@ def test_inactive_when_dismissed(store):
     assert onboarding.onboarding_active(store, now=10.0) is False
 
 
-def test_inactive_when_enough_feedback(store, monkeypatch):
-    from yt_playlist.rec import rec_params
-
+def test_feedback_alone_does_not_graduate_without_usable_offers(store):
     _synced_thin(store)
-    rec_params.set_param(store, "onboard_feedback_min", 3)
-    monkeypatch.setattr(onboarding, "feedback_count", lambda s: 2)
+    observe_rating(store, 'liked|artist', 'LIKE', 2, provenance='action')
+    observe_rating(store, 'disliked|artist', 'DISLIKE', 3, provenance='action')
+    assert store.rec_model.recent_liked_keys() == ['liked|artist']
+    assert [row['item_key'] for row in store.rec_model.list_dislikes()] == ['disliked|artist']
+    assert not onboarding.setup_completed(store)
+    assert onboarding.initial_setup_pending(store, now=10.0)
     assert onboarding.onboarding_active(store, now=10.0) is True
-    monkeypatch.setattr(onboarding, "feedback_count", lambda s: 3)
-    assert onboarding.onboarding_active(store, now=10.0) is False
 
 
-def test_inactive_when_taste_ready_with_no_genre_coverage(store):
+def test_taste_alone_does_not_graduate_without_a_pool_and_usable_menu(store):
     _synced_thin(store)
     store.modes.replace_modes([{"mode_id": 1, "label": "m", "families": [["house", 1]],
                                 "centroid": np.array([1.0], dtype=np.float32), "size": 5,
                                 "rep_keys": []}], retired_ids=[], now=1.0)
-    assert onboarding.onboarding_active(store, now=10.0) is False
+    assert onboarding.onboarding_active(store, now=10.0) is True
 
 
 def test_active_when_genre_coverage_is_complete_but_modes_are_not_ready(store):

@@ -2,6 +2,7 @@
 import json
 import logging
 
+from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.album_fetch import fetch_album, shareable_album_tracks
 from yt_playlist.library.executor import add_tracks_to_playlist
@@ -31,7 +32,7 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
                 vids.append(v)
                 keys[v] = k
     title = (new_name or "").strip() or (f"{pls[0].title} (copy)" if len(pls) == 1 else "Combined playlist")
-    identity = pls[0].identity_id
+    identity = pls[0].account_id
     new_pid = client.create_playlist(title, "Copied by TuneConsole")
     addition = account_additions(_add_items, client, new_pid, vids, prior_tracks=[])
     added, skipped = addition.added, addition.skipped
@@ -60,7 +61,7 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     return {"new_ytm": new_pid, "title": title, "added": added, "skipped": len(skipped),
             "skipped_video_ids": list(skipped), "from": len(pls)}
 
-def create_playlist_from_song(store, name, track, client, now, identity_id) -> dict:
+def create_playlist_from_song(store, name, track, client, now, account_id) -> dict:
     """Create an ordinary user playlist, seeding it through the shared track-add operation.
 
     Materialize the new playlist before adding so a rejected song still leaves a discoverable
@@ -68,18 +69,18 @@ def create_playlist_from_song(store, name, track, client, now, identity_id) -> d
     """
     title = (name or "").strip()
     if not title or not track.get("videoId"):
-        raise ValueError("Choose a song and give the playlist a name.")
+        raise ActionInputError('song_playlist_name_required')
     new_pid = client.create_playlist(title, "Created by TuneConsole")
     # Creation is already a remote side effect. Retain its destination before any local
     # materialization or seed work can fail; pending actions cannot be undone mid-write.
     action_id = store.actions.record_action(
         COPY_PLAYLIST, json.dumps({"title": title, "source": "song", "added": 0, "partial": True}),
-        "{}", "pending", json.dumps({"new_ytm": new_pid, "target_identity": identity_id,
+        "{}", "pending", json.dumps({"new_ytm": new_pid, "target_identity": account_id,
                                      "post": None}), now)
     addition = None
     try:
         db_pid = store.playlists.upsert_playlist(
-            identity_id, new_pid, title, 0, content_hash([]), now, created_at=now)
+            account_id, new_pid, title, 0, content_hash([]), now, created_at=now)
         # A playlist just created by this operation has a known empty baseline, even while
         # YouTube's first readable page is still propagating. Existing destinations still read.
         result = add_tracks_to_playlist(store, db_pid, [track], client, now, prior_tracks=[])
@@ -94,7 +95,7 @@ def create_playlist_from_song(store, name, track, client, now, identity_id) -> d
         result = {"added": 0}
     store.actions.update_action(
         action_id, "executed", now,
-        json.dumps(capture_copy(client, new_pid, identity_id,
+        json.dumps(capture_copy(client, new_pid, account_id,
                              [track["videoId"]] if result["added"] else [],
                              title=title, description="Created by TuneConsole", addition=addition)),
         params_json=json.dumps({"title": title, "source": "song", "added": result["added"],
@@ -105,13 +106,13 @@ def create_playlist_from_song(store, name, track, client, now, identity_id) -> d
     return {**result, "db_pid": db_pid, "new_ytm": new_pid, "title": title}
 
 
-def create_playlist_from_album(store, browse_id, name, client, now, identity_id) -> dict:
+def create_playlist_from_album(store, browse_id, name, client, now, account_id) -> dict:
     """Create a NEW playlist from an album's tracks (non-destructive). Fetches the album, creates a
-    real (un-grouped) playlist under `identity_id` with its songs, and materializes it into the store
+    real (un-grouped) playlist under `account_id` with its songs, and materializes it into the store
     so it shows up immediately. Returns the new playlist's local db id for redirecting to its page."""
     a = with_retry(lambda: fetch_album(client, browse_id))
     if not a:
-        raise ValueError("couldn't load that album")
+        raise ActionInputError('album_load_unavailable')
     artist = ", ".join(x.get("name", "") for x in (a.get("artists") or []) if x.get("name"))
     vids, seen, meta = [], set(), {}
     for t in shareable_album_tracks(a):
@@ -121,7 +122,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
             vids.append(v)
             meta[v] = (t.get("title") or "", artist, a.get("title") or "")
     if not vids:
-        raise ValueError("this album has no playable tracks")
+        raise ActionInputError('album_unplayable')
     title = (name or "").strip() or (a.get("title") or "Album playlist")
     new_pid = client.create_playlist(title, f"Created from “{a.get('title')}” by TuneConsole")
     addition = account_additions(_add_items, client, new_pid, vids, prior_tracks=[])
@@ -135,7 +136,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
         ti, ar, al = meta[v]
         track_ids.append(store.tracks.upsert_track(v, ti, ar, al, None, thumbnail=thumb))
     keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
-    db_pid = store.playlists.upsert_playlist(identity_id, new_pid, title, len(track_ids),
+    db_pid = store.playlists.upsert_playlist(account_id, new_pid, title, len(track_ids),
                                    content_hash(list(dict.fromkeys(keys))), now, created_at=now)
     store.playlists.set_playlist_tracks(db_pid, track_ids)
     store.playlists.ensure_playlist_thumbnail(db_pid)
@@ -144,7 +145,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
                         json.dumps({"title": title, "source": a.get("title") or "album",
                                     "added": added, "skipped": len(skipped),
                                     "addition": addition.diagnostics(), "partial": bool(addition.failure)}),
-                        "{}", "executed", json.dumps(capture_copy(client, new_pid, identity_id,
+                        "{}", "executed", json.dumps(capture_copy(client, new_pid, account_id,
                             [v for v in vids if v not in skipped], title=title,
                             description=f"Created from “{a.get('title')}” by TuneConsole",
                             addition=addition)), now)
@@ -157,17 +158,17 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
     safe to re-run. The source playlists are left untouched."""
     target = store.playlists.get_playlist(target_id)
     if target is None:
-        raise ValueError("target playlist no longer exists")
-    if target.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError("can't copy into a system playlist")
+        raise ActionInputError('playlist_missing')
+    if target.provider_playlist_id in SYSTEM_PLAYLIST_IDS:
+        raise ActionInputError('playlist_regular_required')
     sources = [p for p in (store.playlists.get_playlist(i) for i in source_ids) if p is not None and p.id != target_id]
     if not sources:
-        raise ValueError("no source playlists to copy")
+        raise ActionInputError('playlist_sources_required')
     # Add with the TARGET's client, so every source video must belong to the target's account. A
     # cross-account copy would feed account A's videoIds to account B's client. Region/upload-scoped
     # ids silently 400 and land in `skipped`, leaving the destination short. Require one account.
-    if any(p.identity_id != target.identity_id for p in sources):
-        raise ValueError("can only copy into a playlist on the same account")
+    if any(p.account_id != target.account_id for p in sources):
+        raise ActionInputError('playlist_copy_account_mismatch')
     have = set(store.playlists.get_playlist_track_keys(target_id))   # songs already in the target
     vids, seen = [], set()
     for pl in sources:
@@ -176,7 +177,7 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
                 seen.add(v)
                 have.add(k)                                # also de-dupe across sources by song
                 vids.append(v)
-    addition = account_additions(_add_items, client, target.ytm_playlist_id, vids)
+    addition = account_additions(_add_items, client, target.provider_playlist_id, vids)
     added, skipped = addition.added, addition.skipped
     added_vids = list(addition.confirmed)
     tid_by_vid = store.tracks.track_ids_for_videos(added_vids)
@@ -193,7 +194,7 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
                         "{}", "executed", json.dumps({"addition": addition.diagnostics(),
                             "snapshot": addition.failure.snapshot if addition.failure else None}), now)
     addition.finish()
-    return {"target_ytm": target.ytm_playlist_id, "title": target.title, "added": added,
+    return {"target_ytm": target.provider_playlist_id, "title": target.title, "added": added,
             "skipped": len(skipped), "skipped_video_ids": list(skipped),
             "from": len(sources), "count": len(combined)}
 

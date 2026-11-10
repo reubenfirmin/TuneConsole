@@ -3,17 +3,32 @@ import sqlite3
 import numpy as np
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.rec import choice_bandit, choice_evidence as choices, mode_eval, rec_params
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('house', 'House'))) as schema:
+        yield schema
+
+
+def test_bandit_input_keeps_empty_evidence_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM choice_mode_estimates').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def modes(store, *, space='basis', flipped=False, reps=('a', 'b')):
     store.modes.replace_modes([{'mode_id': i + 1, 'label': f'Group {i + 1}',
-        'families': [['Jazz', 2]], 'centroid': np.eye(2)[1 - i if flipped else i],
+        'families': [[('Jazz', 'House')[i], 2]], 'centroid': np.eye(2)[1 - i if flipped else i],
         'size': 2, 'rep_keys': list(reps), 'space': space} for i in range(2)], [], 1)
 
 
 def menu(store, oid='menu', now=100, reverse=False):
-    options = [{'id': 'one', 'mode_id': 1}, {'id': 'two', 'mode_id': 2}]
+    options = [{'id': 'one', 'label': 'One', 'genres': ['Jazz']},
+               {'id': 'two', 'label': 'Two', 'genres': ['House']}]
     if reverse:
         options.reverse()
     for index, option in enumerate(options):
@@ -71,7 +86,7 @@ def test_episode_length_rerenders_and_display_position_do_not_multiply_response_
     assert evidence(store, 204)[1][1]['positive'] == 1  # Still one group-day unit.
 
 
-def test_old_cohorts_expire_and_mode_drift_retires_incompatible_evidence(store):
+def test_old_cohorts_expire_and_vector_drift_does_not_change_broad_evidence(store):
     modes(store)
     oid = menu(store)
     choices.respond(store, oid, 'visible', 101, visible=['one', 'two'])
@@ -83,12 +98,12 @@ def test_old_cohorts_expire_and_mode_drift_retires_incompatible_evidence(store):
     modes(store, flipped=True)
     assert choice_bandit.stats(store, 104) == {}
     state, rows = evidence(store, 104)
-    assert not rows and state['excluded']['drifted_mode'] == 2
-    # Across a basis rebuild, representative identity overlap is the conservative fallback.
+    assert len(rows) == 2 and state['excluded']['drifted_mode'] == 0
+    # Raw genre areas remain interpretable independently of model vectors/reps.
     modes(store, space='rebuilt', reps=('a', 'c'))
     assert len(evidence(store, 105)[1]) == 2
     modes(store, space='different', reps=('x', 'y'))
-    assert not evidence(store, 106)[1]
+    assert len(evidence(store, 106)[1]) == 2
 
 
 def test_later_choices_from_held_menu_keep_days_and_do_not_reuse_old_completion(store):
@@ -112,24 +127,40 @@ def test_later_choices_from_held_menu_keep_days_and_do_not_reuse_old_completion(
     assert rows[1]['days'] == rows[2]['days'] == 3
 
 
-def test_findings_publish_atomically_and_corrections_recompute_support(store):
+def test_interrupted_findings_retain_completed_publications_and_retry_withdrawal(store):
     modes(store)
     oid = menu(store)
     choices.respond(store, oid, 'visible', 101, visible=['one', 'two'])
     choices.respond(store, oid, 'choice', 102, option_id='one')
     old = choices.compile_report(store, 103)
+    old_interests = store.rec_proposals.get_proposals('choice_interests')
+    assert old['bandit']['rows'] and old_interests['contexts']
     choices.respond(store, oid, 'withdraw', 104, details={'action_id': 'menu:choice:one'})
-    store.conn.execute("CREATE TEMP TRIGGER fail_choice_publication BEFORE UPDATE ON rec_proposals "
+    store.conn.execute("CREATE TEMP TRIGGER fail_choice_publication BEFORE UPDATE ON choice_learning_heads "
                        "WHEN NEW.surface='choice_interests' BEGIN SELECT RAISE(ABORT,'interrupted'); END")
-    with pytest.raises(sqlite3.IntegrityError, match='interrupted'):
-        choices.compile_report(store, 105)
-    assert store.rec_proposals.get_proposals('listening_choices')['watermark'] == old['watermark']
-    assert store.rec_proposals.get_proposals('choice_bandit') == old['bandit']
-    store.conn.execute('DROP TRIGGER fail_choice_publication')
-    assert not evidence(store, 106)[1]
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match='interrupted'):
+            choices.compile_report(store, 105)
+        # Completed repository publications survive a later owner's failure.
+        partial = store.rec_proposals.get_proposals('listening_choices')
+        assert partial['watermark'] != old['watermark']
+        assert partial['formats']['mixes']['choices'] == 0
+        assert not partial['bandit']['rows']
+        assert store.rec_proposals.get_proposals('choice_bandit') == partial['bandit']
+        assert store.rec_proposals.get_proposals('choice_interests') == old_interests
+        assert not store.conn.in_transaction
+    finally:
+        store.conn.execute('DROP TRIGGER fail_choice_publication')
+    report = choices.compile_report(store, 106)
+    assert not report['bandit']['rows']
+    assert store.rec_proposals.get_proposals('listening_choices') == report
+    assert store.rec_proposals.get_proposals('choice_bandit') == report['bandit']
+    interests = store.rec_proposals.get_proposals('choice_interests')
+    assert not interests['contexts']
+    assert interests['watermark'] == report['watermark']
 
 
-def test_shared_context_components_preserve_mode_reconciliation_and_missing_data_abstains(store):
+def test_unrelated_historical_group_components_are_not_mix_dependencies(store):
     modes(store)
     groups = [{**mode, 'centroid': mode['centroid'].tolist(), 'detail': 'x' * 40000}
               for mode in store.modes.list_modes(active_only=True)]
@@ -137,15 +168,15 @@ def test_shared_context_components_preserve_mode_reconciliation_and_missing_data
     ledger = store.rec_ledger.evidence()
     manifest = ledger.get('artifact', context['artifact'])
     assert set(manifest['groups']) == {'$artifact'}
-    oid = choices.issue(store, 'mixes', [{'id': 'one', 'mode_id': 1}, {'id': 'two', 'mode_id': 2}],
+    oid = choices.issue(store, 'mixes', [{'id': 'one', 'genres':['Jazz']}, {'id': 'two', 'genres':['House']}],
                         100, context=context, opportunity_id='shared-context')
     choices.respond(store, oid, 'visible', 101, visible=['one', 'two'])
     choices.respond(store, oid, 'choice', 102, option_id='one')
     state, rows = evidence(store, 103)
     assert rows[1]['positive'] == rows[2]['negative'] == .25
     assert state['excluded']['missing_context'] == 0
-    # A retained offer with a missing component is unknown evidence, rather
-    # than a compiler crash or an invented mode preference.
+    # The visible menu is self-contained even after unused group vectors expire.
     ledger._path('artifact', manifest['groups']['$artifact']).unlink()
     state, rows = evidence(store, 104)
-    assert not rows and state['excluded']['missing_context'] == 1
+    assert rows[1]['positive'] == rows[2]['negative'] == .25
+    assert state['excluded']['missing_context'] == 0

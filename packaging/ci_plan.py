@@ -12,6 +12,14 @@ def timing_source(backend, baseline=None):
     if baseline is None:
         baseline = json.loads((Path(__file__).resolve().parents[1] / '.github/test-durations.json').read_text())
     refreshed = baseline.get('refreshed_at')
+    # Exporting old measurements today does not make their workload newer.
+    # Prefer a passing run newer than the measured source, even if its export
+    # happened after that passing run started. Legacy baselines use export time.
+    prefix = f'https://github.com/{backend.repository}/actions/runs/'
+    source = baseline.get('run', '')
+    if source.startswith(prefix) and source[len(prefix):].isdecimal():
+        measured = backend.api(f"repos/{backend.repository}/actions/runs/{source[len(prefix):]}")
+        refreshed = measured.get('run_started_at') or refreshed
     refreshed_at = datetime.fromisoformat(refreshed) if refreshed else None
     result = backend.api(f"repos/{backend.repository}/actions/workflows/ci.yml/runs?event=pull_request&status=success&per_page=20")
     if not isinstance(result, dict) or not isinstance(result.get("workflow_runs"), list):

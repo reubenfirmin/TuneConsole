@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import catalog
+from yt_playlist.core import catalog, legacy_evidence
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations import v028_discovery_representatives as upgrade
@@ -16,14 +16,11 @@ REGISTRY = (*MIGRATIONS[:27],Migration(28,'discovery_representatives',upgrade.ap
 
 
 @pytest.fixture
-def store():
-    s = Store(':memory:')
+def store(store):
     # Workflow cases call current repositories. The explicit migration cases
     # below retain their independent v027/v028 databases and registry.
-    s.init_schema()
-    yield s
-    upgrade.validate(s.conn)
-    s.conn.close()
+    yield store
+    upgrade.validate(store.conn)
 
 
 def subject(s,entry):
@@ -38,6 +35,13 @@ def move(s,video,entry,now=10):
 def discover(s,video,source,now):
     return s.discovery.upsert_discovered_track(video+'|artist',video,video,'Artist',None,None,
                                                None,None,source,now)
+
+
+def retained_source(s, video, original):
+    association = s.conn.execute('SELECT id FROM item_recording_associations '
+        'WHERE video_id=? ORDER BY id DESC LIMIT 1', (video,)).fetchone()[0]
+    return json.loads(legacy_evidence.original(s.conn, 'discovery', 'discovery_reassociation',
+                                              json.dumps([association, original['id']])))
 
 
 @pytest.mark.parametrize('representative_moves',[True,False])
@@ -65,11 +69,11 @@ def test_partial_move_preserves_counters_and_independent_sources_through_expiry(
     assert s.discovery.discovery_sources_for_track(key)[0]['source_token']=='genre:b'
     newkey = subject(s,target)['identity_key']
     assert s.discovery.discovery_sources_for_track(newkey)[0]['source_token']=='radio:a'
-    # Refresh one branch, expire the other, then remove the last surviving source.
+    # Refresh one branch, expire the other, then let the surviving branch age out.
     discover(s,'a','radio:a',50*86400)
     assert s.discovery.gc_discovery_pool(50*86400,30,set())['tracks']==1
     assert [r['recording_id'] for r in s.discovery.get_discovered_tracks()]==[new]
-    assert s.discovery.remove_discovery_source(newkey,'radio:a')
+    assert s.discovery.gc_discovery_pool(81*86400,30,set())['tracks']==1
     assert not s.discovery.get_discovered_tracks()
     assert len(s.conn.execute('SELECT * FROM youtube_items').fetchall())==3
     assert subject(s,b)['recording_id']==old
@@ -83,14 +87,16 @@ def test_complete_move_merges_counts_and_preserves_source_collision_evidence(sto
     newkey = discover(s,'target','radio:same',2)
     s.discovery.mark_offered('track',[oldkey],3)
     s.discovery.mark_offered('track',[newkey],4)
+    original = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
     move(s,'a',target,5)
     row = s.discovery.get_discovered_tracks()[0]
     assert (row['offered_count'],row['first_shown'],row['last_shown'])==(2,3,4)
     sources = s.discovery.discovery_sources_for_track(newkey)
-    assert len(sources)==1 and sources[0]['found_at']==1 and sources[0]['last_found_at']==2
-    archived = [json.loads(r[0]) for r in s.conn.execute("SELECT payload FROM identity_state_archive WHERE kind='discovery_reassociation'")]
-    assert {r['input_video_id'] for r in archived}=={'a','target'}
-    assert s.discovery.remove_discovery_source(newkey,'radio:same')
+    assert {(r['input_video_id'],r['found_at'],r['last_found_at']) for r in sources}=={('a',1,1),('target',2,2)}
+    archived = [retained_source(s, 'a', original)]
+    assert archived == [original]
+    assert {r['input_video_id'] for r in archived}=={'a'}
+    assert s.discovery.gc_discovery_pool(31*86400,30,set())['tracks']==1
     assert not s.conn.execute('SELECT * FROM discovery_memberships').fetchall()
 
 
@@ -104,13 +110,17 @@ def test_same_timestamp_moves_retain_each_original_source_input(store):
     newkey = discover(s,'target','radio:same',2)
     s.discovery.mark_offered('track',[oldkey],3)
     s.discovery.mark_offered('track',[newkey],4)
+    original_a = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
     move(s,'a',target,10)
+    archived = [retained_source(s, 'a', original_a)]
     discover(s,'b','radio:same',5)
+    original_b = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='b'").fetchone())
     move(s,'b',target,10)
-    archived = [json.loads(r[0]) for r in s.conn.execute(
-        "SELECT payload FROM identity_state_archive WHERE kind='discovery_reassociation'")]
-    assert {row['input_video_id'] for row in archived}=={'a','b','target'}
-    assert len(archived)==4
+    archived.append(retained_source(s, 'b', original_b))
+    assert archived == [original_a, original_b]
+    assert retained_source(s, 'a', original_a) == original_a
+    assert {row['input_video_id'] for row in archived}=={'a','b'}
+    assert len(archived)==2
     assert len(s.discovery.get_discovered_tracks())==1
     assert s.discovery.get_discovered_tracks()[0]['offered_count']==2
 
@@ -130,19 +140,28 @@ def test_unknown_source_and_offer_state_stay_with_partial_original(store):
     assert s.discovery.discovery_sources_for_track(row['identity_key'])[0]['input_video_id'] is None
 
 
-def test_failed_partial_move_rolls_back_representative_sources_and_events(store,monkeypatch):
+def test_partial_move_keeps_completed_owners_when_final_invalidation_fails(store,monkeypatch):
     a = store.tracks.upsert_track('a','a','Artist',None,200)
     b = store.tracks.upsert_track('b','b','Artist',None,200)
     target = store.tracks.upsert_track('target','target','Artist',None,200)
     move(store,'b',a)
     discover(store,'a','radio:seed',1)
-    before = list(store.conn.iterdump())
-    def fail(conn):
+    previous = subject(store, a)['recording_id']
+    recording = subject(store, target)['recording_id']
+    original = dict(store.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
+    def fail():
+        assert not store.conn.in_transaction
         raise RuntimeError('interrupted association')
-    monkeypatch.setattr(catalog,'invalidate_derived',fail)
+    monkeypatch.setattr(store.recording_keys,'invalidate_catalog',fail)
     with pytest.raises(RuntimeError,match='interrupted association'):
         move(store,'a',target)
-    assert list(store.conn.iterdump())==before
+    assert not store.conn.in_transaction
+    assert subject(store, a)['recording_id'] == recording
+    assert subject(store, b)['recording_id'] == previous
+    memberships = {row['recording_id']: row['entry_id'] for row in store.conn.execute('SELECT * FROM discovery_memberships')}
+    assert memberships == {previous: b, recording: a}
+    assert retained_source(store, 'a', original) == original
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_membership_and_entry_guards_reject_inconsistent_writes(store):
@@ -163,7 +182,7 @@ def test_membership_and_entry_guards_reject_inconsistent_writes(store):
 
 def test_playback_consumers_take_metadata_from_one_available_upload(store):
     s = store
-    iid = s.identities.upsert_identity('main','credential',None,True)
+    iid = s.accounts.upsert_account('main','credential',None,True)
     a = s.tracks.upsert_track('a','A title','Artist','A release',100,False,thumbnail='a-cover')
     b = s.tracks.upsert_track('b','Z title','Artist','Z release',300,True,
                               thumbnail='z-cover',album_browse_id='z-release')
@@ -177,7 +196,7 @@ def test_playback_consumers_take_metadata_from_one_available_upload(store):
         assert [(r['label'],r['href'],r['thumbnail']) for r in section['rows']]==[
             ('Z title','/track/b','z-cover')]
     assert library_sample(s)==[{'video_id':'b','title':'Z title','artist':'Artist','album':'Z release',
-                               'thumbnail':'z-cover','key':key}]
+                               'thumbnail':'z-cover','key':key,'duration':300}]
     assert s.charts.top_tracks()==[{'title':'Z title','artist':'Artist','video_id':'b','thumbnail':'z-cover','plays':1}]
     songs = s.charts.artist_songs('Artist')
     assert len(songs)==1
@@ -199,15 +218,16 @@ def test_scoped_representative_filters_artist_release_and_account_before_selecti
     for field,value in [('artist','Second artist'),('album_browse_id','second')]:
         sql = playable_tracks_sql(f'SELECT * FROM tracks WHERE {field}=?')
         assert [r['video_id'] for r in s.conn.execute(sql,(value,))]==['b']
-    iid = s.identities.upsert_identity('main','credential',None,True)
-    other = s.identities.upsert_identity('other','credential',None,False)
+    iid = s.accounts.upsert_account('main','credential',None,True)
+    other = s.accounts.upsert_account('other','credential',None,False)
     for owner,entry in [(iid,a),(other,b)]:
         pid = s.playlists.upsert_playlist(owner,'LM','Liked',1,'hash',1)
         s.playlists.set_playlist_tracks(pid,[entry])
     sql = playable_tracks_sql('SELECT t.* FROM tracks t WHERE EXISTS('
                               'SELECT 1 FROM playlist_tracks pt JOIN playlists p ON p.id=pt.playlist_id '
-                              'WHERE pt.track_id=t.id AND p.identity_id=?)')
+                              'WHERE pt.track_id=t.id AND p.account_id=?)')
     assert [r['video_id'] for r in s.conn.execute(sql,(other,))]==['b']
+    assert [r['video_id'] for r in s.conn.execute(sql,(iid,))]==['a']
 
 
 def seed_installed_mismatch(s):

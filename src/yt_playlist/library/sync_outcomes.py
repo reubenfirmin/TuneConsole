@@ -1,5 +1,4 @@
 """Sync results and durable freshness, shared by manual and automatic jobs."""
-import json
 from copy import deepcopy
 
 MAX_AGE_S = 86400
@@ -11,13 +10,13 @@ class SyncSchedule:
     """Use persisted resource outcomes without treating a retry as a full refresh."""
 
     def __init__(self, store, now, *, automatic=False, retry_now=False, max_age_s=MAX_AGE_S):
-        self.state = json.loads(store.settings.get_setting("library_sync_state") or "{}")
+        self.state = store.sync.state()
         self.now, self.automatic, self.retry_now = now, automatic, retry_now
         self.max_age_s = max_age_s
 
-    def previous(self, identity_id, name):
-        resources = (self.state.get("resources", {}) if identity_id is None else
-                     self.state.get("accounts", {}).get(str(identity_id), {}).get("resources", {}))
+    def previous(self, account_id, name):
+        resources = (self.state.get("resources", {}) if account_id is None else
+                     self.state.get("accounts", {}).get(str(account_id), {}).get("resources", {}))
         return resources.get(name, {})
 
     def due(self, item):
@@ -27,8 +26,8 @@ class SyncSchedule:
             return self.retry_now or self.now >= item.get("retry_at", 0)
         return self.now - (item.get("last_success_at") or 0) >= self.max_age_s
 
-    def resource_due(self, identity_id, name):
-        return self.due(self.previous(identity_id, name))
+    def resource_due(self, account_id, name):
+        return self.due(self.previous(account_id, name))
 
 
 def retained(item):
@@ -54,13 +53,16 @@ def combined_status(results):
 
 
 def begin_attempt(store, now):
-    store.settings.set_setting("last_sync_attempt_at", str(now))
+    return store.sync.begin_attempt(now)
 
 
-def finish_attempt(store, result, now):
+def finish_attempt(store, result, now, *, expected_revision=None):
     """Failed attempts must not refresh successful timestamps, including individual resources."""
-    previous = json.loads(store.settings.get_setting("library_sync_state") or "{}")
+    return store.sync.finish_attempt(now, result, expected_revision=expected_revision)
 
+
+def stamp_result(result, previous, now):
+    """Apply freshness and retry policy to supplied state without database access."""
     def stamp(current, old):
         for name, item in current.items():
             previous_item = old.get(name, {})
@@ -83,23 +85,19 @@ def finish_attempt(store, result, now):
                 item["retry_at"] = now + min(RETRY_MAX_S, RETRY_BASE_S * 2 ** (failures - 1))
             item["last_success_at"] = last_success
 
-    for identity_id, account in result.get("accounts", {}).items():
-        old = previous.get("accounts", {}).get(identity_id, {})
+    for account_id, account in result.get("accounts", {}).items():
+        old = previous.get("accounts", {}).get(account_id, {})
         stamp(account["resources"], old.get("resources", {}))
-        stamp({identity_id: account}, {identity_id: old})
+        stamp({account_id: account}, {account_id: old})
     stamp(result.get("resources", {}), previous.get("resources", {}))
     result["last_attempt_at"] = now
-    store.settings.set_setting("library_sync_state", json.dumps(result))
-    store.settings.set_setting("last_sync_outcome", result["status"])
-    if result["status"] == "complete":
-        store.settings.set_setting("last_sync_at", str(now))
     return result
 
 
 def sync_due(store, now, max_age_s, *, retry_now=False):
     schedule = SyncSchedule(store, now, automatic=True, retry_now=retry_now, max_age_s=max_age_s)
     state = schedule.state
-    configured = {str(i.id) for i in store.identities.get_identities()}
+    configured = {str(i.id) for i in store.accounts.get_accounts()}
     if state:
         if set(state.get("accounts", {})) != configured:
             return True

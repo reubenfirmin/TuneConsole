@@ -4,7 +4,6 @@ import random
 import zlib
 from collections import Counter
 
-from yt_playlist.util import genre_map
 from yt_playlist.rec import arc_energy, journeys, musical_character, rec_params, transient
 from yt_playlist.rec.ordering import _field
 from yt_playlist.rec.taste_analysis import era_distribution, taste_breadth
@@ -47,12 +46,11 @@ def _join(names):
     return names[0] if len(names) == 1 else " and ".join(names)
 
 
-def theme_counts(store, items):
+def theme_counts(store, items, *, catalog=None):
     """Genre and decade counts behind the displayed description and the Home offer audit.
     Keep their metadata fallbacks identical so the audit explains what the user saw."""
-    keys = [_field(it, "key") or "" for it in items]
     genres = Counter()
-    by_artist = None
+    by_artist = catalog['artists'] if catalog is not None else None
     for it in items:
         g = (_field(it, "genre") or "").strip()
         if not g:
@@ -68,7 +66,8 @@ def theme_counts(store, items):
             genres[g.strip().lower()] += 1
     # Decades come from the library, except for tracks that aren't IN the library: the Fresh card's
     # proposals carry their own year, and are the whole reason that fallback exists.
-    from_library = store.rec_query.track_decades(keys)
+    from_library = (catalog['decades'] if catalog is not None else store.rec_query.track_decades([
+        _field(it, 'key') or '' for it in items if not _field(it, 'year')]))
     decades = Counter()
     for it in items:
         own = _field(it, "year")
@@ -78,13 +77,13 @@ def theme_counts(store, items):
     return genres, decades
 
 
-def theme_sentence(store, model, items) -> str:
+def theme_sentence(store, model, items, *, counts=None) -> str:
     """Describe the actual card's framing, genres and eras, rather than its intended recipe.
     Clauses are dropped when too few tracks carry metadata or no genre/decade dominates."""
     lead = _LANE_LEAD.get(model, _DEFAULT_LEAD)
     if not items:
         return lead + "."
-    genres, decades = theme_counts(store, items)
+    genres, decades = theme_counts(store, items) if counts is None else counts
     # Shares describe the whole card, including unknown tags. Sparse metadata cannot justify
     # "mostly trance", and two 2010s songs among six decades cannot describe the card's era.
     covered = lambda counts: sum(counts.values()) >= _COVERAGE * len(items)   # noqa: E731
@@ -107,6 +106,38 @@ def theme_sentence(store, model, items) -> str:
     return (", ".join(parts[:2]) + (" " + parts[2] if len(parts) > 2 else "")) + "."
 
 
+def theme_heading(store, model, items):
+    """A short mix title, with supporting facts kept out of the headline."""
+    genres, decades = theme_counts(store, items)
+    total = len(items)
+    named = (_top_shares(genres, _GENRE_FLOOR, total=total)
+             if sum(genres.values()) >= _COVERAGE * total else [])
+    # Unknown tags count against coverage. A few tagged songs cannot name the whole mix.
+    if named and named[0][1] >= _MOSTLY:
+        genre = named[0][0]
+    elif sum(share for _, share in named) >= _MOSTLY:
+        genre = _join([name for name, _ in named])
+    else:
+        genre = None
+    titles = {
+        'wheelhouse': f'More {genre} to get lost in' if genre else 'More of what you love',
+        'explore': f'Rediscover your {genre}' if genre else 'Worth another listen',
+        'comfort': f'Back to your {genre} favorites' if genre else 'Back to your favorites',
+        'fresh': f'Find your next {genre} favorite' if genre else 'Find your next favorite',
+    }
+    context = []
+    if named and not genre:
+        context.append('With ' + _join([name for name, _ in named]))
+    eras = _top_shares(decades, _ERA_FLOOR, total=total)
+    share = sum(value for _, value in eras)
+    if share >= _MOSTLY:
+        years = _join([f'{decade}s' for decade, _ in sorted(eras)])
+        context.append(f'{"mostly " if share < 1 else ""}from the {years}')
+    detail = ', '.join(context)
+    return {'name': titles.get(model, 'Picked for you'),
+            'context': detail[:1].upper() + detail[1:] if detail else None}
+
+
 def pool_facets(store, items, min_tracks=3):
     """The genre-family and decade distributions of the candidates a card can actually draw from.
 
@@ -117,10 +148,12 @@ def pool_facets(store, items, min_tracks=3):
     whatever the theme said. Families with fewer than `min_tracks` are dropped: a theme that can only
     fill one slot is not a theme."""
     fams, eras = Counter(), Counter()
+    items = list(items)
+    genre_axes = store.genres.feature_axes(_field(it, 'genre') for it in items)
     for it in items:
         genre = _field(it, "genre") or ""
         if genre:
-            fams[genre_map.family(genre)] += 1
+            fams[genre_axes[genre][0]] += 1
         year = _field(it, "year")
         if year:
             eras[str(int(year) // 10 * 10)] += 1
@@ -131,7 +164,8 @@ def pool_facets(store, items, min_tracks=3):
     return _shares(fams), _shares(eras)
 
 
-def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans=None) -> dict:
+def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans=None,
+                *, ordering_only=False) -> dict:
     """Roll a per-playlist theme. Preference-weighted by your play distribution × permanent axis
     weights × the live transient facet leans, so common facets come up often, a muted facet never
     rolls, and a fresh 'less house' makes house roll less in the very next generation.
@@ -148,11 +182,15 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans
     rng = random.Random(seed)
     avoid = avoid or {}
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-    if leans is None:
-        leans = transient.facet_leans(store, now) if now is not None else {}
     fgain = rec_params.get_param(store, "facet_gain")
     fmin = rec_params.get_param(store, "facet_mult_min")
     fmax = rec_params.get_param(store, "facet_mult_max")
+    if leans is None:
+        # Transient facets contain genre/era/artist axes. With a positive lower
+        # bound they cannot change whether a theme consumes its random draw.
+        # Completed Vibe cards retain only journey/DJ, not the discarded theme.
+        leans = (transient.facet_leans(store, now)
+                 if now is not None and (not ordering_only or fmin <= 0) else {})
 
     def pick(dist, prefix):
         items = [(k, share * weights.get(f"{prefix}:{k}", 1.0)
@@ -174,6 +212,8 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans
                 return k
         return items[-1][0]
 
+    if dists is None and ordering_only:
+        dists = store.memoized_read('recipe-facet-keys', store.rec_query.recipe_facet_keys)
     genre_dist, era_dist = dists if dists is not None else (taste_breadth(store)["families"],
                                                            dict(era_distribution(store)))
     genre = pick(genre_dist, "genre")
@@ -181,6 +221,9 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans
     # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
     # (rediscovery, deep dive, eras…) have no signal to order by. Keep them a straight shuffle.
     journey = "shuffle" if model == "fresh" else (pick(dict.fromkeys(journeys.JOURNEYS, 1.0), "journey") or "shuffle")
+    dj = {"stickiness": round(rng.random(), 2), "seed": rng.randint(0, 2**31 - 1)}
+    if ordering_only:
+        return {'journey': journey, 'dj': dj}
     facets = {}
     if genre:
         facets["genres"] = [genre]
@@ -188,7 +231,7 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans
         facets["eras"] = [era]
     axis = {a: w for a, w in weights.items() if a.split(":", 1)[0] in ("genre", "era", "artist")}
     return {"model": model, "facets": facets, "params": {}, "journey": journey,
-            "dj": {"stickiness": round(rng.random(), 2), "seed": rng.randint(0, 2**31 - 1)},
+            "dj": dj,
             "weights": axis}
 
 
@@ -201,17 +244,21 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     `journey` is the user's DJ-Journey pick from the save bar; 'auto' (or anything unknown) ⇒ the
     'energy_arc' default. Unlike Home recipes this isn't theme-rolled. It just records what the
     cluster IS. Returns (recipe, ordered_keys); ordering is deterministic so a re-save lands the same."""
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return cluster_recipe(reader, keep_keys, seed_labels, allow_families, journey=journey)
     journey = journey if journey in journeys.JOURNEYS else "energy_arc"
     keys = [k for k in dict.fromkeys(keep_keys) if k]
     dao = store.rec_query
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
+    genre_axes = store.genres.feature_axes(genres.values())
     lastp, plays = dao.track_last_played(keys), store.rec_query.play_counts()
     meta = store.rec_query.tracks_by_keys(keys)
     arc = arc_energy.arc_energies(keys, musical_character.load(store, keys))
     fam_count, era_count = {}, {}
     for k in keys:
         if k in genres:
-            fam = genre_map.family(genres[k])
+            fam = genre_axes.get(genres[k], ('', None))[0]
             fam_count[fam] = fam_count.get(fam, 0) + 1
         if k in decades:
             era_count[decades[k]] = era_count.get(decades[k], 0) + 1
@@ -230,6 +277,7 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     def feat(k):
         g = genres.get(k, "")
         return {"artist": (meta.get(k) or {}).get("artist", ""), "genre": g,
+                "family": genre_axes.get(g, ('', None))[0],
                 "energy": arc.get(k, .5), "decade": decades.get(k),
                 "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
 
@@ -255,13 +303,15 @@ def theme_filter(store, items, facets, limit=None):
     keys = [k for k in (_field(i, "key") or "" for i in items) if k]
     dao = store.rec_query
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
+    genre_axes = store.genres.feature_axes(
+        (_field(i, 'genre') or '') or genres.get(_field(i, 'key') or '', '') for i in items)
 
     def facets_of(i):
         key = _field(i, "key") or ""
         genre = (_field(i, "genre") or "") or genres.get(key, "")
         year = _field(i, "year")
         decade = (str(int(year) // 10 * 10) if year else None) or decades.get(key)
-        return (genre_map.family(genre) if genre else None), decade
+        return (genre_axes[genre][0] if genre else None), decade
 
     def matches(i):
         fam, decade = facets_of(i)

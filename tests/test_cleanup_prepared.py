@@ -4,7 +4,6 @@ from itertools import combinations as original_combinations
 from fastapi.testclient import TestClient
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.library import analysis
 from yt_playlist.repos.models import CleanupPreferences, Playlist, PlaylistMemberships
 from yt_playlist.web.app import create_app
@@ -78,11 +77,10 @@ def test_sparse_disjoint_memberships_have_no_candidate_pairs():
     assert state.relationships(0.5) == ([], [])
 
 
-def test_memberships_preferences_and_upload_kinds_share_a_snapshot(tmp_path, monkeypatch):
-    store = Store(tmp_path / 'cleanup.db')
-    store.init_schema()
+def test_memberships_preferences_and_upload_kinds_share_a_snapshot(file_backed_store, monkeypatch):
+    store = file_backed_store
     try:
-        iid = store.identities.upsert_identity('main', 'cred', None, True)
+        iid = store.accounts.upsert_account('main', 'cred', None, True)
         a = store.playlists.upsert_playlist(iid, 'A', 'A', 1, '', 1)
         b = store.playlists.upsert_playlist(iid, 'B', 'B', 1, '', 1)
         track = store.tracks.upsert_track('v', 'Song', 'Artist', None, 100)
@@ -94,8 +92,10 @@ def test_memberships_preferences_and_upload_kinds_share_a_snapshot(tmp_path, mon
             recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (track,)).fetchone()[0]
             store.conn.execute('UPDATE catalog_entries SET recording_id=? WHERE id=?', (recording, other))
             store.conn.execute('UPDATE youtube_items SET recording_id=? WHERE video_id=?', (recording, 'v-other'))
-            store.conn.execute("UPDATE catalog_tracks SET video_type='MUSIC_VIDEO_TYPE_ATV' WHERE id=?", (track,))
-            store.conn.execute("UPDATE catalog_tracks SET video_type='MUSIC_VIDEO_TYPE_OMV' WHERE id=?", (other,))
+            store.conn.execute("UPDATE youtube_items SET video_type='MUSIC_VIDEO_TYPE_ATV' WHERE video_id IN "
+                               "(SELECT video_id FROM catalog_entries WHERE id=?)", (track,))
+            store.conn.execute("UPDATE youtube_items SET video_type='MUSIC_VIDEO_TYPE_OMV' WHERE video_id IN "
+                               "(SELECT video_id FROM catalog_entries WHERE id=?)", (other,))
         store.playlists.set_playlist_tracks(a, [track, other])
         original = type(store.overlaps).cleanup_preferences
 
@@ -117,7 +117,7 @@ def test_memberships_preferences_and_upload_kinds_share_a_snapshot(tmp_path, mon
 
 
 def test_page_and_home_summary_share_one_analysis(store, monkeypatch):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     track = store.tracks.upsert_track('v', 'Song', 'Artist', None, 100)
     for i in range(10):
         pid = store.playlists.upsert_playlist(iid, f'P{i}', f'Playlist {i}', 1, '', 1)

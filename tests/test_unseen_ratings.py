@@ -7,10 +7,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events, ratings, sync
 from yt_playlist.rec import rec_worker
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 def _event(action="like", **outcome):
@@ -25,11 +32,10 @@ def _song(video_id):
 
 
 @pytest.mark.parametrize("action", ["like", "dislike"])
-def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(tmp_path, action):
+def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(tmp_path, action, consumer_store, request):
     path = tmp_path / "ratings.db"
-    store = Store(path)
-    store.init_schema()
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store = consumer_store(path)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     calls = []
     ctx = SimpleNamespace(store=store, rec_worker=SimpleNamespace(
         trigger_rating_update=lambda: calls.append("scheduled")))
@@ -39,6 +45,7 @@ def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(t
     store.conn.close()
 
     store = Store(path)
+    request.addfinalizer(store.conn.close)
     store.init_schema()
     keys = ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=_song))
     assert keys == {"unseen song|artist"}
@@ -54,7 +61,7 @@ def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(t
 
 
 def test_failed_metadata_retries_during_normal_sync(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     player_events.handle_player_event(SimpleNamespace(store=store), _event(), 100)
     monkeypatch.setattr(ratings, "with_retry", lambda fn: fn())
 
@@ -70,7 +77,7 @@ def test_failed_metadata_retries_during_normal_sync(store, monkeypatch):
 
 
 def test_mismatched_metadata_is_not_bound_to_the_rating(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     ratings.record_confirmed(store, iid, "unseen", "DISLIKE", 100)
     assert ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=lambda _: _song("other"))) == set()
     assert store.tracks.identity_key_for_video("unseen") is None
@@ -79,7 +86,7 @@ def test_mismatched_metadata_is_not_bound_to_the_rating(store):
 
 
 def test_unlike_arriving_during_metadata_fetch_prevents_stale_learning(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     ratings.record_confirmed(store, iid, "unseen", "LIKE", 100)
 
     def resolve(video_id):
@@ -92,7 +99,7 @@ def test_unlike_arriving_during_metadata_fetch_prevents_stale_learning(store):
 
 
 def test_failed_native_request_does_not_queue_learning(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     calls = []
     ctx = SimpleNamespace(store=store, rec_worker=SimpleNamespace(
         trigger_rating_update=lambda: calls.append(True)))
@@ -102,7 +109,7 @@ def test_failed_native_request_does_not_queue_learning(store):
 
 
 def test_backend_rating_retains_pending_feedback_without_waiting_for_metadata(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     writes = []
     remote = SimpleNamespace(get_song=lambda _: pytest.fail("metadata must be resolved by the worker"),
                              rate_song=lambda *args: writes.append(args))
@@ -118,7 +125,7 @@ def test_backend_rating_retains_pending_feedback_without_waiting_for_metadata(st
 
 @pytest.mark.parametrize("endpoint", ["/track/like", "/now-playing/rate"])
 def test_both_heart_routes_schedule_unknown_subjects_after_confirming_rating(store, monkeypatch, endpoint):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     reads = []
     remote = SimpleNamespace(rate_song=lambda *args: None,
         get_song=lambda video_id: reads.append(video_id) or _song(video_id))
@@ -127,6 +134,11 @@ def test_both_heart_routes_schedule_unknown_subjects_after_confirming_rating(sto
     worker.enabled, worker.debounce_s = True, 0
     queued = []
     monkeypatch.setattr(worker, "_start_loop", lambda: queued.append(worker._loop))
+    # Keep rating reconciliation and scheduling real. Model/profile fitting is
+    # a downstream consumer of the confirmed feedback, with separate owners.
+    refreshes = []
+    monkeypatch.setattr(worker, '_prepare_content', lambda: False)
+    monkeypatch.setattr(worker, '_do_rebuild', lambda: refreshes.append('refresh'))
     client = TestClient(app, base_url="http://127.0.0.1")
     response = (client.post(endpoint, data={"video_id": "unseen", "on": "1"})
                 if endpoint == "/track/like" else
@@ -140,10 +152,12 @@ def test_both_heart_routes_schedule_unknown_subjects_after_confirming_rating(sto
     queued.pop()()
     assert reads == ["unseen"]
     assert store.rec_model.recent_liked_with_ts() == [("unseen song|artist", 100)]
+    assert refreshes == ['refresh']
+    assert store.rec_refresh.revision() is not None
 
 
 def test_later_catalog_observation_resolves_pending_rating_without_network(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     ratings.record_confirmed(store, iid, "unseen", "DISLIKE", 100)
     store.tracks.observe_track("unseen", "Unseen song", "Artist", now=200)
     assert ratings.reconcile_pending(store, iid, None) == {"unseen song|artist"}
@@ -151,7 +165,7 @@ def test_later_catalog_observation_resolves_pending_rating_without_network(store
 
 
 def test_rating_worker_coalesces_and_resolves_before_background_refresh(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     ratings.record_confirmed(store, iid, "unseen", "LIKE", 100)
     calls = []
     worker = rec_worker.RecWorker(SimpleNamespace(store=store, now_fn=lambda: 200,
@@ -160,6 +174,7 @@ def test_rating_worker_coalesces_and_resolves_before_background_refresh(store, m
     queued = []
     monkeypatch.setattr(worker, "_start_loop", lambda: queued.append(worker._loop))
     monkeypatch.setattr(worker, '_do_rebuild', lambda: calls.append('refresh'))
+    monkeypatch.setattr(worker, '_prepare_content', lambda: False)
     worker.trigger_rating_update()
     worker.trigger_rating_update()
     assert len(queued) == 1

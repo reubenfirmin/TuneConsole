@@ -62,9 +62,12 @@ class RadioPlayback:
         return self.bridge.send_control({"type": "navigate", "url":
             "https://music.youtube.com/watch?" + urlencode({"v": video, "list": playlist})}, intent=intent)
 
-    def next(self, video: str):
+    def next(self, video: str, *, brand_id=None):
         try:
-            status, body = asyncio.run(self.bridge.request_control({"type": "next", "videoId": video}, timeout=10))
+            frame = {"type": "next", "videoId": video}
+            if brand_id is not None:
+                frame['brandId'] = brand_id
+            status, body = asyncio.run(self.bridge.request_control(frame, timeout=10))
             return status, json.loads(body)
         except (BridgeError, ValueError) as exc:
             return 0, {"error": str(exc)}

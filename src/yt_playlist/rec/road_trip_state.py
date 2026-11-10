@@ -42,6 +42,7 @@ class DraftState(TypedDict):
     other_cap: int
     saved_playlist_id: str | None
     artist_contexts: NotRequired[dict[str, dict]]
+    genre_families: NotRequired[dict[str, str]]
     own_facts_done: NotRequired[int]
     done_widening: NotRequired[list[str]]
     untagged: NotRequired[dict[str, int]]

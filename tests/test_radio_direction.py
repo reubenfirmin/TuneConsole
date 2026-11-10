@@ -1,6 +1,4 @@
 """Direction changes, tuning, native transitions and stream decay."""
-import json
-
 import pytest
 from fastapi import FastAPI
 from tests.template_support import web_templates
@@ -110,7 +108,7 @@ def test_tuning_preserves_history_and_waits_for_native_future_ack(poc):
     assert s.heard == history
     assert requested not in s.choices  # Slider changes aren't explicit song choices.
     assert len(frames) == 1
-    saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+    saved = c.persistence.load()
     assert saved["tuning"] == controls
     assert len(set(saved["directions"]["decay"].values())) == 3
 
@@ -183,6 +181,26 @@ def test_tuning_honors_a_pending_explicit_stream_selection(poc):
     c.advance(c.session)
     assert c.session.directions.active == 2
     assert c.ctx.bridge.now_playing["video_id"] == "v2"
+
+
+def test_tuning_keeps_pending_explicit_song_and_its_skipped_prefix(poc):
+    c, remote, frames, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v2')
+    state = c.status()
+    branch = state['directions'][2]
+    song = branch['tracks'][2]['video_id']
+    assert c.select(branch['id'], state['menu_id'], song)['ok']
+    request = c.session.requested_direction
+    play_intent = dict(request['play'])
+    excluded = list(request['excluded'])
+    before = (list(remote.ids), list(remote.adds), list(remote.removes), list(frames))
+    assert c.tune({'comfort': .1, 'theme': .5, 'energy': .2})['ok']
+    assert c.session.requested_direction is request
+    assert request['play'] == play_intent
+    assert request['excluded'] == excluded
+    assert request['tracks'][0]['video_id'] == song
+    assert (remote.ids, remote.adds, remote.removes, frames) == before
 
 
 @pytest.mark.parametrize("retuned", [False, True])

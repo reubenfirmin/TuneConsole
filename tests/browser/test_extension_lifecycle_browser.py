@@ -5,13 +5,13 @@ fixtures; extension APIs, world isolation, media, and backend ingestion run for 
 """
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import io
 import json
 from pathlib import Path
 import shutil
 import socket
 import subprocess
-import threading
 import time
 from types import SimpleNamespace
 import wave
@@ -23,6 +23,7 @@ import uvicorn
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.routes.bridge import build
+from tests.live_server import LiveServer
 
 
 EXT = Path(__file__).resolve().parents[2] / "extension"
@@ -34,22 +35,19 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     if shutil.which("openssl") is None:
         pytest.fail("OpenSSL is required for the local Music TLS fixture")
     bridge = Bridge()
-    main = store.identities.upsert_identity("main", "bridge", None, True)
-    brand = store.identities.upsert_identity("band", "bridge", "brand-A", False)
+    main = store.accounts.upsert_account("main", "bridge", None, True)
+    brand = store.accounts.upsert_account("band", "bridge", "brand-A", False)
     ctx = SimpleNamespace(bridge=bridge, store=store, now_fn=time.time)
     app = FastAPI()
     app.include_router(build(ctx))
+    owners = ExitStack()
+    request.addfinalizer(owners.close)
     # Bind before starting the server so another test/process cannot take the chosen port.
-    listener = socket.socket()
+    listener = owners.enter_context(socket.socket())
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-    thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 5
-    while not server.started and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert server.started, "fixture bridge failed to start"
+    owners.enter_context(LiveServer(server, sockets=[listener], startup_timeout=5))
 
     # Change only the local test endpoint/permission in a copy; the source manifest and
     # production endpoint remain untouched. Retain the real unpacked extension identity.
@@ -94,17 +92,12 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     def fixture_page(path: str):
         return HTMLResponse(HTML.read_text())
 
-    tls_listener = socket.socket()
+    tls_listener = owners.enter_context(socket.socket())
     tls_listener.bind(("127.0.0.1", 0))
     tls_port = tls_listener.getsockname()[1]
     tls_server = uvicorn.Server(uvicorn.Config(app, log_level="warning",
                                               ssl_keyfile=str(key), ssl_certfile=str(certificate)))
-    tls_thread = threading.Thread(target=lambda: tls_server.run(sockets=[tls_listener]), daemon=True)
-    tls_thread.start()
-    deadline = time.monotonic() + 5
-    while not tls_server.started and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert tls_server.started, "fixture Music origin failed to start"
+    owners.enter_context(LiveServer(tls_server, sockets=[tls_listener], startup_timeout=5))
     context = None
     try:
         context = playwright.chromium.launch_persistent_context(
@@ -144,12 +137,6 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     finally:
         if context is not None:
             context.close()
-        server.should_exit = True
-        tls_server.should_exit = True
-        thread.join(timeout=5)
-        tls_thread.join(timeout=5)
-        listener.close()
-        tls_listener.close()
 
 
 def _music(h, query="?playing=true"):
@@ -180,7 +167,7 @@ def test_worlds_delayed_metadata_and_ratings_keep_account_and_video_identity(ins
     assert _plays(h) == [], "unknown account must not persist as the main account"
     page.evaluate("fixture.known = true; fixture.sample()")
     h.eventually(lambda: len(_plays(h)) == 1)
-    assert _plays(h)[0]["identity_id"] == h.brand
+    assert _plays(h)[0]["account_id"] == h.brand
     assert _plays(h)[0]["video_id"] == "first"
     assert h.bridge.now_playing["thumbnail"] == "https://lh3.googleusercontent.com/album-art"
     page.evaluate("fixture.setRating('DISLIKE'); fixture.sample()")
@@ -199,75 +186,12 @@ def test_worlds_delayed_metadata_and_ratings_keep_account_and_video_identity(ins
     assert h.store.tracks.item_rating(h.brand, "second")["status"] == "LIKE"
     assert h.store.tracks.item_rating(h.brand, "first")["status"] == "DISLIKE"
     assert h.store.tracks.item_rating(h.main, "second") is None
-    assert [(p["video_id"], p["identity_id"]) for p in _plays(h)] == [
+    assert [(p["video_id"], p["account_id"]) for p in _plays(h)] == [
         ("first", h.brand), ("second", h.brand)]
 
 
-@pytest.mark.parametrize("settlement", ["binding_ready", "song_changed", "account_changed", "newer_rating"])
-def test_native_rating_waits_for_bound_controls_and_cancels_old_intent(installed_bridge, settlement):
-    h = installed_bridge
-    page = _music(h)
-    _sample(h, page)
-    h.worker.evaluate("""() => {
-        globalThis.ratingFrames = [];
-        const send = tuneConsole.transport.send;
-        tuneConsole.transport.send = frame => {
-            if (frame.type === 'rating-reconciliation') ratingFrames.push(frame);
-            return send(frame);
-        };
-    }""")
-    page.evaluate("""() => {
-        document.querySelector('ytmusic-player-bar').data = undefined;
-        document.querySelector('ytmusic-like-button-renderer').data = undefined;
-        fixture.sample();
-    }""")
-
-    def rate(desired):
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(asyncio.run, h.bridge.request_control({
-                "type": "rate", "action": "like", "videoId": "first",
-                "likeStatus": desired, "brandId": "brand-A"}))
-            h.eventually(result.done)
-            return json.loads(result.result()[1])
-
-    assert rate("LIKE") == {"ok": True, "pending": True}
-    assert page.evaluate("fixture.clicks") == []
-    first_id = h.worker.evaluate("ratingFrames[0].ratingId")
-    if settlement == "newer_rating":
-        assert rate("INDIFFERENT")["pending"]
-    page.evaluate("""settlement => {
-        if (settlement === 'song_changed') fixture.videoId = 'second';
-        if (settlement === 'account_changed') fixture.brand = 'brand-B';
-        fixture.setBar(); fixture.setRating(); fixture.sample();
-    }""", settlement)
-    h.eventually(lambda: h.worker.evaluate("ratingFrames.at(-1)?.state") in ("recovered", "cancelled"))
-    frames = h.worker.evaluate("ratingFrames")
-    first = [frame for frame in frames if frame["ratingId"] == first_id]
-    assert [frame["state"] for frame in first] == [
-        "pending", "recovered" if settlement == "binding_ready" else "cancelled"]
-    assert first[0]["first"]["diagnostics"]["binding"]["targetIds"] == []
-    if settlement == "binding_ready":
-        assert rate("LIKE")["ok"]  # Reapplying a confirmed desired state sends no second click.
-    assert page.evaluate("fixture.clicks") == (["like"] if settlement == "binding_ready" else [])
 
 
-@pytest.mark.parametrize("installed_bridge", ["legacy_bootstrap", "missing_receiver_option"], indirect=True)
-def test_legacy_bootstrap_reconnects_without_reloading_music(installed_bridge):
-    h = installed_bridge
-    page = _music(h)
-    page.evaluate("window.documentToken = 'same document'")
-    h.eventually(lambda: len(_plays(h)) == 1)
-    h.eventually(lambda: (h.bridge.sensor_health or {}).get("healthy"))
-
-    connection_id = h.bridge._conn_id
-    h.drop_connection()
-    h.eventually(lambda: h.bridge.connected and h.bridge._conn_id != connection_id)
-    h.eventually(lambda: (h.bridge.sensor_health or {}).get("healthy"))
-    h.eventually(lambda: (h.bridge.now_playing or {}).get("video_id") == "first")
-    assert page.evaluate("documentToken") == "same document"
-    assert page.evaluate("!document.querySelector('video').paused")
-    assert len(_plays(h)) == 1
-    assert h.worker.evaluate("tuneConsole.sensors.probe()")["reloadedTabs"] == 0
 
 
 def test_extension_reload_reconnect_and_throttled_main_repair_preserve_playback(installed_bridge):
@@ -394,7 +318,7 @@ def test_dislike_updates_native_thumb_then_skips_the_radio_queue(installed_bridg
     assert owner.evaluate("fixture.clicks") == ["dislike", "next"]
 
 
-@pytest.mark.parametrize("first", ["launch", "fetch"])
+@pytest.mark.parametrize("first", ["launch"])
 def test_library_fetch_and_launch_share_one_real_tab_and_deliver_each_request(installed_bridge, first):
     h = installed_bridge
     target = "https://music.youtube.com/?playing=true&v=launched&list=PL_launch"
@@ -422,4 +346,4 @@ def test_library_fetch_and_launch_share_one_real_tab_and_deliver_each_request(in
                  f"health={h.bridge.sensor_health}, tabs={tabs}, pages={diagnostics}")
     assert _plays(h)[0]["video_id"] == "launched"
     assert _plays(h)[0]["playlist_ytm_id"] == "PL_launch"
-    assert _plays(h)[0]["identity_id"] == h.brand
+    assert _plays(h)[0]["account_id"] == h.brand

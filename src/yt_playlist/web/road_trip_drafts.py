@@ -1,4 +1,5 @@
 """One application's Road Trip draft mutations and generation-scoped build jobs."""
+import logging
 import random
 import threading
 from dataclasses import dataclass
@@ -78,9 +79,9 @@ class RoadTripDrafts:
         with self._lock:
             entry = (None if recipe_id is None else
                      {'recipe_id': recipe_id, 'state': self.store.road_trip.get_road_trip_draft(recipe_id)})
-            if entry is None or entry['state'] is None:
+            if recipe_id is None:
                 entry = self.store.road_trip.latest_road_trip_draft()
-            if not entry:
+            if not entry or entry['state'] is None:
                 return None
             rid = entry['recipe_id']
             state = road_trip.normalized(entry['state'], self.store, self.now())
@@ -177,6 +178,8 @@ class RoadTripDrafts:
                 if self._publish(job, state):
                     revision = state['revision']
         except Exception as exc:
+            logging.getLogger(__name__).exception('Road Trip acquisition failed for recipe %s generation %s',
+                                                  job.recipe_id, job.generation)
             error = str(exc) or type(exc).__name__
             raise
         finally:

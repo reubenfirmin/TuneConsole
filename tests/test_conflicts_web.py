@@ -8,10 +8,27 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.store_fixture_support import bounded_consumer_schema
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('electronic', 'Electronic'), ('art_pop', 'Art Pop'),
+                                  ('rock', 'Rock'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def conflict_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import album, app_update, audio_preview, playlists
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (album, app_update, audio_preview, playlists)])
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -20,7 +37,7 @@ def _seed(store, iid):
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     tid = store.tracks.upsert_track("v0", "Hyperballad", "Bjork", "Post", 200, 1)
     store.playlists.set_playlist_tracks(a, [tid])
-    store.tracks.set_track_enrichment(tid, "Electronic", "1995")     # canonical = MusicBrainz's pick
+    store.enrichment.apply_provider_fields(tid, 'musicbrainz', {'genre': 'Electronic', 'year': '1995'})
     store.enrichment.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Electronic"},
                                          {"provider": "discogs", "value": "Art Pop"}])
     return a, tid
@@ -30,7 +47,7 @@ def test_page_passes_conflict_count_to_panel(store):
     c, iid = _client(store)
     a, _tid = _seed(store, iid)
     html = c.get(f"/playlist/{a}").text
-    assert f"enrichPanel({a}, false, 0, '', null, 1)" in html   # conflict_count = 1 lights the icon
+    assert f"enrichPanel({a}, 0, '', null, 1)" in html   # conflict_count = 1 lights the icon
 
 
 def test_resolver_lists_candidates(store):
@@ -62,7 +79,7 @@ def test_provider_links_look_up_track_and_survive_partial_resolution(store, scop
     tid = store.tracks.upsert_track("v0", title, artist, "Album", 200, 1, album_browse_id="BID")
     store.playlists.set_playlist_tracks(pid, [tid])
     mbid = "b1234567-1234-1234-1234-123456789abc"
-    store.tracks.set_track_mbid(tid, mbid)
+    store.enrichment.apply_provider_fields(tid, 'musicbrainz', {'mb_recording_id': mbid})
     providers = ["musicbrainz", "discogs", "lastfm", "deezer", "acousticbrainz"]
     store.enrichment.upsert_conflict(tid, "year", [{"provider": p, "value": str(1952 + i)}
                                          for i, p in enumerate(providers)])

@@ -227,12 +227,28 @@
   flex-wrap: wrap;
   align-items: center;
   gap: .45rem .65rem;
-  margin-block-end: clamp(1.5rem, 3vw, 2.75rem);
+  margin-block-end: 1.2rem;
   color: var(--light-source);
   font-size: var(--type-sm);
   line-height: 1.4;
 }
-.page-playlist .release-hero :is(.pl-type-badge, .pl-version) {
+.page-playlist .release-hero h1 {
+  max-width: 28ch;
+  font-size: clamp(2rem, 3vw, 3rem);
+  line-height: 1.08;
+  letter-spacing: -.035em;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+.page-playlist .release-hero .pl-title-context {
+  max-width: 60ch;
+  margin-block: .65rem 0;
+  color: color-mix(in srgb, var(--light-source) 84%, transparent);
+  font-size: var(--type-body);
+  line-height: 1.45;
+  text-shadow: 0 1px 8px var(--shadow-ink);
+}
+.page-playlist .release-hero :is(.pl-type-badge, .pl-version, .pl-vibe-badge) {
   display: inline-block;
   box-sizing: border-box;
   max-width: 100%;
@@ -244,6 +260,10 @@
 }
 .page-playlist .release-hero .pl-type-badge {
   background: color-mix(in srgb, var(--accent) 40%, var(--shadow-ink));
+  font-weight: 650;
+}
+.page-playlist .release-hero .pl-vibe-badge {
+  border-color: var(--accent);
   font-weight: 650;
 }
 .page-playlist .release-hero .pl-version {

@@ -72,7 +72,7 @@ DMG_ROOT="dist/dmg-root"
 mkdir -p "$DMG_ROOT"
 cp -R "$APP" "$DMG_ROOT/TuneConsole.app"
 ln -s /Applications "$DMG_ROOT/Applications"
-hdiutil create -volname "TuneConsole" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
+bash ./create-dmg.sh "$DMG_ROOT" "$DMG"
 rm -rf "$DMG_ROOT"
 
 echo

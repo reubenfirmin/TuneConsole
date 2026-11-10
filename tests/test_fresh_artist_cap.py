@@ -7,7 +7,7 @@ over that returned nine Underworld tracks in a twelve-track card.
 """
 from collections import Counter
 
-from yt_playlist.core.store import Store
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import rec_params
 from yt_playlist.rec.surfaces import _cap_per_artist
 
@@ -63,9 +63,8 @@ def test_an_accented_spelling_does_not_get_its_own_allowance():
     assert sum(1 for _, r in got if "eubauten" in r["artist"]) == 2
 
 
-def test_the_cap_is_tunable_and_defaults_to_two():
-    s = Store(":memory:")
-    s.init_schema()
+def test_the_cap_is_tunable_and_defaults_to_two(no_database):
+    s = repository_store(settings={'get_setting': None})
     assert rec_params.get_param(s, "fresh_artist_cap") == 2
     spec = rec_params.PARAMS_BY_NAME["fresh_artist_cap"]
     assert spec.integer and spec.min >= 1

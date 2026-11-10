@@ -153,11 +153,24 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     }).catch(e => warn("Navigate failed", e));
   }
 
-  async function next(videoId) {
+  async function next(videoId, brandId) {
     const message = {type: "next", videoId};
+    if (brandId !== undefined) message.brandId = brandId;
     if (!videoId) return {ok: false, error: "Displayed song is missing"};
     const tab = await pickTab();
     if (!tab) return {ok: false, error: "No music player is available"};
+    if (brandId !== undefined) {
+      if (typeof brandId !== "string") return {ok: false, error: "Invalid player account"};
+      const ready = result => result.ok && Number.isSafeInteger(result.reply?.receiverRevision) &&
+        result.reply.receiverRevision >= TC_CONFIG.accountBoundNextRevision;
+      let sensor = await sensors.ping(tab.id, false);
+      if (!ready(sensor)) {
+        await sensors.inject(tab.id);
+        sensor = await sensors.ping(tab.id, false);
+      }
+      if (!ready(sensor)) return {ok: false,
+        error: "The player needs an updated connection before an account-specific skip"};
+    }
     const deliver = () => chrome.tabs.sendMessage(tab.id, message);
     try { return await deliver() || {ok: false}; }
     catch (e) {

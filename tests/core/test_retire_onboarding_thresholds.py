@@ -17,12 +17,18 @@ def test_upgrade_removes_only_the_unsupported_onboarding_overrides():
         ])
         store.conn.commit()
 
-        store.init_schema()
+        # This case owns v46's selective deletion. The populated historical-chain
+        # owner checks the same values after all subsequent registered upgrades.
+        migrate(store.conn, registry=MIGRATIONS[:46])
 
-        assert store.settings.get_setting("rec_param:onboard_coverage_min") is None
-        assert store.settings.get_setting("rec_param:onboard_library_min") is None
-        assert store.settings.get_setting("rec_param:onboard_feedback_min") == "15"
-        assert store.settings.get_setting("onboard_dismissed") == "1"
-        assert store.settings.get_setting("last_sync_at") == "1000"
+        settings = dict(store.conn.execute("SELECT key,value FROM settings"))
+        assert "rec_param:onboard_coverage_min" not in settings
+        assert "rec_param:onboard_library_min" not in settings
+        assert settings["rec_param:onboard_feedback_min"] == "15"
+        assert settings["onboard_dismissed"] == "1"
+        assert float(settings["last_sync_at"]) == 1000
+        before = list(store.conn.iterdump())
+        migrate(store.conn, registry=MIGRATIONS[:46])
+        assert list(store.conn.iterdump()) == before
     finally:
         store.conn.close()

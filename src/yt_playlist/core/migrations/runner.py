@@ -1,15 +1,16 @@
 import logging
 import time
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import import_module
+from pathlib import Path
+import sqlite3
 from typing import Callable
 
 from yt_playlist.core import db_space
+from yt_playlist.core.schema_contract import MigrationError
 
 log = logging.getLogger(__name__)
-
-
-class MigrationError(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -22,17 +23,18 @@ class Migration:
     version: int
     name: str
     apply: Callable
+    rebuild_tables: bool = False
 
 
 def history(conn, registry):
     table = conn.execute("SELECT type FROM sqlite_master WHERE name='schema_migrations'").fetchone()
     if table is None:
         return 0
-    columns = list(conn.execute("PRAGMA table_info(schema_migrations)"))
+    columns = conn.execute("PRAGMA table_info(schema_migrations)").fetchall()
     if (table[0] != 'table' or [(r[1], r[2].upper(), r[3], r[5]) for r in columns] !=
             [('version', 'INTEGER', 0, 1), ('name', 'TEXT', 1, 0), ('applied_at', 'REAL', 1, 0)]):
         raise MigrationError("Incompatible schema_migrations layout")
-    rows = list(conn.execute("SELECT version,name,applied_at FROM schema_migrations ORDER BY version"))
+    rows = conn.execute("SELECT version,name,applied_at FROM schema_migrations ORDER BY version").fetchall()
     if len(rows) > len(registry):
         raise MigrationError("Database schema is newer than this application")
     for row, migration in zip(rows, registry):
@@ -105,23 +107,126 @@ def validate_catalog(conn, version):
         v022_artist_references.validate(conn)
 
 
-def validate_version(conn, version):
+@lru_cache(maxsize=2)
+def _predecessor_contract(version):
+    """Validate installed predecessors using their frozen DDL before upgrading.
+
+    Versions 32/33 have frozen full definitions. Later predecessors added DDL
+    through v51, with separate validators for subsequent replacements. This
+    path is never used to initialize or validate a current database.
+    """
+    from . import current
+    from .registry import MIGRATIONS
+
+    def statements():
+        floor = min(version, 33)
+        pending = ''
+        for line in Path(__file__).with_name(f'schema_v{floor:03}.sql').read_text().splitlines(keepends=True):
+            pending += line
+            if sqlite3.complete_statement(pending):
+                yield pending
+                pending = ''
+        if pending.strip():
+            raise MigrationError('Incomplete predecessor schema definition')
+        for migration in MIGRATIONS[33:version]:
+            if migration.version in (43, 46):  # Only retired settings.
+                continue
+            if migration.version == 45:
+                yield "CREATE INDEX ix_actions_delete_pending ON actions(id DESC) WHERE status='delete_pending'"
+            else:
+                yield from import_module(migration.apply.__module__).statements()
+
+    return current._schema_contract(statements())
+
+
+@lru_cache(maxsize=16)
+def _installed_contract(version):
+    """Reuse shipped DDL fingerprints; installed structure and data stay live."""
+    from . import current
+    return current._schema_contract(current.statements(version=version))
+
+
+def validate_version(conn, version, *, foreign_keys=True, data=True):
+    from ..schema_inspection import reuse_objects
+
+    with reuse_objects(conn):
+        return _validate_version(conn, version, foreign_keys=foreign_keys, data=data)
+
+
+def _validate_version(conn, version, *, foreign_keys=True, data=True):
     """Use the current contract at its floor; frozen validators serve older upgrades."""
     from . import current
+    if (not foreign_keys or not data) and version < 79:
+        raise ValueError('Only readable installed schemas can defer data validation')
+    if version >= current.VERSION:
+        current.validate(conn, foreign_keys=foreign_keys, data=data)
+        return
+    if version >= 92:
+        current._validate(conn, _installed_contract(version), version,
+                          foreign_keys=foreign_keys, data=data)
+        return
+    if 86 <= version < 92:
+        from . import v092_installed_genre_contract
+        v092_installed_genre_contract.validate_predecessor(
+            conn, version, foreign_keys=foreign_keys, data=data)
+        return
+    if version in (80, 81, 82, 83, 84, 85):
+        from . import v082_recommendation_work, v083_home_offers, v084_album_note_requests, v085_genre_preferences
+        # These versions only add independent owners to the installed v80
+        # contract; old readable libraries need no historical reconstruction.
+        added = v085_genre_preferences.OBJECTS if version < 85 else frozenset()
+        if version < 84:
+            added |= v084_album_note_requests.OBJECTS
+        if version < 83:
+            added |= v083_home_offers.OBJECTS
+        if version < 82:
+            added |= v082_recommendation_work.OBJECTS
+        if version == 80:
+            added |= {'playback_feedback_receipts'}
+        expected = _installed_contract(85)
+        current._validate(conn, expected, version, replaced=added,
+                          foreign_keys=foreign_keys, data=data)
+        return
     if version >= current.CONTRACT_FLOOR:
         from . import v062_album_aliases
-        current.validate(conn, min(version, current.VERSION),
-                         replaced=v062_album_aliases.REPLACED if version >= 62 else frozenset())
+        key_replacements = frozenset()
+        if version >= 66:
+            from . import v066_explicit_keys
+            key_replacements = frozenset((*v066_explicit_keys.TABLES, 'rec_mood'))
+        if version >= 69:
+            key_replacements |= {'rec_prepared_content', 'ix_prepared_content_revision', 'ix_group_library_inputs'}
+        if version >= 70:
+            from . import v070_policy_documents
+            key_replacements |= v070_policy_documents.REPLACED
+        if version >= 72:
+            from . import v072_compact_groups
+            key_replacements |= frozenset(v072_compact_groups.OLD_TABLES)
+        if version >= 74:
+            key_replacements |= {'artist_credit_observations'}
+        if version >= 76:
+            key_replacements |= {'legacy_track_evidence', 'identity_state_archive', 'legacy_enrichment_attempts'}
+        if version >= 77:
+            key_replacements |= {'playlist_scopes', 'playlist_group', 'hidden_playlists', 'overlap_ignored', 'playlist_provenance',
+                                 'album_library_revisions', 'album_library_snapshots', 'album_library_legacy_cohort',
+                                 'album_library_memberships', 'saved_albums', 'quarantined_playlists'}
+        if version >= 78:
+            key_replacements |= {'identities', 'road_trip_recipes'}
+        if version >= 79:
+            key_replacements |= {'track_artists'}
+        predecessor = min(version, 51)
+        current._validate(conn, _predecessor_contract(predecessor), predecessor,
+                          replaced=key_replacements | (v062_album_aliases.REPLACED if version >= 62 else frozenset()),
+                          foreign_keys=foreign_keys, data=data)
         if version >= 53:
             from . import v053_shared_policies
-            v053_shared_policies.validate(conn)
+            v053_shared_policies.validate(conn, replaced=key_replacements)
         if 54 <= version < 61:
             from . import v054_audio_vibes
             v054_audio_vibes.validate(conn)
-        if version >= 55:
+        if 55 <= version < 67:
             from . import v055_audio_vibe_labels
             v055_audio_vibe_labels.validate(conn)
-        if version >= 56:
+        if 56 <= version < 67:
             from . import v056_audio_session_labels
             v056_audio_session_labels.validate(conn)
         if version >= 57:
@@ -130,23 +235,103 @@ def validate_version(conn, version):
         if 58 <= version < 61:
             from . import v058_predicted_vibes
             v058_predicted_vibes.validate(conn)
-        if version >= 59:
+        if 59 <= version < 72:
             from . import v059_group_publication
-            v059_group_publication.validate(conn)
-        if version >= 60:
+            v059_group_publication.validate(conn, replaced=key_replacements)
+        if 60 <= version < 72:
             from . import v060_group_build_expiry
             v060_group_build_expiry.validate(conn)
         if version >= 61:
             from . import v061_recording_vibes
-            v061_recording_vibes.validate(conn)
+            vibe_replacements = frozenset({'audio_vibe_feedback'}) if version >= 67 else frozenset()
+            if version >= 79:
+                vibe_replacements |= {f'vibe_artists_{event}' for event in ('insert', 'update', 'delete')}
+            if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone() and conn.execute(
+                    "SELECT 1 FROM schema_changes WHERE version=16 AND name='file_owned_vibe_guards'").fetchone():
+                from .. import vibe_provenance
+                vibe_provenance.validate_guards(conn)
+                vibe_replacements |= {name for name, _sql in vibe_provenance.guards()}
+            v061_recording_vibes.validate(conn, replaced=vibe_replacements)
         if version >= 62:
-            v062_album_aliases.validate(conn)
-        if version >= 63:
+            v062_album_aliases.validate(conn, replaced=frozenset({'saved_albums'}) if version >= 77 else frozenset(),
+                                       data=data)
+        if 63 <= version < 73:
             from . import v063_proposal_cache
             v063_proposal_cache.validate(conn)
         if version >= 64:
             from . import v064_musical_link_retractions
             v064_musical_link_retractions.validate(conn)
+        if 65 <= version < 69:
+            from . import v065_group_library_lookup
+            v065_group_library_lookup.validate(conn)
+        if version >= 66:
+            from . import v068_canonical_embeddings
+            retired = (v070_policy_documents.REPLACED if version >= 70 else frozenset())
+            if version >= 72:
+                retired |= frozenset(v072_compact_groups.OLD_TABLES)
+            if version >= 74:
+                retired |= {'artist_credit_observations'}
+            if version >= 76:
+                retired |= {'legacy_track_evidence', 'identity_state_archive', 'legacy_enrichment_attempts'}
+            if version >= 77:
+                retired |= {'playlist_group', 'hidden_playlists', 'overlap_ignored', 'playlist_provenance',
+                            'album_library_revisions', 'album_library_snapshots', 'album_library_legacy_cohort',
+                            'album_library_memberships'}
+            if version >= 79:
+                retired |= {'track_artists'}
+            # The predecessor contract above already checks every foreign key
+            # on this same transaction. Validate each owner's structure without
+            # rescanning the full installed library for each historical module.
+            v066_explicit_keys.validate(conn, replaced=retired | (frozenset(v068_canonical_embeddings.SOURCES)
+                                                                 if version >= 68 else frozenset()),
+                                       foreign_keys=False, data=data)
+        if version >= 67:
+            from . import v067_audio_annotations
+            v067_audio_annotations.validate(conn)
+        if version >= 68:
+            v068_canonical_embeddings.validate(conn)
+        if version >= 69:
+            from . import v069_prepared_recording_inputs
+            v069_prepared_recording_inputs.validate(conn)
+        if version >= 70:
+            policy_replacements = frozenset()
+            if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone() and conn.execute(
+                    "SELECT 1 FROM schema_changes WHERE name='continuing_historical_policy_attribution'").fetchone():
+                from .. import policy_history
+                policy_history.validate_capture(conn)
+                policy_replacements = {name for name, _sql in policy_history.capture_guards()}
+            v070_policy_documents.validate(conn, replaced=policy_replacements)
+        if version >= 71:
+            from . import v071_album_descriptions
+            v071_album_descriptions.validate(conn)
+        if version >= 72:
+            v072_compact_groups.validate(conn)
+        if version >= 73:
+            from . import v073_recommendation_publications
+            from .. import recommendation_revalidations
+            replacements = frozenset()
+            if recommendation_revalidations.available(conn):
+                recommendation_revalidations.validate(conn)
+                replacements = {name for name, _sql in recommendation_revalidations.guards()}
+            v073_recommendation_publications.validate(conn, replaced=replacements)
+        if version == 74:
+            from . import v074_artist_credits
+            v074_artist_credits.validate(conn)
+        if version >= 75:
+            from . import v075_metadata_deliveries
+            v075_metadata_deliveries.validate(conn)
+        if version >= 76:
+            from . import v076_legacy_evidence_owners
+            v076_legacy_evidence_owners.validate(conn, foreign_keys=False)
+        if version >= 77:
+            from . import v077_scope_account_state
+            v077_scope_account_state.validate(conn, foreign_keys=False)
+        if version >= 78:
+            from . import v078_account_contracts
+            v078_account_contracts.validate(conn, foreign_keys=False, data=data)
+        if version >= 79:
+            from . import v079_entry_artists
+            v079_entry_artists.validate(conn)
         return
     from .v001_baseline import validate
     if version < 8:
@@ -161,55 +346,155 @@ def validate_version(conn, version):
     validate_catalog(conn, version)
 
 
-def migrate(conn, *, registry=None, clock=time.time):
-    """Apply one version per transaction; preserve earlier commits if a later version fails.
+def _validate_migration_structure(conn, version):
+    # Older upgrade validators predate the split admission contract. Keep their
+    # historical safety checks until their unsupported serving formats advance.
+    if version < 79:
+        validate_version(conn, version)
+    else:
+        validate_version(conn, version, foreign_keys=False, data=False)
+
+
+def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
+    """Admit installed owners and apply independent bounded schema changes.
 
     Store serializes its connection; SQLite's write reservation serializes independent startups.
-    DDL, data changes and the version record commit together; SQLite rolls back an
-    interrupted version without copying the database. Tests may inject a registry.
+    Fresh databases receive the current empty schema. A supplied historical
+    registry explicitly exercises the frozen upgrade route, one version per
+    transaction; ordinary startup never invokes its populated conversions.
+    Routine advancement checks the installed structural contract. Full-library
+    integrity auditing has a separate read-only entry point in migrations.audit.
+    True means the installed layout still needs compatibility adapters. It does
+    not request an automatic conversion or pause ordinary application writes.
     """
+    from ..schema_inspection import reuse_tables
+
+    with reuse_tables(conn) as inspections:
+        return _migrate(conn, registry, clock, defer_validation, inspections)
+
+
+def _migrate(conn, registry, clock, defer_validation, inspections):
     production = registry is None
     if production:
         from .registry import MIGRATIONS
         registry = MIGRATIONS
     registry = tuple(registry)
+    from .registry import MIGRATIONS
+    frozen = registry == tuple(MIGRATIONS)
+    registered_prefix = registry == tuple(MIGRATIONS[:len(registry)])
     if [m.version for m in registry] != list(range(1, len(registry) + 1)) or len({m.name for m in registry}) != len(registry):
         raise MigrationError("Invalid migration registry")
     if conn.in_transaction:
         raise MigrationError("Cannot migrate with an outstanding caller transaction")
     fresh = None
+    checked_entry = False
     while True:
+        migration = None
+        restore_foreign_keys = None
         try:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('BEGIN' if production else 'BEGIN IMMEDIATE')
+            inspections.refresh()
             current = history(conn, registry)
             if fresh is None:
                 fresh = not bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone())
+            if production:
+                if not fresh and current == 64:
+                    from .. import released_schema
+                    released_schema.validate(conn)
+                    conn.rollback()
+                    return True
+                if not fresh and current >= 79:
+                    # All these installed schemas have readable repository
+                    # adapters. Inspect structure on one committed read snapshot;
+                    # neither a writer reservation nor full data scans belong
+                    # before HTTP admission, even when no migration is pending.
+                    from . import regular
+                    from ..schema_inspection import reuse_objects
+
+                    # Admission reads one pinned schema. Share that catalog
+                    # across both sets of validators, then discard it before
+                    # rollback or any pending regular DDL.
+                    with reuse_objects(conn):
+                        validate_version(conn, current, foreign_keys=False, data=False)
+                        applied = regular.validate(conn)
+                    conn.rollback()
+                    # Both histories and their installed owners were checked
+                    # on the same read snapshot. Only pending changes need the
+                    # regular runner's new snapshot and write reservation.
+                    if not defer_validation and applied < len(regular.CHANGES):
+                        regular.migrate(conn, clock=clock)
+                    return current < len(registry)
+                if not fresh:
+                    raise MigrationError('Installed layouts before 79 require the explicit historical upgrade route')
+                conn.rollback()
+                conn.execute('BEGIN IMMEDIATE')
+                inspections.refresh()
+                if history(conn, registry) != current:
+                    conn.rollback()
+                    continue
             if production and fresh and current == 0:
                 from . import current as current_schema
-                current_schema.bootstrap(conn, registry, clock())
+                from .. import schema_bootstrap
+                from . import regular
+                schema_bootstrap.bootstrap(conn, registry, regular.CHANGES, clock(), validation=current_schema.validate)
+                # Bootstrap installs both complete histories. Validate their
+                # regular owners before committing the same transaction, rather
+                # than reopening it and repeating the current-schema check.
+                regular.validate(conn)
                 conn.commit()
                 log.info('Initialized current schema at version %s', current_schema.VERSION)
-                continue
-            if production:
-                validate_version(conn, current)
+                return False
             if current == len(registry):
+                if frozen and not checked_entry:
+                    _validate_migration_structure(conn, current)
                 conn.rollback()
-                return
+                return False
+            if frozen and not checked_entry and (current or not fresh):
+                _validate_migration_structure(conn, current)
+            checked_entry = True
             migration = registry[current]
+            if migration.rebuild_tables and conn.execute('PRAGMA foreign_keys').fetchone()[0]:
+                # SQLite's table-replacement procedure requires disabling FK
+                # actions before BEGIN, otherwise DROP can cascade-delete
+                # unrelated children. Reacquire and revalidate after releasing
+                # the first reservation; another startup may have advanced.
+                conn.rollback()
+                restore_foreign_keys = 1
+                conn.execute('PRAGMA foreign_keys=OFF')
+                conn.execute('BEGIN IMMEDIATE')
+                inspections.refresh()
+                if history(conn, registry) != current:
+                    conn.rollback()
+                    checked_entry = False
+                    continue
+                if frozen:
+                    _validate_migration_structure(conn, current)
             if current == 0:
                 conn.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at REAL NOT NULL)')
-            migration.apply(conn, Context(clock()))
+            # Applied migrations may consult the versioned definition provider.
+            # Their implicit lookup must not change when a later bootstrap
+            # retires an object that their own historical upgrade still needs.
+            from .current import migration_definitions
+            with migration_definitions(migration.version):
+                migration.apply(conn, Context(clock()))
             if not conn.in_transaction:
                 raise MigrationError('Migration committed outside the runner')
-            if production:
-                validate_version(conn, migration.version)
+            if migration.rebuild_tables and conn.execute('PRAGMA foreign_key_check').fetchone():
+                raise MigrationError('Table replacement broke a foreign-key reference')
             conn.execute('INSERT INTO schema_migrations VALUES (?,?,?)', (migration.version, migration.name, clock()))
+            if registered_prefix:
+                from . import regular
+                regular.after_owner_upgrade(conn)
+            if frozen and migration.version == len(registry):
+                _validate_migration_structure(conn, migration.version)
             conn.commit()
             log.info('Applied migration %s: %s', migration.version, migration.name)
         except BaseException as exc:
             conn.rollback()
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            version = locals().get('migration')
-            label = f'{version.version} ({version.name})' if version else 'validation/locking'
+            label = f'{migration.version} ({migration.name})' if migration else 'validation/locking'
             raise MigrationError(f'Database migration {label} failed: {exc}' + db_space.failure_hint(conn, exc)) from exc
+        finally:
+            if restore_foreign_keys is not None:
+                conn.execute(f'PRAGMA foreign_keys={restore_foreign_keys}')

@@ -26,23 +26,34 @@ NAMED = re.compile(
     r"\s*:\s*(red|blue|green|white|black|yellow|orange|purple|pink|gray|grey|cyan|magenta)\b",
     re.I,
 )
+POSSIBLE_COLOUR = re.compile('|'.join(f'(?:{pattern.pattern})' for pattern in (HEX, RGB, HSL, NAMED)), re.I)
+ISSUE_REFERENCE = re.compile(r"\(#\d+\)|see #\d+|issue #\d+")
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Source and template contracts do not construct the HTTP application."""
 
 
 def _source_files():
-    for p in sorted(SRC.rglob("*")):
-        if p.is_dir() or p.suffix not in {".css", ".js", ".html", ".py"}:
-            continue
-        if "vendor" in p.parts or "node_modules" in p.parts or p == TOKENS:
-            continue
-        yield p
+    paths = []
+    for directory, subdirectories, files in SRC.walk():
+        subdirectories[:] = [name for name in subdirectories
+                             if name not in {'vendor', 'node_modules', '__pycache__'}]
+        paths.extend(directory / name for name in files
+                     if Path(name).suffix in {'.css', '.js', '.html', '.py'}
+                     and directory / name != TOKENS)
+    yield from sorted(paths)
 
 
 def _colour_literals(path: Path) -> list[str]:
     """Colour literals in `path`, ignoring things that only look like one."""
     found = []
     for lineno, line in enumerate(path.read_text(errors="ignore").split("\n"), 1):
+        if not POSSIBLE_COLOUR.search(line):
+            continue
         # `(#106)` / `see #79` are GitHub issue references, not colours
-        if re.search(r"\(#\d+\)|see #\d+|issue #\d+", line):
+        if ISSUE_REFERENCE.search(line):
             continue
         for m in HEX.finditer(line):
             if line[: m.start()].endswith("&"):      # HTML entity, e.g. &#9662;
@@ -288,9 +299,11 @@ def test_composed_launch_surfaces_have_one_shared_console_heading(template, stat
             if self.depth:
                 self.text.append(data)
 
-    source = (WEB / 'templates' / template).read_text()
-    assert '{% include "_partials/launch_loader.html" %}' in source
+    # The interstitial composes the shared loader through mix_launch_loader.
+    # Inspect the rendered composition so wrapper partials retain this check.
+    from yt_playlist.web.theme import mix_launch_tokens
     env = Environment(loader=FileSystemLoader(WEB / 'templates'), autoescape=True)
+    env.globals['mix_launch_tokens'] = mix_launch_tokens
     markup = LoaderMarkup()
     markup.feed(env.get_template(template).render(radio_bootstrap={}, tv_max_minutes=60))
     assert markup.loaders == 1

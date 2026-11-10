@@ -83,6 +83,9 @@ def summarize(offers, responses, formats):
         selected = choices.get(pair)
         tracks = ((selected.get('details') or {}).get('tracks') if selected else None)
         tracks = tracks if tracks is not None else option.get('tracks', [])
+        if offer['format'] == 'mixes':
+            # The menu describes genres, not the playback owner's track list.
+            tracks = []
         state['expected'].update(track['video_id'] for track in tracks if track.get('video_id'))
         if event['kind'] == 'experience' and details.get('kind') in {'track_exit', 'ended', 'bye'}:
             position, duration = details.get('position'), details.get('duration')

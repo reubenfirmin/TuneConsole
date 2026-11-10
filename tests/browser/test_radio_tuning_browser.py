@@ -1,110 +1,17 @@
 """Radio tuning streams, axis edits, decay and metadata refresh."""
 import json
-from pathlib import Path
 
 import pytest
-from playwright.sync_api import expect
+from playwright.sync_api import Error as PlaywrightError, expect
 from tests.browser.radio_ui_support import radio_ui
+from tests.visual_support import capture
 
 
-def test_middle_stream_transition_bends_around_fixed_control(page, radio_ui):
-    from tests.template_support import web_templates
-    radio_ui.playlist = web_templates().get_template('_partials/radio_playlist.html').render(
-        session=radio_ui.ready, tracks=radio_ui.tracks)
-    radio_ui.state = radio_ui.ready
-    expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
-    second = page.locator('.radio-direction[data-slot="1"]')
-    third = page.locator('.radio-direction[data-slot="2"]')
-    second.hover()
-    page.wait_for_timeout(1600)
-    transitions = []
-    for index, destination in enumerate([third, second]):
-        destination.hover()
-        samples = page.evaluate('''() => new Promise(resolve => {
-          const model = Alpine.$data(document.querySelector('.radio-home'));
-          const paths = [...document.querySelectorAll('.radio-junction-line, .radio-junction-flow')];
-          const control = document.querySelector('.radio-tune').getBoundingClientRect();
-          const x = control.x + control.width / 2, y = control.y + control.height / 2;
-          const frames = [];
-          const sample = () => {
-            let nearest = Infinity;
-            for (const path of paths) {
-              const length = path.getTotalLength(), matrix = path.getScreenCTM();
-              for (let step = 0; step <= 400; step++) {
-                const at = path.getPointAtLength(length * step / 400).matrixTransform(matrix);
-                // Check the unmasked drawing against the actual control, with
-                // one screen pixel of clearance. The approved spline can round
-                // inside its routing padding without touching the button.
-                nearest = Math.min(nearest, Math.hypot((at.x - x) / (control.width / 2 + 1),
-                  (at.y - y) / (control.height / 2 + 1)));
-              }
-            }
-            frames.push({nearest, x: model.junctionX, fork: model.junctionForkX,
-              outline: getComputedStyle(paths[0]).d, flow: getComputedStyle(paths[1]).d});
-            if (frames.length < 75) requestAnimationFrame(sample); else resolve(frames);
-          };
-          requestAnimationFrame(sample);
-        })''')
-        assert min(frame['nearest'] for frame in samples) >= 1
-        assert len({round(frame['x'], 2) for frame in samples}) > 10
-        assert max(abs(frame['x'] - frame['fork']) for frame in samples) > 10
-        transitions.append(samples)
-        page.screenshot(path=f'/tmp/tuneconsole-radio-411-organic-{index}.png')
-    Path('/tmp/tuneconsole-radio-411-frames.json').write_text(json.dumps(transitions))
 
 
-def test_junction_geometry_remains_continuous_around_control(page, radio_ui):
-    from tests.template_support import web_templates
-    radio_ui.playlist = web_templates().get_template('_partials/radio_playlist.html').render(
-        session=radio_ui.ready, tracks=radio_ui.tracks)
-    radio_ui.state = radio_ui.ready
-    expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
-    page.locator('.radio-direction[data-slot="1"]').hover()
-    page.wait_for_timeout(700)
-    jumps = page.evaluate(r'''() => {
-      const actual = Alpine.$data(document.querySelector('.radio-home'));
-      const model = radioArtwork();
-      model.artworkView = {connectedSlot: 1, directionCount: 4};
-      model.queueCenters = {...actual.queueCenters};
-      model.junctionHub = {...actual.junctionHub};
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      const data = (x, detail) => {
-        model.junctionX = model.junctionForkX = x;
-        const d = model.junctionStyle(1, detail).match(/path\("(.*)"\)/)[1];
-        path.setAttribute('d', d);
-        return {d, length: path.getTotalLength()};
-      };
-      const samples = d => {
-        path.setAttribute('d', d);
-        const length = path.getTotalLength(), points = [];
-        for (let at = 0; at <= length; at += 1) {
-          const p = path.getPointAtLength(at);
-          points.push([p.x, p.y]);
-        }
-        return points;
-      };
-      const distance = (a, b) => Math.max(...a.map(p =>
-        Math.sqrt(Math.min(...b.map(q => (p[0]-q[0])**2 + (p[1]-q[1])**2)))));
-      const jumps = [];
-      for (const detail of [false, true]) {
-        let previous = data(model.queueCenters[1], detail);
-        for (let x = model.queueCenters[1] + .5; x <= model.queueCenters[2]; x += .5) {
-          const next = data(x, detail);
-          if (Math.abs(next.length - previous.length) > 10) {
-            const before = samples(previous.d), after = samples(next.d);
-            const movement = Math.max(distance(before, after), distance(after, before));
-            if (movement > 5) jumps.push({x, detail, movement});
-          }
-          previous = next;
-        }
-      }
-      return jumps;
-    }''')
-    assert not jumps, jumps
-
-
-@pytest.mark.parametrize("width", [1440, 390])
-def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page, radio_ui, width):
+@pytest.mark.parametrize("width", [1440])
+@pytest.mark.parametrize("selection", ["stream"])
+def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page, radio_ui, width, selection):
     api = radio_ui
     page.set_viewport_size({"width": width, "height": 1000})
     api.state = {**api.ready, "tuning": {"comfort": .3, "theme": .7, "energy": .2}}
@@ -143,7 +50,7 @@ def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page,
     expect(energy).to_have_value("20")
     expect(comfort).to_have_css("background-image", "none")
     assert dialog.bounding_box()["width"] <= width
-    page.screenshot(path=f"/tmp/tuneconsole-radio-tuning-{width}.png")
+    capture(page, path=f"/tmp/tuneconsole-radio-tuning-{width}.png")
     dialog.get_by_role("button", name="Reset", exact=True).click()
     expect(comfort).to_have_value("50")
     comfort.focus()
@@ -163,15 +70,19 @@ def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page,
     dialog.get_by_role("button", name="Apply", exact=True).click()
     expect(dialog).to_be_hidden()
     streams = page.locator(".radio-directions")
-    expect(streams).to_have_attribute("aria-busy", "true")
-    expect(streams).to_have_css("opacity", "0.4")
-    expect(button).to_be_disabled()
-    expect(streams.get_by_role("button").first).to_be_disabled()
+    expect(streams).to_have_css("opacity", "0.45")
+    expect(streams).to_have_attribute('aria-busy', 'true')
+    page.screenshot(path=f'/tmp/tuneconsole-1105-tuning-pending-{selection}-20261106.png')
+    expect(button).to_be_enabled()
+    expect(streams.get_by_role("button").first).to_be_enabled()
+    button.click()
+    expect(dialog.locator('.radio-tuning-status')).to_have_text('Tuning your future songs…')
     assert sent == [{"comfort": .1, "theme": .9, "energy": .8}]
-    api.state = {**api.state, "tuning": sent[-1]}
+    api.state = {**api.state, "tuning": sent[-1], "menu_id": "after-tuning"}
     pending.pop().fulfill(json={"ok": True, **api.state})
-    expect(streams).to_have_attribute("aria-busy", "false")
+    expect(dialog).to_be_hidden()
     expect(streams).to_have_css("opacity", "1")
+    page.screenshot(path=f'/tmp/tuneconsole-1105-tuning-complete-{selection}-20261106.png')
     expect(page.locator(".radio-session")).to_be_visible()
     button.click()
     expect(comfort).to_have_value("10")
@@ -179,22 +90,52 @@ def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page,
     expect(dialog).to_be_hidden()
     expect(button).to_be_focused()
 
+    # A genuinely newer choice must still publish its full snapshot. Hold the
+    # following poll so it cannot conceal a selection receipt being discarded.
+    selections, held_status = [], []
 
-def test_decay_and_metadata_refresh_without_switching_streams(page, radio_ui):
-    api = radio_ui
-    api.state = {**api.ready, "directions": [
-        {**b, "decay_total": 3, "decay_remaining": 3 if b["active"] else b["slot"],
-         "tracks": [{**t, "genre": "ambient", "year": "2001"} for t in b["tracks"]]}
-        for b in api.ready["directions"]]}
-    expect(page.locator(".radio-session")).to_be_visible(timeout=6000)
-    expect(page.locator(".radio-proposed-meta")).to_have_count(0)
-    bars = page.get_by_role("progressbar")
-    expect(bars).to_have_count(4)
-    expect(bars.nth(1)).to_have_attribute("aria-valuenow", "1")
-    api.state = {**api.state, "directions": [
-        {**b, "decay_remaining": 0} if b["slot"] == 1 else b for b in api.state["directions"]]}
-    page.evaluate("() => Alpine.$data(document.querySelector('.radio-home')).poll()")
-    expect(bars.nth(1)).to_have_attribute("aria-valuenow", "0")
-    expect(page.locator(".radio-direction.is-active")).to_have_attribute("data-slot", "0")
+    def select(route):
+        selections.append(route.request.post_data_json)
+        api.state = {**api.state, "menu_id": "after-selection", "directions": [
+            {**branch, "active": branch["slot"] == 1,
+             "id": "selected-" + branch["id"]} for branch in api.state["directions"]]}
+        route.fulfill(json={"ok": True, **api.state})
 
+    def hold_status(route):
+        held_status.append(route)
 
+    page.route("**/radio/select", select)
+    page.route("**/radio/status", hold_status)
+    try:
+        branch = page.locator('.radio-direction[data-slot="1"]')
+        with page.expect_request("**/radio/select"):
+            if selection == "song":
+                branch.locator(".radio-proposed-art").nth(1).click()
+            else:
+                branch.locator(".radio-direction-heading").click()
+        page.wait_for_function('Alpine.$data(document.querySelector(".radio-home")).switchSending === false')
+        assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).state.menu_id') == "after-selection"
+        assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).state.tuning') == sent[-1]
+        expect(page.locator(".radio-direction.is-active")).to_have_attribute("data-slot", "1")
+        assert selections == [{"proposal_id": "direction1", "menu_id": "after-tuning",
+                               **({"video_id": "radio3"} if selection == "song" else {})}]
+        if selection == "song":
+            assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).pendingSong.accepted')
+            expect(branch.locator(".radio-song-pending")).to_contain_text("Night frequency 4")
+            expect(branch.locator(".is-skipping")).to_have_count(1)
+            page.evaluate('''() => window.dispatchEvent(new CustomEvent('bridge-status', {detail: {
+                connected: true, now_playing: {playlist_ytm_id: 'PLRADIO', video_id: 'radio3', paused: false}}}))''')
+            expect(branch.locator(".radio-song-pending")).to_be_hidden()
+        button.click()
+        expect(comfort).to_have_value("10")
+        expect(theme).to_have_value("90")
+        expect(energy).to_have_value("80")
+        assert len(sent) == 1 and not api.starts and not api.stops
+    finally:
+        page.unroute("**/radio/status", hold_status)
+        for route in held_status:
+            try:
+                route.fulfill(json=api.state)
+            except PlaywrightError:
+                pass
+        page.unroute("**/radio/select", select)

@@ -10,7 +10,8 @@
 {% else %}
 {# enrichPanel drives the live genre/year enrichment for the folded-in tracks (pid unused for albums;
    enrichBase scopes the start POST to this album). #}
-<div x-data="enrichPanel(0, {{ 'true' if lastfm_configured else 'false' }}, 0, '', '/album/{{ browse_id }}', {{ conflict_count }})"
+<div x-data="enrichPanel(0, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', '/album/{{ browse_id }}', {{ conflict_count }})"
+     x-init="rejoinIfActive()"
      @conflicts-count.window="conflictCount = $event.detail.count">
 <div class="artist-head pl-head library-hero release-hero album-release-hero{{ ' has-art' if cover or mosaic }}">
   {% if mosaic %}
@@ -37,7 +38,9 @@
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
      you save it (or immediately, if it's your own upload), so the icons are always shown (parity
      with playlists) but disabled until the album is in your library. #}
-  <div class="head-tools" x-data="{ cpOpen: false }">
+  <div class="head-tools" x-data="{ cpOpen: false, cpName: {{ album.title|tojson|forceescape }}, cpOutcome: '' }"
+       @app-page-leaving.window="if ($event.detail.state &amp;&amp; cpOpen) $event.detail.state.albumPlaylistDraft = { browse: {{ browse_id|tojson|forceescape }}, name: cpName, outcome: cpOutcome }"
+       @app-page-changed.window="if ($event.detail.state?.albumPlaylistDraft?.browse === {{ browse_id|tojson|forceescape }}) { const draft = $event.detail.state.albumPlaylistDraft; cpName = draft.name; cpOutcome = draft.outcome; cpOpen = true; }">
     <button type="button" class="head-icon" @click="cpOpen = true"
             title="Create a playlist from this album" aria-label="Create a playlist from this album">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
@@ -54,11 +57,14 @@
         <div class="modal" @click.stop x-transition.scale.origin.center>
           <h3>Create a playlist from this album</h3>
           <p>Start a new playlist with every track on <strong>{{ album.title }}</strong>.</p>
-          <form hx-post="/album/create-playlist" hx-swap="none">
+          <form hx-post="/album/create-playlist" hx-swap="none" hx-disabled-elt="find button"
+                @submit="cpOutcome = ''"
+                @htmx:after-request="if (!$event.detail.successful) cpOutcome = 'Creation was not confirmed. Check your playlists before creating again.'">
             <input type="hidden" name="browse_id" value="{{ browse_id }}">
-            <input class="modal-input" type="text" name="name" value="{{ album.title }}"
+            <input class="modal-input" type="text" name="name" value="{{ album.title }}" x-model="cpName"
                    placeholder="Playlist name" autocomplete="off"
                    x-ref="cpName" x-init="$watch('cpOpen', v => v && $nextTick(() => $refs.cpName.focus()))">
+            <p class="hint" x-show="cpOutcome" x-text="cpOutcome"></p>
             <div class="modal-actions">
               <button type="button" class="btn-ghost" @click="cpOpen = false">Cancel</button>
               <button type="submit" class="btn-primary">Create playlist</button>
@@ -124,27 +130,6 @@
 </details>
 {% endif %}
 
-<!-- Last.fm API key modal -->
-<template x-teleport="body">
-  <div class="modal-backdrop" x-show="keyModal" x-cloak x-transition.opacity
-       @click="keyModal = false" @keydown.escape.window="keyModal = false">
-    <div class="modal" @click.stop x-transition.scale.origin.center>
-      <h3>Last.fm API key</h3>
-      <p>Last.fm has dense genre tags. Enrichment needs a free API key. Create one at
-         <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
-         and paste the <strong>API key</strong> here. It's stored locally.</p>
-      <input class="modal-input" type="text" x-model="keyValue" placeholder="API key"
-             autocomplete="off" spellcheck="false" @keydown.enter="saveKey()"
-             x-ref="lfkey" x-init="$watch('keyModal', v => v && $nextTick(() => $refs.lfkey.focus()))">
-      <p class="notice err" x-show="keyErr" x-text="keyErr"></p>
-      <div class="modal-actions">
-        <button type="button" class="btn-ghost" @click="keyModal = false" :disabled="keyBusy">Cancel</button>
-        <button type="button" @click="saveKey()" :disabled="keyBusy"
-                x-text="keyBusy ? 'Saving…' : 'Save & run'"></button>
-      </div>
-    </div>
-  </div>
-</template>
 </div>
 {% endif %}
 {% endblock %}

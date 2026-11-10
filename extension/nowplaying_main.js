@@ -5,7 +5,7 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 12; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 14; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
   if (previous && previous.version === SENSOR_VERSION && Number.isSafeInteger(previous.revision) &&
       previous.revision >= SENSOR_REVISION && !previous.stopped &&
@@ -16,6 +16,7 @@
   var last = { videoId: "", playlist: "", position: 0, duration: 0 };
   var lastTickAt = 0;
   var bindings = [];
+  var boundVideo = null;
 
   function playerInfo() {
     // The URL describes the page being browsed, which can differ from the playing song/queue.
@@ -33,8 +34,8 @@
         info.artist = data.author || "";
       }
       if (info.videoId && player.getPlaylistId) info.playlist = player.getPlaylistId() || "";
-      // Only report elapsed time. Music's getDuration() grows with buffering; the app
-      // already knows the full song length. The raw media timeline can also span songs.
+      // Music's getDuration() grows with buffering, and the raw media timeline can span
+      // songs. Read elapsed time from the player and full length only from song metadata.
       try {
         var position = player && player.getCurrentTime && player.getCurrentTime();
         if (info.videoId && Number.isFinite(position) && position >= 0) {
@@ -50,6 +51,16 @@
       if (info.videoId && typeof player.getPlayerResponse === "function") {
         var response = player.getPlayerResponse();
         var details = response && response.videoDetails;
+        if (details && details.videoId === info.videoId) {
+          var length = details.lengthSeconds;
+          var duration = typeof length === "number" ? length :
+            (typeof length === "string" && /^\d+(?:\.\d+)?$/.test(length) ? Number(length) : NaN);
+          var current = player.getVideoData();
+          if (current && current.video_id === info.videoId &&
+              Number.isFinite(duration) && duration > 0 && duration <= 86400) {
+            info.duration = duration;
+          }
+        }
         var thumbs = details && details.thumbnail && details.thumbnail.thumbnails;
         if (details && details.videoId === info.videoId && Array.isArray(thumbs)) {
           for (var i = thumbs.length - 1; i >= 0; i--) {
@@ -237,11 +248,19 @@
              position: (v && v.currentTime) || 0, duration: (v && v.duration) || 0 };
     return info;
   }
+  function unbindVideo() {
+    bindings.forEach(function (b) { boundVideo.removeEventListener(b.event, b.handler); });
+    bindings = [];
+    boundVideo = null;
+  }
   function bindVideo(v) {
-    if (!v || bindings.some(function (b) { return b.video === v; })) return;
+    if (v === boundVideo) return;
+    unbindVideo();
+    if (!v) return;
+    boundVideo = v;
     function listen(event, kind, extra) {
       var handler = function () {
-        if (v !== document.querySelector("video")) return;
+        if (poller.stopped || v !== boundVideo || v !== document.querySelector("video")) return;
         // YTM's own ended listener can already have advanced its API to the next song. Finish
         // the observed track before a later play event/poll adopts that new identity.
         if (event === "ended" && last.videoId) {
@@ -254,7 +273,7 @@
         if (observe(v).videoId) post(kind, extra());
       };
       v.addEventListener(event, handler);
-      bindings.push({ video: v, event: event, handler: handler });
+      bindings.push({ event: event, handler: handler });
     }
     listen("ended", "ended", function () { return {}; });
     listen("pause", "state", function () { return { state: "paused" }; });
@@ -263,6 +282,7 @@
   }
 
   function sample(probeId) {
+    if (poller.stopped) return;
     try {
       var v = document.querySelector("video");
       bindVideo(v);
@@ -283,7 +303,7 @@
                                       videoVerified: !!info.videoId,
                                       videoId: info.videoId, playlist: info.playlist,
                                       // Each presence heartbeat anchors the app's local progress clock.
-                                      position: info.position,
+                                      position: info.position, duration: info.duration,
                                       playerBar: bar,
                                       brandId: identity.brandId, brandKnown: identity.brandKnown,
                                       paused: !v || v.paused,
@@ -298,7 +318,7 @@
   function onNext(ev) {
     // Observe real native button intent. App controls send their own explicit
     // request in content.js; synthetic queue repair clicks are not user input.
-    if (!ev.isTrusted) return;
+    if (poller.stopped || !ev.isTrusted) return;
     var control = document.querySelector("ytmusic-player-bar .next-button");
     var path = ev.composedPath ? ev.composedPath() : [];
     if (!control || (!control.contains(ev.target) && path.indexOf(control) < 0)) return;
@@ -319,7 +339,7 @@
     clearInterval(timer);
     window.removeEventListener("message", onProbe);
     window.removeEventListener("click", onNext, true);
-    bindings.forEach(function (b) { b.video.removeEventListener(b.event, b.handler); });
+    unbindVideo();
   } };
   sample(); // Reinjection can prove MAIN health immediately, before its first periodic tick.
 })();

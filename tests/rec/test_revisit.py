@@ -1,13 +1,32 @@
 """Revisit is remembered music, with hard listening rests and per-visit variety."""
+import pytest
+
 from tests.conftest import seed_catalog_track
-from tests.rec.test_home_prepared import seed
+from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls, without_query_timing
 from tests.test_recommend import _seed_album
+from yt_playlist.core import artists
 from yt_playlist.library import ratings
 from yt_playlist.rec import home_prepared, surfaces
 
 
 DAY = 86400
 NOW = 2000*DAY
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These listening/selection checks never construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Remembered-song eligibility reads ratings and listening, with no genre
+    # selection. Keep its actual SQL and guards below a bounded vocabulary.
+    with bounded_consumer_schema((('rock', 'Rock'),)) as schema:
+        yield schema
 
 
 def song(store, iid, name, *, plays=0, age=40, liked=False):
@@ -20,7 +39,7 @@ def song(store, iid, name, *, plays=0, age=40, liked=False):
 
 
 def test_pool_needs_like_or_repeat_and_obeys_month_and_heavy_rotation_rest(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     song(store, iid, 'never')
     song(store, iid, 'liked-unheard', liked=True)
     song(store, iid, 'one', plays=1)
@@ -34,7 +53,7 @@ def test_pool_needs_like_or_repeat_and_obeys_month_and_heavy_rotation_rest(store
 
 
 def test_generated_membership_is_eligible_but_a_real_recent_generated_play_counts_as_heard(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     key = song(store, iid, 'favorite', plays=2, age=60)
     pid = store.playlists.upsert_playlist(iid, 'GEN', 'Generated', 1, None, NOW)
     tid = store.conn.execute('SELECT id FROM tracks WHERE video_id=?', ('v-favorite',)).fetchone()[0]
@@ -45,30 +64,63 @@ def test_generated_membership_is_eligible_but_a_real_recent_generated_play_count
     assert surfaces.rediscover_tracks(store, NOW) == []
 
 
-def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
-    seed(store)
-    keys = [song(store, iid, f'song{i}', plays=2, age=60) for i in range(20)]
-    prepared = home_prepared.prepare(store, NOW)
-    assert prepared and len(prepared['rediscover_tracks']) == 20
-    first = home_prepared.collections(store, prepared, NOW)['rediscover_tracks']
-    assert len(first) == 15
-    assert home_prepared.collections(store, prepared, NOW)['rediscover_tracks'] == first
+def test_calendar_imports_count_once_per_account_day_without_recounting_exact_events(store):
+    main = store.accounts.upsert_account('Main', 'cred', None, True)
+    other = store.accounts.upsert_account('Other', 'cred', 'other', False)
+    key = song(store, main, 'calendar-and-exact', plays=2, age=60)
+    day = NOW-60*DAY
+    store.history.record_history_plays(main, day+100, [(key, 'Today')], source_timezone='UTC')
+    store.history.record_history_plays(main, day+200, [(key, 'Today')], source_timezone='UTC')
+    store.history.record_history_plays(other, day+100, [(key, 'Today')], source_timezone='UTC')
+    store.history.record_history_plays(main, day+2*DAY, [(key, 'Today')], source_timezone='UTC')
+    rows = store.rec_candidates.revisit_candidates(NOW, keys=[key])
+    assert len(rows) == 1
+    # Two exact events, one independent account/day, and one later import day.
+    assert rows[0]['plays'] == 4
+    # Calendar evidence uses the existing noon date marker plus its one-day
+    # conservative rest boundary, without claiming an exact listening time.
+    assert rows[0]['last_played'] == day+3.5*DAY
+
+
+def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store, monkeypatch):
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    # Artist ingestion is independent of the remembered-song eligibility SQL.
+    # Keep actual catalog, rating and listening writes for every candidate.
+    with monkeypatch.context() as inputs:
+        inputs.setattr(artists, 'observe', lambda *args, **kwargs: None)
+        keys = [song(store, iid, f'song{i}') for i in range(20)]
+    # The existing listening corpus is a completed input, imported in one real
+    # controller batch. The new live play below remains the mutation under test.
+    store.history.import_listening_events(iid,
+        [(key, 'v-' + key, NOW - 60 * DAY - index * 1000)
+         for key in keys for index in range(2)], source_timezone='UTC')
+    assert store.rec_query.play_counts() == dict.fromkeys(keys, 2)
+    # Rediscovery has its own real checkpoint. Mix-menu model fitting and
+    # discovery producers are independent of current listening eligibility.
+    home_prepared.prepare_revisit(store, NOW)
+    prepared = store.rec_proposals.get_proposals(home_prepared.REVISIT_SURFACE)
+    assert {row['key'] for row in prepared['rediscover_tracks']} == set(keys)
+    with store.read_view() as reader:
+        first = home_prepared.collections(reader, prepared, NOW)['rediscover_tracks']
+        assert len(first) == 15
+        assert home_prepared.collections(reader, prepared, NOW)['rediscover_tracks'] == first
     store.rec_ledger.bump_card_view('rediscover', NOW)
     store.rec_ledger.bump_card_view('rediscover', NOW+1)
-    following = home_prepared.collections(store, prepared, NOW+1)['rediscover_tracks']
+    with store.read_view() as reader:
+        following = home_prepared.collections(reader, prepared, NOW+1)['rediscover_tracks']
     assert following != first
     ratings.record_confirmed(store, iid, 'v-song0', 'DISLIKE', NOW)
     store.history.record_play_event(iid, 'song1', 'v-song1', NOW, source_timezone='UTC')
     with store.conn:
-        store.conn.execute('UPDATE catalog_tracks SET available=0 WHERE video_id=?', ('v-song2',))
-    current = home_prepared.collections(store, prepared, NOW)['rediscover_tracks']
+        store.conn.execute('UPDATE youtube_items SET available=0 WHERE video_id=?', ('v-song2',))
+    with store.read_view() as reader:
+        current = home_prepared.collections(reader, prepared, NOW)['rediscover_tracks']
     assert not {'song0', 'song1', 'song2'} & {r['key'] for r in current}
     assert {r['key'] for r in current} <= set(keys)
 
 
 def test_albums_never_claim_unheard_saved_collection_is_a_memory(store):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     _seed_album(store, iid, 'unheard', 'Andre Sobota Collection', NOW)
     assert surfaces.rediscover_albums(store, NOW) == []
     _seed_album(store, iid, 'heard', 'Old favorite', NOW, played_at=NOW-60*DAY)

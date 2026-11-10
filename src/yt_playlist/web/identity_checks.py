@@ -3,10 +3,10 @@ from yt_playlist.core.bridge import BridgeError
 from yt_playlist.library.sync import _is_auth_error
 
 
-def check_identities(ctx, identity_id=None):
-    identities = ctx.store.identities.get_identities()
-    if identity_id is not None:
-        identities = [i for i in identities if i.id == identity_id]
+def check_identities(ctx, account_id=None):
+    identities = ctx.store.accounts.get_accounts()
+    if account_id is not None:
+        identities = [i for i in identities if i.id == account_id]
     try:
         clients = ctx.clients() or {}
     except Exception:  # noqa: BLE001 - a broken provider must still leave setup usable

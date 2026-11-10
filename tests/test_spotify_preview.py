@@ -15,10 +15,11 @@ def test_preview_expiry_capacity_and_single_use():
 
 
 def test_saved_playlist_report_discards_source_song_metadata(store):
-    save_job(store, {"report_schema": 5, "report": {"details": {
-        "playlists": [{"name": "Source playlist", "ytm_playlist_id": "PL1"}],
+    account = store.accounts.upsert_account('Destination','destination.json',None,True)
+    save_job(store, {"status":"done", "account_id":account, "report_schema": 5, "report": {"details": {
+        "playlists": [{"name": "Source playlist", "provider_playlist_id": "PL1"}],
         "unmatched_tracks": [{"title": "Private source song", "spotify_url": "spotify:track:secret"}],
         "albums": []}}})
     saved = store.settings.get_setting("spotify_library_import_job")
     assert "Private source song" not in saved and "spotify:track:secret" not in saved
-    assert json.loads(saved)["report"]["details"]["playlists"][0]["ytm_playlist_id"] == "PL1"
+    assert json.loads(saved)["report"]["details"]["playlists"][0]["provider_playlist_id"] == "PL1"

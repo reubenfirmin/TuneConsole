@@ -80,6 +80,16 @@ button.fresh-pool-action:focus-visible { outline: 3px solid var(--accent-2); out
   align-items: flex-start; gap: 0.5rem; }
 .gen-foot-note { color: var(--dim); font-size: var(--type-xs); line-height: 1.4; }
 .gen-done { justify-content: center; }
+.gen-recovery-tracks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  column-gap: 1.5rem; list-style: none; padding: 0; margin: .75rem 0; }
+.gen-recovery-tracks li { display: grid; grid-template-columns: 2.3rem minmax(0, 1fr);
+  align-items: center; gap: .75rem; margin: .6rem 0; }
+.page-home .dash-directions .gen-card.gen-recovery { display: flex; grid-area: 1 / 1 / -1 / -1;
+  justify-content: flex-start; padding: clamp(1rem, 3vw, 2.5rem); overflow-y: auto; }
+.page-home .dash-directions .gen-recovery .gen-head { display: block; padding: 0;
+  margin-bottom: .5rem; background: transparent; border: 0; cursor: default; }
+.page-home .dash-directions .gen-recovery .gen-name { max-width: none; -webkit-line-clamp: 2; }
+.gen-recovery .gen-foot { margin-top: 0; }
 
 /* "Generated" pinned as its own collapsible card above the playlists table */
 .gen-grp { border: 1px solid var(--accent); margin-bottom: .9375rem; }

@@ -1,8 +1,9 @@
 """Confirmed album ratings and their account-scoped local publication."""
+from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.util.thumbnails import best_thumb
 
 
-def set_saved(store, client, identity_id, browse_id, album, *, saved, fallback=None):
+def set_saved(store, client, account_id, browse_id, album, *, saved, fallback=None):
     """Publish membership only after the supported YouTube acknowledgement succeeds.
 
     Older clients return None for success; current clients can return a boolean
@@ -11,15 +12,14 @@ def set_saved(store, client, identity_id, browse_id, album, *, saved, fallback=N
     """
     audio_id = album.get('audioPlaylistId')
     if not audio_id:
-        raise ValueError('YouTube Music cannot save that candidate as an album')
+        raise ActionInputError('album_unavailable')
     result = client.rate_playlist(audio_id, 'LIKE' if saved else 'INDIFFERENT')
     confirmed = (result is None or result is True or
                  isinstance(result, dict) and result.get('status') in (None, 'STATUS_SUCCEEDED'))
     if not confirmed:
-        operation = 'save' if saved else 'removal'
-        raise ValueError(f'YouTube Music did not confirm the album {operation}')
+        raise ActionInputError('album_save_rejected' if saved else 'album_remove_rejected')
     if not saved:
-        store.collection.remove_saved_album(browse_id, identity_id=identity_id)
+        store.collection.remove_saved_album(browse_id, account_id=account_id)
         return
     fallback = fallback or {}
     artist = ', '.join(a['name'] for a in (album.get('artists') or []) if a.get('name'))
@@ -29,4 +29,4 @@ def set_saved(store, client, identity_id, browse_id, album, *, saved, fallback=N
         'year': album.get('year') or fallback.get('year'), 'type': album.get('type'),
         'thumbnail': best_thumb(album.get('thumbnails')) or fallback.get('thumbnail'),
         'credits': album.get('artists'),
-    }, identity_id=identity_id)
+    }, account_id=account_id)

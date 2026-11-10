@@ -7,44 +7,59 @@ pool ranking happens on the request once full-depth bundles have been prepared."
 import hashlib
 import json
 import logging
-import random
+import uuid
 from collections import Counter
+from dataclasses import dataclass
 from itertools import permutations
 
 import numpy as np
 
 from yt_playlist.core.activity import WorkClosing, check_stopping
+from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import work_span
-from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.core.proposal_codec import encode_proposals
+from yt_playlist.core.policy_config import PolicyCapacityFull
 from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
                              taste_modes, transient, measurement, negative, vibe_pools)
 from yt_playlist.util import genre_map
 from yt_playlist.rec.eligibility import home_exclusions
+from yt_playlist.rec.mode_selection import (select_modes, thompson_mode_scores,
+    _mode_mood_weight, ranker_for as _ranker_for, PROTO_SIZE,
+    CARD_LABELS as _CARD_LABELS, BAND_LABELS as _BAND_LABELS)
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
 
-# Rankings describe a pinned past snapshot, with immutable pool-policy attribution.
-# Import/enrichment and playback may continue while they calculate. Serving rechecks
-# membership, canonical artist links, suppression and current genres. Model generations,
-# mode definitions, explicit feedback, preferences and settings remain strictly guarded.
+# Small serving projections still guard their live settings while tolerating
+# ongoing import, enrichment and playback. Full pool rounds publish captured
+# inputs and do not use this dependency filter.
 RANKING_CHURN_TABLES = frozenset({
     "recordings", "youtube_items", "catalog_entries", "library_memberships",
-    "artists", "artist_aliases",
-    "discovery_memberships", "track_artists", "playlists", "playlist_items", "playlist_provenance",
+    "artists", "artist_aliases", "metadata_observations",
+    "discovery_memberships", "entry_artists", "track_artists", "playlists", "playlist_items", "playlist_provenance",
     "play_events", "player_events", "listening_observations",
+    "play_event_calendar", "play_event_sources",
 })
 
 _PPR_TAIL = 1 << 30    # sort sentinel: a candidate absent from the PPR ranking sorts after all ranked ones
 
 
-def _ranker_for(epoch, mode_id, share) -> str:
-    """Deterministic A/B coin per (epoch, mode): 'ppr' with probability `share`, else 'cosine'. Seeded
-    with an integer (str seeds are per-process-randomized), so the same card resolves to the same ranker
-    across processes and re-renders of the epoch."""
-    seed = (int(epoch) * 1_000_003 + int(mode_id)) & 0x7FFFFFFF
-    return "ppr" if random.Random(seed).random() < share else "cosine"
+def bundle_metadata(store, *, generation=None):
+    """Read framing independently of the ranked candidate bodies."""
+    if not getattr(store, '_recommendation_files', False):
+        return (store.rec_proposals.get_proposals('mode_bundles') or {}).get('_meta', {})
+    row = store.recommendations.framing('home', generation=generation)
+    if row is None:
+        return {}
+    result = {}
+    for bit, field in ((0, 'comfort_pool'), (2, 'full_pools'), (3, 'unmodeled'), (4, 'musical_generation')):
+        if row['presence'] & (1 << bit):
+            result[field] = row[field]
+    if row['presence'] & 2:
+        result['year_cuts'] = ([row['year_low'], row['year_high']]
+                               if row['year_low'] is not None or row['year_high'] is not None else None)
+    return result
 
 
 def _order_key(ranker, ppr_pos, leans, penalties=None):
@@ -92,33 +107,130 @@ def _bucket_pool(pool, mode_ids, C, lidx, LV, didx, DV, cap):
     return buckets
 
 
+def prepare_scheduled(store, now):
+    """Share one durable hourly admission across worker and discovery jobs.
+
+    Direct preparation remains available for offline builds. Live callers join
+    this admission; captured work finishes and updates wait for the next check.
+    """
+    from yt_playlist.rec import candidate_refresh
+    with store._lock:
+        if getattr(store, '_candidate_preparation_active', False) or not candidate_refresh.check_due(store, now):
+            return None
+        store._candidate_preparation_active = True
+    try:
+        from yt_playlist.rec import recommendation_retirement
+        recommendation_retirement.drain(store, now)
+        with store._lock:
+            candidate_refresh.checked(store, now)
+        return prepare_bundles(store, now)
+    finally:
+        with store._lock:
+            store._candidate_preparation_active = False
+
+
 def prepare_bundles(store, now) -> dict | None:
     """Calculate privately; publish bundles, discoveries and their policies as one transaction.
 
-    None means guarded model/preference inputs changed during the build. Catalog and playback
-    can advance while these disposable rankings calculate. No ranking, fingerprints or JSON
-    under UI locks; serving checks current eligibility before offering cached candidates.
+    Finish the captured run even while its inputs change. Later scheduled runs
+    consume those updates; serving checks current eligibility before offering
+    cached candidates. No ranking, fingerprints or JSON under UI locks.
     """
     measurement.maintain_storage(store, now)
+    with store._lock:
+        deferred = store.__dict__.pop('_deferred_bundles', None)
+    if deferred is not None:
+        # The admitted plan is bounded and fully materialized. Its snapshot has
+        # no open reader or retained file lock. Recheck quota without replacing
+        # the captured work when preferences, playback or impressions advance.
+        published = deferred.publish(store)
+        return deferred.payload if published is not None else None
     with store.read_snapshot() as snapshot:
         from yt_playlist.rec import candidate_refresh
         with column_group_reads(snapshot.store, "recordings", "catalog"):
             policies = measurement.PoolPolicies(snapshot.store, now)
             payload, fresh = _calculate_bundles(snapshot.store, now, policies)
             settings = candidate_refresh.prepared_settings(snapshot.store, now)
+        if getattr(store, '_recommendation_files', False):
+            published = _publish_typed_bundles(store, snapshot, payload, fresh, policies, settings, now)
+            return payload if published is not None else None
         encoded = encode_proposals('mode_bundles', payload)
         fresh_encoded = encode_proposals('fresh_pool', fresh)
-        # Release the pinned WAL reader before staging. These immutable chunks
-        # are invisible until both heads, policies and settings commit together.
+        # Release the pinned WAL reader before staging. Publish policy owners
+        # before the proposal heads and acknowledge the calculation in settings last.
         snapshot.release_reader()
         prepared = store.rec_proposals.stage_prepared_bundles(encoded, fresh_encoded)
         def publish():
             store.rec_ledger.publish_prepared_policies(list(policies.rows.values()), list(policies.bases.values()))
             store.rec_proposals.publish_prepared_bundles(*prepared, now)
             store.settings.publish_values(settings)
-        if not snapshot.publish(publish, allow_stale_tables=RANKING_CHURN_TABLES):
+        if not snapshot.publish_ordered(publish, validate_inputs=False):
             return None
         return payload
+
+
+def _publish_typed_bundles(store, snapshot, payload, fresh, policies, settings, now):
+    """Stage immutable ranks, then publish the captured generation and its settings.
+
+    The caller still owns the preparation snapshot. Its reader is released
+    before staging. Source changes never discard the completed calculation.
+    """
+    version = policies.generation_policy()
+    # Comparison with derived output must not become a ranking dependency:
+    # staging this very plan writes those tables. Exact immutable rows are read
+    # separately, then their complete policy closure is owned by the claim.
+    with store.read_view() as previous:
+        prepared = snapshot.store.recommendations.prepare_bundles(payload, fresh,
+            external_key='bundle:' + uuid.uuid4().hex, policy_version=version,
+            input_revision=snapshot.store.prepared_content.serial(), created_at=now,
+            pending_policies=policies.rows.values(), previous=previous.recommendations)
+        selected = {version, *(slot.pool.policy_version for slot in prepared.slots),
+                    *(slot.revalidated_policy for slot in prepared.slots if slot.revalidated)}
+        rows = [row for key, row in policies.rows.items() if key in selected]
+        bases = {}
+        for row in rows:
+            base = json.loads(row[1]).get(BASE_FIELD)
+            if base is not None:
+                bases[base] = policies.bases[base]
+        old_rows, old_bases = previous.rec_ledger.captured_policies(selected - policies.rows.keys())
+        rows.extend(old_rows)
+        bases.update((row[0], row) for row in old_bases)
+    snapshot.release_reader()
+    return _DeferredBundles(prepared, snapshot, rows, list(bases.values()), settings, now, payload).publish(store)
+
+
+@dataclass
+class _DeferredBundles:
+    prepared: object
+    snapshot: object
+    rows: list
+    bases: list
+    settings: dict
+    now: float
+    payload: dict
+
+    def publish(self, store):
+        try:
+            store.rec_ledger.record_prepared_policies(self.rows, self.bases)
+            build = store.recommendations.claim(self.prepared)
+        except PolicyCapacityFull:
+            # Keep only one unclaimed plan. SQL retirement progress is durable;
+            # restarting simply recalculates once from the then-current inputs.
+            with store._lock:
+                store._deferred_bundles = self
+            raise
+        if not store.recommendations.stage(self.prepared, build):
+            return None
+        selected = ({slot.surface for slot in self.prepared.slots}
+                    | {output.surface for output in self.prepared.outputs})
+        absent = sorted({'home', 'fresh', 'radio', *('vibe:' + preset for preset in home_vibe.PRESETS)} - selected)
+
+        def publish():
+            store.recommendations.publish(build, self.now, retire_surfaces=absent)
+            store.settings.publish_values(self.settings)
+
+        return (build.generation_id
+                if self.snapshot.publish_ordered(publish, validate_inputs=False) else None)
 
 
 def _calculate_bundles(store, now, policies):
@@ -273,93 +385,6 @@ def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, *, years, year_
     payload.setdefault("all", {})["temporal"] = allt
 
 
-def _mode_mood_weight(mode, leans):
-    """Fold the live transient leans onto a mode: sum the signed leans of its families (a 'more house'
-    lean lifts house-heavy modes). Returns a positive multiplier centered on 1.0."""
-    s = 0.0
-    for fam, cnt in mode.get("families", []):
-        s += leans.get(f"genre:{fam}", 0.0) * cnt
-    total = sum(c for _f, c in mode.get("families", [])) or 1
-    # Clamp both ends: a floor keeps a muted mode eligible, a ceiling stops a strongly-leaned mode from
-    # dominating the weighted draw so hard that the dominant never rotates (the freshness goal).
-    return min(4.0, max(0.05, 1.0 + s / total))
-
-
-def thompson_mode_scores(stats, mode_ids, rng) -> dict:
-    """#87 One Beta posterior sample per mode: Beta(1 + picks, 1 + impressions - picks). A mode
-    that gets offered but never picked concentrates low and is served less; an unproven mode's
-    wide Beta(1,1) keeps it explored. The sample replaces the old draw's uniform randomness, so
-    exploration is uncertainty-shaped instead of blind."""
-    out = {}
-    for mid in mode_ids:
-        picks, imps = stats.get(mid, (0, 0))
-        out[mid] = rng.betavariate(*mode_eval.choice_posterior(picks, imps))
-    return out
-
-
-def select_modes(store, modes, leans, epoch, n=4, stats=None, now_posterior=None) -> list[int]:
-    """Pick n distinct mode_ids using acceptance evidence across all card framings. The first uses
-    Thompson-sampled pick-through x library share x live mood x NOW-layer boost (#88). Later choices
-    use that same evidence with a bounded diversity bonus, so an ignored theme cannot keep returning
-    just because its centroid is distant. Deterministic for fixed inputs.
-
-    `now_posterior` ({mode_id: share} from `layers.now_mode_posterior`, or None) multiplies the
-    dominant draw's context: a mode carrying share `s` of the last `now_window_h` hours' real plays
-    gets `now_boost = 1.0 + now_gain * s`, nudging the rotation toward whatever the listener is doing
-    right now without ever excluding a mode outright. `now_gain` (a live param) is read ONLY when a
-    posterior is present, so a None posterior (the common case: quiet hours, thin evidence, or a caller
-    that doesn't pass one, including `store=None` in tests) touches no param and reproduces the exact
-    pre-#88 behavior, byte-for-byte: no boost, no store access."""
-    if not modes:
-        return []
-    rng = random.Random(epoch)
-    cents = {m["mode_id"]: np.asarray(m["centroid"], dtype=np.float64) for m in modes}
-    now_gain = rec_params.get_param(store, "now_gain") if now_posterior else None
-
-    def _now_boost(mid):
-        if not now_posterior:
-            return 1.0
-        return 1.0 + now_gain * now_posterior.get(mid, 0.0)
-
-    # #87 Thompson-sampled dominant: sample each mode's pick-through posterior, scale by the same
-    # library-share and mood context as before, take the max. The sample's randomness IS the
-    # rotation (a big or mood-lifted mode rolls dominant often but not always), and unlike the old
-    # blind draw it is uncertainty-shaped: offered-but-never-picked modes concentrate low, unproven
-    # modes stay wide and keep getting explored. Zero pick data reproduces the old behavior in
-    # expectation (uniform samples scale every mode equally).
-    samples = thompson_mode_scores(stats or {}, [m["mode_id"] for m in modes], rng)
-    scores = {m["mode_id"]: samples[m["mode_id"]] * max(1, m["size"])
-              * _mode_mood_weight(m, leans) * _now_boost(m["mode_id"]) for m in modes}
-    dominant = max(scores, key=scores.get)
-    chosen = [dominant]
-    remaining = [m["mode_id"] for m in modes if m["mode_id"] != dominant]
-    while len(chosen) < min(n, len(modes)):
-        def diverse_score(mid):
-            distance = min(1.0 - float(cents[mid] @ cents[c]) for c in chosen)
-            return scores[mid] * (1.0 + max(0.0, min(2.0, distance)))
-
-        nxt = max(remaining, key=diverse_score)
-        chosen.append(nxt)
-        remaining.remove(nxt)
-    return chosen
-
-
-def artist_cap(items, max_per) -> list:
-    """Drop items beyond max_per per artist, preserving order."""
-    seen, out = {}, []
-    for d in items:
-        a = d.get("artist", "")
-        seen[a] = seen.get(a, 0) + 1
-        if seen[a] <= max_per:
-            out.append(d)
-    return out
-
-
-PROTO_SIZE = 12
-_CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your catalog",
-                "comfort": "Comfort listening", "fresh": "Fresh songs"}
-
-
 def _tilt_key(d, leans):
     """A light, vector-free transient score for ordering within a bucket: the track's genre lean
     multiplier (centered on 1.0). Higher sorts first."""
@@ -385,9 +410,6 @@ def _diversify(items, max_artist, max_album, *, limit=None) -> list:
         if limit is not None and len(out) >= limit:
             break
     return out
-
-
-_BAND_LABELS = {0: "Throwback", 1: "Time Flies", 2: "Recent Picks"}   # temporal card label by band (#63)
 
 
 def _in_band(year, band, lo, hi) -> bool:
@@ -439,8 +461,13 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
     legacy cards)."""
     preset = preparation['vibe_rank'].preset if preparation is not None else home_vibe.current(store, now)
     if preset:
-        return vibe_pools.assemble(store, now, preset, epoch,
+        from yt_playlist.rec import vibe_serving
+        return vibe_serving.assemble(store, now, preset, epoch,
                                    include_genres=include_genres, avoid_genres=avoid_genres)
+    if getattr(store, '_recommendation_files', False):
+        from yt_playlist.rec import stored_home
+        return stored_home.assemble(store, now, epoch, avoid_genres=avoid_genres,
+            include_genres=include_genres, mode_order=mode_order, preparation=preparation)
     inputs = _assembly_inputs(store, now, preparation)
     bundles, modes = inputs['bundles'], inputs['modes']
     if not bundles or not modes:
@@ -588,8 +615,9 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
                     inputs['checked_keys'].update(unchecked)
                 inputs['full_pools'][surf] = home_themes.resolved_genres(store, list(unique.values()))
             pool = inputs['full_pools'][surf]
+            axes = store.genres.feature_axes({d.get('genre') for d in pool})
             full_pools[surf] = [d for d in pool if d.get("artist") not in muted
-                                and genre_map.family(d.get("genre")) not in avoid_genres]
+                                and axes.get(d.get('genre'), ('', None))[0] not in avoid_genres]
         return full_pools[surf]
 
     def _card_for(surf, mid, ranker, ppr_pos):
@@ -612,7 +640,8 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
             family = mode_families.get(mid)
             order = ordering(ranker, ppr_pos, extra)
             if family:
-                distance = lambda d: genre_map.family_distance(family, genre_map.family(d.get("genre")))
+                axes = store.genres.feature_axes({d.get('genre') for d in extra})
+                distance = lambda d: genre_map.family_distance(family, axes.get(d.get('genre'), ('', None))[0])
                 # Exhaust the SAME family across the whole library before adding close neighbors.
                 # Never fill a soul mix with unrelated electronic tracks just because both were selected.
                 extra = [d for d in extra if d.get("genre") and distance(d) <= 0.5]
@@ -629,7 +658,8 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
         label = _BAND_LABELS[band] if surf == "temporal" else _CARD_LABELS[surf]
         # The candidate-fit score is not the final assembly order: preserve both its origin and
         # the ordering inputs, before diversity, genre backfill and the later DJ journey.
-        items = [{**item, "serving_context": {"score_kind": "candidate_fit", "source_ranker": surf,
+        items = [{**item, "serving_context": {**item.get('serving_context', {}),
+                  "score_kind": "candidate_fit", "source_ranker": surf,
                   "ordering_ranker": ranker, "ppr_position": ppr_pos.get(item["key"]) if ranker == "ppr" else None,
                   "facet_tilt": _tilt_key(item, leans), "vibe": vibe_rank.preset,
                   "negative_delta": dislike_deltas.get(item["key"], 0.0),

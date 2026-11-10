@@ -23,7 +23,7 @@ def test_ingestion_preserves_useful_art_when_new_art_is_unavailable(store, incom
 
 @pytest.mark.parametrize("placeholder", [_YT_TRACK_PH, _YT_ALBUM_PH])
 def test_provider_recovery_survives_repeated_full_and_single_playlist_syncs(store, placeholder):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = FakeClient(playlists=[{"playlistId": "PL", "title": "Library"}], tracks={"PL": [
         {**_track("video", "Song", "Artist"), "thumbnails": [{"url": placeholder}]}]})
     sync_identity(store, iid, client, now=100)

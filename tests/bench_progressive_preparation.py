@@ -37,7 +37,7 @@ def test_continual_writes_publish_thin_then_richer_catalog(tmp_path, monkeypatch
             store.conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
                                (i + 1, i + 1, video))
             store.conn.execute("INSERT INTO library_memberships(entry_id,origin) VALUES (?,'fixture')", (i + 1,))
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     for i in range(n // 48):
         pid = store.playlists.upsert_playlist(iid, f'playlist-{i}', f'Playlist {i}', 64, '', 1)
         store.playlists.set_playlist_tracks(pid, [(i * 48 + j) % n + 1 for j in range(64)])

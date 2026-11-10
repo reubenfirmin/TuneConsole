@@ -1,17 +1,49 @@
 """Verified release identity groups choice dates without rewriting evidence."""
 from copy import deepcopy
+from contextlib import ExitStack
+from tests.enrichment_support import use_existing_album_tracks
 
 import numpy as np
 import pytest
 
-from tests import model_support
+from tests.conftest import seed_catalog_track
+from tests.prepared_fixture_support import prepared_template
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as store,
+    reuse_reporting_reader, without_query_timing,
+)
 from tests.repos.test_album_aliases import OLD, ALIAS, release
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.rec import choice_evidence, choice_learning, rec_params, scoring
 
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
 DAY = 86400
 START = 1_700_000_000
 NOW = START + 4 * DAY
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Scoring and evidence tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'), ('folk', 'Folk'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def copied_choice_store(choice_catalogs, first, tmp_path, monkeypatch):
+    directory = tmp_path / 'album-choice'
+    directory.mkdir()
+    with choice_catalogs(first).open(directory / 'library.db') as database:
+        use_existing_album_tracks(database, monkeypatch)
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 
 def raw(store):
@@ -22,25 +54,95 @@ def raw(store):
         for path in (ledger.directory / kind).rglob('*.json')}
 
 
-def setup_choices(store, first, second, before, scenario, distinct=False):
+def seed_choice_catalog(store, first):
     payload = release()
     remember_album(store, first, payload)
     tracks = []
     vectors = []
     for index, track in enumerate(payload['tracks']):
         key = f'track {index}|all them witches'
-        entry = store.tracks.upsert_track(track['videoId'], track['title'], 'All Them Witches',
-                                         payload['title'], 181, album_browse_id=first)
-        store.tracks.set_track_enrichment(entry, 'Rock', '2015')
+        entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                   (track['videoId'],)).fetchone()[0]
+        with store.conn:
+            store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)", (entry,))
         tracks.append({'key': key, 'video_id': track['videoId']})
         vectors.append((key, np.array([1., 0.], dtype=np.float32).tobytes()))
     store.collection.add_saved_album({'browse': 'anchor', 'title': 'Anchor', 'artist': 'Anchor'})
-    entry = store.tracks.upsert_track('anchor-video', 'Anchor', 'Anchor', 'Anchor', 181,
-                                     album_browse_id='anchor')
-    store.tracks.set_track_enrichment(entry, 'Folk', '1990')
+    anchor = seed_catalog_track(store, 'anchor|anchor', 'Anchor', 'Anchor', video_id='anchor-video')
+    store.tracks.albums.link(anchor, 'anchor', title='Anchor', artist='Anchor')
     vectors.append(('anchor|anchor', np.array([0., 1.], dtype=np.float32).tobytes()))
     store.rec_model.replace_rec_vectors(vectors)
-    model_support.build_content_model(store)
+    # Scoring consumes completed spaces; fitting genre/year encoders has its
+    # own model owners. Both spaces still publish real private vector files.
+    store.rec_model.replace_rec_content_vectors(vectors)
+    return payload, tracks
+
+
+@pytest.fixture(scope='module')
+def choice_catalogs(_pristine_current_schema):
+    with ExitStack() as resources:
+        templates = {}
+
+        def template(first):
+            if first not in templates:
+                def build(source):
+                    with pytest.MonkeyPatch.context() as patch:
+                        use_existing_album_tracks(source, patch)
+                        return seed_choice_catalog(source, first)
+                templates[first] = resources.enter_context(prepared_template(_pristine_current_schema, build))
+            return templates[first]
+
+        yield template
+
+
+@pytest.fixture
+def choice_catalog(store, first, monkeypatch):
+    # Ordinary choice consumers need one seeded private library. The copy
+    # isolation owner below separately retains the template and both copies.
+    use_existing_album_tracks(store, monkeypatch)
+    return seed_choice_catalog(store, first)
+
+
+@pytest.fixture
+def other_choice_store(choice_catalogs, first, tmp_path):
+    with choice_catalogs(first).open(tmp_path / 'other-choice.db') as database:
+        yield database
+
+
+@pytest.mark.parametrize('first', [OLD, ALIAS])
+def test_choice_catalog_copies_keep_models_payloads_and_aliases_private(
+        copied_choice_store, other_choice_store, first, choice_catalogs):
+    from tests.prepared_fixture_support import roots
+
+    template = choice_catalogs(first)
+    store = copied_choice_store
+    choice_catalog = deepcopy(template.result)
+    second = ALIAS if first == OLD else OLD
+    other_catalog = deepcopy(template.result)
+    assert choice_catalog == other_catalog == template.result
+    vectors = (template.source.rec_model.get_rec_vectors(),
+               template.source.rec_model.get_rec_content_vectors())
+    assert len(vectors[0]) == len(vectors[1]) == 10
+    namespaces = [set(roots(target.conn).values()) for target in (template.source, store, other_choice_store)]
+    assert all(left.isdisjoint(right) for index, left in enumerate(namespaces) for right in namespaces[index + 1:])
+    for target in (store, other_choice_store):
+        assert (target.rec_model.get_rec_vectors(), target.rec_model.get_rec_content_vectors()) == vectors
+        assert target.collection.album_id(second) is None
+        assert not target.rec_query.play_counts()
+    payload, tracks = choice_catalog
+    remember_album(store, second, payload)
+    assert store.collection.album_id(first) == store.collection.album_id(second)
+    payload['year'] = 'Private payload edit'
+    tracks[0]['video_id'] = 'private-video'
+    store.rec_model.replace_rec_vectors([('anchor|anchor', np.array([1., 1.], dtype=np.float32).tobytes())])
+    assert other_catalog == template.result
+    for other in (template.source, other_choice_store):
+        assert other.collection.album_id(second) is None
+        assert (other.rec_model.get_rec_vectors(), other.rec_model.get_rec_content_vectors()) == vectors
+
+
+def setup_choices(store, first, second, before, scenario, *, catalog, distinct=False):
+    payload, tracks = catalog
     other = deepcopy(payload)
     if distinct:
         other['year'] = '2016'
@@ -95,10 +197,10 @@ def assert_release(store, now, days, latest):
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])
 @pytest.mark.parametrize('before', [True, False])
-@pytest.mark.parametrize('scenario', ['preferred', 'alias', 'split', 'overlap'])
-def test_unsaved_choice_dates_combine_once_in_both_vector_spaces(store, first, before, scenario):
+@pytest.mark.parametrize('scenario', ['preferred', 'alias', 'split'])
+def test_unsaved_choice_dates_combine_once_in_both_vector_spaces(store, first, before, scenario, choice_catalog):
     second = ALIAS if first == OLD else OLD
-    setup_choices(store, first, second, before, scenario)
+    setup_choices(store, first, second, before, scenario, catalog=choice_catalog)
     original = raw(store)
     assert store.collection.album_id(first) == store.collection.album_id(second)
     assert_release(store, NOW + 1, 3, START + 2 * DAY + 1)
@@ -107,11 +209,13 @@ def test_unsaved_choice_dates_combine_once_in_both_vector_spaces(store, first, b
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])
 @pytest.mark.parametrize('before', [True, False])
-def test_withdrawal_keeps_a_shared_date_until_its_last_choice_is_withdrawn(store, first, before):
+def test_withdrawal_keeps_a_shared_date_until_its_last_choice_is_withdrawn(store, first, before, choice_catalog):
     second = ALIAS if first == OLD else OLD
-    events = setup_choices(store, first, second, before, 'overlap')
+    events = setup_choices(store, first, second, before, 'overlap', catalog=choice_catalog)
+    assert store.collection.album_id(first) == store.collection.album_id(second)
     original, files = raw(store)
     assert_release(store, NOW + 1, 3, START + 2 * DAY + 1)
+    assert raw(store) == (original, files)
     for index, (_, oid) in enumerate(event for event in events if event[0] == 2):
         choice_evidence.respond(store, oid, 'withdraw', NOW + 2 + index,
             action_id=f'withdraw:{index}', details={'action_id': oid})
@@ -125,9 +229,9 @@ def test_withdrawal_keeps_a_shared_date_until_its_last_choice_is_withdrawn(store
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])
 @pytest.mark.parametrize('scenario', ['split', 'overlap'])
-def test_distinct_editions_keep_separate_choice_dates(store, first, scenario):
+def test_distinct_editions_keep_separate_choice_dates(store, first, scenario, choice_catalog):
     second = ALIAS if first == OLD else OLD
-    setup_choices(store, first, second, False, scenario, distinct=True)
+    setup_choices(store, first, second, False, scenario, catalog=choice_catalog, distinct=True)
     assert store.collection.album_id(first) != store.collection.album_id(second)
     contexts, tastes = measure(store, NOW + 1)
     assert {row['option_id']: row['days'] for row in contexts} == (

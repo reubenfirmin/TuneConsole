@@ -17,9 +17,9 @@ def _fold_album(store, bid="BID", n=4):
                                  "year": "2001", "type": "Album", "thumbnail": None}])
 
 
-def test_album_waterfall_fills_genres(store, monkeypatch):
+def test_album_waterfall_fills_genres(store, monkeypatch, canonical_genre_matcher):
     _fold_album(store)
-    pending = store.tracks.album_tracks_to_enrich("BID")
+    pending = store.tracks.album_tracks_for_waterfall("BID")
     assert len(pending) == 4
     monkeypatch.setattr(musicbrainz, "enrich_full",
                         lambda title, artist, *, observations=None: ("rock", "2001", None, [], []))
@@ -28,12 +28,17 @@ def test_album_waterfall_fills_genres(store, monkeypatch):
                             lambda ev: None)
 
     detail = store.charts.album_tracks_detail("BID")
-    assert all(t["genre"] == "rock" and t["year"] == "2001" for t in detail)
-    assert store.tracks.album_tracks_to_enrich("BID") == []          # nothing left to enrich
+    assert all(t["genre"] == "Rock" and t["year"] == "2001" for t in detail)
+    # Genre/year completion still leaves audio and artwork work for this album.
+    assert len(store.tracks.album_tracks_for_waterfall('BID')) == 4
+    for track in pending:
+        store.enrichment.apply_provider_fields(track['id'], 'deezer', {'bpm': 120, 'energy': .5, 'danceability': .5})
+        store.tracks.set_track_art(track['id'], 'https://example.com/cover.jpg')
+    assert store.tracks.album_tracks_for_waterfall('BID') == []
 
 
 def test_album_page_renders_enrichable_table(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
@@ -52,7 +57,7 @@ def test_album_enrich_endpoint_starts_job(store, monkeypatch):
         started.set()
 
     monkeypatch.setattr(waterfall, "run_waterfall", enrich)
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
@@ -63,17 +68,18 @@ def test_album_enrich_endpoint_starts_job(store, monkeypatch):
 
 
 def test_album_track_genre_edit(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     r = c.post("/album/BID/track-genre", data={"video_id": "v0", "genre": "jazz"})
     assert r.status_code == 200 and "jazz" in r.text                 # re-rendered row carries it
-    assert any(t["genre"] == "jazz" for t in store.charts.album_tracks_detail("BID") if t["video_id"] == "v0")
+    edited = [t for t in store.charts.album_tracks_detail("BID") if t["video_id"] == "v0"]
+    assert len(edited) == 1 and edited[0]['genre'] == 'Jazz'
 
 
 def test_album_folds_in_on_demand_when_saved(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.collection.replace_saved_albums([{"browse": "BID", "title": "Kind of Blue", "artist": "Miles Davis",
                                  "year": "1959", "type": "Album", "thumbnail": None}])
     album = {"title": "Kind of Blue", "artists": [{"name": "Miles Davis"}], "thumbnails": [{"url": "t"}],

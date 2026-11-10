@@ -10,13 +10,13 @@ from yt_playlist.providers import enrichment, lastfm
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.waterfall import run_waterfall
 from tests.test_enrichment_config import _client
+from tests.metadata_provenance_support import metadata_provenance
 
 
 class Provider:
     def __init__(self, name, available=lambda store: True):
         self.name, self.available, self.calls = name, available, []
 
-    def reset(self): pass
     def tripped(self): return False
     def probe(self, track, store):
         self.calls.append(track["id"])
@@ -71,12 +71,12 @@ def test_reenrichment_keeps_genre_until_later_provider_replacement(store):
                                [(recording, name) for name in order])
     store.enrichment_state.record_enrichment_attempt('song|artist', 'musicbrainz', {}, providers=order)
     assert store.tracks.get_track_enrichment(tid)[0] == 'Rock'
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre']['source'] == 'musicbrainz'
+    assert metadata_provenance(store, tid)['fields']['genre']['source'] == 'musicbrainz'
     # A subsequent process can replace it using completed answers, without an empty interval.
     store.enrichment.apply_provider_fields(tid, 'discogs', {'genre': 'Soundtrack'}, providers=order)
     store.enrichment_state.record_enrichment_attempt('song|artist', 'discogs', {'genre': 'Soundtrack'}, providers=order)
     assert store.tracks.get_track_enrichment(tid)[0] == 'Soundtrack'
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre']['source'] == 'discogs'
+    assert metadata_provenance(store, tid)['fields']['genre']['source'] == 'discogs'
 
 
 def test_adding_or_changing_effective_key_schedules_only_that_provider(store, monkeypatch):
@@ -101,6 +101,82 @@ def test_adding_or_changing_effective_key_schedules_only_that_provider(store, mo
     assert "first-key" not in str(list(map(tuple, store.conn.execute("SELECT * FROM enrichment_provider_config"))))
     assert "second-key" not in str(list(map(tuple, store.conn.execute("SELECT * FROM enrichment_provider_config"))))
     assert w.drain_once() == 0
+
+
+@pytest.mark.parametrize('newer_status', [None, 'found', 'retry'])
+def test_provider_refresh_retains_durable_evidence_and_newer_state(store, newer_status):
+    from yt_playlist.core import metadata_attempts
+
+    tid = store.tracks.upsert_track('refresh', 'Song', 'Artist', None, 200)
+    subject = store.tracks.catalog_subject(tid)
+    recording = subject['recording_id']
+    repo = store.enrichment_state
+    repo._configure_providers({'a': {'fingerprint': 'first', 'status': 'available'}})
+    for provider, genre in [('a', 'Jazz'), ('b', 'Rock')]:
+        store.enrichment.apply_provider_fields(tid, provider, {'genre': genre}, providers=('a', 'b'))
+        repo.record_enrichment_attempt(subject['identity_key'], provider,
+                                       {'genre': genre, 'bpm': 120}, now=10, run_id=provider + '-old')
+    store.tracks.set_track_genre(tid, 'My explicit choice')
+    with store.conn:
+        store.conn.execute('UPDATE recordings SET first_enriched_at=10 WHERE id=?', (recording,))
+    current = {'fingerprint': 'second', 'status': 'available'}
+    repo._configure_providers({'a': current})
+    if newer_status is not None:
+        repo.record_enrichment_attempt(subject['identity_key'], 'a', {'bpm': 130}, now=20,
+            retry=newer_status == 'retry', run_id='a-new')
+        if newer_status == 'retry':
+            repo.defer_integration('a', now=20, retry_after=50, error='new outage')
+    protected = ('metadata_deliveries', 'metadata_observations', 'metadata_choice_heads',
+                 'recording_metadata_selections', 'entry_metadata_selections', 'metadata_conflicts',
+                 'metadata_conflict_candidates', 'provider_attempts', 'provider_attempt_fields')
+
+    def retained():
+        return {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')))
+                for table in protected}
+
+    before = retained()
+    states = repo.enrichment_provider_state(recording, include_previous=True)
+    cooldowns = repo.enrichment_cooldowns()
+    assert repo._advance_provider_refresh('a', current)
+    assert not repo._advance_provider_refresh('a', current)
+    assert retained() == before
+    assert store.tracks.get_track_enrichment(tid)[0] == 'My explicit choice'
+    after = repo.enrichment_provider_state(recording, include_previous=True)
+    assert after['b'] == states['b']
+    if newer_status is None:
+        assert 'a' not in after
+        assert metadata_attempts.state_fields(store.conn, recording, 'a') == {}
+    else:
+        assert after['a'] == states['a']
+    assert repo.enrichment_cooldowns() == cooldowns
+    queued = store.conn.execute('SELECT provider FROM enrichment_provider_jobs WHERE recording_id=?',
+                                 (recording,)).fetchall()
+    assert [row[0] for row in queued] == ([] if newer_status == 'found' else ['a'])
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_provider_refresh_rolls_back_operational_fields_state_jobs_and_frontier_together(store):
+    import sqlite3
+
+    tid = store.tracks.upsert_track('rollback', 'Rollback', 'Artist', None, 200)
+    subject = store.tracks.catalog_subject(tid)
+    repo = store.enrichment_state
+    repo._configure_providers({'a': {'fingerprint': 'first', 'status': 'available'}})
+    repo.record_enrichment_attempt(subject['identity_key'], 'a', {'genre': 'Jazz'}, now=10)
+    current = {'fingerprint': 'second', 'status': 'available'}
+    repo._configure_providers({'a': current})
+    with store.conn:
+        store.conn.execute("CREATE TRIGGER interrupt_refresh BEFORE DELETE ON enrichment_provider_state "
+                           "BEGIN SELECT RAISE(ABORT,'Controlled refresh interruption'); END")
+    before = list(store.conn.iterdump())
+    with pytest.raises(sqlite3.IntegrityError, match='Controlled refresh interruption'):
+        repo._advance_provider_refresh('a', current)
+    assert list(store.conn.iterdump()) == before
+    with store.conn:
+        store.conn.execute('DROP TRIGGER interrupt_refresh')
+    assert repo._advance_provider_refresh('a', current)
+    assert not store.conn.execute('SELECT 1 FROM provider_state_fields').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM enrichment_provider_state').fetchone()
 
 
 def test_provider_settings_routes_wake_owned_worker(store):

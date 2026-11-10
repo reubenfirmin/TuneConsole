@@ -1,13 +1,35 @@
 """Library pools built only after clicking an unfilled Home mix."""
 from yt_playlist.rec import home_themes, home_vibe, measurement, mode_surfaces, rec_params, surfaces
-from yt_playlist.util import genre_map
 
 
 def prepare(store, now, parameters):
     if home_vibe.current(store, now):
-        # A clicked fallback uses the same complete worker inputs as the main
-        # menu. Its consumer must not get stuck waiting on an unrelated cache.
-        return mode_surfaces.prepare_bundles(store, now)
+        # A clicked fallback joins the ordinary worker's hourly admission.
+        return mode_surfaces.prepare_scheduled(store, now)
+    if store._clicked_library_pools:
+        with store.read_snapshot() as snapshot:
+            reader = snapshot.store
+            tracks = _calculate(reader, now, parameters)
+            policies = measurement.PoolPolicies(reader, now)
+            tracks = policies.stamp(tracks, parameters['lane'])
+            policy = policies.generation_policy()
+            rows, bases = list(policies.rows.values()), list(policies.bases.values())
+            surface = 'home_pool:' + parameters['lane']
+            plan = reader.recommendations.prepare_clicked_pool(surface,
+                {'parameters': parameters, 'tracks': tracks}, now, policy=policy,
+                input_revision=reader.prepared_content.serial(), pending_policies=rows)
+            snapshot.release_reader()
+            store.rec_ledger.record_prepared_policies(rows, bases)
+            build = store.recommendations.claim(plan)
+            store.recommendations.remember_clicked_pool_parameters(build.generation_id, parameters, now)
+            store.recommendations.stage(plan, build)
+            return snapshot.publish_ordered(lambda: store.recommendations.publish(build, now), validate_inputs=False)
+    tracks = _calculate(store, now, parameters)
+    tracks = measurement.stamp_pool(store, tracks, now, parameters['lane'])
+    store.rec_proposals.put_proposals(f"home_pool:{parameters['lane']}", {"parameters": parameters, "tracks": tracks}, now)
+
+
+def _calculate(store, now, parameters):
     lane = parameters["lane"]
     keys = store.rec_query.library_keys()
     if lane == "temporal":
@@ -24,8 +46,7 @@ def prepare(store, now, parameters):
     if not home_vibe.current(store, now):
         tracks = home_themes.matching_genres(store, tracks, include=parameters["include_genres"],
                                             avoid=parameters["avoid_genres"])
-    tracks = measurement.stamp_pool(store, tracks, now, lane)
-    store.rec_proposals.put_proposals(f"home_pool:{lane}", {"parameters": parameters, "tracks": tracks}, now)
+    return tracks
 
 
 def pick(store, now, parameters, exclude_keys=()):
@@ -45,11 +66,12 @@ def pick(store, now, parameters, exclude_keys=()):
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     tracks = home_themes.matching_genres(store, cached["tracks"], include=parameters["include_genres"],
                                         avoid=parameters["avoid_genres"])
+    axes = store.genres.feature_axes(t.get('genre') for t in tracks)
     tracks = [t for t in tracks if t["key"] in owned and t["key"] not in blocked
               and t["artist"] not in muted
-              and weights.get(f"genre:{genre_map.family(t.get('genre'))}", 1.0) != 0]
+              and weights.get(f"genre:{axes.get(t.get('genre'), ('', None))[0]}", 1.0) != 0]
     if parameters["lane"] == "temporal":
-        cuts = (store.rec_proposals.get_proposals("mode_bundles") or {}).get("_meta", {}).get("year_cuts")
+        cuts = mode_surfaces.bundle_metadata(store).get('year_cuts')
         if not cuts:
             return []
         tracks = [t for t in tracks if mode_surfaces._in_band(t.get("year"), parameters["epoch"] % 3,

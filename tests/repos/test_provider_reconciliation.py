@@ -1,30 +1,29 @@
 """Provider revisions survive bounded publication, restart and newer attempts."""
 from contextlib import contextmanager
-import json
+from tests.enrichment_support import complete_entries
 
 import pytest
 
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core.store import Store
-from yt_playlist.repos import enrichment_state
+from yt_playlist.core import provider_frontiers
+from yt_playlist.controllers import enrichment_state
 
 ORIGINAL = {'deezer': {'fingerprint': 'original', 'status': 'available'}}
 CHANGED = {'deezer': {'fingerprint': 'changed', 'status': 'available'}}
 
 
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'providers.db')
-    store.init_schema()
+def database(file_backed_store):
+    store = file_backed_store
     store.enrichment_state.reconcile_provider_configuration(ORIGINAL)
-    yield store
-    store.conn.close()
+    return store
 
 
 def completed(store, count=2, provider='musicbrainz'):
     ids = [store.tracks.upsert_track(f'song{i}', f'Song {i}', 'Artist', None, 200)
            for i in range(count)]
-    store.enrichment_queue.mark_enriched(ids, 10)
+    complete_entries(store, ids, 10)
     rows = [dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone())
             for entry in ids]
     for row in rows:
@@ -48,7 +47,7 @@ def test_unchanged_configuration_catches_up_later_recordings_without_rewriting_c
     assert database.conn.total_changes == before
     # Catch-up is independent of a configuration change, including after a restart.
     new = database.tracks.upsert_track('later', 'Later', 'Artist', None, 200)
-    database.enrichment_queue.mark_enriched([new], 30)
+    complete_entries(database, [new], 30)
     key = database.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (new,)).fetchone()[0]
     database.enrichment_state.record_enrichment_attempt(key, 'musicbrainz', {}, now=30)
     database.enrichment_state.reconcile_provider_configuration(ORIGINAL)
@@ -106,7 +105,7 @@ def test_partial_configuration_refresh_resumes_after_restart_without_requeueing_
     with pytest.raises(WorkClosing):
         database.enrichment_state.reconcile_provider_configuration(CHANGED)
     assert jobs(database) == {rows[0]['recording_id']}
-    refresh = json.loads(database.settings.get_setting(enrichment_state.REFRESH_KEY + 'deezer'))
+    refresh = provider_frontiers.read(database.conn, 'deezer')
     assert refresh['cursor'] == rows[0]['recording_id']
     database.enrichment_state.record_enrichment_attempt(rows[0]['identity_key'], 'deezer', {}, now=20)
     restarted = Store(database._db_path)
@@ -114,7 +113,7 @@ def test_partial_configuration_refresh_resumes_after_restart_without_requeueing_
     try:
         restarted.enrichment_state.reconcile_provider_configuration(CHANGED)
         assert jobs(restarted) == {rows[1]['recording_id']}
-        assert restarted.settings.get_setting(enrichment_state.REFRESH_KEY + 'deezer') is None
+        assert provider_frontiers.read(restarted.conn, 'deezer') is None
         assert restarted.enrichment_state.enrichment_provider_state(rows[0]['recording_id'])['deezer']['at'] == 20
         assert not restarted.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
@@ -131,7 +130,9 @@ def test_refresh_preserves_attempt_and_cooldown_committed_after_configuration_ch
         nonlocal expected
         if expected is None:
             database.enrichment_state.record_enrichment_attempt(row['identity_key'], 'deezer', {'genre': 'House'},
-                retry=retry, cooldown=retry, now=20)
+                retry=retry, now=20)
+            if retry:
+                database.enrichment_state.defer_integration('deezer', now=20, retry_after=50, error='new outage')
             expected = database.enrichment_state.enrichment_provider_state(row['recording_id'])['deezer']
         return original(provider, current)
 

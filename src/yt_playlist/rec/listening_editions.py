@@ -4,7 +4,7 @@ import hashlib
 from yt_playlist.rec.listening_dates import edition_day
 from yt_playlist.rec.listening_insights import candidates
 
-VERSION = 11
+VERSION = 12
 
 
 def present(edition):

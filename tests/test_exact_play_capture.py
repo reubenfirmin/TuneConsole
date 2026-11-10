@@ -91,9 +91,9 @@ for(const fn of polls)fn();flush();
                             text=True, capture_output=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr
     frames = json.loads(result.stdout)
-    iid = store.identities.upsert_identity("music", "bridge", "brand-A", True)
+    iid = store.accounts.upsert_account("music", "bridge", "brand-A", True)
     if scenario == "ambiguous_account":
-        store.identities.upsert_identity("other", "bridge", "brand-A", False)
+        store.accounts.upsert_account("other", "bridge", "brand-A", False)
     if scenario == "generated":
         store.playlists.set_playlist_group("PL_current", "Generated")
         store.playlists.mark_generated_playlist("PL_current")
@@ -112,7 +112,7 @@ for(const fn of polls)fn();flush();
         assert all(frame['metadataVerified'] is (scenario != 'known_title_variant') for frame in plays)
         assert [event["video_id"] for event in events] == ["current", "next"]
         assert [event["played_at"] for event in events] == [1000.0, 1300.0]
-        assert all(event["identity_id"] == iid and event["playlist_ytm_id"] == "PL_current" for event in events)
+        assert all(event["account_id"] == iid and event["playlist_ytm_id"] == "PL_current" for event in events)
         assert store.settings.get_setting("last_plays_sync_at") == "1300.0"
         assert [row[0] for row in store.conn.execute("SELECT is_generated FROM play_events")] == \
             [int(scenario == "generated")] * 2

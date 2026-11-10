@@ -16,6 +16,8 @@ def test_manual_genre_year_overrides(store):
     assert store.tracks.get_track_enrichment(t) == ("Techno", "1999")
     store.tracks.set_track_genre(t, "")                    # blank clears
     assert store.tracks.get_track_enrichment(t) == ("", "1999")
+    store.tracks.set_track_year(t, "2020")
+    assert store.tracks.get_track_enrichment(t) == ("", "2020")
 
 
 def test_set_title_artist_and_reset(store):
@@ -36,33 +38,32 @@ def test_set_title_rejects_blank(store):
     assert store.conn.execute("SELECT title FROM tracks WHERE id=?", (t,)).fetchone()["title"] == "Keep Me"
 
 
-def test_enrichment_is_fill_only(store):
+def test_preferred_provider_fills_metadata_and_manual_choices_survive_refresh(store):
     t = store.tracks.upsert_track("v1", "S", "A", "Al", 100)
-    store.tracks.set_track_enrichment(t, "House", "2001")
-    store.tracks.set_track_enrichment(t, "Trance", "2002")  # must NOT overwrite existing values
+    providers = ('musicbrainz', 'lastfm')
+    store.enrichment.apply_provider_fields(t, 'musicbrainz', {'genre': 'House', 'year': '2001'}, providers=providers)
+    store.enrichment.apply_provider_fields(t, 'lastfm', {'genre': 'Trance', 'year': '2002'}, providers=providers)
     assert store.tracks.get_track_enrichment(t) == ("House", "2001")
+    store.tracks.set_track_genre(t, '')
+    store.enrichment.apply_provider_fields(t, 'musicbrainz', {'genre': 'Techno', 'year': '2003'}, providers=providers)
+    assert store.tracks.get_track_enrichment(t) == ('', '2003')
 
 
-def test_missing_genre_and_year_queries(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+def test_waterfall_selects_missing_genre_and_year_in_playlist_order(store):
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
     t1 = store.tracks.upsert_track("v1", "S1", "A", "Al", 100)
     t2 = store.tracks.upsert_track("v2", "S2", "A", "Al", 100)
     store.playlists.set_playlist_tracks(p, [t1, t2])
-    store.tracks.set_track_enrichment(t1, "House", "2001")  # t1 fully tagged
-    assert [r["id"] for r in store.tracks.tracks_missing_genre(p)] == [t2]
-    assert [r["id"] for r in store.tracks.tracks_to_enrich(p)] == [t2]
+    store.enrichment.apply_provider_fields(t1, 'musicbrainz', {'genre': 'House', 'year': '2001'})
+    store.enrichment.apply_provider_fields(t1, 'deezer', {'bpm': 120, 'energy': .5, 'danceability': .5})
+    store.tracks.set_track_art(t1, 'https://example.com/cover.jpg')
+    assert [r["id"] for r in store.tracks.tracks_for_waterfall(p)] == [t2]
 
 
 def test_track_ids_for_videos_latest_wins(store):
     t = store.tracks.upsert_track("v1", "S", "A", "Al", 100)
     assert store.tracks.track_ids_for_videos(["v1", "nope"]) == {"v1": t}
-
-
-def test_store_binding(store):
-    t = store.tracks.upsert_track("v1", "S", "A", "Al", 100)
-    store.tracks.set_track_year(t, "2020")
-    assert store.tracks.get_track_enrichment(t) == ("", "2020")
 
 
 def test_identity_key_for_video(store):

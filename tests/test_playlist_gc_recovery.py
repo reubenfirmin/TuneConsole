@@ -11,6 +11,7 @@ from ytmusicapi.exceptions import YTMusicServerError
 from tests.conftest import _track
 from tests.test_saved_album_snapshot import _production_client
 from tests.test_undo_recovery import RecoveryClient
+from yt_playlist.core import fao
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.library import playlist_backups, playlist_deletion, playlist_gc_retry, playlist_generated
@@ -41,21 +42,23 @@ class Client(RecoveryClient):
 
 
 @pytest.fixture
-def case(tmp_path, monkeypatch):
+def case(tmp_path, monkeypatch, file_backed_store):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(playlist_backups, "with_retry", lambda fn, **kwargs: fn())
-    store = Store(tmp_path / "gc.db")
-    store.init_schema()
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    store = file_backed_store
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Generated", 2, "", 1)
     tids = [store.tracks.upsert_track(v, v, "Artist", None, None, 1) for v in ("a", "b")]
     store.playlists.set_playlist_tracks(pid, tids)
     store.playlists.mark_generated_playlist("SOURCE")
     client = Client()
     result = SimpleNamespace(store=store, iid=iid, pid=pid, client=client,
-                             path=tmp_path / "gc.db", tmp=tmp_path)
-    yield result
-    result.store.conn.close()
+                             path=Path(store._db_path), tmp=tmp_path)
+    try:
+        yield result
+    finally:
+        # Restart cases replace the original fixture's Store.
+        result.store.conn.close()
 
 
 def collect(case, now=NOW, **kwargs):
@@ -90,7 +93,9 @@ def test_saved_failure_confirmed_absent_completes_original_without_another_delet
 
     result = collect(case)
 
-    assert [row["backup"] for row in result] == [str(backup)]
+    assert len(result)==1 and fao.read(result[0]['backup']).bytes == fao.read(backup).bytes
+    retained = case.store.conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=?',(aid,)).fetchone()[0]
+    assert result[0]['backup']==retained
     assert case.store.actions.get_action(aid).status == "executed"
     assert case.store.playlists.get_playlist(case.pid) is None
     assert len(case.store.actions.get_actions()) == 1
@@ -108,7 +113,7 @@ def test_confirmed_survivor_requires_fresh_complete_backup_and_committed_intent(
         newest = case.store.actions.get_actions()[0]
         assert newest.id != old_aid and newest.status == "delete_pending"
         entry, = json.loads(newest.undo_json)["deletions"]
-        saved = json.loads(Path(entry["backup"]).read_text())
+        saved = json.loads(fao.read(entry['backup']).bytes)
         assert [row["video_id"] for row in saved["tracks"]] == ["a", "b", "new"]
         assert entry["backup"] != str(old_backup)
         return delete(ytm)
@@ -202,7 +207,7 @@ def test_production_complete_pages_back_up_new_members_before_fresh_delete(case,
     assert len(result) == 1 and case.client.writes == ["SOURCE"]
     assert len(bridge.calls) == 2
     assert backup.read_bytes() == original
-    fresh = json.loads(Path(result[0]["backup"]).read_text())
+    fresh = json.loads(fao.read(result[0]['backup']).bytes)
     assert [row["video_id"] for row in fresh["tracks"]] == ["a", "b", "new"]
     assert case.store.actions.get_actions()[0].id != old_aid
 
@@ -352,17 +357,17 @@ def test_listening_completed_during_admission_prevents_automatic_delete(case, mo
     admitted = []
 
     @contextmanager
-    def claim_after_listening(store, identity_id, remote_id):
-        with original_claim(store, identity_id, remote_id):
+    def claim_after_listening(store, account_id, remote_id):
+        with original_claim(store, account_id, remote_id):
             keys = store.playlists.get_playlist_track_keys(case.pid)
             if source == "sync":
                 store.history.record_history_plays(
-                    identity_id, NOW + 1, list(keys), source_timezone="UTC")
+                    account_id, NOW + 1, list(keys), source_timezone="UTC")
             else:
                 for key, video_id in zip(sorted(keys), ("a", "b")):
-                    store.history.record_play_event(identity_id, key, video_id, NOW + 1,
+                    store.history.record_play_event(account_id, key, video_id, NOW + 1,
                                                     playlist_ytm_id=remote_id)
-            admitted.append((identity_id, remote_id))
+            admitted.append((account_id, remote_id))
             yield
 
     monkeypatch.setattr(playlist_generated, "claim_deletion_target", claim_after_listening)
@@ -401,7 +406,7 @@ def test_eligibility_changed_during_backup_prevents_automatic_delete(case, monke
 
     assert case.client.writes == []
     assert len(retained) == 1 and retained[0].is_file()
-    assert [row["video_id"] for row in json.loads(retained[0].read_text())["tracks"]] == ["a", "b"]
+    assert [row["video_id"] for row in json.loads(fao.read(retained[0]).bytes)["tracks"]] == ["a", "b"]
     assert case.store.actions.get_actions() == []
     assert playlist_gc_retry.states(case.store) == {}
 
@@ -423,16 +428,17 @@ def test_failed_target_does_not_block_healthy_playlist_and_retry_only_leaves_new
     case.client.read_failure = TimeoutError("Unavailable")
     collect(case)
     healthy = Client()
-    other = case.store.identities.upsert_identity("Other", "bridge", "brand", False)
-    pid = case.store.playlists.upsert_playlist(other, "SOURCE", "Other generated", 2, "", 1)
-    case.store.playlists.set_playlist_provenance("SOURCE", identity_id=other,
+    healthy._tracks['HEALTHY'] = healthy._tracks.pop('SOURCE')
+    other = case.store.accounts.upsert_account("Other", "bridge", "brand", False)
+    pid = case.store.playlists.upsert_playlist(other, "HEALTHY", "Other generated", 2, "", 1)
+    case.store.playlists.set_playlist_provenance("HEALTHY", account_id=other,
                                                 origin="tuneconsole", adopted=False)
     clients = {case.iid: case.client, other: healthy}
 
     assert gc_generated_playlists(case.store, clients, NOW + 1, grace_days=1, retry_only=True) == []
     assert healthy.reads == [] and healthy.writes == []
     result = gc_generated_playlists(case.store, clients, NOW + 2, grace_days=1)
-    assert len(result) == 1 and healthy.writes == ["SOURCE"]
+    assert len(result) == 1 and healthy.writes == ["HEALTHY"]
     assert case.store.playlists.get_playlist(pid) is None
     assert case.store.playlists.get_playlist(case.pid) is not None
     assert case.client.writes == []

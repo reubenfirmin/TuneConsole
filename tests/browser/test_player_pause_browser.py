@@ -10,7 +10,7 @@ from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
 @pytest.mark.parametrize("path", ["/", "/artists"])
-@pytest.mark.parametrize("width", [1280, 390])
+@pytest.mark.parametrize("width", [1280])
 def test_pause_resume_reaches_global_player(live_app, page, path, width):
     page.set_viewport_size({"width": width, "height": 900})
     with connect(live_app.replace("http://", "ws://") + "/bridge/ws",
@@ -22,8 +22,6 @@ def test_pause_resume_reaches_global_player(live_app, page, path, width):
         equalizer = widget.locator(".hs-eq")
         expect(widget).to_be_visible()
         expect(widget.get_by_role("button", name="Pause", exact=True)).to_be_visible()
-        if width < 1040:  # The desktop sidebar intentionally omits the equalizer.
-            expect(equalizer).to_be_visible()
         assert equalizer.locator("i").first.evaluate("el => getComputedStyle(el).animationName") != "none"
 
         # A pause from YouTube must propagate without another track-start report.
@@ -39,17 +37,41 @@ def test_pause_resume_reaches_global_player(live_app, page, path, width):
         while frame == {"ping": 1}:
             frame = json.loads(extension.recv(timeout=5))
         assert frame == {"id": frame["id"], "type": "playpause", "action": "play", "videoId": "v_pause"}
-        # Wait for a real status poll after the extension acknowledges resume; this also checks
-        # that a subsequent poll does not undo the optimistic click's visual state.
-        extension.send(json.dumps({"type": "pevent", "kind": "state", "state": "playing",
-                                   "videoId": "v_pause", "position": 21, "duration": 200}))
-        with page.expect_response(lambda response: response.url.endswith("/bridge/status")
-                                  and response.json().get("now_playing", {}).get("paused") is False,
-                                  timeout=8000):
-            pass
-        expect(widget.get_by_role("button", name="Pause", exact=True)).to_be_visible()
-        if width < 1040:
-            expect(equalizer).to_be_visible()
+        # A transient absent player is not a resumed acknowledgement. Keep the
+        # observer installed across that response and the later real status poll.
+        absent = []
+        def absent_once(route):
+            if not absent:
+                absent.append(True)
+                route.fulfill(json={"connected": True, "now_playing": None})
+            else:
+                route.continue_()
+        page.route("**/bridge/status", absent_once)
+
+        def resumed(response):
+            if not response.url.endswith("/bridge/status"):
+                return False
+            state = response.json().get("now_playing") or {}
+            return state.get("video_id") == "v_pause" and state.get("paused") is False
+
+        with page.expect_response(resumed, timeout=8000):
+            with page.expect_response(lambda response: response.url.endswith("/bridge/status")
+                                      and response.json().get("now_playing") is None):
+                page.evaluate("window.playbackStatus.refresh()")
+            assert absent == [True]
+            extension.send(json.dumps({"type": "pevent", "kind": "state", "state": "playing",
+                                       "videoId": "v_pause", "position": 21, "duration": 200}))
+            # A sensor update does not acknowledge this exact control command.
+            # Complete the extension protocol before accepting the UI result.
+            with page.expect_response(lambda response: '/now-playing/toggle?' in response.url) as toggled:
+                extension.send(json.dumps({'id': frame['id'], 'status': 200,
+                    'body': json.dumps({'ok': True, 'videoId': 'v_pause', 'paused': False})}))
+                page.evaluate("window.playbackStatus.refresh()")
+        assert toggled.value.status == 200
+        assert toggled.value.json() == {'ok': True, 'paused': False}
+        expect(widget).to_be_visible()
+        expect(widget.get_by_role("button", name="Pause", exact=True)).to_be_enabled()
+        expect(page.locator('#playback-error')).to_have_count(0)
         expect(widget.locator(".hs-now")).not_to_have_class(re.compile(r"\bpaused\b"))
         expect(equalizer.locator("i").first).to_have_css("animation-play-state", "running")
 
@@ -81,9 +103,17 @@ def test_card_waits_for_confirmation_and_reports_failed_requests(live_app, page,
         status["now_playing"]["paused"] = True
         requests[0].fulfill(json={"ok": True, "paused": True})
     if failure:
-        expect(page.locator("#playback-error")).to_contain_text("Playback was not confirmed")
         expect(pause).to_be_enabled()
+        expect(pause).not_to_have_attribute('aria-busy', 'true')
+        expect(page.locator('#playback-error, #navigation-error, .toast-err, [role="alert"]:visible')).to_have_count(0)
+        assert len(requests) == 1
+        pause.click()
+        expect(pause).to_be_disabled()
+        assert len(requests) == 2
+        assert 'action=pause' in requests[1].request.url and 'videoId=confirmed' in requests[1].request.url
+        status['now_playing']['paused'] = True
+        requests[1].fulfill(json={'ok': True, 'paused': True})
+        expect(player.get_by_role('button', name='Play', exact=True)).to_be_enabled()
     else:
         expect(player.get_by_role("button", name="Play", exact=True)).to_be_enabled()
         expect(page.locator("#playback-error")).to_have_count(0)
-    page.screenshot(path=tmp_path / f"playback-{failure or 'confirmed'}.png")

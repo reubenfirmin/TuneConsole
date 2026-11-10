@@ -5,10 +5,10 @@ import sqlite3
 
 import pytest
 
-from experiments.audio_lab_tools import train_vibes as trainer
+from experiments.audio_lab_tools.training import train_vibes as trainer
 from tests.test_audio_vibe_model import examples, excerpts
 from yt_playlist.rec import audio_vibe_model as model
-from yt_playlist.rec import audio_vibe_preview as heuristic
+from yt_playlist.rec import audio_vibe_prediction as heuristic
 
 
 def jazzbois_prediction():

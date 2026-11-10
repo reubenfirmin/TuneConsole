@@ -16,8 +16,13 @@ def loop():
     lp = asyncio.new_event_loop()
     t = threading.Thread(target=_run_loop, args=(lp,), daemon=True)
     t.start()
-    yield lp
-    lp.call_soon_threadsafe(lp.stop)
+    try:
+        yield lp
+    finally:
+        lp.call_soon_threadsafe(lp.stop)
+        t.join(timeout=5)
+        assert not t.is_alive(), 'Bridge fixture event loop did not stop'
+        lp.close()
 
 
 def test_execute_round_trips_via_sender(loop):
@@ -44,11 +49,30 @@ def test_execute_raises_when_not_connected():
         bridge.execute("POST", "https://music.youtube.com/youtubei/v1/browse", {})
 
 
-def test_disconnect_fails_pending(loop):
-    bridge = Bridge()
+def test_new_connection_cannot_dispatch_a_bound_skip_using_an_old_workers_capability(loop):
+    bridge, sent = Bridge(), []
 
     async def send(frame):
-        pass  # never resolves; we disconnect instead
+        sent.append(frame)
+        bridge.resolve(frame['id'], 200, '{"ok":true}')
+
+    bridge.connect(send, loop)
+    bridge.account_bound_next = True
+    bridge.connect(send, loop)
+    with pytest.raises(BridgeError, match='extension') as error:
+        asyncio.run(bridge.request_control({'type': 'next', 'videoId': 'song', 'brandId': ''}))
+    assert error.value.outcome == 'not-dispatched' and not sent and not bridge._pending
+    bridge.account_bound_next = True
+    assert asyncio.run(bridge.request_control({'type': 'next', 'videoId': 'song', 'brandId': ''}))[0] == 200
+    assert len(sent) == 1 and sent[0]['brandId'] == ''
+
+
+def test_disconnect_fails_pending(loop):
+    bridge = Bridge()
+    sent = threading.Event()
+
+    async def send(frame):
+        sent.set()  # never resolves; we disconnect instead
 
     bridge.connect(send, loop)
 
@@ -62,10 +86,12 @@ def test_disconnect_fails_pending(loop):
 
     t = threading.Thread(target=call)
     t.start()
-    while not bridge._pending:  # wait until the request is registered
-        pass
-    bridge.disconnect()
-    t.join(timeout=5)
+    try:
+        assert sent.wait(1), 'Bridge did not send the pending request'
+    finally:
+        bridge.disconnect()
+        t.join(timeout=5)
+    assert not t.is_alive()
     assert "err" in result
 
 

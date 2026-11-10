@@ -24,7 +24,7 @@ PROVIDERS = [
     {"name": "acousticbrainz", "label": "AcousticBrainz", "key": None,             "requires": "musicbrainz",
      "blurb": "BPM, energy, danceability. Keyed by MusicBrainz ID, so it runs after it."},
     {"name": "lastfm",         "label": "Last.fm",        "key": "lastfm_api_key", "requires": None,
-     "blurb": "Genre from dense crowd tags. Needs a free API key."},
+     "blurb": "Better genre labels than the free, public sources used by default. Register for a free API key to improve recommendations over time."},
     {"name": "discogs",        "label": "Discogs",        "key": None,             "requires": None,
      "blurb": "Genre & year search needs DISCOGS_TOKEN or discogs_token in config.toml. Linked release facts work without a token."},
     {"name": "deezer",         "label": "Deezer",         "key": None,             "requires": None,

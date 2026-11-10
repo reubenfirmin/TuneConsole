@@ -7,7 +7,7 @@
       <header class="starter-head">
         <div>
           <h2 id="starter-title-{{ p.lane }}">Something to listen to</h2>
-          <p class="starter-context">{% if radio_fallback %}Start with this mix while we prepare your Radio Session.{% else %}while we complete setup for you.{% endif %}</p>
+          <p class="starter-context">{% if radio_fallback %}Start with this mix while we find songs for your station.{% else %}while we find more music for you.{% endif %}</p>
         </div>
         <div class="starter-actions">
           <button class="btn btn-primary starter-play" type="button" aria-label="Save and play this mix"
@@ -36,6 +36,6 @@
     </div>
   </section>
   {% else %}
-  <span class="sr-only" role="status">Finding something to listen to while we complete setup.</span>
+  <span class="sr-only" role="status">Finding something for you to listen to.</span>
   {% endif %}
 </div>

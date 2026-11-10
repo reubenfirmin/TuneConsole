@@ -17,13 +17,10 @@ def stamp(local,zone):
 
 
 @pytest.fixture
-def listening_store():
-    store = Store(':memory:')
-    store.init_schema()
-    store.identities.upsert_identity('main','bridge',None,True)
-    store.identities.upsert_identity('other','bridge','other',False)
-    yield store
-    store.conn.close()
+def listening_store(store):
+    store.accounts.upsert_account('main','bridge',None,True)
+    store.accounts.upsert_account('other','bridge','other',False)
+    return store
 
 
 @pytest.mark.parametrize('zone',['America/Costa_Rica','Pacific/Kiritimati'])
@@ -61,7 +58,7 @@ def test_event_generation_policy_does_not_change_with_later_playlist_curation(li
     s.playlists.adopt_generated_playlist('PL')
     assert s.trends.ledger_track_plays(ts-1,ts+7200)=={'ordinary':1}
     assert s.history.listening_day_counts()=={'ordinary':1}
-    assert s.rec_evidence.generated_only_play_days()=={(int(ts//86400),'generated')}
+    assert s.rec_evidence.generated_only_keys_between(ts-1,ts+7200)=={'generated'}
 
 
 def test_installed_layout_retains_raw_evidence_and_unknown_precision():
@@ -122,6 +119,7 @@ def test_repeated_events_and_coarse_days_are_distinct_units(listening_store):
     assert s.history.listening_day_counts()=={'song':2}
     assert s.history.event_play_counts()=={'song':2}
     assert s.conn.execute('SELECT COUNT(*) FROM listening_activity').fetchone()[0]==3
+    assert s.recommendations.repository.candidate_play_counts(['song', 'absent']) == {'song': 2}
 
 
 def test_removing_one_source_preserves_overlaps_and_unknown_legacy(listening_store):
@@ -136,7 +134,7 @@ def test_removing_one_source_preserves_overlaps_and_unknown_legacy(listening_sto
     assert s.history.event_play_counts()=={'both':1}
     assert s.history.listening_day_counts()=={'both':1,'independent':1,'unknown':1}
     assert list(map(tuple,s.conn.execute("SELECT * FROM listening_observations WHERE precision='legacy_unknown'")))==raw
-    assert s.conn.execute('SELECT source FROM play_events').fetchone()[0]=='takeout'
+    assert [r[0] for r in s.conn.execute('SELECT source FROM play_event_sources')]==['takeout']
     with pytest.raises(ValueError,match='Unknown legacy'):
         s.history.remove_listening_source('unknown')
 
@@ -164,9 +162,11 @@ def test_generated_sync_shadow_is_account_scoped_and_independent_evidence_surviv
     s.history.record_history_plays(2,ts,[('song','Today')],source_timezone='America/Costa_Rica')
     assert s.history.listening_day_counts(1)=={}
     assert s.history.listening_day_counts(2)=={'song':1}
+    assert s.recommendations.repository.candidate_play_counts(['song', 'absent']) == {'song': 1}
     s.history.record_history_plays(1,ts,['song'],source_timezone='America/Costa_Rica')
     assert s.history.listening_day_counts(1)=={'song':1}
     assert s.history.event_play_counts(1)=={}
+    assert s.recommendations.repository.candidate_play_counts(['song', 'absent']) == {'song': 2}
 
 
 def test_failed_draft_upgrade_rolls_back_and_backup_is_installed_v25(tmp_path):
@@ -219,15 +219,12 @@ def test_playlist_counts_and_taste_weights_ignore_confirmed_alternate_upload(lis
     np.testing.assert_array_equal(after.weights,before.weights)
     np.testing.assert_array_equal(after.centroids,before.centroids)
     assert len(s.charts.get_playlist_track_recency()[first])==1
-    health = {row['playlist_id']:row['listens'] for row in s.trends.dead_playlists(10)}
-    assert health=={first:3,second:4}
     assert s.history.listening_day_counts(1)[key]==2
     assert s.history.event_play_counts(1)[key]==2
+    assert s.recommendations.repository.candidate_play_counts([key, other]) == {key: 2, other: 1}
 
 
-def test_reassociation_preserves_coarse_sources_and_first_play_atomically(listening_store,monkeypatch):
-    from yt_playlist.core import catalog
-
+def test_reassociation_preserves_completed_listening_changes_when_final_invalidation_fails(listening_store,monkeypatch):
     s = listening_store
     first = s.tracks.upsert_track('a','Old','Artist',None,200)
     target = s.tracks.upsert_track('b','Correct','Artist',None,200)
@@ -235,23 +232,26 @@ def test_reassociation_preserves_coarse_sources_and_first_play_atomically(listen
     s.history.record_history_plays(1,10*86400,[(old,'Today'),(key,'Today')],source_timezone='UTC')
     s.history.import_listening_events(1,[(key,'b',20*86400)])
     s.trends.refresh_first_play()
-    previous = list(s.conn.iterdump())
-    original = catalog.invalidate_derived
-    def fail(conn):
-        original(conn)
+    original = s.recording_keys.invalidate_catalog
+    def fail():
+        assert not s.conn.in_transaction
+        original()
         raise RuntimeError('interrupt association')
-    monkeypatch.setattr(catalog,'invalidate_derived',fail)
+    monkeypatch.setattr(s.recording_keys,'invalidate_catalog',fail)
     with pytest.raises(RuntimeError,match='interrupt association'):
         s.tracks.associate_youtube_item('a',s.tracks.catalog_subject(target)['recording_id'],
                                        source='review',evidence={'same':True},now=1)
-    assert list(s.conn.iterdump())==previous
-    monkeypatch.setattr(catalog,'invalidate_derived',original)
+    assert not s.conn.in_transaction
+    assert s.tracks.catalog_subject(first)['recording_id']==s.tracks.catalog_subject(target)['recording_id']
+    assert s.history.listening_day_counts()=={key:2}
+    assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
+    monkeypatch.setattr(s.recording_keys,'invalidate_catalog',original)
     s.tracks.associate_youtube_item('a',s.tracks.catalog_subject(target)['recording_id'],
                                    source='review',evidence={'same':True},now=1)
     assert s.settings.get_setting('trend_first_play_watermark') is None
     assert not s.trends.first_play_map('track')
     assert s.history.listening_day_counts()=={key:2}
-    evidence = s.conn.execute('SELECT raw_identity_key,identity_key FROM listening_observations').fetchall()
+    evidence = s.conn.execute('SELECT raw_identity_key,identity_key FROM listening_observation_subjects').fetchall()
     assert {r[0] for r in evidence}=={old,key} and {r[1] for r in evidence}=={key}
     s.trends.refresh_first_play()
     assert s.trends.first_play_map('track')=={key:10}
@@ -280,19 +280,22 @@ def test_successful_draft_upgrade_reopens_without_rewriting_data(tmp_path):
     reopened.conn.close()
 
 
-def test_import_failure_rolls_back_event_source_and_calendar(listening_store,monkeypatch):
-    from yt_playlist.core import listening
-
+def test_import_failure_keeps_calendar_setup_and_rolls_back_event_projection(listening_store,monkeypatch):
     s = listening_store
-    before = list(s.conn.iterdump())
-    original = listening.project_event
+    tables = ('play_events', 'play_event_sources', 'play_event_calendar')
+    before = {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables}
+    original = s.history.repository.project_event
     def fail(*args,**kwargs):
         original(*args,**kwargs)
         raise RuntimeError('interrupt event projection')
-    monkeypatch.setattr(listening,'project_event',fail)
+    monkeypatch.setattr(s.history.repository,'project_event',fail)
     with pytest.raises(RuntimeError,match='interrupt event projection'):
         s.history.import_listening_events(1,[('song',None,1000)],source_timezone='America/Costa_Rica')
-    assert list(s.conn.iterdump())==before
+    assert s.history.repository.calendar_facts(1) == {'timezone': 'America/Costa_Rica', 'confirmed': 1}
+    assert {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables} == before
+    monkeypatch.setattr(s.history.repository, 'project_event', original)
+    assert s.history.import_listening_events(1, [('song', None, 1000)], source_timezone='America/Costa_Rica') == (1, 1)
+    assert s.conn.execute('SELECT count(*) FROM listening_calendars').fetchone()[0] == 1
 
 
 def test_partial_reassociation_keeps_unattributed_coarse_evidence_with_recording(listening_store):

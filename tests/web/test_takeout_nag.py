@@ -3,12 +3,13 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.home_onboarding import takeout_nag_due, TAKEOUT_NAG_SNOOZE_S
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, seed_catalog_track
 
 
 def _finished_onboarding(store):
     store.settings.set_setting("last_sync_at", "999")
     store.settings.set_setting("onboard_dismissed", "1")
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='existing-song')
 
 
 def test_due_after_onboarding_and_after_snooze_expiry(store):
@@ -33,38 +34,31 @@ def test_terminal_once_imported(store):
 def test_dismiss_route_stamps(store):
     _finished_onboarding(store)
     c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
-    assert "takeout-nag" in c.get("/").text
+    html = c.get('/').text
+    assert 'takeout-nag' not in html
+    assert '/setup?tab=import' in html
+    assert 'Download your YouTube Music listening history from Google Takeout.' in html
+    assert 'In Setup, choose Import and upload the file.' in html
+    assert 'Rediscover old favorites sooner' in html
     assert c.post("/onboard/takeout/dismiss").status_code == 200
     assert store.settings.get_setting("takeout_nag_dismissed_at") is not None   # snooze timestamp recorded
-    assert "takeout-nag" not in c.get("/").text
+    after = c.get('/').text
+    assert 'takeout-nag' not in after
+    assert '/setup?tab=import' in after
+    assert 'Rediscover old favorites sooner' in after
 
 
 def test_banner_waits_on_fresh_install_and_during_onboarding(store):
     assert store.settings.get_setting("last_sync_at") is None
     c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
-    assert "takeout-nag" not in c.get("/").text
+    html = c.get('/').text
+    assert 'id="arrival-title"' in html and 'Welcome to TuneConsole' in html
+    assert 'takeout-nag' not in html and 'lastfm-nudge' not in html
     store.settings.set_setting("last_sync_at", "999")
     assert "takeout-nag" not in c.get("/").text
-
-
-def test_banner_links_to_import_tab(store):
-    _finished_onboarding(store)
-    c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
-    html = c.get("/").text
-    assert "/setup?tab=import" in html
-    assert "Want better recommendations?" in html
 
 
 def test_unparseable_dismissal_timestamp_means_due(store):
     _finished_onboarding(store)
     store.settings.set_setting("takeout_nag_dismissed_at", "garbage")
     assert takeout_nag_due(store, now=1000.0) is True
-
-
-def test_fresh_install_shows_welcome_before_optional_nudges(store):
-    assert store.settings.get_setting("last_sync_at") is None
-    c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
-    html = c.get("/").text
-    assert "Welcome to TuneConsole." in html
-    assert "takeout-nag" not in html
-    assert "lastfm-nudge" not in html

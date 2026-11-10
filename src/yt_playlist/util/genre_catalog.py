@@ -10,6 +10,8 @@ import unicodedata
 from collections import defaultdict, deque
 from pathlib import Path
 
+from yt_playlist.core import fao
+
 _DATA = Path(__file__).parent.parent / "data"
 REVISION = "2026-10-20.2"
 
@@ -216,7 +218,7 @@ def legacy_entries():
 
 
 def family_labels():
-    families = json.loads((_DATA / "genre_families.json").read_text())["families"]
+    families = json.loads(fao.read(_DATA / "genre_families.json").bytes)["families"]
     return {key: _FAMILY_LABELS.get(key, key.title()) for key in families}
 
 
@@ -244,8 +246,8 @@ def _display(name):
 @functools.lru_cache(maxsize=1)
 def catalog():
     """Immutable bundled identities and unambiguous labels, independent of the enabled list."""
-    snapshot = json.loads((_DATA / "musicbrainz_genres.json").read_text())
-    family_data = json.loads((_DATA / "genre_families.json").read_text())
+    snapshot = json.loads(fao.read(_DATA / "musicbrainz_genres.json").bytes)
+    family_data = json.loads(fao.read(_DATA / "genre_families.json").bytes)
     records = {normalize(name): {"key": normalize(name), "name": name, "mbid": None,
                                "source": "curated", "family": None, "family_source": None}
                for name, _ in _GENRES}
@@ -291,7 +293,7 @@ def catalog():
                 record.update(family=family, family_source="curated")
 
     parents = defaultdict(set)
-    parent_data = json.loads((_DATA / "musicbrainz_genre_parents.json").read_text())
+    parent_data = json.loads(fao.read(_DATA / "musicbrainz_genre_parents.json").bytes)
     for child, parent in parent_data["parents"]:
         child_label, parent_label = labels.get(normalize(child)), labels.get(normalize(parent))
         if child_label and parent_label and child_label[0] != parent_label[0]:
@@ -325,7 +327,7 @@ def _parents():
     """Documented genre ancestry, separate from the looser recommendation families."""
     _, labels = catalog()
     parents = defaultdict(set)
-    data = json.loads((_DATA / "musicbrainz_genre_parents.json").read_text())
+    data = json.loads(fao.read(_DATA / "musicbrainz_genre_parents.json").bytes)
     for child, parent in data['parents']:
         child_label, parent_label = labels.get(normalize(child)), labels.get(normalize(parent))
         if child_label and parent_label and child_label[0] != parent_label[0]:

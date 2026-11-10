@@ -27,10 +27,21 @@ def policy(store):
 def calculate(store, head, now):
     groups = [group for group in head['groups'] if not group.get('legacy')]
     by_version = {group['version']: group for group in groups}
-    bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
-    pools = bundles.get('all', {})
-    keys = {item['key'] for pool in pools.values() for item in pool if item.get('key')}
-    blocked = home_exclusions(store, keys, now)
+    typed = getattr(store, '_recommendation_files', False)
+    generation = None
+    if typed:
+        from yt_playlist.rec import stored_groups
+        header = store.recommendations.head('home')
+        generation = header['id'] if header else None
+        pools = {lane: None for lane in mode_surfaces.CARD_SURFACES + ('temporal',)
+                 if generation is not None and store.recommendations.pool('home', 'all', lane,
+                                                                          generation=generation) is not None}
+        blocked = set()
+    else:
+        bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
+        pools = bundles.get('all', {})
+        keys = {item['key'] for pool in pools.values() for item in pool if item.get('key')}
+        blocked = home_exclusions(store, keys, now)
     muted = store.rec_model.muted_artists()
     cap_artist = int(rec_params.get_param(store, 'modes_artist_cap'))
     cap_album = int(rec_params.get_param(store, 'modes_album_cap'))
@@ -45,6 +56,10 @@ def calculate(store, head, now):
         members = set(group.get('members', {}))
         frames = {}
         for frame, pool in pools.items():
+            if typed:
+                frames[frame] = stored_groups.preview_frame(store, generation, group['version'], frame, now,
+                                                            cap_artist, cap_album, muted)
+                continue
             eligible, seen = [], set()
             for item in pool:
                 key = item.get('key')
@@ -93,10 +108,13 @@ def calculate(store, head, now):
     context = {'schema': 1, 'at': now, 'grouping_policy': head['policy'], 'group_generation': head['generation'],
                'musical_groups': [{key: group.get(key) for key in
                    ('group_id', 'version', 'parent_version', 'name', 'size')} for group in groups]}
-    return {'schema': SCHEMA, 'at': now, 'generation': head['generation'], 'shadow': not enabled(store),
+    result = {'schema': SCHEMA, 'at': now, 'generation': head['generation'], 'shadow': not enabled(store),
             'serving_policy': 'adaptive' if enabled(store) else 'legacy',
             'groups': list(prepared.values()), 'context': context,
             'counts': head['payload']['counts'], 'menus': menus}
+    if typed:
+        result['recommendation_generations'] = [generation] if generation is not None else []
+    return result
 
 
 def prepare(store, now, *, seconds=10):
@@ -105,14 +123,15 @@ def prepare(store, now, *, seconds=10):
             if snapshot.store.settings.get_setting('rec_group_shadow') == '0':
                 store.maintenance_diagnostics.resolve_wait(PHASE, 'disabled')
                 return None
-            head = snapshot.store.taste_groups.head(members=True)
+            head = snapshot.store.taste_groups.head(members=not getattr(snapshot.store, '_recommendation_files', False))
             if head is None:
                 store.maintenance_diagnostics.record('deferred', phase=PHASE, reasons=('group-head',))
                 return None
             result = calculate(snapshot.store, head, now)
             encoded = json.dumps(result)
             check_stopping()
-            if snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(encoded, now, surface=SURFACE)):
+            if snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
+                    encoded, now, surface=SURFACE, input_revision=snapshot._changes)):
                 store.maintenance_diagnostics.record('completed', phase=PHASE)
                 return result
     except WorkBudgetExceeded:

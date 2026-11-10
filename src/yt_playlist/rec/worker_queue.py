@@ -20,6 +20,7 @@ class Job(StrEnum):
     STORIES = "stories"
     MEASUREMENT = "measurement"
     EVIDENCE_STORAGE = "evidence_storage"
+    RETENTION = "retention"
     CHOICES = "choices"
     GROUPS = "groups"
     MODEL_HEALTH = "model_health"
@@ -66,9 +67,11 @@ class PendingJobs:
         self.retry = {job: Retry() for job in Job}
         # A successful publication is not permission to refit immediately on the
         # next enrichment write. Admit at most one start per minute for each
-        # expensive phase. Ratings and serving projections keep their own clocks.
-        for job in (Job.FULL, Job.BUNDLES, Job.GROUPS):
+        # model phase. Ratings and serving projections keep their own clocks.
+        for job in (Job.FULL, Job.GROUPS):
             self.retry[job].minimum_interval = 60
+        from yt_playlist.rec.candidate_refresh import CHECK_INTERVAL_S
+        self.retry[Job.BUNDLES].minimum_interval = CHECK_INTERVAL_S
         self.retry[Job.PREPARE].minimum_interval = 5
         self.retry[Job.TV].minimum_interval = 60
 
@@ -78,7 +81,7 @@ class PendingJobs:
     @property
     def visible(self):
         """Measurements, summaries and shadow groups do not show a model refresh."""
-        return any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in self.pending)
+        return any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in self.pending)
 
     @property
     def measurements(self):

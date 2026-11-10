@@ -17,16 +17,18 @@ from yt_playlist.util import net
 
 
 @pytest.fixture
-def boundary(store, monkeypatch):
-    def install(fetch=lambda request: {'tag_name': 'v0.2.0'}):
+def boundary(monkeypatch):
+    def install(fetch=lambda request: {'tag_name': 'v0.2.0'}, *, store=None):
         clock, calls, responses, events = [1000.0], [], [], []
 
         def pace():
-            assert not store._lock.held_by_current_thread and not store.conn.in_transaction
+            if store is not None:
+                assert not store._lock.held_by_current_thread and not store.conn.in_transaction
             events.append('pace')
 
         def open_request(request, *, timeout):
-            assert not store._lock.held_by_current_thread and not store.conn.in_transaction
+            if store is not None:
+                assert not store._lock.held_by_current_thread and not store.conn.in_transaction
             calls.append((request, timeout))
             events.append('request')
             body = fetch(request)
@@ -48,7 +50,7 @@ def boundary(store, monkeypatch):
 def test_scheduler_uses_exact_public_transport_and_detached_shared_metadata(boundary, store, monkeypatch):
     monkeypatch.setenv('GITHUB_TOKEN', 'SECRET')
     monkeypatch.setenv('GH_TOKEN', 'ALSO_SECRET')
-    b = boundary()
+    b = boundary(store=store)
     updatecheck.check_latest(store, 1000)
     first = b.iao.latest_release()
     first['tag_name'] = 'mutated'
@@ -65,7 +67,7 @@ def test_scheduler_uses_exact_public_transport_and_detached_shared_metadata(boun
 
 
 def test_overlapping_scheduler_checks_share_one_vendor_request(boundary, store):
-    b = boundary()
+    b = boundary(store=store)
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda index: updatecheck.check_latest(store, 1000, interval_s=0), range(8)))
     assert len(b.calls) == 1
@@ -88,7 +90,7 @@ def test_http_failure_deadlines_are_shared_and_persisted(boundary, store, code, 
     def fetch(request):
         raise urllib.error.HTTPError(request.full_url, code, 'SECRET vendor message', headers, body)
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     store.settings.set_setting('latest_version_seen', '0.1.0')
     with net.probe_errors() as errors:
         for _ in range(2):
@@ -119,7 +121,7 @@ def test_expired_last_good_survives_temporary_failure_and_recovers(boundary, sto
             return b'invalid json' if failure == 'invalid_json' else {'message': 'unavailable'}
         return {'tag_name': 'v0.2.0' if len(b.calls) == 1 else 'v0.3.0'}
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     updatecheck.check_latest(store, 1000)
     b.clock[0] += github.CACHE_TTL
     failed[0] = True
@@ -161,7 +163,7 @@ def test_no_release_is_a_short_confirmed_miss_and_preserves_seen_version(boundar
     def fetch(request):
         raise urllib.error.HTTPError(request.full_url, 404, 'not found', {}, body)
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     store.settings.set_setting('latest_version_seen', '0.1.0')
     with net.probe_errors() as errors:
         updatecheck.check_latest(store, 1000)
@@ -173,7 +175,7 @@ def test_no_release_is_a_short_confirmed_miss_and_preserves_seen_version(boundar
 
 def test_primary_limit_headers_on_success_defer_uncached_work(boundary, store):
     b = boundary(lambda request: ({'tag_name': 'v0.2.0'},
-        {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1300'}))
+        {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1300'}), store=store)
     updatecheck.check_latest(store, 1000)
     assert store.enrichment_state.integration_cooldown('github')['retry_at'] == 1300
     b.clock[0] += github.CACHE_TTL
@@ -191,7 +193,7 @@ def test_foreground_database_work_proceeds_while_update_check_waits_for_http(bou
         assert release.wait(5)
         return {'tag_name': 'v0.2.0'}
 
-    boundary(fetch)
+    boundary(fetch, store=store)
     with ThreadPoolExecutor(max_workers=2) as pool:
         update = pool.submit(updatecheck.check_latest, store, 1000)
         try:
@@ -203,10 +205,9 @@ def test_foreground_database_work_proceeds_while_update_check_waits_for_http(bou
         update.result(5)
 
 
-def test_reopened_database_keeps_cooldown_and_scoped_success_preserves_newer_wait(boundary, tmp_path):
-    path = tmp_path / 'github.db'
-    db = Store(path)
-    db.init_schema()
+def test_reopened_database_keeps_cooldown_and_scoped_success_preserves_newer_wait(boundary, file_backed_store):
+    db = file_backed_store
+    path = db._db_path
     try:
         db.enrichment_state.defer_integration('github', now=1000, retry_after=1100, error='old')
     finally:
@@ -218,7 +219,7 @@ def test_reopened_database_keeps_cooldown_and_scoped_success_preserves_newer_wai
         db.enrichment_state.defer_integration('github', now=1101, retry_after=1300, error='new')
         return {'tag_name': 'v0.3.0'}
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=db)
     try:
         updatecheck.check_latest(db, 1000, interval_s=0)
         assert not b.calls
@@ -237,7 +238,7 @@ def test_cancellation_does_not_stamp_a_completed_check(boundary, store, error_ty
     def fetch(request):
         raise error_type('controlled cancellation')
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     with net.probe_errors() as errors, pytest.raises(error_type):
         updatecheck.check_latest(store, 1000)
     assert not errors and b.iao._cached is None
@@ -246,7 +247,7 @@ def test_cancellation_does_not_stamp_a_completed_check(boundary, store, error_ty
 
 
 def test_scoped_repository_is_restored_before_a_standalone_call(boundary, store):
-    b = boundary()
+    b = boundary(store=store)
     store.enrichment_state.defer_integration('github', now=1000, retry_after=1300, error='saved')
     with b.iao.context(store.enrichment_state):
         with b.iao.context(), pytest.raises(IntegrationUnavailable):

@@ -1,20 +1,22 @@
 """Telemetry does not schedule models or invalidate snapshots of skip evidence."""
+from contextlib import closing
 import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import current, migrate, registry
+from yt_playlist.core.migrations import migrate, registry
+from yt_playlist.core.migrations.runner import validate_version
 from tests.core.test_snapshot_revisions import database
 
 
 @pytest.fixture
 def player_store(database):
-    database.identities.upsert_identity('Telemetry fixture', 'fixture', None, True)
+    database.accounts.upsert_account('Telemetry fixture', 'fixture', None, True)
     return database
 
 
 def event(store, kind):
-    identity = store.identities.get_identities()[0].id
+    identity = store.accounts.get_accounts()[0].id
     return store.player_events.record_player_event(identity, kind, 'video', 10, 200, None, '{}', 100)
 
 
@@ -55,7 +57,7 @@ def test_reclassifying_or_deleting_a_consumed_event_invalidates_snapshot(player_
 
 
 def test_version_39_upgrade_preserves_events_and_pending_work(tmp_path):
-    with sqlite3.connect(tmp_path / 'old.db') as conn:
+    with closing(sqlite3.connect(tmp_path / 'old.db')) as conn, conn:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
         migrate(conn, registry=registry.MIGRATIONS[:39])
@@ -64,8 +66,9 @@ def test_version_39_upgrade_preserves_events_and_pending_work(tmp_path):
         conn.commit()
         before = [tuple(row) for row in conn.execute('SELECT * FROM player_events')]
         pending = [tuple(row) for row in conn.execute('SELECT * FROM rec_change_queue')]
-        migrate(conn)
-        current.validate(conn)
+        # Exercise v40's telemetry trigger change on its genuine predecessor.
+        migrate(conn, registry=registry.MIGRATIONS[:40])
+        validate_version(conn, 40)
         assert [tuple(row) for row in conn.execute('SELECT * FROM player_events')] == before
         assert [tuple(row) for row in conn.execute('SELECT * FROM rec_change_queue')] == pending
         conn.execute('DELETE FROM rec_change_queue')

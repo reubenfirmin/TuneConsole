@@ -1,26 +1,65 @@
 """Continuing style streams are independent of Home's finite card proposals."""
+from copy import deepcopy
+
 import pytest
+from tests.derived_rating_support import remove_rating, seed_dislike
 
 from yt_playlist.rec import embedding_vectors, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
-from tests.test_radio_catalog import catalog_track, seed
+from tests.test_radio_catalog import catalog_track, seed, seed_catalog
 from tests.musical_support import prepare_profiles
 from yt_playlist.core import catalog
 from yt_playlist.rec import musical_character
+from tests.recommendation_support import publish_bundles
+from tests.radio_candidate_support import intensity_inputs
+from tests.radio_timing_support import radio_costs
+from yt_playlist.core.db_writes import atomic_write
 
 
-def indexed(store, seed, count=110, *, mixed=False):
-    tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if mixed and i % 2 else seed['genre'])[0]
-              for i in range(count)]
-    store.rec_proposals.put_proposals('mode_bundles', {
-        '1': {'wheelhouse': [seed]}, '_radio': {'generation': None, 'space': '',
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Radio candidate tests do not construct an HTTP application."""
+
+
+def indexed(store, seed, count=110, *, mixed=False, home=True):
+    with atomic_write(store):
+        tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if mixed and i % 2 else seed['genre'])[0]
+                  for i in range(count)]
+    publish_bundles(store, {
+        '1': {'wheelhouse': [seed] if home else []}, '_radio': {'generation': None, 'space': '',
         'members': {'1': [seed['key'], *[track['key'] for track in tracks]]}}})
     return tracks
 
 
+@pytest.fixture
+def refill_library(intensity_inputs):
+    """One published style exceeds the finite Home and catalog lookahead.
+
+    Real stored-page reads and live eligibility are owned by test_stored_radio;
+    this fixture isolates candidate continuation policy from SQL/model setup.
+    """
+    inputs = intensity_inputs
+    anchor = inputs.pools['1'][0]
+    mode = inputs.modes['1']
+    inputs.modes.clear()
+    inputs.modes['1'] = mode
+    inputs.pools.clear()
+    tracks = []
+    for index in range(110):
+        key = f'continued-{index}'
+        track = {**deepcopy(anchor), 'key': key, 'video_id': key,
+                 'title': key, 'artist': f'Artist {index}'}
+        inputs.tracks[key] = track
+        inputs.profiles[key] = track['musical']
+        inputs.vectors[key] = mode['centroid'].tobytes()
+        tracks.append(track)
+    inputs.pools['1'] = [anchor, *tracks]
+    return inputs.store, anchor, tracks
+
+
 @pytest.mark.parametrize('theme', [0, .5, 1])
-def test_every_dial_position_refills_beyond_home_and_catalog_batch(store, seed, monkeypatch, theme):
-    tracks = indexed(store, seed)
+def test_every_dial_position_refills_beyond_home_and_catalog_batch(refill_library, monkeypatch, theme):
+    store, seed, tracks = refill_library
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': theme})
     monkeypatch.setattr(embedding_vectors, 'load_content_vectors', lambda *a, **kw: pytest.fail('request loaded full vectors'))
     sizes, read = [], c._read_vectors
@@ -56,7 +95,7 @@ def test_same_cluster_directions_use_distinct_positions_and_preserve_existing_pl
 def test_refill_rechecks_feedback_and_survives_an_unrelated_model_publication(store, seed):
     tracks = indexed(store, seed, 5)
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
-    store.rec_model.record_dislike(tracks[0]['key'], 1001, 1)
+    seed_dislike(store, tracks[0]['key'], 1001, 1)
     store.settings.set_setting('rec_content_generation', 'new-generation')
     # An active session retains its published membership and directions. A new
     # incompatible basis is never decoded against the old saved centroids.
@@ -70,10 +109,7 @@ def test_refill_rechecks_feedback_and_survives_an_unrelated_model_publication(st
 
 
 def test_indexed_cluster_without_a_home_card_is_still_available(store, seed):
-    tracks = indexed(store, seed, 3)
-    payload = store.rec_proposals.get_proposals('mode_bundles')
-    payload['1'] = {}
-    store.rec_proposals.put_proposals('mode_bundles', payload)
+    tracks = indexed(store, seed, 3, home=False)
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     assert c.next_track([seed])['key'] in {row['key'] for row in tracks}
     assert c.seed_offer()
@@ -96,15 +132,18 @@ def test_continuing_refill_uses_shared_intensity_for_unprepared_recordings(store
 def test_correcting_feedback_readmits_a_recording_in_the_same_session(store, seed):
     track = indexed(store, seed, 1)[0]
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
-    store.rec_model.record_dislike(track['key'], 1001, 1)
+    seed_dislike(store, track['key'], 1001, 1)
     assert c.next_track([seed]) is None
-    store.rec_model.clear_dislike(track['key'])
+    remove_rating(store, track['key'], 'dislike')
     assert c.next_track([seed])['key'] == track['key']
 
 
-def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(store, seed):
+def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(refill_library):
     from yt_playlist.rec.radio_directions import RadioDirections
-    indexed(store, seed, 110, mixed=True)
+    store, seed, tracks = refill_library
+    for index, track in enumerate(tracks):
+        if index % 2:
+            track['genre'] = 'Indie Rock'
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     directions = RadioDirections(c, seed)
     directions.update([seed], [], 0)
@@ -117,12 +156,16 @@ def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(store, seed)
     assert directions.slots == first
 
 
-def test_pinned_refill_reads_past_a_full_page_of_other_genres(store, seed):
-    wrong = [catalog_track(store, f'wrong-{i}', label='Indie Rock')[0] for i in range(CLUSTER_POOL_LIMIT)]
-    matching = [catalog_track(store, f'matching-{i}', label=seed['genre'])[0] for i in range(30)]
-    store.rec_proposals.put_proposals('mode_bundles', {
-        '1': {'wheelhouse': [seed, *wrong]}, '_radio': {'generation': None, 'space': '',
-        'members': {'1': [t['key'] for t in [seed, *wrong, *matching]]}}})
+def test_pinned_refill_reads_past_a_full_page_of_other_genres(refill_library):
+    store, seed, tracks = refill_library
+    # The candidate policy must continue beyond an ineligible first page.
+    # Real SQL paging through rarer genres is independently exercised by
+    # test_stored_radio's two-page pinned-genre owner.
+    wrong = tracks[:CLUSTER_POOL_LIMIT]
+    matching = tracks[CLUSTER_POOL_LIMIT:]
+    assert len(wrong) == CLUSTER_POOL_LIMIT and matching
+    for track in wrong:
+        track['genre'] = 'Indie Rock'
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     history = [seed]
     for _ in matching:

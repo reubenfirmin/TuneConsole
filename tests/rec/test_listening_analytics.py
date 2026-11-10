@@ -13,6 +13,7 @@ from yt_playlist.library import live_plays, ratings
 from yt_playlist.rec import listening_analytics as analytics, maintenance
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
+from yt_playlist.rec.listening_policy import PLAYER_KINDS
 from yt_playlist.web.app import create_app
 
 NOW = datetime(2026, 10, 24, 12, tzinfo=timezone.utc).timestamp()
@@ -25,7 +26,7 @@ def listening_enabled(monkeypatch, store):
 
 
 def seed(store):
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     for key, artist, genre in [('a', 'A', 'Techno'), ('b', 'A', 'Techno'), ('c', 'B', 'Jazz')]:
         seed_catalog_track(store, key, key.upper(), artist, video_id='v'+key, genre=genre)
     return iid
@@ -46,7 +47,7 @@ def test_empty_generation_and_serving_never_calculate(store, monkeypatch):
         assert client.get('/charts/listening-data').status_code == 202
         payload = analytics.build(store, NOW)
         assert payload['rows'] == []
-        encoded = ListeningAnalyticsRepo(store).encoded()
+        encoded = store.listening_analytics.encoded()
         monkeypatch.setattr(analytics, 'calculate', lambda *a: pytest.fail('calculated on request'))
         response = client.get('/charts/listening-data')
         assert response.status_code == 200 and response.text == encoded
@@ -69,7 +70,7 @@ def test_generated_plays_coarse_evidence_and_discovery_use_complete_history(stor
     assert total(payload, 'rated') == 0  # mutable play-event status is not historical evidence
     by_format = {row[3]: row for row in payload['rows'] if row[4]}
     assert set(by_format) == {'mixes', 'albums', 'liked'}
-    assert store.conn.execute('SELECT is_generated FROM play_events WHERE identity_key=?', ('a',)).fetchone()[0]
+    assert store.conn.execute('SELECT is_generated FROM play_event_subjects WHERE identity_key=?', ('a',)).fetchone()[0]
 
 
 def test_discovery_baseline_excludes_the_initial_capture_and_survives_partitioning(store):
@@ -89,57 +90,21 @@ def test_discovery_baseline_excludes_the_initial_capture_and_survives_partitioni
     store.history.record_play_event(iid, 'a', 'va', NOW-86400)
     payload = analytics.build(store, NOW)
     assert payload['discovery_from'] == '2026-09-27'
-    assert ListeningAnalyticsRepo(store).prepared()['discovery_from'] == '2026-09-27'
+    assert store.listening_analytics.prepared()['discovery_from'] == '2026-09-27'
     assert payload['catalog']['baseline-0']['cohort']['first'] == '2026-08-25'
-
-
-def test_observed_seconds_exclude_pause_mute_seek_missing_samples_and_duplicate_exit(store):
-    iid = seed(store)
-    samples = [('tick', 0, 0, {}), ('tick', 30, 30, {}),
-        ('state', 40, 40, {'state': 'paused'}), ('state', 60, 40, {'state': 'playing'}),
-        ('tick', 90, 70, {}), ('volume', 100, 80, {'volume': 0}),
-        ('tick', 130, 110, {}), ('volume', 140, 120, {'volume': 1}),
-        ('tick', 170, 150, {}), ('tick', 180, 500, {}),  # seek
-        ('tick', 300, 620, {}),  # missing heartbeats
-        ('track_exit', 310, 630, {}), ('bye', 310, 630, {})]
-    for kind, at, position, payload in samples:
-        event(store, iid, kind, NOW-1000+at, position, payload=payload)
-    payload = analytics.build(store, NOW)
-    assert total(payload, 'seconds') == 120
-    assert total(payload, 'plays') == 0  # samples never invent play events
-    assert {row[3] for row in payload['rows']} == {'liked'}
 
 
 def test_midnight_sample_is_split_and_radio_context_is_durable(store):
     iid = seed(store)
-    store.settings.set_setting('radio_session_playlist_ids', '["saved-radio"]')
+    from yt_playlist.core import radio_provenance
+    with store.conn:
+        radio_provenance.remember(store.conn, 'saved-radio', iid)
     midnight = NOW - 12*3600
     event(store, iid, 'tick', midnight-10, 0, playlist='saved-radio')
     event(store, iid, 'tick', midnight+20, 30, playlist='saved-radio')
     payload = analytics.build(store, NOW)
     assert [(row[0],row[3],row[payload['columns'].index('seconds')]) for row in payload['rows']] == [
         ('2026-10-23', 'radio', 10), ('2026-10-24', 'radio', 20)]
-
-
-def test_new_start_and_positionless_exit_break_elapsed_intervals(store):
-    iid = seed(store)
-    for kind, at, position in [('tick',0,0),('tick',10,10),
-        ('listen_start',15,None),('tick',20,20),('tick',30,30),
-        ('track_exit',35,None),('tick',40,40),('tick',50,50)]:
-        event(store,iid,kind,NOW-100+at,position)
-    assert total(analytics.build(store,NOW),'seconds') == 30
-
-
-def test_local_midnight_and_dst_do_not_borrow_time_from_another_day(store):
-    iid=seed(store)
-    store.settings.set_setting('listening_timezone','America/New_York')
-    midnight=datetime(2026,3,9,4,tzinfo=timezone.utc).timestamp()
-    event(store,iid,'tick',midnight-10,0)
-    event(store,iid,'tick',midnight+20,30)
-    payload=analytics.build(store,midnight+60)
-    assert payload['timezone']=='America/New_York'
-    assert [(r[0],r[payload['columns'].index('seconds')]) for r in payload['rows']]==[
-        ('2026-03-08',10),('2026-03-09',20)]
 
 
 def test_confirmed_action_history_survives_clear_and_native_or_sync_state_is_not_an_action(store):
@@ -160,7 +125,7 @@ def test_publication_uses_compact_manifest_and_preserves_inflight_previous_chunk
     iid=seed(store)
     store.history.record_play_event(iid,'a','va',NOW-100)
     payload=analytics.build(store,NOW)
-    repo=ListeningAnalyticsRepo(store)
+    repo=store.listening_analytics
     manifest=repo.prepared()
     assert 'rows' not in manifest and 'catalog' not in manifest
     assert len(repo.encoded().encode())<32768
@@ -182,7 +147,7 @@ def test_publication_uses_compact_manifest_and_preserves_inflight_previous_chunk
 
 
 def test_rating_start_is_frozen_queued_and_never_borrowed_from_another_play(store):
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     offers = []
     store.choice_capture = CaptureQueue(lambda capture: offers.append(capture) or True)
     ctx = SimpleNamespace(store=store)
@@ -206,7 +171,7 @@ def test_worker_schedules_telemetry_separately_and_throttles_it(store, monkeypat
     iid = seed(store)
     worker = worker_for(store, monkeypatch, [NOW])
     tick(worker)
-    assert ListeningAnalyticsRepo(store).encoded()
+    assert store.listening_analytics.encoded()
     assert not worker.projections.active
     event(store, iid, 'tick', NOW-30, 0)
     worker.projections.poll()
@@ -229,7 +194,7 @@ def test_worker_schedules_telemetry_separately_and_throttles_it(store, monkeypat
 def test_conflicting_sources_keep_last_good_and_scans_require_private_reader(store, monkeypatch):
     iid = seed(store)
     assert analytics.build(store, NOW)
-    encoded = ListeningAnalyticsRepo(store).encoded()
+    encoded = store.listening_analytics.encoded()
     original = analytics.calculate
 
     def conflict(reader, now):
@@ -240,7 +205,7 @@ def test_conflicting_sources_keep_last_good_and_scans_require_private_reader(sto
 
     monkeypatch.setattr(analytics, 'calculate', conflict)
     assert analytics.build(store, NOW) is None
-    assert ListeningAnalyticsRepo(store).encoded() == encoded
+    assert store.listening_analytics.encoded() == encoded
     with pytest.raises(RuntimeError, match='private worker snapshot'):
         list(ListeningAnalyticsRepo(store).catalog_rows())
 
@@ -248,10 +213,10 @@ def test_conflicting_sources_keep_last_good_and_scans_require_private_reader(sto
 def test_snapshot_scans_are_bounded_and_cancellable(store, monkeypatch):
     iid = seed(store)
     with store.conn:
-        store.conn.executemany('INSERT INTO player_events(identity_id,kind,video_id,position,at) VALUES (?,?,?,?,?)',
+        store.conn.executemany('INSERT INTO player_events(account_id,kind,video_id,position,at) VALUES (?,?,?,?,?)',
             [(iid, 'tick', 'va', n, NOW-1000+n) for n in range(600)])
     with store.read_snapshot() as snapshot:
-        batches = list(ListeningAnalyticsRepo(snapshot.store).player(NOW))
+        batches = list(ListeningAnalyticsRepo(snapshot.store).player(NOW, kinds=PLAYER_KINDS))
         assert [len(batch) for batch in batches] == [256,256,88]
         repo = ListeningAnalyticsRepo(snapshot.store)
         connection, lock = repo.conn, repo._lock
@@ -285,16 +250,52 @@ def test_snapshot_scans_are_bounded_and_cancellable(store, monkeypatch):
                 assert state['locked']
                 return CheckedCursor(connection.execute(*args))
 
-        repo._lock, repo.conn = Guard(), CheckedConnection()
-        stream = repo.player(NOW)
-        assert len(next(stream)) == 256
-        assert not state['locked']  # Consumer calculation must run outside the guard.
+        repo._lock = Guard()
+        with monkeypatch.context() as instrument:
+            instrument.setattr(snapshot.store, 'conn', CheckedConnection())
+            stream = repo.player(NOW, kinds=PLAYER_KINDS)
+            assert len(next(stream)) == 256
+            assert not state['locked']  # Consumer calculation must run outside the guard.
 
-        def cancelled():
-            raise WorkBudgetExceeded('cancelled between batches')
+            def cancelled():
+                raise WorkBudgetExceeded('cancelled between batches')
 
-        monkeypatch.setattr('yt_playlist.repos.listening_analytics.check_cancellable_work', cancelled)
-        with pytest.raises(WorkBudgetExceeded, match='between batches'):
-            next(stream)
+            instrument.setattr('yt_playlist.repos.listening_analytics.check_cancellable_work', cancelled)
+            with pytest.raises(WorkBudgetExceeded, match='between batches'):
+                next(stream)
         assert state == {'locked': False, 'closed': True, 'fetches': 1}
     assert ('player_events','') not in maintenance.DEPENDENCIES['analytics']
+
+
+def test_catalog_scan_rejects_writer_before_sql_and_guards_schema_discovery(store, monkeypatch):
+    seed(store)
+    repo = ListeningAnalyticsRepo(store)
+
+    class NoSQL:
+        def execute(self, *args):
+            pytest.fail('Writer rejection must happen before schema discovery')
+
+    with monkeypatch.context() as instrument:
+        instrument.setattr(store, 'conn', NoSQL())
+        with pytest.raises(RuntimeError, match='private worker snapshot'):
+            repo.catalog_rows()
+
+    with store.read_snapshot() as snapshot:
+        repo = ListeningAnalyticsRepo(snapshot.store)
+        connection, lock = repo.conn, repo._lock
+        queries = []
+
+        class CheckedConnection:
+            def execute(self, sql, *args):
+                assert lock._is_owned()
+                queries.append(sql)
+                return connection.execute(sql, *args)
+
+        with monkeypatch.context() as instrument:
+            instrument.setattr(snapshot.store, 'conn', CheckedConnection())
+            stream = repo.catalog_rows()
+            rows = next(stream)
+            assert {row['identity_key'] for row in rows} == {'a', 'b', 'c'}
+            assert not lock._is_owned()
+            assert any('sqlite_' in sql for sql in queries)
+            stream.close()

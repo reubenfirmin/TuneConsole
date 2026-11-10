@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from yt_playlist.core.work_diagnostics import work_span
-from yt_playlist.core.priority import yield_to_requests
+from yt_playlist.core.priority import waiting_for_worker, yield_to_requests
+from yt_playlist.core.work_errors import WorkBudgetExceeded
 
 _CURRENT_WORK = ContextVar("tuneconsole_activity", default=None)
 _CANCELLATION = ContextVar("tuneconsole_cancellation", default=None)
@@ -21,13 +22,10 @@ class WorkClosing(RuntimeError):
     pass
 
 
-class WorkBudgetExceeded(RuntimeError):
-    """A disposable calculation used its allotted wall time."""
-
-
 @dataclass
 class _CancellationState:
     should_stop: Callable[[], bool]
+    stop_on_shutdown: bool = True
     interrupted: bool = False
 
 
@@ -116,8 +114,8 @@ class Activity:
 
     def start_thread(self, target, *, args=(), kwargs=None, name=None):
         run = self.wrap(name or target.__name__, target, *args, **(kwargs or {}))
-        thread = threading.Thread(target=run, name=name, daemon=True)
         try:
+            thread = threading.Thread(target=run, name=name, daemon=True)
             thread.start()
         except BaseException:
             run.release()
@@ -127,8 +125,9 @@ class Activity:
     async def to_thread(self, target, *args, **kwargs):
         run = self.wrap(getattr(target, "__name__", "request work"), target, *args, **kwargs)
         # Cancellation of an awaiting request must not hide a still-running remote mutation.
-        task = asyncio.create_task(asyncio.to_thread(run))
-        return await asyncio.shield(task)
+        with waiting_for_worker():
+            task = asyncio.create_task(asyncio.to_thread(run))
+            return await asyncio.shield(task)
 
     def start_executor(self):
         with self._condition:
@@ -180,7 +179,8 @@ def check_stopping():
     current = _CURRENT_WORK.get()
     cancellation = _CANCELLATION.get()
     def stopped():
-        return ((current is not None and current[0].closing_reason == "shutdown")
+        return ((current is not None and current[0].closing_reason == "shutdown"
+                 and (cancellation is None or cancellation.stop_on_shutdown))
                 or (cancellation is not None and cancellation.should_stop()))
 
     deadline = _DEADLINE.get()
@@ -188,17 +188,17 @@ def check_stopping():
     if stopped():
         raise WorkClosing("TuneConsole is shutting down; background work stopped.")
     if deadline is not None and time.monotonic() >= deadline:
-        raise WorkBudgetExceeded("Background preparation exhausted its time budget")
+        raise WorkBudgetExceeded("This operation exceeded its time limit. Please try again.")
 
 
 @contextmanager
-def cancellable_work(should_stop):
+def cancellable_work(should_stop, *, stop_on_shutdown=True):
     """Allow disposable background calculations to stop, including inside SQLite.
 
     Cancellation is local to this thread/context. Other admitted work, especially
     remote mutations and their local bookkeeping, keeps draining normally.
     """
-    token = _CANCELLATION.set(_CancellationState(should_stop))
+    token = _CANCELLATION.set(_CancellationState(should_stop, stop_on_shutdown))
     try:
         check_stopping()
         try:
@@ -224,7 +224,11 @@ def work_budget(seconds):
     parent_deadline = _DEADLINE.get()
     token = _DEADLINE.set(min(parent_deadline, deadline) if parent_deadline is not None else deadline)
     try:
-        with cancellable_work(previous.should_stop if previous else lambda: False):
+        # A budget bounds reads used by admitted mutations too. It must not turn
+        # their bookkeeping into disposable shutdown work. Explicit cancellation
+        # scopes keep their original shutdown behavior through nested budgets.
+        with cancellable_work(previous.should_stop if previous else lambda: False,
+                              stop_on_shutdown=previous.stop_on_shutdown if previous else False):
             yield
     finally:
         _DEADLINE.reset(token)

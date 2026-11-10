@@ -2,7 +2,6 @@
 import random
 from tests.mode_fixtures import seed_modes
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec.mode_eval import mode_bandit_stats
 from yt_playlist.rec.mode_surfaces import thompson_mode_scores
 
@@ -20,9 +19,8 @@ def test_picked_mode_outsamples_ignored_mode_on_average():
     # Mode 1: 10/20 picked. Mode 2: 0/20 offered, never picked. Over many seeds the
     # posterior for mode 1 must dominate: this is the bandit actually using acceptance.
     stats = {1: (10, 20), 2: (0, 20)}
-    wins = sum(1 for seed in range(400)
-               if thompson_mode_scores(stats, [1, 2], random.Random(seed))[1]
-               > thompson_mode_scores(stats, [1, 2], random.Random(seed))[2])
+    samples = [thompson_mode_scores(stats, [1, 2], random.Random(seed)) for seed in range(400)]
+    wins = sum(sample[1] > sample[2] for sample in samples)
     assert wins > 360                                    # ~Beta(11,11) vs Beta(1,21)
 
 
@@ -32,14 +30,24 @@ def test_unknown_mode_gets_wide_uniform_prior():
     assert min(vals) < 0.2 and max(vals) > 0.8
 
 
-def test_mode_bandit_stats_counts():
-    s = Store(":memory:")
-    s.init_schema()
+def test_mode_bandit_counts_cutoffs_and_feedback_across_framings(store):
+    s = store
     seed_modes(s,1,2)
     s.modes.log_impressions(100, [(0, 1), (1, 1)], 100.0)
     s.modes.log_impressions(101, [(0, 2)], 101.0)
     s.modes.log_pick(77, 1, 102.0)
     assert mode_bandit_stats(s) == {1: (1, 2), 2: (0, 1)}
+
+    # The displayed menu cannot learn from its own later pick until rotation.
+    s.modes.log_impressions(102, [('fresh', 1), ('explore', 2)], 110.0)
+    s.modes.log_pick(78, 2, 111.0)
+    assert mode_bandit_stats(s, before=s.modes.epoch_started_at(102)) == {1: (1, 2), 2: (0, 1)}
+    assert mode_bandit_stats(s, before=s.modes.epoch_started_at(103)) == {1: (1, 3), 2: (1, 2)}
+
+    # Choice counts pool the same theme across Fresh, wheelhouse and Comfort.
+    s.modes.log_impressions(103, [('wheelhouse', 1), ('explore', 2)], 120.0)
+    s.modes.log_impressions(104, [('comfort', 1), ('explore', 2)], 130.0)
+    assert mode_bandit_stats(s) == {1: (1, 5), 2: (1, 4)}
 
 
 def _mode(mid, size=50, fams=()):
@@ -88,25 +96,3 @@ def test_ignored_theme_loses_exposure_across_the_whole_menu():
     exposure = {mid: sum(mid in menu for menu in menus) for mid in range(6)}
     assert exposure[0] < min(exposure[mid] for mid in range(1, 6)) / 2
     assert exposure[0] > 0  # weak negative evidence reduces exposure, never bans a theme
-
-
-def test_theme_feedback_pools_choices_across_framings():
-    s = Store(":memory:")
-    s.init_schema()
-    seed_modes(s,1,2)
-    for epoch, lane in enumerate(("fresh", "wheelhouse", "comfort")):
-        s.modes.log_impressions(epoch, [(lane, 1), ("explore", 2)], float(epoch))
-    s.modes.log_pick(77, 2, 4.0)
-    assert mode_bandit_stats(s) == {1: (0, 3), 2: (1, 3)}
-
-
-def test_current_menu_feedback_waits_until_the_next_rotation():
-    s = Store(":memory:")
-    s.init_schema()
-    seed_modes(s,1,2)
-    s.modes.log_impressions(0, [("fresh", 1)], 1.0)
-    s.modes.log_pick(76, 1, 2.0)
-    s.modes.log_impressions(1, [("comfort", 1), ("fresh", 2)], 10.0)
-    s.modes.log_pick(77, 2, 11.0)
-    assert mode_bandit_stats(s, before=s.modes.epoch_started_at(1)) == {1: (1, 1)}
-    assert mode_bandit_stats(s, before=s.modes.epoch_started_at(2)) == {1: (1, 2), 2: (1, 1)}

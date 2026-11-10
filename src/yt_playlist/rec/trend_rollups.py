@@ -1,4 +1,4 @@
-"""Background listening-rollup pipeline and atomic publication.
+"""Background listening-rollup calculation and ordered publication.
 
 Calculations use detached rows from a private read snapshot. Monthly statistics and recap
 assembly have separate owners; only this pipeline publishes their result.
@@ -31,9 +31,10 @@ def build(store, now) -> dict | None:
         imported = reader.settings.get_setting("takeout_imported_at")
         payload = _calculate(reader, now)
         encoded = json.dumps(payload)
-        if not snapshot.publish(lambda: store.trends.publish_rollup(
-                first_play, encoded, now, imported)):
+        if not snapshot.is_current():
             return None
+        snapshot.release_reader()
+        store.trends.publish_rollup(first_play, encoded, now, imported)
         return payload
 
 
@@ -43,5 +44,6 @@ def _calculate(store, now) -> dict:
     meta = store.trends.track_meta()
     artist_first = store.trends.first_play_map("artist")
     catalog_artists = store.trends.catalog_artists()
-    months = stats.compute_months(day_counts, meta, artist_first, catalog_artists)
+    genre_axes = store.genres.feature_axes(row[1] for row in meta.values())
+    months = stats.compute_months(day_counts, meta, artist_first, catalog_artists,genre_axes=genre_axes)
     return trend_payload.assemble(store, now, day_counts, meta, months)

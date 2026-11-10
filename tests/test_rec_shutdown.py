@@ -34,14 +34,16 @@ def test_quit_interrupts_rollup_sql_rolls_back_and_releases_waiting_request(
     caplog.set_level(logging.INFO, logger=__name__)
     worker = RecWorker(SimpleNamespace(store=store, work=work,
         logger=logging.getLogger(__name__), now_fn=lambda: 1), debounce_s=0)
-    store.trends.upsert_first_play_min([("track", "saved", 1, 86400, "saved")])
+    store.accounts.upsert_account('Listener','c',None,True)
+    store.history.record_history_plays(1,86400,['saved'],source_timezone='UTC')
+    store.trends.refresh_first_play()
     entered, request_waiting = threading.Event(), threading.Event()
     store.conn.create_function("query_started", 0, lambda: (entered.set(), 0)[1])
 
     # Exercise the real first-play refresh savepoint: cancellation must retain its
     # previously published data, even if SQLite rolls back the savepoint itself.
     if operation == "first-play":
-        monkeypatch.setattr(store.trends, "_rebuild_artist_first_play",
+        monkeypatch.setattr(store.trends.repository, "_replace_first_play",
                             lambda: store.conn.execute(SLOW_SQL).fetchone())
         calculate = store.trends.refresh_first_play
     else:
@@ -114,6 +116,9 @@ def test_shutdown_sql_cancellation_does_not_interrupt_an_admitted_mutation(store
             total = store.conn.execute("WITH RECURSIVE numbers(n) AS (VALUES(0) UNION ALL "
                 "SELECT n+1 FROM numbers WHERE n<10000) SELECT sum(n) FROM numbers").fetchone()[0]
             store.settings.set_setting("saved-after-quit", str(total))
+            # Owner reads use a bounded snapshot. That bound must not cancel
+            # bookkeeping for the mutation already being drained.
+            assert store.discovery.get_discovered_artists() == []
     finally:
         release()
     assert store.settings.get_setting("saved-after-quit") == "50005000"
@@ -140,6 +145,9 @@ def test_ppr_stops_between_iterations():
 
 
 def test_cancelled_embedding_keeps_saved_vectors(store, monkeypatch):
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store, 'old', 'Old song', 'Artist', video_id='old-video')
+    seed_catalog_track(store, 'new', 'New song', 'Artist', video_id='new-video')
     store.rec_model.replace_rec_vectors([("old", np.ones(8, dtype=np.float32).tobytes())])
     work = Activity()
 
@@ -153,13 +161,16 @@ def test_cancelled_embedding_keeps_saved_vectors(store, monkeypatch):
     assert [key for key, _ in store.rec_model.get_rec_vectors()] == ["old"]
 
 
-def test_quit_exits_process_with_sql_holding_database_and_default_executor_waiting(tmp_path):
+def test_quit_exits_process_with_sql_holding_database_and_default_executor_waiting(tmp_path, request):
+    initialized = tmp_path / "initialized"
     ready, output = tmp_path / "ready", tmp_path / "child.log"
     # A separate process exercises Python's executor shutdown too. A thread-only
     # server test misses the hang after Uvicorn logs "Finished server process".
     code = '''
 import asyncio
+import faulthandler
 import logging
+import sqlite3
 import sys
 import threading
 from pathlib import Path
@@ -169,9 +180,14 @@ from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 
 logging.basicConfig(level=logging.INFO)
+faulthandler.dump_traceback_later(45, repeat=True)
 store = Store(":memory:")
 store.init_schema()
 app = create_app(store, lambda: {}, background_work=False)
+print("Loaded Store:", sys.modules[Store.__module__].__file__, flush=True)
+print("Loaded AppServer:", sys.modules[AppServer.__module__].__file__, flush=True)
+print("Loaded create_app:", sys.modules[create_app.__module__].__file__, flush=True)
+print("Runtime:", sys.executable, sys.version, "SQLite", sqlite3.sqlite_version, flush=True)
 worker = app.state.ctx.rec_worker
 worker.enabled = True
 worker.debounce_s = 0
@@ -185,22 +201,42 @@ worker._rebuild = lambda: worker._stage("trend rollups", query)
 class Server(AppServer):
     async def startup(self, sockets=None):
         await super().startup(sockets)
+        Path(sys.argv[3]).write_text("initialized")
+        # Start the contention exercise only after the parent acknowledges that
+        # real schema/app initialization has completed within its separate bound.
+        assert await asyncio.to_thread(sys.stdin.readline) == "start\\n"
+        faulthandler.dump_traceback_later(5, repeat=True)
         worker.trigger()
         assert await asyncio.to_thread(entered.wait, 5)
         # Simulate a page request waiting for the database lock in the default
         # executor. asyncio cancellation alone cannot stop that thread.
-        asyncio.create_task(asyncio.to_thread(store.settings.get_setting, "queued"))
-        await asyncio.sleep(0.05)
+        request_started = threading.Event()
+        def waiting_request():
+            request_started.set()
+            return store.settings.get_setting("queued")
+        request = asyncio.create_task(asyncio.to_thread(waiting_request))
+        assert await asyncio.to_thread(request_started.wait, 5)
+        assert not request.done()
+        faulthandler.cancel_dump_traceback_later()
         Path(sys.argv[1]).write_text("ready")
 
 Server(uvicorn.Config(app, host="127.0.0.1", port=0,
     timeout_graceful_shutdown=0.1, log_config=None)).run()
 '''
     with output.open("w") as logs:
-        child = subprocess.Popen([sys.executable, "-c", code, str(ready), SLOW_SQL],
+        child = subprocess.Popen([sys.executable, "-c", code, str(ready), SLOW_SQL, str(initialized)],
+                                 stdin=subprocess.PIPE, text=True,
                                  stdout=logs, stderr=subprocess.STDOUT,
                                  cwd=Path(__file__).resolve().parents[1])
         try:
+            # Fresh schema validation runs once in this new interpreter. Its
+            # setup budget must not consume the lock-contention/shutdown budget.
+            deadline = time.monotonic() + 60
+            while not initialized.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert initialized.exists(), output.read_text()
+            child.stdin.write("start\n")
+            child.stdin.flush()
             deadline = time.monotonic() + 10
             while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
                 time.sleep(.02)
@@ -212,7 +248,9 @@ Server(uvicorn.Config(app, host="127.0.0.1", port=0,
             if child.poll() is None:
                 child.kill()
                 child.wait(timeout=5)
+            child.stdin.close()
     logged = output.read_text()
+    request.node.user_properties.append(("child_log", logged))
     assert "rec worker stopped for shutdown" in logged
     assert "Application shutdown complete" in logged
     assert "did not stop" not in logged

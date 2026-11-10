@@ -1,5 +1,7 @@
 """Temporary, explicit sound preferences for Home mixes, applied before track selection."""
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from yt_playlist.rec import mix_tuning, musical_character
 from yt_playlist.rec.ordering import _field
@@ -7,6 +9,53 @@ from yt_playlist.rec.ordering import _field
 SETTING = "home_mix_vibe"
 VERSION = 'musical-vibes-5'
 FIT_STEP = .04
+_NATURAL = ContextVar('onboarding_natural_mix', default=False)
+_AUTHORIZED = ContextVar('authorized_vibe_request', default=None)
+_ACCESS = ContextVar('vibe_access_policy', default=None)
+_access = None
+
+
+def configure_access(check):
+    """Supply the journey policy from the application or worker composition root.
+
+    Ranking is also used by the journey's natural-menu readiness checks. It
+    cannot import that higher-level service without making preparation depend
+    on its own serving gate.
+    """
+    global _access
+    _access = check
+
+
+@contextmanager
+def access_policy(check):
+    """Use the request's live session when checking its remembered selection."""
+    token = _ACCESS.set(check)
+    try:
+        yield
+    finally:
+        _ACCESS.reset(token)
+
+
+@contextmanager
+def natural():
+    """Inspect ordinary preparation without a remembered, possibly locked Vibe."""
+    token = _NATURAL.set(True)
+    try:
+        yield
+    finally:
+        _NATURAL.reset(token)
+
+
+@contextmanager
+def authorized(store, preset=None):
+    """Reuse this operation's completed journey guard while rendering its result."""
+    if preset is not None and preset != '' and preset not in PRESETS:
+        raise ValueError('Unknown authorized Vibe')
+    token = _AUTHORIZED.set((getattr(store, '_evidence_source', store), preset))
+    try:
+        yield
+    finally:
+        _AUTHORIZED.reset(token)
 
 # Listening purposes, with provisional cross-genre sound preferences. The full
 # descriptions also define the internal model-development labeling task; those
@@ -58,9 +107,22 @@ def axis_fit(preset, name, value):
 
 
 def current(store, now):
+    if _NATURAL.get():
+        return ''
+    authorized = _AUTHORIZED.get()
+    same_operation = authorized is not None and authorized[0] is getattr(store, '_evidence_source', store)
+    if same_operation and authorized[1] is not None:
+        return authorized[1]
     mix_tuning.expire(store, now)
     value = store.settings.get_setting(SETTING)
-    return value if value in PRESETS else ""
+    if value not in PRESETS:
+        return ''
+    if same_operation:
+        return value
+    check = _ACCESS.get() or _access
+    if check is None:
+        raise RuntimeError('Vibe access policy has not been configured')
+    return value if check(store, now) else ''
 
 
 def affinity(item, preset, profiles=None):
@@ -74,8 +136,11 @@ def affinity(item, preset, profiles=None):
 
 def heuristic_affinity(profile, preset):
     """The original fixed-denominator fallback, also used during preparation."""
+    weights = PRESETS[preset]["weights"]
+    if not profile:
+        return .5
     total = evidence = 0.0
-    for name, weight in PRESETS[preset]["weights"].items():
+    for name, weight in weights.items():
         value, support = musical_character.dimension({'musical': profile}, name)
         if value is not None:
             # Intensity already contains conservative shrinkage. A midpoint

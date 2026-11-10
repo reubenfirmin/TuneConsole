@@ -1,19 +1,55 @@
-"""Identity setup, validation and reauthentication messages."""
+"""Account setup, validation and reauthentication messages."""
 from urllib.parse import parse_qs, urlsplit
+from types import SimpleNamespace
+from unittest.mock import Mock
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
 
+import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.setup_support import _FakeRuntime
-def test_home_format_setting_is_in_setup_and_persists(store):
-    c = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1.0), base_url='http://127.0.0.1')
-    html = c.get('/setup?tab=home').text
-    assert 'id="setup-home-format"' in html
-    assert 'hx-post="/home/format"' in html
-    assert 'Start Home with' not in c.get('/taste/panels/recommendations').text
-    assert c.post('/home/format', data={'format': 'radio'}).status_code == 204
-    assert '<option value="radio" selected>' in c.get('/setup?tab=home').text
-    assert c.post('/home/format', data={'format': 'invalid'}).status_code == 400
-    assert store.settings.get_setting('home_format') == 'radio'
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def setup_routes_only(monkeypatch):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, setup, taste
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, setup, taste)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+
+
+def test_home_format_setting_is_in_setup_and_persists(
+        store, unlocked_home_controls, without_metadata_providers, monkeypatch):
+    from yt_playlist.rec import account_growth
+
+    # Availability is a completed input here; growth tests own preparation and
+    # unlock conditions. Exercise the real setting handlers and rendered forms.
+    growth = account_growth.view(store, 1000)
+    growth['ready_formats'] = dict.fromkeys(('mixes', 'albums', 'radio'), True)
+    monkeypatch.setattr(account_growth, 'view', lambda *_args, **_kwargs: growth)
+    with TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000.0),
+                    base_url='http://127.0.0.1') as c:
+        assert all(c.get('/home/growth').json()['ready_formats'].values())
+        html = c.get('/setup?tab=home').text
+        assert 'class="setup-home-formats"' in html
+        assert 'Follow my listening' not in html
+        assert 'hx-post="/home/format"' in html
+        assert 'Start Home with' not in c.get('/taste/panels/recommendations').text
+        assert c.post('/home/format', data={'format': 'radio'}).status_code == 204
+        assert 'name="format" value="radio" checked' in c.get('/setup?tab=home').text
+        assert c.post('/home/format', data={'format': 'invalid'}).status_code == 400
+        assert store.settings.get_setting('home_format') == 'radio'
 
 
 def test_unconfigured_home_still_renders(store):
@@ -108,18 +144,35 @@ def test_setup_page_alpine_attr_well_formed(store):
 
 # --- streaming sync (background job + SSE) ---
 
-def test_saving_identity_definitions_does_not_clear_expired_session(store):
-    rt = _FakeRuntime(store, configured=True)
-    iid = store.identities.upsert_identity("main", "browser.json", None, True)
-    store.settings.set_setting("last_sync_at", "1.0")
-    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
-    app.state.ctx.flag_auth_expired(iid, "Main")
-    c = TestClient(app, base_url="http://127.0.0.1")
+def test_saving_identity_definitions_does_not_clear_expired_session():
+    from fastapi import FastAPI
+    from yt_playlist.controllers.accounts import Accounts
+    from yt_playlist.repos.accounts import AccountRepo
+    from yt_playlist.web.context import Ctx
+    from yt_playlist.web.jobs import SyncJobs
+    from yt_playlist.web.routes import setup
 
-    r = c.post("/setup", data={"label": ["main"],
-                               "brand_account_id": [""], "master": "0"}, follow_redirects=False)
+    iid = 1
+    repository = Mock(spec_set=AccountRepo)
+    repository.has_auth_state.return_value = True
+    repository.auth_expirations.return_value = {}
+    repository.flag_auth_expiration.return_value = {iid: 'Main'}
+    repository.get_accounts.return_value = [SimpleNamespace(id=iid)]
+    store = SimpleNamespace(accounts=Accounts(
+        repository, None, paused=lambda: False, maintenance_accounts=lambda: None))
+    rt = _FakeRuntime(store, configured=True)
+    ctx = Ctx(store, rt.clients, lambda: 1.0, Mock(), SyncJobs(), setup=rt)
+    ctx.flag_auth_expired(iid, 'Main')
+    app = FastAPI()
+    app.include_router(setup.build(ctx))
+    with TestClient(app) as c:
+        r = c.post("/setup", data={"label": ["main"],
+                                   "brand_account_id": [""], "master": "0"}, follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"].startswith("/setup?tab=identities&flash=")
-    assert app.state.ctx.auth_expired == {iid: "Main"}
+    assert ctx.auth_expired == {iid: "Main"}
+    assert rt.applied[0]['label'] == 'main'
+    repository.flag_auth_expiration.assert_called_once_with(iid, 'Main')
+    repository.clear_auth_expirations.assert_not_called()
 
 

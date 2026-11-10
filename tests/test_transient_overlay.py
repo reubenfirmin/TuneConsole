@@ -1,29 +1,31 @@
 """Tests for Task 8: transient facet leans wired into _axis_weights_for / explore_for_you."""
 from yt_playlist.rec import scoring, surfaces
 from tests import model_support
+from tests.repository_mock_support import no_database, transient_store
 from yt_playlist.util.matching import identity_key
 
 
-def test_axis_overlay_lowers_disfavored_facet(store):
-    a = store.tracks.upsert_track("v1", "House One", "DJ A", None, None, 1)
-    store.tracks.set_track_genre(a, "deep house")
-    b = store.tracks.upsert_track("v2", "Jazz One", "Sax B", None, None, 1)
-    store.tracks.set_track_genre(b, "jazz")
+def test_axis_overlay_lowers_disfavored_facet(transient_store):
+    store = transient_store
     ka, kb = identity_key("House One", "DJ A"), identity_key("Jazz One", "Sax B")
-    store.rec_signals.record_mood([ka], -2, now=10.0)                      # "less" house, a lot
+    store.rec_query.track_genres.return_value = {ka: 'deep house', kb: 'jazz'}
+    store.rec_query.track_artists.return_value = {ka: 'DJ A', kb: 'Sax B'}
+    store.genres.feature_axes.return_value = {
+        'deep house': ('house', 'deep house'), 'jazz': ('jazz', None)}
+    store.rec_signals.recent_mood_events.return_value = [(10., -2, [ka])]
     mult = scoring._axis_weights_for(store, [ka, kb], now=10.0)
     assert mult is not None and mult[ka] < mult[kb]            # house ranked below jazz
 
 
-def test_axis_weights_none_when_fully_neutral(store):
-    a = store.tracks.upsert_track("v1", "T", "A", None, None, 1)
+def test_axis_weights_none_when_fully_neutral(transient_store):
+    store = transient_store
     k = identity_key("T", "A")
     assert scoring._axis_weights_for(store, [k], now=10.0) is None   # no weights, no leans
 
 
 def test_explore_lane_respects_transient_facet_lean(store):
     from yt_playlist.rec import embed
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     house, jazz = [], []
     for i in range(6):
         h = store.tracks.upsert_track(f"h{i}", f"H{i}", f"DJ{i}", None, None); store.tracks.set_track_genre(h, "deep house"); house.append(h)

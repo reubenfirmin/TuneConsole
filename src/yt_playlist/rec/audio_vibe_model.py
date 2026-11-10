@@ -13,10 +13,10 @@ from pathlib import Path
 from statistics import median
 
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
-from yt_playlist.core import features
+from yt_playlist.core import fao, features
 from yt_playlist.core import audio_vibe_metadata as metadata_features
 from yt_playlist.core import audio_embedding
-from yt_playlist.rec import audio_vibe_external
+from yt_playlist.rec import audio_vibe_cruise, audio_vibe_energize, audio_vibe_external, audio_vibe_focus, audio_vibe_relax, audio_vibe_release, audio_vibe_uplift
 
 SCHEMA = 1
 LEGACY_FEATURE_VERSION = 'audio-vibe-corrections-1'
@@ -163,7 +163,7 @@ def validate(model):
 def _load(path, modified, size):
     if size > 262144:
         raise ValueError('Listening model exceeds 256 KiB')
-    with Path(path).open('rb') as stream:
+    with fao.read(path, max_bytes=262144) as stream:
         content = stream.read(262145)
     if len(content) > 262144:
         raise ValueError('Listening model exceeds 256 KiB')
@@ -190,8 +190,8 @@ def identity():
     path = configured_path()
     if path:
         try:
-            stat = Path(path).stat()
-            return _load(path, stat.st_mtime_ns, stat.st_size)[1]
+            info = fao.read(path).info
+            return _load(path, info.identity, info.logical_bytes)[1]
         except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
             pass
     return 'heuristic'
@@ -203,8 +203,8 @@ def apply(samples, prediction, metadata=None):
     if not path:
         return prediction
     try:
-        stat = Path(path).stat()
-        model, digest = _load(path, stat.st_mtime_ns, stat.st_size)
+        info = fao.read(path).info
+        model, digest = _load(path, info.identity, info.logical_bytes)
         external = model.get('format') == audio_vibe_external.FORMAT
         if external:
             if prediction.get('taxonomy_version') != model['taxonomy_version']:
@@ -247,12 +247,20 @@ def apply(samples, prediction, metadata=None):
         matches = matches or ranking[:1]
         if model['training'].get('objective') in ('acceptable_nll', 'acceptable_libra'):
             matches, method = ranking[:1], 'top_ranked'
-        return {**prediction, 'vibe': matches[0]['vibe'], 'vibes': [row['vibe'] for row in matches],
+        result = {**prediction, 'vibe': matches[0]['vibe'], 'vibes': [row['vibe'] for row in matches],
                 'label': ' · '.join(row['label'] for row in matches), 'ranking': ranking,
                 'selection_method': method, 'score_margin': round(ranking[0]['score'] - ranking[1]['score'], 5),
                 'model': {'sha256': digest, 'feature_version': model['feature_version'],
                           'trained_labels': sorted(trained_labels),
                           'training_songs': model['training']['songs']},
                 'evidence': prediction['evidence'] + [evidence]}
+        if external:
+            result = audio_vibe_cruise.apply(samples, result)
+            result = audio_vibe_release.apply(samples, result)
+            result = audio_vibe_relax.apply(samples, result)
+            result = audio_vibe_uplift.apply(samples, result)
+            result = audio_vibe_energize.apply(samples, result)
+            result = audio_vibe_focus.apply(samples, result)
+        return result
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         return prediction

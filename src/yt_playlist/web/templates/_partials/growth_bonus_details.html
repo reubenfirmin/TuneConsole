@@ -1,0 +1,27 @@
+<div x-show="selectedNode.id === 'takeout'">
+  <p class="growth-small">Your past listening · Google Takeout</p>
+  <p>Add the music you’ve played on YouTube Music before, so TuneConsole can get to know you sooner. It also learns from what you play now.</p>
+</div>
+<div x-show="selectedNode.id === 'lastfm'">
+  <p class="growth-small">Richer music details · Last.fm</p>
+  <p>Last.fm has better genre labels than the free, public sources we use by default. You can register for a free API key, a code that lets TuneConsole ask Last.fm about songs. Those genre labels help improve your recommendations over time.</p>
+  <p>To find genres, TuneConsole sends Last.fm song and artist names. It doesn’t post what you listen to on your Last.fm profile.</p>
+</div>
+<div x-show="selectedNode.id === 'deepseek'">
+  <p class="growth-small">Stories behind the records · DeepSeek</p>
+  <p>DeepSeek can write a short AI introduction to an album when you open it.</p>
+  <p>It’s very cheap: with the default daily limit, these introductions should cost well under $1 a month. You can set your own daily limit in Setup.</p>
+  <p>Its API key is a code that lets TuneConsole use your DeepSeek account. We send only the artist, album title and year.</p>
+</div>
+<div x-show="selectedNode.id === 'milestones'">
+  <p>Save a playlist, heart songs and keep listening to earn these optional achievements.</p>
+  <ul class="growth-achievements">
+    <template x-for="achievement in growth.achievements" :key="achievement.id"><li>
+      <strong x-text="achievement.label"></strong>
+      <span class="tag" x-text="achievement.complete ? 'Earned' : Math.min(achievement.count, achievement.goal) + ' of ' + achievement.goal"></span>
+      <p x-text="achievement.detail"></p>
+      <a class="btn btn-primary" :href="({playlist: '/#directions', likes: '/playlists', audio: '/playlists'})[achievement.id]"
+         x-text="({playlist: 'Find a mix to save', likes: 'Find songs to rate', audio: 'Find music to play'})[achievement.id]"></a>
+    </li></template>
+  </ul>
+</div>

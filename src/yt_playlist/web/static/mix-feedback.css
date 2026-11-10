@@ -1,8 +1,4 @@
-/* transient mood feedback panel (post-save card + generated playlist page) */
-.mood-panel { margin-top: .9375rem; padding: .875rem .9375rem; border: 1px dashed var(--border-2);
-  border-radius: var(--radius-sm); background: var(--accent-soft); }
-.mood-q { display: block; font-weight: 650; font-size: var(--type-body); color: var(--text); }
-.mood-btns { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.6rem 0 0.4rem; }
+/* Mood reactions in the generated playlist feedback panel. */
 .mood-btn {
   --mood-color: var(--mix-tune-hover);
   --mood-edge: var(--mix-tune-hover-ink);
@@ -183,7 +179,6 @@
   65% { opacity: .7; }
   100% { opacity: 0; transform: translate(calc(-50% + var(--tear-drift)), 3.25rem) scale(.65, 1.2) rotate(12deg); }
 }
-.mood-note { color: var(--dim); font-size: var(--type-xs); margin: 0.3rem 0 0; line-height: 1.4; }
 
 /* Generated playlist feedback: quick reactions above, optional tuning below. */
 .fb-panel { --fb-supporting: color-mix(in srgb, var(--text) 72%, var(--surface-inset));
@@ -291,7 +286,6 @@
 @media (max-width: 44rem) {
   .fb-facets { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
 }
-.mood-done { background: color-mix(in srgb, var(--teal-muted) 10%, transparent); border-style: solid; border-color: transparent; }
 .status-label--success { color: var(--ok-2); }
 .status-label--error { color: var(--danger-3); }
 

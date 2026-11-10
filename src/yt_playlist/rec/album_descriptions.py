@@ -13,8 +13,8 @@ def identity(album):
     return hashlib.sha256(json.dumps(fields, ensure_ascii=False).encode()).hexdigest()
 
 
-def settings(store, now):
-    return deepseek.settings(store, now)
+def settings(store, now, *, typed=None):
+    return deepseek.settings(store, now, paid=typed)
 
 
 def _description(record):
@@ -25,17 +25,44 @@ def _description(record):
             'kind': 'generated', 'acquisition': 'automatic', 'model': record['model']}
 
 
-def read(store, album):
+def _typed_cached(store, album):
+    owner = store.album_descriptions
+    album_id = owner.album_id(album)
+    saved = owner.successful_result(album_id) if album_id is not None else None
+    # This is an unresolved historical lookup, never an identity association or
+    # permission to make a new paid request using an artist/title fingerprint.
+    legacy = owner.legacy_result(identity(album))
+    if saved and saved.get('description'):
+        return album_id, saved
+    if legacy and legacy.get('description'):
+        return album_id, legacy
+    policy = owner.policy_version(deepseek.description_policy())
+    return album_id, (owner.cached(album_id, policy) if album_id is not None else None) or legacy
+
+
+def read(store, album, *, typed=None):
     """Request-safe read; never starts a generation or reserves budget."""
-    return _description(store.rec_proposals.get_proposals('album_description:' + identity(album)))
+    typed = getattr(store, '_paid_descriptions', False) if typed is None else typed
+    record = (_typed_cached(store, album)[1] if typed else
+              store.rec_proposals.get_proposals('album_description:' + identity(album)))
+    return _description(record)
 
 
-def get(store, album, now, *, now_fn=None):
+def get(store, album, now, *, now_fn=None, typed=None):
     """Read durable copy even when disabled; reserve before any paid network work."""
-    album_id = identity(album)
-    cached = store.rec_proposals.get_proposals('album_description:' + album_id)
+    typed = getattr(store, '_paid_descriptions', False) if typed is None else typed
+    if typed:
+        album_id, cached = _typed_cached(store, album)
+    else:
+        album_id = identity(album)
+        cached = store.rec_proposals.get_proposals('album_description:' + album_id)
     if _description(cached):
         return _description(cached), cached
+    if typed:
+        if cached and cached.get('status') in ('unknown', 'invalid_response') and cached.get('retry_at', 0) > now:
+            return None, cached
+        if album_id is None:
+            return None, {'status': 'unresolved_album'}
 
     def project(send):
         result = deepseek.describe(album, send)
@@ -45,5 +72,6 @@ def get(store, album, now, *, now_fn=None):
             record.update(status='unknown', retry_at=finished_at + 7 * 86400)
         return record
 
-    record = deepseek.generate(store, album_id, project, now, now_fn=now_fn)
+    kwargs = {'policy': deepseek.description_policy()} if typed else {}
+    record = deepseek.generate(store, album_id, project, now, now_fn=now_fn, **kwargs)
     return _description(record), record

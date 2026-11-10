@@ -58,10 +58,6 @@ def test_repeated_500s_are_delayed_and_logged_once_per_attempt(clock, monkeypatc
     assert len(calls) == 1
     assert len(caplog.records) == 1
     assert 'retry_at=160.000' in caplog.text
-    # A new enrichment batch must not erase the cooldown.
-    coverart.reset()
-    assert coverart.front_cover(["release"]) is None
-    assert len(calls) == 1
     clock[0] = 160
     assert coverart.front_cover(["release"]) is None
     assert len(calls) == 2

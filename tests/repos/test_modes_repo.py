@@ -5,13 +5,6 @@ import pytest
 from yt_playlist.core.store import Store
 
 
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
-
-
 def _mode(mid, label, fams, vec, size, reps):
     return {"mode_id": mid, "label": label, "families": fams,
             "centroid": np.asarray(vec, dtype=np.float32), "size": size, "rep_keys": reps}
@@ -110,6 +103,7 @@ def test_genres_and_meta_for(store):
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,'a|x','Song A','Artist A',genre='house')
     seed_catalog_track(store,'b|y','Song B','Artist B',genre='')
-    assert store.modes.genres_for(["a|x", "b|y", "c|z"]) == {"a|x": "house"}
-    meta = store.modes.meta_for(["a|x"])
-    assert meta["a|x"] == {"title": "Song A", "artist": "Artist A"}
+    assert store.modes.genres_for(["a|x", "b|y", "c|z"]) == {"a|x": "House"}
+    assert store.modes.meta_for(["a|x", "b|y", "c|z"]) == {
+        "a|x": {"title": "Song A", "artist": "Artist A"},
+        "b|y": {"title": "Song B", "artist": "Artist B"}}

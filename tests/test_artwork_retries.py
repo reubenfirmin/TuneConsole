@@ -20,7 +20,6 @@ class Provider:
     name = "musicbrainz"
     def __init__(self): self.calls = []
     def available(self, store): return True
-    def reset(self): pass
     def tripped(self): return False
     def probe(self, track, store):
         self.calls.append(track["id"])
@@ -43,7 +42,7 @@ def install_archive(monkeypatch, clock, fetch):
     return iao
 
 
-def test_transient_art_failure_recovers_after_restart_without_repeating_complete_metadata(tmp_path, monkeypatch):
+def test_transient_art_failure_recovers_after_restart_without_repeating_complete_metadata(tmp_path, monkeypatch, consumer_store, request):
     clock = [1000.0]
     calls, recovered = [], [False]
     def fetch(url):
@@ -53,7 +52,7 @@ def test_transient_art_failure_recovers_after_restart_without_repeating_complete
         return {"images":[{"front":True,"image":"https://cover.example/real.jpg"}]}
     install_archive(monkeypatch, clock, fetch)
     path = tmp_path / "art.db"
-    store = Store(path); store.init_schema()
+    store = consumer_store(path)
     tid = store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     provider = Provider()
     w = worker(store, clock, provider)
@@ -65,7 +64,9 @@ def test_transient_art_failure_recovers_after_restart_without_repeating_complete
     store.conn.close()
     # Simulate a new process: persistent schedule survives, while the response cache does not.
     install_archive(monkeypatch, clock, fetch)
-    store = Store(path); store.init_schema()
+    store = Store(path)
+    request.addfinalizer(store.conn.close)
+    store.init_schema()
     w = worker(store, clock, provider)
     clock[0] = 1059
     assert w.drain_once() == 0
@@ -135,7 +136,7 @@ def test_retry_preserves_useful_cover_added_after_failure(store, monkeypatch):
     assert store.enrichment_state.artwork_retry_status()["count"] == 0
 
 
-def test_stale_cover_applied_by_waterfall_stays_pending_and_refreshes_after_restart(tmp_path, monkeypatch):
+def test_stale_cover_applied_by_waterfall_stays_pending_and_refreshes_after_restart(tmp_path, monkeypatch, consumer_store, request):
     from yt_playlist.enrich.artwork import retry_due
     clock, calls, recovered = [1000.0], [], [False]
 
@@ -148,7 +149,7 @@ def test_stale_cover_applied_by_waterfall_stays_pending_and_refreshes_after_rest
     assert coverart.lookup(['release']).status == 'found'
     clock[0] += COVER_TTL
     path = tmp_path / 'stale-art.db'
-    store = Store(path); store.init_schema()
+    store = consumer_store(path)
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', None, 200)
     provider = Provider()
     assert worker(store, clock, provider).drain_once() == 1
@@ -158,7 +159,9 @@ def test_stale_cover_applied_by_waterfall_stays_pending_and_refreshes_after_rest
     assert len(calls) == 2
     store.conn.close()
     install_archive(monkeypatch, clock, fetch)
-    store = Store(path); store.init_schema()
+    store = Store(path)
+    request.addfinalizer(store.conn.close)
+    store.init_schema()
     try:
         clock[0] += 59
         assert retry_due(store, lambda: clock[0]) == 0

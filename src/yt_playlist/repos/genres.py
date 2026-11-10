@@ -1,110 +1,260 @@
 """Canonical genre identities, sourced labels, and the user's enabled vocabulary."""
-import json
+from contextlib import contextmanager
 
-from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.util import genre_catalog
+from yt_playlist.repos.base import Repo, lookup_read, synchronized, snapshot_read
+from yt_playlist.core import genre_identity, recommendation_invalidation as invalidation, taste_axes
 
 
 class GenreRepo(Repo):
+    @contextmanager
+    def transaction(self):
+        with self._lock:
+            with self.conn.atomic(join=True):
+                yield
+
     @synchronized
-    def configure_catalog(self, *, reset=False):
-        """Seed/upgrade in one transaction, preserving additions and disabled old defaults.
+    def taxonomy_facts(self):
+        families = dict(self.conn.execute('SELECT key,name FROM genre_family'))
+        redirects = (dict(self.conn.execute('SELECT retired_key,genre_key FROM genre_redirects'))
+                     if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone()
+                     else {})
+        return {'families': families, 'redirects': redirects,
+                'aliases': [tuple(row) for row in self.conn.execute('SELECT genre_key,label,source FROM genre_alias')],
+                'genres': [tuple(row) for row in self.conn.execute(
+                    'SELECT key,name,family_key FROM genre_catalog ORDER BY key')]}
 
-        Keep the old text whitelist as the enabled slice for existing callers and saved songs.
-        The catalog retains disabled identities, so removing a primary name cannot resurrect
-        that genre through one of its aliases. No saved track or taste key is rewritten.
-        """
-        def setting(key):
-            row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-            return row[0] if row else None
+    @lookup_read
+    def axis_matches(self, labels):
+        return genre_identity.axis_match_rows(self.conn, labels)
 
-        records, labels = genre_catalog.catalog()
-        defaults = genre_catalog.builtin_names()
-        current = self.get_genre_whitelist()
-        seeded = setting("genres_seeded")
-        revision = setting("genre_catalog_revision")
-        upgrading = revision != genre_catalog.REVISION
-        if reset or not (seeded or current):
-            target = defaults
-        elif upgrading and current:
-            previous = setting("genre_defaults")
-            baseline = json.loads(previous) if previous is not None else genre_catalog.legacy_names()
-            previous_keys = {genre_catalog.normalize(genre_catalog.canonical_name(n)) for n in baseline}
-            active_keys = {genre_catalog.normalize(genre_catalog.canonical_name(n)) for n in current}
-            blocked = set()
-            if previous is None:
-                # Splitting a mistaken old alias must not bypass a user's old removal.
-                for name, aliases in genre_catalog.legacy_entries():
-                    if genre_catalog.normalize(genre_catalog.canonical_name(name)) not in active_keys:
-                        blocked.update(genre_catalog.normalize(genre_catalog.canonical_name(a))
-                                       for a in [name, *aliases])
-            target = [*current, *(n for n in defaults
-                                  if genre_catalog.normalize(n) not in previous_keys | blocked)]
-        else:
-            target = current
-        canonical = {}
-        for name in target:
-            name = genre_catalog.canonical_name(name)
-            canonical.setdefault(genre_catalog.normalize(name), name)
-        target = sorted(canonical.values(), key=str.casefold)
+    @lookup_read
+    def family_members(self, families):
+        """Current, unretired genre identities in display-name order per family."""
+        families = list(dict.fromkeys(families))
+        result = {family: [] for family in families}
+        redirected = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone()
+        retired = ('AND NOT EXISTS(SELECT 1 FROM genre_redirects r WHERE r.retired_key=c.key) '
+                   if redirected else '')
+        for offset in range(0, len(families), 200):
+            page = families[offset:offset + 200]
+            for family, key in self.conn.execute(
+                    'SELECT c.family_key,c.key FROM genre_catalog c WHERE c.family_key IN ('
+                    + ','.join('?' for _ in page) + ') ' + retired + 'ORDER BY c.name COLLATE NOCASE', page):
+                result[family].append(key)
+        return result
 
-        with self.conn:
-            if upgrading:
-                self.conn.executemany(
-                    "INSERT OR REPLACE INTO genre_family(key,name) VALUES (?,?)",
-                    list(genre_catalog.family_labels().items()))
-                self.conn.executemany(
-                    "INSERT INTO genre_catalog(key,name,family_key,source,family_source,description) "
-                    "VALUES (?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
-                    "name=excluded.name,family_key=excluded.family_key,source=excluded.source,"
-                    "family_source=excluded.family_source,description=excluded.description",
-                    [(r["key"], r["name"], r["family"], r["source"], r["family_source"],
-                      r.get("description", "")) for r in records.values()])
-                self.conn.execute("DELETE FROM genre_alias WHERE source != 'custom'")
-                self.conn.executemany(
-                    "INSERT OR REPLACE INTO genre_alias(label_key,label,genre_key,source) VALUES (?,?,?,?)",
-                    [(key, label, genre, source) for key, (genre, label, source) in labels.items()])
-                self.conn.execute("DELETE FROM genre_external_id WHERE provider='musicbrainz'")
-                self.conn.executemany(
-                    "INSERT INTO genre_external_id(provider,external_id,genre_key) VALUES ('musicbrainz',?,?)",
-                    [(r["mbid"], r["key"]) for r in records.values() if r["mbid"]])
-            for key, name in canonical.items():
-                if key not in records:
-                    self.conn.execute(
-                        "INSERT OR IGNORE INTO genre_catalog(key,name,source) VALUES (?,?,'custom')",
-                        (key, name))
-                    self.conn.execute(
-                        "INSERT OR IGNORE INTO genre_alias(label_key,label,genre_key,source) "
-                        "VALUES (?,?,?,'custom')", (key, name, key))
-            if target != current:
-                self.conn.execute("DELETE FROM genre_whitelist")
-                self.conn.executemany("INSERT INTO genre_whitelist(name) VALUES (?)", [(n,) for n in target])
-            self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
-                ("genres_seeded", "1"), ("genre_catalog_revision", genre_catalog.REVISION),
-                ("genre_defaults", json.dumps(defaults)),
-            ])
+    @synchronized
+    def current_key(self, key):
+        return genre_identity.current_key(self.conn, key)
+
+    @synchronized
+    def genre_name(self, key):
+        row = self.conn.execute('SELECT name FROM genre_catalog WHERE key=?', (key,)).fetchone()
+        return row[0] if row else None
+
+    @lookup_read
+    def label_matches(self, label, normalized):
+        return {genre_identity.current_key(self.conn, row[0]) for row in self.conn.execute(
+            'SELECT key FROM genre_catalog WHERE key=? OR name=? COLLATE NOCASE '
+            'UNION SELECT genre_key FROM genre_alias WHERE label_key=? OR label=? COLLATE NOCASE',
+            (label, label, normalized, label))}
+
+    @synchronized
+    def insert_custom(self, key, name):
+        self.conn.execute("INSERT INTO genre_catalog(key,name,source) VALUES (?,?,'custom')", (key, name))
+        self.conn.execute("INSERT INTO genre_alias(label_key,label,genre_key,source) VALUES (?,?,?,'custom')",
+                          (key, name, key))
+
+    @synchronized
+    def alias_conflicts(self, label, key):
+        rows = self.conn.execute('SELECT key FROM genre_catalog WHERE (key=? OR name=? COLLATE NOCASE) '
+                                 'AND key<>?', (label, label, key))
+        return any(genre_identity.current_key(self.conn, row[0]) != key for row in rows)
+
+    @synchronized
+    def rename(self, key, name, *, old_label_key, old_label):
+        self.conn.execute("INSERT INTO genre_alias(label_key,label,genre_key,source) VALUES (?,?,?,'custom') "
+                          'ON CONFLICT(label_key) DO NOTHING', (old_label_key, old_label, key))
+        self.conn.execute('UPDATE genre_catalog SET name=? WHERE key=?', (name, key))
+
+    @synchronized
+    def save_alias(self, label_key, label, key):
+        self.conn.execute("INSERT INTO genre_alias(label_key,label,genre_key,source) VALUES (?,?,?,'custom') "
+            "ON CONFLICT(label_key) DO UPDATE SET label=excluded.label,genre_key=excluded.genre_key,source='custom'",
+            (label_key, label, key))
+
+    @synchronized
+    def save_family(self, key, family_key):
+        self.conn.execute("UPDATE genre_catalog SET family_key=?,family_source='custom' WHERE key=?", (family_key, key))
+
+    @synchronized
+    def invalidate(self):
+        invalidation.catalog_changed(self.conn)
+
+    @synchronized
+    def genre_axis(self, key):
+        if not taste_axes.available(self.conn):
+            return None
+        row = self.conn.execute("SELECT id FROM taste_axes WHERE kind='genre' AND genre_key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    @synchronized
+    def family_exists(self, key):
+        return self.conn.execute('SELECT 1 FROM genre_family WHERE key=?', (key,)).fetchone() is not None
+
+    @synchronized
+    def axis_id(self, kind, key):
+        column = {'genre': 'genre_key', 'family': 'family_key'}[kind]
+        row = self.conn.execute(f'SELECT id FROM taste_axes WHERE kind=? AND {column}=?', (kind, key)).fetchone()
+        return row[0] if row else None
+
+    @synchronized
+    def create_axis(self, kind, key):
+        column = {'genre': 'genre_key', 'family': 'family_key'}[kind]
+        return self.conn.execute(f'INSERT INTO taste_axes(kind,{column}) VALUES (?,?)', (kind, key)).lastrowid
+
+    @synchronized
+    def axis_counts(self, old_axis, new_axis):
+        return {table: self.conn.execute(f'SELECT count(*) FROM {table} WHERE axis_id IN (?,?)',
+                                         (old_axis, new_axis)).fetchone()[0]
+                for table in ('rec_weights', 'rec_lean', 'rec_theme', 'play_gradient_checkpoints', 'home_hidden_facet')}
+
+    @synchronized
+    def preferences(self, source, target):
+        return [dict(row) for row in self.conn.execute(
+            'SELECT genre_key,enabled,origin FROM genre_preferences WHERE genre_key IN (?,?)', (source, target))]
+
+    @synchronized
+    def apply_merge(self, source, target, preference, *, old_axis, new_axis, now):
+        prefs = self.preferences(source, target)
+        for row in prefs:
+            self.conn.execute('INSERT INTO genre_merge_preferences(retired_key,genre_key,enabled,origin,merged_at) '
+                              'VALUES (?,?,?,?,?)', (row['genre_key'], target, row['enabled'], row['origin'], now))
+        self.conn.execute('DELETE FROM genre_preferences WHERE genre_key IN (?,?)', (source, target))
+        if preference is not None:
+            self.conn.execute('INSERT INTO genre_preferences VALUES (?,?,?)', (target, *preference))
+        for table in ('recordings', 'albums', 'discovered_artists'):
+            self.conn.execute(f'UPDATE {table} SET genre_key=? WHERE genre_key=?', (target, source))
+        for table in ('recipe_genres', 'home_genre_request_items', 'album_menu_control_genres'):
+            if self.conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?', (table,)).fetchone():
+                self.conn.execute(f'UPDATE {table} SET genre_key=? WHERE genre_key=?', (target, source))
+        if old_axis is not None:
+            for table in ('rec_weights', 'rec_lean', 'rec_theme', 'play_gradient_checkpoints'):
+                self.conn.execute(f'UPDATE {table} SET axis_id=? WHERE axis_id=?', (new_axis, old_axis))
+            self.conn.execute('INSERT OR IGNORE INTO home_hidden_facet(axis_id) SELECT ? FROM home_hidden_facet '
+                              'WHERE axis_id=?', (new_axis, old_axis))
+            self.conn.execute('DELETE FROM home_hidden_facet WHERE axis_id=?', (old_axis,))
+            if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='playlist_recipe_facets'").fetchone():
+                self.conn.execute('UPDATE playlist_recipe_facets SET axis_id=? WHERE axis_id=?', (new_axis, old_axis))
+        for table in ('genre_alias', 'genre_external_id'):
+            self.conn.execute(f'UPDATE {table} SET genre_key=? WHERE genre_key=?', (target, source))
+        self.conn.execute('UPDATE genre_redirects SET genre_key=? WHERE genre_key=?', (target, source))
+        self.conn.execute('INSERT INTO genre_redirects VALUES (?,?)', (source, target))
+
+    @synchronized
+    def matcher_facts(self):
+        from yt_playlist.core.preparation import genre_preference_publication
+        preferences = genre_preference_publication.relation(self.conn)
+        if preferences is None:
+            return None
+        redirects = (dict(self.conn.execute('SELECT retired_key,genre_key FROM genre_redirects'))
+                     if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone() else {})
+        enabled = dict(self.conn.execute('SELECT c.key,c.name FROM '+preferences+' p '
+                                        'JOIN genre_catalog c ON c.key=p.genre_key WHERE p.enabled=1'))
+        return {'redirects': redirects, 'enabled': enabled, 'labels': [tuple(row) for row in self.conn.execute(
+            'SELECT name,key FROM genre_catalog UNION ALL SELECT key,key FROM genre_catalog '
+            'UNION ALL SELECT label,genre_key FROM genre_alias')]}
+
+    @lookup_read
+    def uses_keyed_preferences(self):
+        return self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
+                                 "AND name='genre_preferences'").fetchone() is not None
+
+    @synchronized
+    def configuration_settings(self):
+        return dict(self.conn.execute("SELECT key,value FROM settings WHERE key IN "
+            "('genres_seeded','genre_catalog_revision','genre_defaults')"))
+
+    @synchronized
+    def seed_catalog(self, records, labels, families):
+        redirects = self._redirects()
+        self.conn.executemany(
+            "INSERT INTO genre_family(key,name) VALUES (?,?) ON CONFLICT(key) DO NOTHING", list(families.items()))
+        self.conn.executemany(
+            "INSERT INTO genre_catalog(key,name,family_key,source,family_source,description) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+            "family_key=CASE WHEN genre_catalog.family_source='custom' THEN genre_catalog.family_key "
+            "ELSE COALESCE(genre_catalog.family_key,excluded.family_key) END,source=excluded.source,"
+            "family_source=CASE WHEN genre_catalog.family_source='custom' THEN 'custom' "
+            "ELSE excluded.family_source END,description=excluded.description",
+            [(r['key'], r['name'], r['family'], r['source'], r['family_source'], r.get('description', ''))
+             for r in records.values()])
+        self.conn.execute("DELETE FROM genre_alias WHERE source != 'custom'")
+        self.conn.executemany(
+            "INSERT INTO genre_alias(label_key,label,genre_key,source) VALUES (?,?,?,?) ON CONFLICT(label_key) DO NOTHING",
+            [(key, label, redirects.get(genre, genre), source)
+             for key, (genre, label, source) in labels.items()])
+        self.conn.execute("DELETE FROM genre_external_id WHERE provider='musicbrainz'")
+        self.conn.executemany(
+            "INSERT INTO genre_external_id(provider,external_id,genre_key) VALUES ('musicbrainz',?,?)",
+            [(r['mbid'], redirects.get(r['key'], r['key'])) for r in records.values() if r['mbid']])
+
+    def _redirects(self):
+        if not self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone():
+            return {}
+        return dict(self.conn.execute('SELECT retired_key,genre_key FROM genre_redirects'))
+
+    @synchronized
+    def insert_legacy_custom(self, key, name):
+        self.conn.execute("INSERT OR IGNORE INTO genre_catalog(key,name,source) VALUES (?,?,'custom')", (key, name))
+        self.conn.execute("INSERT OR IGNORE INTO genre_alias(label_key,label,genre_key,source) "
+                          "VALUES (?,?,?,'custom')", (key, name, key))
+
+    @synchronized
+    def configure_preferences(self, enabled, default_keys):
+        redirects = self._redirects()
+        self.conn.execute('UPDATE genre_preferences SET enabled=0')
+        self.conn.executemany("INSERT OR IGNORE INTO genre_preferences VALUES (?,0,'default')",
+                              [(key,) for key in default_keys if redirects.get(key, key) == key])
+        self.conn.executemany('INSERT INTO genre_preferences VALUES (?,1,?) '
+                              'ON CONFLICT(genre_key) DO UPDATE SET enabled=1', enabled)
+
+    @synchronized
+    def save_configuration(self, values):
+        self.conn.executemany('INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)', values.items())
 
     @synchronized
     def get_genre_whitelist(self) -> list:
-        rows = self.conn.execute("SELECT name FROM genre_whitelist").fetchall()
+        from yt_playlist.core.preparation import genre_preference_publication
+        preferences = genre_preference_publication.relation(self.conn)
+        query = ('SELECT c.name FROM '+preferences+' p JOIN genre_catalog c ON c.key=p.genre_key '
+                 'WHERE p.enabled=1' if preferences is not None else 'SELECT name FROM genre_whitelist')
+        rows = self.conn.execute(query).fetchall()
         return sorted((r["name"] for r in rows), key=str.lower)
 
     @synchronized
-    def set_genres(self, names) -> None:
-        with self.conn:
-            self.conn.execute("DELETE FROM genre_whitelist")
-            self.conn.executemany("INSERT OR IGNORE INTO genre_whitelist(name) VALUES (?)",
-                                  [(n,) for n in names])
+    def replace_preferences(self, keys, *, origin):
+        self.conn.execute('UPDATE genre_preferences SET enabled=0,origin=?', (origin,))
+        self.conn.executemany('INSERT INTO genre_preferences VALUES (?,1,?) '
+            'ON CONFLICT(genre_key) DO UPDATE SET enabled=1,origin=excluded.origin', [(key, origin) for key in keys])
 
     @synchronized
-    def add_genre(self, name) -> None:
-        self.conn.execute("INSERT OR IGNORE INTO genre_whitelist(name) VALUES (?)", (name,))
-        self.conn.commit()
+    def save_preference(self, key, *, enabled, origin):
+        self.conn.execute('INSERT INTO genre_preferences VALUES (?,?,?) '
+            'ON CONFLICT(genre_key) DO UPDATE SET enabled=excluded.enabled,origin=excluded.origin', (key, int(enabled), origin))
 
     @synchronized
-    def remove_genre(self, name) -> None:
-        self.conn.execute("DELETE FROM genre_whitelist WHERE name=?", (name,))
-        self.conn.commit()
+    def replace_legacy_whitelist(self, names):
+        self.conn.execute('DELETE FROM genre_whitelist')
+        self.conn.executemany('INSERT OR IGNORE INTO genre_whitelist(name) VALUES (?)', [(name,) for name in names])
+
+    @synchronized
+    def add_legacy_genre(self, name):
+        self.conn.execute('INSERT OR IGNORE INTO genre_whitelist(name) VALUES (?)', (name,))
+
+    @synchronized
+    def remove_legacy_genre(self, name):
+        self.conn.execute('DELETE FROM genre_whitelist WHERE name=?', (name,))
 
     @synchronized
     def all_genres(self) -> list:

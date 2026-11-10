@@ -190,17 +190,21 @@ def _scores(conn):
                      (encoded, hashlib.sha256(encoded.encode()).hexdigest(), key))
 
 
-def validate(conn):
+def validate(conn, *, replaced=frozenset()):
     from . import v054_audio_vibes, v058_predicted_vibes
     from .current import _tokens
     from .runner import MigrationError
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     retained = [sql for sql in v054_audio_vibes.statements() if sql.startswith('CREATE TABLE audio_vibe_feedback')]
     retained += [sql for sql in v058_predicted_vibes.statements()
                  if sql.startswith(('CREATE TABLE rec_vibe_pending', 'CREATE TRIGGER vibe_artists_'))]
     for sql in (*statements(), *retained):
         name = sql.split()[2]
-        row = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+        if name in replaced:
+            continue
+        actual = definitions.get(name)
+        if actual is None or _tokens(actual) != _tokens(sql):
             raise MigrationError(f'Incompatible recording vibe structure: {name}')
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name IN ('audio_vibe_samples','rec_vibe_tracks','rec_vibe_groups')").fetchone():
+    if definitions.keys() & {'audio_vibe_samples', 'rec_vibe_tracks', 'rec_vibe_groups'}:
         raise MigrationError('Superseded vibe stores remain')

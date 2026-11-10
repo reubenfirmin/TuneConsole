@@ -2,8 +2,23 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema, uncontended_file_consumer_store as store
+from tests.metadata_provenance_support import metadata_provenance
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Song actions consume catalog identities and metadata, independently of
+    # the shipped vocabulary and snapshot admission machinery.
+    with bounded_consumer_schema((('electronic', 'Electronic'), ('art-pop', 'Art Pop'),
+                                  ('jazz', 'Jazz'), ('ambient', 'Ambient')),
+                                 snapshot_guards=False) as schema:
+        yield schema
 
 
 SONG = {"video_id": "new-song", "title": "A song's <title>", "artist": "Artist & Friends",
@@ -12,22 +27,23 @@ SONG = {"video_id": "new-song", "title": "A song's <title>", "artist": "Artist &
 
 
 def seed_song_actions(store):
-    main_id = store.identities.upsert_identity("Main", "main-cred", None, True)
-    other_id = store.identities.upsert_identity("Other account", "other-cred", None, False)
-    offline_id = store.identities.upsert_identity("Offline", "offline-cred", None, False)
+    main_id = store.accounts.upsert_account("Main", "main-cred", None, True)
+    other_id = store.accounts.upsert_account("Other account", "other-cred", None, False)
+    offline_id = store.accounts.upsert_account("Offline", "offline-cred", None, False)
     source = store.playlists.upsert_playlist(main_id, "SOURCE", "Source mix", 1, "h", 1)
     destination = store.playlists.upsert_playlist(other_id, "DEST", "Evening mix", 0, "", 1)
     system = store.playlists.upsert_playlist(main_id, "LM", "Liked Music", 0, "", 1)
     offline = store.playlists.upsert_playlist(offline_id, "OFFLINE", "Offline mix", 0, "", 1)
     track = store.tracks.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180)
     store.playlists.set_playlist_tracks(source, [track])
-    main = FakeClient(albums={"MPRE_new": {
+    main = FakeClient(catalog={SONG['video_id']: _track(SONG['video_id'], SONG['title'], SONG['artist'], 225)},
+                      albums={"MPRE_new": {
         "title": "New Album", "artists": [{"name": "Artist & Friends"}],
         "tracks": [{"videoId": SONG["video_id"], "title": SONG["title"], "duration": "3:45"}],
     }})
     other = FakeClient()
     clients = {main_id: main, other_id: other}
-    app = create_app(store, lambda: clients, now_fn=lambda: 100.0)
+    app = create_app(store, lambda: clients, now_fn=lambda: 100.0, background_work=False)
     return {"app": app, "main": main, "other": other, "main_id": main_id,
             "source": source, "destination": destination, "system": system, "offline": offline,
             "clients": clients, "store": store}
@@ -55,14 +71,14 @@ def test_create_seeds_an_ordinary_playlist_on_main_account(songs):
     assert data["message"] == "Playlist created."
     assert data["added"] is True
     playlist = songs["store"].playlists.get_playlist(int(data["url"].split("/")[-1]))
-    assert playlist.title == "Soul favorites" and playlist.identity_id == songs["main_id"]
+    assert playlist.title == "Soul favorites" and playlist.account_id == songs["main_id"]
     assert playlist.created_at == 100.0
     assert playlist.thumbnail == SONG["thumbnail"]
     assert next(p for p in songs["store"].playlists.get_playlists() if p.id == playlist.id).thumbnail == SONG["thumbnail"]
     tracks = songs["store"].charts.playlist_tracks_detail(playlist.id)
     assert [(t["video_id"], t["duration"], t["album_browse"]) for t in tracks] == [(SONG["video_id"], 225, "MPRE_new")]
-    assert playlist.ytm_playlist_id not in songs["store"].playlists.get_playlist_groups()
-    assert songs["main"].added == [(playlist.ytm_playlist_id, [SONG["video_id"]])]
+    assert playlist.provider_playlist_id not in songs["store"].playlists.get_playlist_groups()
+    assert songs["main"].added == [(playlist.provider_playlist_id, [SONG["video_id"]])]
     assert not songs["other"].created
 
 
@@ -120,7 +136,7 @@ def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, 
     import json
     from tests.core.test_playlist_page_accounting import first
     from tests.test_saved_album_snapshot import _production_client
-    from yt_playlist.library import executor, undo_capture
+    from yt_playlist.library import executor, playlist_writes, undo_capture
     from yt_playlist.util.action_kinds import COPY_PLAYLIST
 
     # Representative of the reported first-page shape: a message inside the playlist shelf,
@@ -150,6 +166,9 @@ def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, 
     capture = undo_capture.capture_post
     monkeypatch.setattr(undo_capture, 'capture_post',
                         lambda *a, **kw: capture(*a, **kw, sleep=lambda _: None))
+    retry = playlist_writes.with_retry
+    monkeypatch.setattr(playlist_writes, 'with_retry',
+                        lambda fn: retry(fn, sleep=lambda _: None))
     result = songs['http'].post('/songs/create-playlist', json={'name': 'Mix', 'song': SONG})
     assert result.status_code == 200
     data = result.json()
@@ -160,7 +179,7 @@ def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, 
     assert playlist.track_count == (0 if unknown else 1)
     actions = [a for a in store.actions.get_actions() if a.kind == COPY_PLAYLIST]
     assert len(actions) == 1 and actions[0].status == 'executed'
-    assert json.loads(actions[0].undo_json)['new_ytm'] == playlist.ytm_playlist_id
+    assert json.loads(actions[0].undo_json)['new_ytm'] == playlist.provider_playlist_id
     assert json.loads(actions[0].undo_json)['post'] is None
     if unknown:
         assert data['status'] == 'partial' and data['uncertain'] == 1
@@ -224,18 +243,44 @@ def test_song_creation_retains_destination_for_rejected_and_unconfirmed_addition
     assert songs['store'].actions.get_actions()
 
 
-def test_metadata_loads_current_values_originals_and_genre_sources(songs):
+@pytest.mark.parametrize('manual_genre', [None, 'Jazz'])
+def test_metadata_loads_current_values_originals_and_genre_sources(songs, manual_genre):
+    import time
+    from yt_playlist.providers.waterfall import TrackSink
+
     store = songs['store']
     tid = store.playlists.get_playlist_track_ids(songs['source'])[0]
     store.tracks.set_track_title(tid, 'Corrected title')
-    store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
-    store.enrichment_state.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
-    data = songs['http'].get('/songs/metadata', params={'video_id': 'owned-song'}).json()
+    track = store.tracks.track_for_waterfall(tid)
+    providers = ('musicbrainz', 'discogs', 'lastfm')
+    sink = TrackSink(store, track, providers)
+    now = time.time()
+    for provider, fields in (
+            ('musicbrainz', {'genre': 'Electronic', 'year': '1995'}),
+            ('discogs', {'genre': 'Art Pop'}),
+            ('lastfm', {'genre': None})):
+        sink.capture_result('metadata-options', provider, fields, now)
+        for field, value in fields.items():
+            sink.log('metadata-options', provider, field, value)
+        sink.apply_fields(provider, fields)
+        store.enrichment_state.record_enrichment_attempt(
+            track['identity_key'], provider, fields, video_id=track['video_id'],
+            providers=providers, run_id='metadata-options', now=now,
+            delivery_id=sink.result_delivery(provider))
+    if manual_genre:
+        store.tracks.set_track_genre(tid, manual_genre)
+    response = songs['http'].get('/songs/metadata', params={'video_id': 'owned-song'})
+    assert response.status_code == 200
+    data = response.json()
     assert data['metadata'] == {
         'track_id': tid, 'title': 'Corrected title', 'artist': 'Artist & Friends',
-        'genre': 'Electronic', 'year': '1995', 'orig_title': 'Owned Song', 'orig_artist': 'Artist & Friends',
+        'genre': manual_genre or 'Electronic', 'year': '1995',
+        'orig_title': 'Owned Song', 'orig_artist': 'Artist & Friends',
     }
-    assert data['genre_options'] == [{'value': 'Art Pop', 'providers': ['discogs']}]
+    assert data['genre_options'] == [
+        {'value': 'Electronic', 'providers': ['musicbrainz']},
+        {'value': 'Art Pop', 'providers': ['discogs']},
+    ]
 
 
 def test_metadata_saves_all_fields_and_restores_originals(songs, monkeypatch):
@@ -269,7 +314,7 @@ def test_metadata_save_preserves_unchanged_provider_selection(songs):
     body = {'song': {'video_id': 'owned-song', 'title': 'Owned Song'},
             'title': 'Fixed title', 'artist': 'Artist & Friends', 'genre': 'Electronic', 'year': '1995'}
     assert songs['http'].post('/songs/metadata', json=body).status_code == 200
-    fields = store.enrichment_reports.metadata_provenance(tid)['fields']
+    fields = metadata_provenance(store, tid)['fields']
     assert fields['genre']['source'] == fields['mb_year']['source'] == 'discogs'
     assert not fields['genre']['override'] and not fields['mb_year']['override']
 
@@ -307,20 +352,37 @@ def test_invalid_metadata_does_not_partially_save(songs, change):
 
 
 @pytest.mark.parametrize('video_id', ['owned-song', 'uncached-song'])
-def test_metadata_write_failure_rolls_back_the_entire_edit(songs, monkeypatch, video_id):
-    from yt_playlist.core import catalog
-
+def test_metadata_write_failure_rolls_back_fields_and_retry_completes(songs, monkeypatch, video_id):
     before = songs['store'].tracks.metadata_for_video(video_id)
-    choose_field = catalog.choose_field
+    repository = songs['store'].metadata_choices.repository
+    store_choice = repository.store
+    written = []
 
-    def fail_year(conn, entry_id, field, value, *args, **kwargs):
+    def fail_year(inputs, field, value, *args, **kwargs):
         if field == 'mb_year':
             raise RuntimeError('write failed')
-        return choose_field(conn, entry_id, field, value, *args, **kwargs)
+        result = store_choice(inputs, field, value, *args, **kwargs)
+        written.append(field)
+        return result
 
-    monkeypatch.setattr(catalog, 'choose_field', fail_year)
+    monkeypatch.setattr(repository, 'store', fail_year)
     body = {'song': {'video_id': video_id, 'title': 'Original', 'artist': 'Original artist'},
             'title': 'Updated', 'artist': 'Updated artist', 'genre': 'Jazz', 'year': '2000'}
     with pytest.raises(RuntimeError, match='write failed'):
         songs['http'].post('/songs/metadata', json=body)
-    assert songs['store'].tracks.metadata_for_video(video_id) == before
+    assert {'title', 'artist', 'genre'} <= set(written)
+    failed = songs['store'].tracks.metadata_for_video(video_id)
+    if before is not None:
+        assert failed == before
+    else:
+        # Catalog observation is independently committed and does not join the
+        # metadata repository's write unit or acquire library membership.
+        assert failed['title'] == 'Original' and failed['artist'] == 'Original artist'
+        assert not failed['genre'] and not failed['year']
+        assert not songs['store'].conn.execute('SELECT 1 FROM library_memberships WHERE entry_id=?',
+                                               (failed['track_id'],)).fetchone()
+    monkeypatch.setattr(repository, 'store', store_choice)
+    assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+    saved = songs['store'].tracks.metadata_for_video(video_id)
+    assert (saved['title'], saved['artist'], saved['genre'], saved['year']) == (
+        'Updated', 'Updated artist', 'Jazz', '2000')

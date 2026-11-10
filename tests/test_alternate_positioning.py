@@ -1,11 +1,37 @@
 """#40: alternate placement must survive YouTube indexing lag and failed moves."""
 import json
+from unittest.mock import Mock
 
 import pytest
 
 from tests.conftest import FakeClient, _track
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import migrations, schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_positions, sync
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Placement reconciliation does not start the HTTP application lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def placement_vocabulary(monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    # Placement and populated reopen keep their real SQL and validators; genre
+    # curation is a completed lower input unrelated to remote playlist order.
+    bound_catalog(monkeypatch, entries=())
 
 
 class LaggingClient(FakeClient):
@@ -30,12 +56,20 @@ class LaggingClient(FakeClient):
         return super().edit_playlist(playlistId, **kw)
 
 
-def seed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+def seed(store, *, completed_catalog=False):
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks = [_track(vid, title, "Artist", set_video_id="set_" + vid)
               for vid, title in (("anchor", "Original"), ("next", "Next"),
                                  ("alt1", "Alternate one"), ("alt2", "Alternate two"))]
-    tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", "Alb", 200) for t in tracks[:2]]
+    if completed_catalog:
+        items = [dict(key=t['title'].lower() + '|artist', video_id=t['videoId'],
+                      title=t['title'], artist='Artist', album='Alb', duration_s=200)
+                 for t in tracks]
+        seed_publication_subjects(store, items, unowned={item['key'] for item in items[2:]})
+        tids = [store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                  (t['videoId'],)).fetchone()[0] for t in tracks[:2]]
+    else:
+        tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", "Alb", 200) for t in tracks[:2]]
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 2, "hash", 1)
     store.playlists.set_playlist_tracks(pid, tids)
     client = LaggingClient(playlists=[{"playlistId": "PL", "title": "Mix"}],
@@ -53,6 +87,27 @@ def remote(client):
     return [t["videoId"] for t in client._tracks["PL"]]
 
 
+@pytest.fixture
+def completed_placement_catalog(store, monkeypatch, native_sql_calls, without_query_timing):
+    inputs = seed(store, completed_catalog=True)
+
+    def known_track(video_id, *args, **kwargs):
+        entry = store.conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=?',
+                                   (video_id,)).fetchone()
+        assert entry is not None, video_id
+        if kwargs.get('library', True):
+            with store.conn:
+                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                                   (entry['recording_id'],))
+        return entry['id']
+
+    monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
+    retry = playlist_positions.with_retry
+    monkeypatch.setattr(playlist_positions, 'with_retry',
+                        lambda fn, **kwargs: retry(fn, **kwargs, sleep=lambda delay: None))
+    return inputs
+
+
 @pytest.mark.parametrize("return_handles", [True, False])
 def test_add_positions_multiple_alternates_despite_lag(store, return_handles):
     _, pid, client, chosen = seed(store)
@@ -65,36 +120,64 @@ def test_add_positions_multiple_alternates_despite_lag(store, return_handles):
     assert client.added == [("PL", ["alt1", "alt2"])]
 
 
-def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path, consumer_store, monkeypatch):
+    retry = playlist_positions.with_retry
+    monkeypatch.setattr(playlist_positions, 'with_retry',
+                        lambda fn, **kwargs: retry(fn, **kwargs, sleep=lambda delay: None))
     path = str(tmp_path / "library.db")
-    store = Store(path)
-    store.init_schema()
-    iid, pid, client, chosen = seed(store)
-    client.return_handles = False
-    client.hidden_reads = 100
-    result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
-    assert result["position_pending"] == 1
-    assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
-    assert remote(client) == ["anchor", "next", "alt1", "alt2"]
-    action = store.actions.get_actions()[0]
-    assert action.status == "pending"
-    assert json.loads(action.plan_json)["after_video_id"] == "anchor"
+    store = consumer_store(path)
+    def known_track(video_id, *args, **kwargs):
+        row = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                 (video_id,)).fetchone()
+        assert row is not None, video_id
+        if kwargs.get('library', True):
+            with store.conn:
+                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                                   (row[0],))
+        return row[0]
+    with reuse_reporting_reader(store, monkeypatch):
+        iid, pid, client, chosen = seed(store, completed_catalog=True)
+        monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
+        client.return_handles = False
+        client.hidden_reads = 100
+        result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
+        assert result["position_pending"] == 1
+        assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
+        assert remote(client) == ["anchor", "next", "alt1", "alt2"]
+        action = store.actions.get_actions()[0]
+        assert action.status == "pending"
+        assert json.loads(action.plan_json)["after_video_id"] == "anchor"
     store.conn.close()
 
     store = Store(path)
-    store.init_schema()
-    # A sync during the lag must preserve the requested tracks and their pending move.
-    sync.sync_identity(store, iid, client, 101)
-    assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
-    assert store.actions.get_action(action.id).status == "pending"
-    client.hidden_reads = 0
-    sync.sync_identity(store, iid, client, 102)
-    assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
-    assert store.actions.get_action(action.id).status == "executed"
-    sync.refresh_playlist(store, iid, client, "PL", "Mix", 103)
-    assert local(store, pid) == remote(client)
-    assert client.added == [("PL", ["alt1", "alt2"])]
-    store.conn.close()
+    try:
+        # Reopen the real populated file and retain ordinary startup admission.
+        # Reuse table observations while the same connection reconciles it.
+        with schema_inspection.reuse_tables(store.conn), reuse_reporting_reader(store, monkeypatch):
+            admitted = Mock(return_value=False)
+            with monkeypatch.context() as startup:
+                # Schema admission is a completed lower input. Reopen, repair,
+                # repository binding and the persisted pending action stay real.
+                startup.setattr(migrations, 'migrate', admitted)
+                store.init_schema()
+            admitted.assert_called_once_with(store.conn, defer_validation=False)
+            # The same four completed catalog subjects are reconciled on every
+            # remote read. Placement owns membership/order, not metadata ingest.
+            monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
+            # A sync during the lag must preserve the requested tracks and their pending move.
+            sync.sync_identity(store, iid, client, 101)
+            assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
+            assert store.actions.get_action(action.id).status == "pending"
+            client.hidden_reads = 0
+            sync.sync_identity(store, iid, client, 102)
+            assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
+            assert store.actions.get_action(action.id).status == "executed"
+            sync.refresh_playlist(store, iid, client, "PL", "Mix", 103)
+            assert local(store, pid) == remote(client)
+            assert client.added == [("PL", ["alt1", "alt2"])]
+    finally:
+        store.conn.close()
 
 
 def test_failed_move_remains_pending_until_targeted_refresh(store):
@@ -178,11 +261,12 @@ def test_later_explicit_edit_cancels_pending_placement(store, edit):
     assert store.actions.get_action(action.id).status == "cancelled"
 
 
-def test_merge_removal_then_undo_and_sync_never_resume_the_old_placement(store, monkeypatch, tmp_path):
+def test_merge_removal_then_undo_and_sync_never_resume_the_old_placement(
+        store, monkeypatch, tmp_path, completed_placement_catalog):
     from yt_playlist.library.playlist_undo import undo_action
 
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid, pid, client, chosen = seed(store)
+    iid, pid, client, chosen = completed_placement_catalog
     client.fail_moves = True
     executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
     placement = store.actions.get_actions()[0]

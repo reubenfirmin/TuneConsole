@@ -1,18 +1,12 @@
 import numpy as np
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec import embed, embedding_vectors as vectors
 from tests import model_support
 from yt_playlist.util.matching import identity_key
 
 
-def _store(tmp_path):
-    s = Store(str(tmp_path / "t.db")); s.init_schema()
-    return s
-
-
-def test_include_new_surfaces_out_of_corpus_track(tmp_path):
-    s = _store(tmp_path)
+def test_include_new_surfaces_discovered_tracks_in_the_shared_model_space(store):
+    s = store
     # two library tracks (techno seed + ambient other), each with a collaborative vector
     sid = s.tracks.upsert_track("vS", "Seed", "ArtistS", None, None); s.tracks.set_track_genre(sid, "Techno")
     oid = s.tracks.upsert_track("vO", "Other", "ArtistO", None, None); s.tracks.set_track_genre(oid, "Ambient")
@@ -25,20 +19,12 @@ def test_include_new_surfaces_out_of_corpus_track(tmp_path):
                               "Techno", "2020", "bid", 1.0)
     model_support.build_content_model(s)  # builds library vectors + model + discovered vectors
 
+    _, CV, _ = vectors.load_content_vectors(s)
+    _, DV, _ = vectors.load_discovered_content_vectors(s)
+    assert CV is not None and DV is not None
+    assert DV.shape[1] == CV.shape[1]
+
     new = [k for k, _ in embed.cluster_expand(s, pos_keys=[skey], topn=10, include_new=True)]
     base = [k for k, _ in embed.cluster_expand(s, pos_keys=[skey], topn=10, include_new=False)]
     assert dkey in new          # the techno out-of-corpus track is reachable from the techno seed
     assert dkey not in base     # ...only when opted in
-
-
-def test_discovered_vectors_share_the_library_model_space(tmp_path):
-    s = _store(tmp_path)
-    sid = s.tracks.upsert_track("vS", "Seed", "ArtistS", None, None); s.tracks.set_track_genre(sid, "Techno")
-    dkey = identity_key("NewTrack", "NewArtist")
-    s.discovery.upsert_discovered_track(dkey, "vD", "NewTrack", "NewArtist", "Alb", "th",
-                              "Techno", "2020", "bid", 1.0)
-    model_support.build_content_model(s)
-    _, CV, _ = vectors.load_content_vectors(s)
-    _, DV, _ = vectors.load_discovered_content_vectors(s)
-    assert CV is not None and DV is not None
-    assert DV.shape[1] == CV.shape[1]      # same dimensionality ⇒ cosines are comparable

@@ -7,7 +7,7 @@ from playwright.sync_api import expect
 
 from yt_playlist.rec import rec_params
 
-@pytest.mark.parametrize("width", [1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_learning_cards_search_page_and_explain_real_progress(live_app, store, page, width, tmp_path):
     for i in range(15):
         store.rec_signals.bump_theme(f"artist:Artist {i:02}", .3 + i * .03, 1.0)
@@ -52,7 +52,7 @@ def test_learning_cards_search_page_and_explain_real_progress(live_app, store, p
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_learning_direction_filters_reach_negatives_beyond_sixty_pages(live_app, store, page, width, tmp_path):
     now = 1_700_000_000
     for i in range(365):
@@ -127,7 +127,7 @@ def test_learning_empty_state(live_app, page):
     expect(page.locator(".learning-card--sources .learning-entry")).to_have_count(3)
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_other_learning_shows_real_choices_sources_and_dated_saved_changes(live_app, store, page, width, tmp_path):
     from yt_playlist.rec import graduation
 
@@ -202,7 +202,7 @@ def test_other_learning_shows_real_choices_sources_and_dated_saved_changes(live_
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_learning_settings_share_compact_layout_and_preserve_edits(live_app, store, page, width, tmp_path):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))

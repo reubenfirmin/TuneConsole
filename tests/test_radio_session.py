@@ -1,22 +1,57 @@
 """Session launch, browser presence and lifecycle constraints."""
+import asyncio
+import json
+import logging
 import threading
 import time
 
 import pytest
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
+from yt_playlist.core.bridge import Bridge
 from yt_playlist.library import playlist_generated
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store,
+    play, radio_controller, seed_completed_pool,
+)
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Controller tests never construct the HTTP app or its background loop."""
+
+
+@pytest.fixture(scope='module')
+def append_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def append_poc(tmp_path, append_schema, native_sql_calls, monkeypatch):
+    # Keep all 32 catalog subjects and actual checkpoint SQL/files. Controller
+    # progression consumes an admitted empty schema, independently of bootstrap
+    # and per-query diagnostics. Publication snapshots and guards remain real.
+    with _file_consumer_store(tmp_path, append_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            pool = seed_completed_pool(store)
+            with radio_controller(monkeypatch, store, pool) as state:
+                yield state
+
 
 @pytest.mark.parametrize("prior_titles", [
     [],
     ["Radio Session · 2026-10-22"],
     ["Radio Session · 2026-10-22 #1", "Radio Session · 2026-10-22 #2"],
 ])
-def test_radio_session_titles_are_numbered_per_local_day(poc, prior_titles):
-    c, *_ = poc
+def test_radio_session_titles_are_numbered_per_local_day(append_poc, prior_titles):
+    c, *_ = append_poc
     store = c.ctx.store
-    identity = store.identities.get_master_identity().id
+    identity = store.accounts.get_master_account().id
     for index, title in enumerate([*prior_titles, "Radio Session · 2026-10-21 #9",
                                    "Fresh songs - October 22 2026 #9"]):
         store.playlists.upsert_playlist(identity, f"PLPREVIOUS{index}", title, 0, "", 0)
@@ -39,8 +74,8 @@ def test_radio_session_titles_are_numbered_per_local_day(poc, prior_titles):
     assert result["ok"] and result["title"] == "Radio Session · 2026-10-23 #1"
 
 
-def test_three_to_start_then_one_append_per_song_and_no_playback_queue_commands(poc):
-    c, remote, frames, workers, _ = poc
+def test_three_to_start_then_one_append_per_song_and_no_playback_queue_commands(append_poc):
+    c, remote, frames, workers, _ = append_poc
     assert c.start()["ok"]
     assert remote.ids == ["v1", "v2", "v3"]
     assert len(workers) == 1
@@ -76,11 +111,18 @@ def test_skip_forward_catches_up_and_going_back_does_not_append(poc):
 
 
 @pytest.mark.parametrize('retries', [0, 2])
-def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_next_song(poc, monkeypatch, retries):
-    c, *_ = poc
+def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_next_song(
+        append_poc, monkeypatch, retries):
+    c, *_ = append_poc
     c.start()
     play(c, 'v1', position=1)
     advance, attempts = c._advance, []
+    waits = []
+
+    def pacing(delay):
+        assert not c.session.stop.is_set()
+        waits.append(delay)
+        return False
 
     def preparing(s):
         attempts.append(True)
@@ -95,11 +137,16 @@ def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_n
 
     monkeypatch.setattr(c, '_advance', preparing)
     monkeypatch.setattr(c.playback, 'next', next_song)
+    # Retry pacing is below this durable-intent check. Every preparation
+    # attempt and the final playback observation still run separately.
+    monkeypatch.setattr(c.session.stop, 'wait', pacing)
     assert c.skip('v1') == {'ok': True}
+    assert len(attempts) == retries + 1
+    assert waits == [.25] * (retries + 1)
     rows = c.ctx.store.player_events.player_events_since(0, kind='next')
     assert len(rows) == 1
     assert rows[0]['video_id'] == 'v1' and rows[0]['position'] == 1
-    assert rows[0]['identity_id'] == c.session.identity
+    assert rows[0]['account_id'] == c.session.identity
     assert c.skip('v1') == {'ok': True}
     assert c.ctx.store.player_events.player_events_since(0, kind='next') == rows
 
@@ -110,7 +157,7 @@ def test_cached_seed_suggestions_recheck_skip_breaks_and_return_after_expiry(poc
     offer = c.seeds()
     track = offer['tracks'][0]
     c.ctx.store.player_events.record_player_event(
-        c.ctx.store.identities.get_master_identity().id, 'next', track['video_id'], 1, 200, '', None, 1234)
+        c.ctx.store.accounts.get_master_account().id, 'next', track['video_id'], 1, 200, '', None, 1234)
     if restored:
         c.offer = None
     bootstrap = c.bootstrap()
@@ -258,6 +305,11 @@ def test_restart_with_old_radio_paused_starts_the_chosen_song(poc):
     assert frames[-1]["url"] == "https://music.youtube.com/watch?v=v5&list=PLSESSION"
     assert state["starting"]
     restarted.stop()
+    checkpoint = restarted.persistence.load()
+    with pytest.raises(ValueError, match='changed.*worker'):
+        c.stop()
+    c.suspend()
+    assert restarted.persistence.load() == checkpoint
 
 
 def test_native_observer_confirms_launch_without_a_visible_radio_page(poc):
@@ -368,3 +420,130 @@ def test_monitor_exits_when_application_closes_or_extension_disconnects(poc, dis
     if disconnected:
         assert c.status()["active"]  # Keep the page attached while the extension reconnects.
         assert not c.status()["connected"]
+
+
+@pytest.mark.parametrize('stop', ['admission', 'session', 'disconnect', None])
+def test_observation_send_disconnect_after_connected_check(poc, caplog, stop):
+    c, remote, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v1')
+    s = c.session
+    before = (list(remote.ids), list(remote.adds), s.observed_video, s.phase)
+    sends = []
+
+    class BoundedWake(threading.Event):
+        def wait(self, timeout=None):
+            if sends:
+                s.stop.set()
+            return True
+
+    s.wake = BoundedWake()
+
+    async def scenario():
+        bridge = Bridge()
+        bridge.now_playing = c.ctx.bridge.now_playing
+        bridge.now_playing_seen_at = c.ctx.bridge.now_playing_seen_at
+        c.ctx.bridge = c.playback.bridge = bridge
+
+        async def receive():
+            return {'type': 'websocket.connect'}
+
+        async def send(message):
+            if message['type'] != 'websocket.send':
+                return
+            assert bridge.connected and c.work.accepting and not s.stop.is_set()
+            sends.append(json.loads(message['text']))
+            # The real Bridge request and Starlette send have both started.
+            if stop == 'admission':
+                c.work.close_admission()
+                assert not s.stop.is_set()
+            elif stop == 'session':
+                s.stop.set()
+            elif stop == 'disconnect':
+                bridge.disconnect(connection)
+            raise OSError('Controlled socket closure during observation send')
+
+        socket = WebSocket({'type': 'websocket'}, receive, send)
+        await socket.accept()
+        connection = bridge.connect(socket.send_json, asyncio.get_running_loop())
+        try:
+            await asyncio.wait_for(asyncio.to_thread(c._monitor, s), 2)
+            assert not bridge._pending
+            assert socket.application_state == WebSocketState.DISCONNECTED
+        finally:
+            s.stop.set()
+            bridge.disconnect(connection)
+
+    with caplog.at_level(logging.WARNING, logger='yt_playlist.web.radio_session'):
+        asyncio.run(scenario())
+    assert len(sends) == 1 and sends[0]['type'] == 'radio-session'
+    assert (remote.ids, remote.adds, s.observed_video, s.phase) == before
+    assert s.stop.is_set() and not s.monitoring
+    saved = c.persistence.load()
+    assert saved['episode_id'] == s.episode_id and saved['phase'] == s.phase
+    assert saved['tracks'] == s.tracks and not saved['stopped']
+    failures = [record for record in caplog.records
+                if record.name == 'yt_playlist.web.radio_session' and record.levelno >= logging.WARNING]
+    if stop is None:
+        failure, = failures
+        assert failure.message == 'Radio Session maintenance failed'
+        assert failure.exc_info and failure.exc_info[2]
+    else:
+        assert not failures
+        assert s.error is None
+
+
+@pytest.mark.parametrize('closing', [False, True])
+@pytest.mark.parametrize('failure_type', [RuntimeError, WebSocketDisconnect])
+def test_append_readback_failure_still_warns_and_recovers_without_replay(
+        poc, monkeypatch, caplog, closing, failure_type):
+    c, remote, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v1')
+    c.ctx.bridge.now_playing['video_id'] = 'v3'
+    c.listening.observe(c.session)
+
+    read = remote.get_playlist
+
+    def failed_read(*args, **kwargs):
+        monkeypatch.setattr(remote, 'get_playlist', read)
+        raise (WebSocketDisconnect(1006) if failure_type is WebSocketDisconnect
+               else RuntimeError('Read response lost'))
+
+    def lose_readback():
+        monkeypatch.setattr(remote, 'get_playlist', failed_read)
+        if closing:
+            c.work.close_admission()
+
+    remote.after_add = lose_readback
+
+    class BoundedWake(threading.Event):
+        def wait(self, timeout=None):
+            if remote.adds:
+                c.session.stop.set()
+            return True
+
+    c.session.wake = BoundedWake()
+    with caplog.at_level(logging.WARNING, logger='yt_playlist.web.radio_session'):
+        c._monitor(c.session)
+    failure, = [record for record in caplog.records
+                if record.message == 'Radio Session maintenance failed']
+    assert isinstance(failure.exc_info[1], failure_type)
+    assert failure.exc_info[2]
+    assert remote.ids == ['v1', 'v2', 'v3', 'v4'] and remote.adds == [['v4']]
+    saved = c.persistence.load()
+    assert saved['pending_sent'] and saved['pending']['video_id'] == 'v4'
+    assert not saved['stopped']
+
+    remote.after_add = lambda: None
+    if closing:
+        c.work.open()
+    restored = PlaylistRadio(c.ctx)
+    try:
+        assert restored.join()['active']
+        play(restored, 'v4')
+        assert remote.ids == ['v1', 'v2', 'v3', 'v4', 'v5']
+        assert remote.adds == [['v4'], ['v5']]
+        assert not restored.persistence.load()['pending_sent']
+    finally:
+        restored.suspend()

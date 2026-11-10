@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.library.album_fetch import UPLOAD_RELEASE_PREFIX, fetch_album, is_upload_album
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.web_consumer_support import install_routes, route_schema, route_store
 
 UPLOAD_ID = UPLOAD_RELEASE_PREFIX + "b_po_XYZ"
 
@@ -62,7 +63,7 @@ def test_album_playlist_creation_routes_and_preserves_complete_order(store, uplo
     browse = UPLOAD_ID if uploaded else "MPRE1"
     fc = _StrictClient(uploads={browse: album} if uploaded else {}, albums={browse: album} if not uploaded else {})
     fc._catalog.update({t["videoId"]: t for t in album["tracks"]})
-    iid = store.identities.upsert_identity("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", "cred", None, True)
     result = create_playlist_from_album(store, browse, "", fc, 1, iid)
     assert result["added"] == 2
     assert fc.added == [(result["new_ytm"], ["u1", "u2"])]
@@ -75,7 +76,7 @@ def test_album_playlist_creation_routes_and_preserves_complete_order(store, uplo
 def test_album_playlist_creation_rejects_incomplete_response_before_writes(store, change):
     from yt_playlist.library.playlist_creation import create_playlist_from_album
     fc = _StrictClient(uploads={UPLOAD_ID: {**deepcopy(_UPLOAD_ALBUM), **change}})
-    iid = store.identities.upsert_identity("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", "cred", None, True)
     with pytest.raises(ValueError):
         create_playlist_from_album(store, UPLOAD_ID, "", fc, 1, iid)
     assert not fc.created and not fc.added
@@ -107,7 +108,7 @@ class _StrictClient(FakeClient):
 
 
 def _upload_client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = _StrictClient(uploads={UPLOAD_ID: _UPLOAD_ALBUM})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc
@@ -121,6 +122,18 @@ def test_upload_album_page_renders_tracks_not_unavailable(store):
     assert "Album unavailable" not in r.text
     assert "Disco-tech (disc 1)" in r.text and "Gatecrasher" in r.text
     assert "Opener" in r.text and "Closer" in r.text
+    html = r.text
+    assert "Your upload" in html
+    assert "/collection/save-album" not in html
+    assert ">Genre<" in html and ">Plays<" in html and "like-btn" in html
+    enrich = re.search(r'<button[^>]*aria-label="Enrich"', html)
+    assert enrich, "enrich icon missing"
+    assert "|| true" not in html[max(0, enrich.start() - 400):enrich.end()]
+    assert "&amp;amp;" not in html and "year &amp; audio features" in html
+    assert re.search(r'<a[^>]*class="ptitle"[^>]*href="/track/u1\?', html)
+    assert "data-yt-info" not in _anchor(html, "pl-play")
+    assert f'https://music.youtube.com/browse/{UPLOAD_ID}' in html
+    assert f'albumPlayback("{UPLOAD_ID}", "", "https://music.youtube.com/browse/{UPLOAD_ID}")' in html
 
 
 def test_upload_album_share_txt_lists_track_urls(store):
@@ -129,24 +142,6 @@ def test_upload_album_share_txt_lists_track_urls(store):
     assert r.status_code == 200
     assert "https://music.youtube.com/watch?v=u1" in r.text
     assert "https://music.youtube.com/watch?v=u2" in r.text
-
-
-def test_upload_album_shows_your_upload_tag_and_no_save_button(store):
-    # An upload has no audioPlaylistId to like, so "Save to library" could only ever fail here.
-    c, _fc = _upload_client(store)
-    r = c.get(f"/album?browse={UPLOAD_ID}")
-    assert "Your upload" in r.text
-    assert "/collection/save-album" not in r.text
-
-
-def test_upload_album_renders_the_folded_in_library_table(store):
-    """An upload IS your library (that is what "privately owned" means), so it gets the same editable
-    table a saved album gets: genre, year, plays, the liked heart. Without this it fell back to the
-    read-only preview table, which has none of them."""
-    c, _fc = _upload_client(store)
-    html = c.get(f"/album?browse={UPLOAD_ID}").text
-    assert ">Genre<" in html and ">Plays<" in html
-    assert "like-btn" in html
 
 
 def test_upload_album_folds_all_live_tracks_into_the_library(store):
@@ -161,32 +156,12 @@ def test_upload_album_folds_all_live_tracks_into_the_library(store):
     assert len(store.charts.album_tracks_detail(UPLOAD_ID)) == 2   # the missing track got folded in
 
 
-def test_upload_album_enrich_button_is_enabled(store):
-    """Enrichment runs over folded-in tracks. Uploads have them now, so the icon must not be disabled
-    (it is gated on saved-ness, which an upload can never have)."""
-    c, _fc = _upload_client(store)
-    html = c.get(f"/album?browse={UPLOAD_ID}").text
-    enrich = re.search(r'<button[^>]*aria-label="Enrich"', html)
-    assert enrich, "enrich icon missing"
-    # the gate lives in the :disabled binding just before aria-label
-    block = html[max(0, enrich.start() - 400):enrich.end()]
-    assert "|| true" not in block
-
-
-def test_enrich_tooltip_renders_a_real_ampersand(store):
-    """The tooltip lives inside a Jinja {{ }} string, so it is autoescaped on the way out: writing
-    &amp; there double-escapes to &amp;amp; and the tooltip literally reads "&amp;". The raw & is
-    what's wanted; escaping turns it into the &amp; the HTML needs."""
-    c, _fc = _upload_client(store)
-    html = c.get(f"/album?browse={UPLOAD_ID}").text
-    assert "&amp;amp;" not in html
-    assert "year &amp; audio features" in html      # single-escaped: renders as "year & audio"
-
-
-def test_album_hides_the_artist_tag_when_there_is_no_album_artist(store):
+def test_album_hides_the_artist_tag_when_there_is_no_album_artist(route_store, monkeypatch):
     """A compilation upload has no single album artist, so YouTube returns none. Rendering the amber
     tag anyway leaves an empty pill in the header."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store = route_store
+    install_routes(monkeypatch, 'album')
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     no_artist = dict(_UPLOAD_ALBUM, artists=[])
     fc = _StrictClient(uploads={UPLOAD_ID: no_artist})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
@@ -204,7 +179,7 @@ def test_album_with_no_cover_shows_a_mosaic_of_its_track_art(store):
     for vid, title, art in (("u1", "Opener", "http://art/1.jpg"), ("u2", "Closer", "http://art/2.jpg")):
         store.tracks.upsert_track(vid, title, "Gatecrasher", "Disco-tech (disc 1)", 100,
                            album_browse_id=UPLOAD_ID, thumbnail=art)
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = _StrictClient(uploads={UPLOAD_ID: dict(_UPLOAD_ALBUM, thumbnails=[{"url": _PH}])})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     html = TestClient(app, base_url="http://127.0.0.1").get(f"/album?browse={UPLOAD_ID}").text
@@ -216,7 +191,7 @@ def test_album_with_no_cover_shows_a_mosaic_of_its_track_art(store):
 def test_album_with_real_cover_keeps_the_single_cover(store):
     """No regression: an ordinary album with its own art shows it, not a mosaic."""
     real = "https://lh3.googleusercontent.com/real=w544"
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = FakeClient(albums={"MPREb_x": {"title": "A", "artists": [{"name": "B"}],
                                         "thumbnails": [{"url": real}], "tracks": []}})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
@@ -225,26 +200,9 @@ def test_album_with_real_cover_keeps_the_single_cover(store):
     assert "pl-art-mosaic" not in html
 
 
-def test_song_titles_open_track_details_and_play_buttons_still_play(store):
-    """Track navigation and the existing playback overlay remain separate actions."""
-    c, _fc = _upload_client(store)
-    html = c.get(f"/album?browse={UPLOAD_ID}").text
-    # Match the whole <a ...> tag: these anchors wrap across lines, so a line-wise check would miss
-    # an attribute that landed on the second line.
-    assert re.search(r'<a[^>]*class="ptitle"[^>]*href="/track/u1\?', html)
-    assert "data-yt-info" not in _anchor(html, "pl-play")
-
-
-def test_upload_play_keeps_existing_browser_handoff_without_an_album_queue(store):
-    c, _fc = _upload_client(store)
-    html = c.get(f'/album?browse={UPLOAD_ID}').text
-    assert f'https://music.youtube.com/browse/{UPLOAD_ID}' in html
-    assert f'albumPlayback("{UPLOAD_ID}", "", "https://music.youtube.com/browse/{UPLOAD_ID}")' in html
-
-
 def test_catalog_album_still_shows_save_button(store):
     # No regression: an ordinary unsaved album keeps its save button.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = FakeClient(albums={"MPREb_x": {"title": "The Album", "artists": [{"name": "A"}],
                                         "thumbnails": [], "tracks": []}})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)

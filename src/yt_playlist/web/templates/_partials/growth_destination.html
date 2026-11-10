@@ -1,0 +1,32 @@
+<dialog class="growth-dialog growth-detail" x-ref="destinationDialog" @close="if (!$el.open) selected = null"
+        aria-labelledby="growth-destination-title" @click="if ($event.target === $el) $el.close()">
+  <button class="growth-dialog-close" type="button" @click="closeNode()" aria-label="Close destination">×</button>
+  <template x-if="selectedNode"><div>
+    <div class="growth-dialog-scene" aria-hidden="true" :style="'background-position:' + selectedNode.x + '% ' + Math.max(0, selectedNode.y - 12) + '%'"></div>
+    <h2 id="growth-destination-title" x-text="({vibes: 'Set the mood.', takeout: 'Rediscover old favorites sooner', lastfm: 'Find more music that fits', deepseek: 'Get a feel for an album before you play'})[selectedNode.id] || selectedNode.label"></h2>
+    <div class="growth-destination-badges" aria-label="Destination status">
+      <span class="tag growth-status" :class="{'teal': selectedNode.state === 'explored', 'amber': selectedNode.state === 'ready'}" x-text="selectedNode.status"></span>
+      <span class="tag" x-show="selectedNode.optional" x-text="selectedNode.bonus ? 'Optional bonus' : 'Optional'"></span>
+      <span class="tag" x-show="selectedNode.id === 'vibes'">In Mix tapes</span>
+    </div>
+    <template x-if="!selectedNode.bonus"><div>
+      <p x-text="selectedNode.detail"></p>
+      <p x-show="selectedNode.unlocked && !selectedNode.usable">You can still visit while we find fresh choices.</p>
+      <p x-show="selectedNode.id === 'vibes'">Relax, concentrate, cruise, energize, release or uplift. Pick a mood before you play and your mixes follow it.</p>
+    </div></template>
+    <template x-if="selectedNode.bonus"><div>{% include '_partials/growth_bonus_details.html' %}</div></template>
+    <section class="growth-how-to" x-show="selectedNode.bonus ? !selectedNode.ready : !selectedNode.unlocked || !selectedNode.href" aria-labelledby="growth-how-to-title">
+      <h3 id="growth-how-to-title">How to get here</h3>
+      <p x-show="!selectedNode.bonus && selectedNode.parent && !node(selectedNode.parent).unlocked"
+         x-text="selectedNode.parent ? 'This opens after ' + node(selectedNode.parent).label + ' is ready.' : ''"></p>
+      <p x-text="selectedNode.how_to"></p>
+    </section>
+    <a class="btn btn-primary" x-show="selectedNode.href" :href="selectedNode.href"
+       @click="if (selectedNode.href.startsWith('/#')) { $event.preventDefault(); visit(selectedNode); }">
+      <span x-text="({vibes: 'Open Mix tapes', foundation: 'Browse your music', takeout: 'Add past listening', lastfm: 'Set up Last.fm', deepseek: 'Set up album descriptions'})[selectedNode.id] || 'Open ' + selectedNode.label"></span>
+      {{ arrow_icon('right') }}
+    </a>
+    <button class="btn-ghost" type="button" x-show="isNew(selectedNode)" @click="markSeen(selectedNode)">Mark as seen</button>
+    <button class="btn-ghost" type="button" x-show="selectedNode.bonus" @click="closeNode()">Back to the festival</button>
+  </div></template>
+</dialog>

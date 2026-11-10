@@ -2,14 +2,17 @@
 from urllib.parse import urlencode
 
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.action_errors import ActionInputError
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.rec import measurement
+from yt_playlist.web.context import refresh_playlist_view
 
 
 class Song(BaseModel):
@@ -53,7 +56,7 @@ def build(ctx):
 
     def unconfirmed_result(exc, *, created):
         playlist = next((p for p in store.playlists.get_playlists()
-                         if p.ytm_playlist_id == exc.playlist_id), None)
+                         if p.provider_playlist_id == exc.playlist_id), None)
         return {"status": "partial", "added": bool(exc.confirmed),
                 "url": f"/playlist/{playlist.id}" if playlist else
                        "https://music.youtube.com/playlist?" + urlencode({"list": exc.playlist_id}),
@@ -92,12 +95,12 @@ def build(ctx):
     @router.get("/songs/playlists")
     def destinations(video_id: str):
         clients = ctx.clients() or {}
-        identities = {i.id: i.label for i in store.identities.get_identities()}
+        identities = {i.id: i.label for i in store.accounts.get_accounts()}
         containing = store.playlists.playlist_ids_for_video(video_id)
         playlists = [p for p in store.playlists.get_playlists()
-                     if p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS and p.identity_id in clients]
+                     if p.provider_playlist_id not in SYSTEM_PLAYLIST_IDS and p.account_id in clients]
         return {"playlists": [{"id": p.id, "title": p.title,
-                               "identity": identities.get(p.identity_id, ""),
+                               "identity": identities.get(p.account_id, ""),
                                "already_present": p.id in containing}
                               for p in sorted(playlists, key=lambda p: (p.title.casefold(), p.id))],
                 "multiple_identities": len(clients) > 1}
@@ -109,11 +112,11 @@ def build(ctx):
                                              body.name, body.song.track())
         except PlaylistAddUncertain as exc:
             return unconfirmed_result(exc, created=True)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+        except ActionInputError as exc:
+            return JSONResponse(status_code=422, content={"code": exc.code, "detail": str(exc)})
         except Exception as exc:
             ctx.logger.exception("create playlist from song failed")
-            raise HTTPException(502, "Couldn't create the playlist. Please try again.") from exc
+            raise HTTPException(502, "Creation was not confirmed. Check your playlists before trying again.") from exc
         if result["added"]:
             measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
                                       event_id=f"song-create:{result['db_pid']}")
@@ -127,22 +130,19 @@ def build(ctx):
             result = await activity_for(ctx).to_thread(ctx.ops().add_song_to_playlist,
                                              body.playlist_id, body.song.track())
             if not result.get("already_present") and not result["added"]:
-                raise ValueError("YouTube couldn't add this song. Please try another song or playlist.")
+                raise ActionInputError('song_add_rejected')
         except PlaylistAddUncertain as exc:
             return unconfirmed_result(exc, created=False)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+        except ActionInputError as exc:
+            return JSONResponse(status_code=422, content={"code": exc.code, "detail": str(exc)})
         except Exception as exc:
             ctx.logger.exception("add song to playlist failed")
             raise HTTPException(502, "Couldn't add the song. Please try again.") from exc
         playlist = store.playlists.get_playlist(body.playlist_id)
         if result["added"] and not result.get("already_present"):
             measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
-                                      generated=store.playlists.is_quarantined_playlist(playlist.scope_ref))
-        try:
-            ctx.bridge.send_control({"type": "refresh-view", "playlist": playlist.ytm_playlist_id})
-        except Exception:  # noqa: BLE001 - a disconnected player must not undo a successful add
-            ctx.logger.debug("playlist refresh not sent", exc_info=True)
+                                      generated=store.playlists.is_quarantined_playlist(playlist.playlist_scope_id))
+        refresh_playlist_view(ctx, playlist.provider_playlist_id)
         return {"url": f"/playlist/{playlist.id}", "title": playlist.title,
                 "message": ("This song is already in the playlist." if result.get("already_present")
                             else "Song added.")}

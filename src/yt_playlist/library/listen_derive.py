@@ -55,7 +55,7 @@ def skip_blackouts(events, now):
         if not explicit and (not measured or classify_exit(position, duration) != 'skip'):
             continue
         key = event['key']
-        episode = (key, event['identity_id'])
+        episode = (key, event['account_id'])
         prior = previous.get(episode)
         # An explicit Next can be followed by an exit even when its media clock
         # was unavailable. Count that one request/playback only once.

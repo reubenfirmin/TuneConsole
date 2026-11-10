@@ -10,9 +10,8 @@
     {% endif %}
     <button type="button" class="chip-x"
         title="Remove {{ name }}" aria-label="Remove {{ name }}"
-        hx-post="/genres/remove" hx-vals='{"name": {{ name|tojson }}}'
-        hx-include="#genre-filter"
-        hx-target="#genre-list" hx-swap="innerHTML">×</button></li>
+        data-genre-name="{{ name }}"
+        @click="change('remove', {name: $el.dataset.genreName})">×</button></li>
   {% endfor %}
 </ul>
 {% endmacro %}

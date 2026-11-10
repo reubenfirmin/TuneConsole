@@ -1,0 +1,14 @@
+<section{% if not error and ytm %} data-generated-playlist="{{ ytm }}"{% endif %}>
+{% if error %}
+  <h2>{% if partial_ytm %}Your set was partly saved.{% elif save_uncertain %}Check your saved music.{% else %}Your first set needs another try.{% endif %}</h2>
+  <p class="artist-start-intro">{{ error }}</p>
+  {% if save_uncertain %}<p><a href="/actions">Open Action Log</a></p>{% endif %}
+  {% if track_length_limited %}<p><a href="/taste#recommendations/features">Change track-length limit</a></p>{% endif %}
+  {% if partial_ytm %}<p>Review the saved playlist before trying again.</p><a href="https://music.youtube.com/playlist?list={{ partial_ytm|urlencode }}" target="_blank" rel="noopener">Review saved music {{ arrow_icon('external') }}</a>{% endif %}
+  <button class="btn btn-primary artist-start-primary" type="button" hx-get="/home/onboard/artists/listen" hx-target="#artist-first-listen" hx-swap="innerHTML">Back to my first set</button>
+{% else %}
+  <h2>Your music is on its way.</h2>
+  <a class="btn btn-primary artist-start-primary" href="https://music.youtube.com/watch?list={{ ytm|urlencode }}" target="_blank" rel="noopener">Open my first set {{ arrow_icon('external') }}</a>
+{% endif %}
+<script>genComplete({{ launch_id|default('')|tojson }}, {{ ytm|default(none)|tojson }}, {{ (error is defined and error)|tojson }}, {{ save_uncertain|default(false)|tojson }}, false, {{ addition_recovery|default(none)|tojson }});</script>
+</section>

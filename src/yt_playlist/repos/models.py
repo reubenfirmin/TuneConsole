@@ -7,14 +7,14 @@ from dataclasses import dataclass
 
 
 @dataclass
-class Identity:
+class Account:
     id: int; label: str; credential_ref: str
     brand_account_id: str | None; is_master: bool; last_auth_ok: float | None
 
 
 @dataclass
 class Playlist:
-    id: int; identity_id: int; ytm_playlist_id: str; title: str
+    id: int; account_id: int; provider_playlist_id: str; title: str
     track_count: int; content_hash: str
     first_seen: float; last_seen: float; last_changed: float
     thumbnail: str | None = None
@@ -22,9 +22,9 @@ class Playlist:
     created_at_source: str | None = None
 
     @property
-    def scope_ref(self):
+    def playlist_scope_id(self):
         from yt_playlist.core.playlist_scopes import key
-        return key(self.identity_id,self.ytm_playlist_id)
+        return key(self.account_id,self.provider_playlist_id)
 
 
 @dataclass
@@ -55,3 +55,5 @@ class Track:
 class Action:
     id: int; kind: str; params_json: str | None; plan_json: str | None; undo_json: str | None
     status: str; created_at: float; executed_at: float | None
+    revision: str | None = None
+    execution_token: str | None = None

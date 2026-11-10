@@ -3,22 +3,39 @@ import time
 
 import pytest
 
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store, play,
+    controlled_radio_checkpoints,
+)
+from tests.test_radio_start_overlap import poc as owned_poc, radio_schema
+from tests.store_fixture_support import reuse_reporting_reader, use_native_sql_calls, without_query_timing
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.library import playlist_generated
 
 
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'controlled_radio_checkpoints')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These controllers and route-only apps have no periodic application jobs."""
+
+
 @pytest.fixture
-def owned_playback(poc, monkeypatch):
+def owned_playback(owned_poc, monkeypatch):
     from yt_playlist.core.bridge import Bridge
 
-    controller, remote, frames, *_ = poc
+    controller, remote, frames, *_ = owned_poc
+    # These three playback-intent consumers are synchronous; checkpoint storage
+    # is supplied below them, so they need no optimistic snapshot guards.
+    use_native_sql_calls(monkeypatch)
     bridge = Bridge()
     bridge._send = frames.append
     monkeypatch.setattr('yt_playlist.core.bridge.asyncio.run_coroutine_threadsafe', lambda frame, loop: None)
     controller.ctx.bridge = controller.playback.bridge = bridge
-    return controller, remote, frames, bridge
+    with reuse_reporting_reader(controller.ctx.store, monkeypatch):
+        yield controller, remote, frames, bridge
 
 
 def test_newer_direct_play_survives_older_radio_creation(owned_playback, monkeypatch):
@@ -59,17 +76,36 @@ def test_radio_route_reserves_playback_before_its_worker_starts(owned_playback, 
     from yt_playlist.web.routes import radio_session
 
     controller, remote, frames, bridge = owned_playback
+    # Use the real, current starter offer; a locked empty request never reaches
+    # worker dispatch and therefore cannot test playback-intent ownership.
+    controller.ctx.store.settings.set_setting('onboard_listening_format', 'radio')
+    offer = controller.seeds()
+    chosen = offer['tracks'][0]['video_id']
     direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+    dispatched = []
+    starts = []
+    start = controller.start
+
+    def captured_start(*args, intent, **kwargs):
+        starts.append(intent)
+        assert not bridge.playback_intent_current(intent)
+        return start(*args, intent=intent, **kwargs)
 
     async def delayed(target, *args, **kwargs):
+        dispatched.append(target)
         bridge.send_control(direct, intent=bridge.begin_playback_intent())
         return target(*args, **kwargs)
 
     monkeypatch.setattr(controller.work, 'to_thread', delayed)
+    monkeypatch.setattr(controller, 'start', captured_start)
     app = FastAPI()
     app.include_router(radio_session.build(controller.ctx))
     with TestClient(app) as client:
-        assert client.post('/radio/start', json={}).json()['ok']
+        response = client.post('/radio/start', json={'video_id': chosen, 'menu_id': offer['menu_id']})
+        assert response.status_code == 200, response.text
+        assert response.json()['ok'], response.text
+    assert len(dispatched) == len(starts) == 1
+    assert controller.ctx.store.playlists.get_playlist(controller.session.local_id)
     assert remote.ids and frames == [direct]
 
 

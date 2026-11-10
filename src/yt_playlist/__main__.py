@@ -76,7 +76,7 @@ def build_app(*, updater=None):
     from yt_playlist import egress
     egress.install()
     store = Store(paths.db_path())
-    store.init_schema()
+    store.init_schema(defer_metadata=True)
     config_path = paths.config_path()
     runtime = Runtime(store, config_path, config_path.parent)
     runtime.load()

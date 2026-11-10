@@ -1,4 +1,5 @@
-"""Identity joins, provider consistency and non-destructive vocabulary upgrades."""
+"""Account joins, provider consistency and non-destructive vocabulary upgrades."""
+from contextlib import closing
 import json
 import sqlite3
 
@@ -6,11 +7,35 @@ import pytest
 
 from yt_playlist.providers import genres, musicbrainz
 from yt_playlist.util import genre_catalog as catalog, genre_map
+from tests.store_fixture_support import consumer_schema, initialize_consumer
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # These owners exercise the entire shipped taxonomy and real SQL upgrades.
+    # They do not use concurrent snapshots or their revision triggers.
+    with consumer_schema(snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(_pristine_current_schema):
+    from yt_playlist.core.store import Store
+
+    database = Store(':memory:')
+    with closing(database.conn):
+        initialize_consumer(database, _pristine_current_schema, snapshot_guards=False)
+        yield database
 
 
 @pytest.fixture(autouse=True)
 def isolated_matcher(monkeypatch):
     monkeypatch.setattr(genres, "_active", None)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Genre matching and upgrades do not construct the HTTP application."""
 
 
 def test_equivalent_spellings_share_identity():
@@ -19,6 +44,30 @@ def test_equivalent_spellings_share_identity():
     assert genres.match_tag("drum and bass") == "Drum & Bass"
     assert genre_map.family("dnb") == "dnb"
     assert genre_map.subgenre("rap") == genre_map.subgenre("Hip-Hop") == "hip hop"
+
+
+@pytest.mark.parametrize('shipped', [False, True], ids=['bounded', 'shipped-subset'])
+def test_restricted_catalog_caches_are_private_and_restore_the_full_vocabulary(shipped):
+    from tests.genre_catalog_support import bound_catalog, bound_shipped_catalog
+    from yt_playlist.rec import musical_profiles
+
+    family = genre_map.family('Rock')
+    profile = musical_profiles.genre_profile('Ambient')
+    assert profile['relaxed']['value'] == pytest.approx(.8)
+    assert catalog.is_subgenre('Deep House', 'House')
+    with pytest.MonkeyPatch.context() as patch:
+        if shipped:
+            bound_shipped_catalog(patch, ('rock',))
+        else:
+            bound_catalog(patch, entries=(('rock', 'Rock'),))
+        expected_family = family if shipped else 'rock'
+        assert genre_map.family('Rock') == expected_family
+        assert genre_map._load()[0]['rock'] == expected_family
+        assert musical_profiles.genre_profile('Ambient') == {}
+        assert not catalog.is_subgenre('Deep House', 'House')
+    assert genre_map.family('Rock') == family
+    assert musical_profiles.genre_profile('Ambient') == profile
+    assert catalog.is_subgenre('Deep House', 'House')
 
 
 @pytest.mark.parametrize("left,right", [
@@ -70,7 +119,10 @@ def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases
     assert "Electro" not in names and "Electronica" not in names
     assert "Phonk" in names and "Whack-a-doodle" in names
     assert names.count("Hip Hop") == 1 and "hip-hop" not in names
-    assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (track,)).fetchone()[0] == "hip-hop"
+    assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (track,)).fetchone()[0] == "Hip Hop"
+    captured = store.conn.execute("SELECT text_value FROM metadata_observations WHERE entry_id=? "
+                                  "AND field='genre' AND origin='user'", (track,)).fetchone()
+    assert captured[0] == 'hip-hop'
     store.genres.remove_genre("Phonk")
     genres.configure(store)
     assert genres.match_tag("phonk") is None
@@ -105,13 +157,14 @@ def test_later_snapshot_adds_only_new_defaults(store):
 def test_failed_upgrade_rolls_back_catalog_enabled_list_and_revision(store):
     store.genres.set_genres(["Jazz", "Whack-a-doodle"])
     store.settings.set_setting("genres_seeded", "1")
+    original = list(store.conn.execute('SELECT * FROM genre_catalog ORDER BY key'))
     store.conn.execute("CREATE TRIGGER reject_catalog BEFORE INSERT ON genre_alias "
                        "BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected failure"):
         genres.configure(store)
     assert store.genres.get_genre_whitelist() == ["Jazz", "Whack-a-doodle"]
     assert store.settings.get_setting("genre_catalog_revision") is None
-    assert store.conn.execute("SELECT count(*) FROM genre_catalog").fetchone()[0] == 0
+    assert list(store.conn.execute('SELECT * FROM genre_catalog ORDER BY key')) == original
 
 
 def test_musicbrainz_skips_noisy_or_disabled_top_tags_and_keeps_relevance():
@@ -163,6 +216,16 @@ def test_disabled_specific_tag_cannot_refine_an_enabled_parent():
 def test_recording_tags_can_refine_musicbrainz_broad_genre():
     assert musicbrainz._top_label({'genres': [{'name': 'rock', 'count': 100}],
                                    'tags': [{'name': 'psychedelic rock', 'count': 5}]}) == 'Psychedelic Rock'
+
+
+def test_provider_refinement_uses_identity_after_display_rename(store):
+    store.genres.configure_catalog()
+    store.genres.rename_genre('psychedelic rock','Renamed specific style')
+    genres.configure(store,read_only=True)
+    try:
+        assert genres.pick_genre(['Rock','Psychedelic Rock'])=='Renamed specific style'
+    finally:
+        genres.set_active(None)
 
 
 def test_imported_children_use_the_same_family_in_matching_and_recommendations():

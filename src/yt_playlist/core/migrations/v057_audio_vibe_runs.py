@@ -15,7 +15,9 @@ def apply(conn, context):
 def validate(conn):
     from .current import _tokens
     from .runner import MigrationError
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     for sql in statements():
-        row = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (sql.split()[2],)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+        actual = definitions.get(sql.split()[2])
+        if actual is None or _tokens(actual) != _tokens(sql):
             raise MigrationError('Incompatible audio playback run structure')

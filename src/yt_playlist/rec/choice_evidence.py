@@ -13,20 +13,31 @@ from copy import deepcopy
 
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core import mix_choices
 from yt_playlist.rec.choice_context import context_manifest as _context_manifest, learning_context, resolve_context
+from yt_playlist.rec import group_roots, home_cache, recommendation_roots
 
 logger = logging.getLogger(__name__)
 FORMATS = {"albums", "mixes", "radio"}
 ACTIONS = {"visible", "open", "choice", "start", "save", "promote", "return", "experience", "feedback", "withdraw", "close"}
+STORAGE_PENDING = 'listening_evidence_storage_pending'
+STORAGE_PHASE = 'listening_evidence_storage_phase'
+STORAGE_SECONDS = 5
 
 
-def present(store, format, options, now, *, context, window, episode_id=None):
+def present(store, format, options, now, *, context, window, episode_id=None, vibe=None):
     """Rerenders reuse one complete menu; edits or new model inputs create another opportunity."""
-    if getattr(store, 'activity_paused', False):
+    if getattr(store, 'activity_paused', False) or getattr(store, '_read_only', False):
         return None
-    identity = hashlib.sha256(canonical([format, window, options, context])).hexdigest()[:32]
+    if format == 'mixes':
+        options = [mix_choices.visible_option(option) for option in options]
+        context = mix_choices.context(_context_manifest(store.rec_ledger.evidence(), context), mixes=True)
+    menu = [format, window, options, context]
+    if vibe is not None:
+        menu.append(vibe)
+    identity = hashlib.sha256(canonical(menu)).hexdigest()[:32]
     if issue(store, format, options, now, context=context, episode_id=episode_id,
-             opportunity_id=identity, reuse=True) is None:
+             opportunity_id=identity, reuse=True, vibe=vibe) is None:
         return None
     held = store.rec_proposals.get_proposals('choice_window:' + format) or {}
     if held.get('opportunity_id') != identity:
@@ -120,19 +131,14 @@ def _model_context(store, now, *, facet_leans=None):
               "content_model": store.settings.get_setting("rec_content_model"),
               "content_generation": store.settings.get_setting("rec_content_generation"),
               "collaborative_inputs": store.settings.get_setting("rec_fit_inputs"),
-              "group_inputs": store.settings.get_setting("rec_mode_fit_inputs"),
-              "album_feedback": store.settings.get_setting("album_feedback"),
+              "album_feedback": scoring.album_feedback_state.state(store),
               "format_preference": store.settings.get_setting("home_format"),
               "method": store.settings.get_setting("rec_embed_method"),
               "dim": store.settings.get_setting("rec_dim")}
     def taste(value):
         return {"titles": value.titles, "centroids": value.centroids.tolist(),
                 "weights": value.weights.tolist(), "sources": getattr(value, "sources", [])}
-    from yt_playlist.rec.group_versions import legacy_definition
     return {"schema": 1, "at": now, "policy": policy,
-        "groups": [{**mode, "centroid": mode["centroid"].tolist(),
-                    "definition_version": legacy_definition(mode)[0], "grouping_policy": "legacy"}
-                   for mode in store.modes.list_modes(active_only=True)],
         "layers": {"now": {"modes": current, "events": count,
                            "window_h": rec_params.get_param(store, "now_window_h")},
                    "session": {"modes": session, "events": session_count,
@@ -142,13 +148,26 @@ def _model_context(store, now, *, facet_leans=None):
                              "content": taste(scoring.content_taste(store, now=now)) if has_content else None}}}
 
 
-def issue(store, format, options, now, *, context, episode_id=None, opportunity_id=None, reuse=False):
+def issue(store, format, options, now, *, context, episode_id=None, opportunity_id=None, reuse=False,
+          vibe=None):
     """Freeze the complete actual menu and its pre-response state, with optional scored forecast."""
     if getattr(store, 'activity_paused', False):
         return None
     if format not in FORMATS or not math.isfinite(now):
         raise ValueError("Unknown listening format")
+    if vibe is not None:
+        from yt_playlist.rec.home_vibe import PRESETS
+        if format != 'mixes' or vibe not in PRESETS:
+            raise ValueError('Unknown displayed Vibe')
     options, context = deepcopy(list(options)), deepcopy(context)
+    if format == 'mixes':
+        options = [mix_choices.visible_option(option) for option in options]
+        context = mix_choices.context(_context_manifest(store.rec_ledger.evidence(), context), mixes=True)
+    if recommendation_roots.enabled(store):
+        generations = set(recommendation_roots.references(context)) | set(recommendation_roots.from_options(options))
+        if generations:
+            context['recommendation_generations'] = recommendation_roots.references(
+                {'recommendation_generations': sorted(generations)})
     ids = [str(option["id"]) for option in options]
     if not options or any(not identity for identity in ids) or len(ids) != len(set(ids)):
         raise ValueError("A choice opportunity needs distinct alternatives")
@@ -157,6 +176,12 @@ def issue(store, format, options, now, *, context, episode_id=None, opportunity_
     record = {"schema": 1, "id": identity, "format": format, "at": now, "observed_at": now,
               "episode_id": episode_id or identity,
               "options": options}
+    if vibe is not None:
+        # The visible tuning choice belongs to the small decision envelope.
+        # It carries no playback recipe, recording membership or model history.
+        record['vibe'] = vibe
+    if format == 'mixes':
+        record['context_at'] = context.get('at', now)
     if comparison:
         record['comparison'] = comparison
     else:
@@ -166,19 +191,38 @@ def issue(store, format, options, now, *, context, episode_id=None, opportunity_
             record['monitor'] = monitoring
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
-        accepted = capture.enqueue('listening:' + format, _issue, store, record, context,
-            reuse=reuse, opportunity=record, deduplicate=reuse,
-            artifacts=(context['artifact'],) if context.get('artifact') else ())
+        try:
+            close = group_roots.pending(store, {}, now)
+        except WorkBudgetExceeded:
+            return None
+        try:
+            accepted = capture.enqueue('listening:' + format, _issue, store, record, context,
+                reuse=reuse, opportunity=record, deduplicate=reuse, on_close=close, group_context=context,
+                artifacts=(context['artifact'],) if context.get('artifact') else ())
+        except BaseException:
+            if close is not None:
+                close()
+            raise
         return identity if accepted else None
-    return _issue(store, record, context, reuse=reuse)
+    try:
+        with group_roots.admission(store, blocking=False):
+            return _issue(store, record, context, reuse=reuse)
+    except WorkBudgetExceeded:
+        return None
 
 
 def _issue(store, record, context, *, reuse=False):
+    with group_roots.admission(store):
+        group_roots.retain(store, 'offer', record['id'], context, record['at'])
+        return _issue_record(store, record, context, reuse=reuse)
+
+
+def _issue_record(store, record, context, *, reuse=False):
     ledger = store.rec_ledger.evidence()
     identity = record['id']
     if reuse and ledger.get('opportunity', identity) is not None:
         return identity
-    context = _context_manifest(ledger, context)
+    context = mix_choices.context(_context_manifest(ledger, context), mixes=record['format'] == 'mixes')
     # Derive forecasts only from the frozen offered scores, never later responses.
     options = record['options']
     scores = [option.get('score') for option in options]
@@ -187,12 +231,17 @@ def _issue(store, record, context, *, reuse=False):
         key=lambda i: (-scores[i], i))] if scored else None
     record = {**record, 'context': hashlib.sha256(canonical(context)).hexdigest(),
               'prediction': prediction, 'prediction_status': 'issued' if scored else 'unscored'}
+    if record['format'] == 'mixes':
+        # Publication acknowledges SQL descriptor custody before the event file.
+        # A failed event write leaves a conservative projection for this ID.
+        record = store.rec_ledger.publish_mix_menu(record, record['context'])
     ledger.put("opportunity", identity, record, artifact=context)
     return identity
 
 
-def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None, visible=(), details=None):
-    """Queue a frozen observation; the worker validates it against the actual issued menu."""
+def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None, visible=(), details=None,
+            synchronous=False):
+    """Queue an observation, or persist a durable intent under nonblocking admission."""
     if getattr(store, 'activity_paused', False):
         return None
     if kind not in ACTIONS or not math.isfinite(now):
@@ -201,17 +250,43 @@ def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None,
         raise ValueError("A listening response must name its option")
     options = {'option_id': str(option_id) if option_id is not None else None,
                'action_id': action_id, 'visible': tuple(map(str, visible)), 'details': deepcopy(details)}
-    capture = getattr(store, 'choice_capture', None)
+    capture = None if synchronous else getattr(store, 'choice_capture', None)
     if capture is not None:
         ledger = store.rec_ledger.evidence()
-        return capture.enqueue('listening:response', _respond, store, opportunity_id, kind, now,
-            references=(opportunity_id,),
-            validate=lambda: capture.get(opportunity_id) is not None
-                or ledger.get('opportunity', opportunity_id) is not None, **options)
-    return _respond(store, opportunity_id, kind, now, **options)
+        close = None
+        if group_roots.enabled(store):
+            captured = capture.context(opportunity_id)
+            if captured is None:
+                offer = ledger.get('opportunity', opportunity_id)
+                captured = {'artifact': offer['context']} if offer else None
+            if captured is not None:
+                try:
+                    close = group_roots.pending(store, {}, now)
+                except WorkBudgetExceeded:
+                    return None
+        try:
+            return capture.enqueue('listening:response', _respond, store, opportunity_id, kind, now,
+                references=(opportunity_id,), on_close=close,
+                validate=lambda: capture.get(opportunity_id) is not None
+                    or ledger.get('opportunity', opportunity_id) is not None, **options)
+        except BaseException:
+            if close is not None:
+                close()
+            raise
+    try:
+        with group_roots.admission(store, blocking=False):
+            return _respond(store, opportunity_id, kind, now, **options)
+    except WorkBudgetExceeded:
+        return None
 
 
 def _respond(store, opportunity_id, kind, now, *, option_id, action_id, visible, details):
+    with group_roots.admission(store):
+        return _respond_record(store, opportunity_id, kind, now, option_id=option_id,
+                               action_id=action_id, visible=visible, details=details)
+
+
+def _respond_record(store, opportunity_id, kind, now, *, option_id, action_id, visible, details):
     ledger = store.rec_ledger.evidence()
     offer = ledger.get("opportunity", opportunity_id)
     if offer is None:
@@ -221,6 +296,9 @@ def _respond(store, opportunity_id, kind, now, *, option_id, action_id, visible,
         raise ValueError("Response does not belong to this opportunity")
     if now < offer["at"]:
         raise ValueError("Response precedes its opportunity")
+    if offer['format'] == 'mixes' and details:
+        details = {key: value for key, value in details.items()
+                   if key not in {'tracks', 'keys', 'feature', 'recipe', 'group_id', 'group_version', 'group_generation'}}
     identity = action_id or f"{opportunity_id}:{kind}:{option_id or ''}"
     # A retry must keep its original observation time; exact source IDs are never counted twice.
     previous = ledger.get("response", identity)
@@ -229,6 +307,8 @@ def _respond(store, opportunity_id, kind, now, *, option_id, action_id, visible,
                 opportunity_id, kind, str(option_id) if option_id is not None else None):
             raise ValueError("Response ID was reused for another action")
         return False
+    if group_roots.enabled(store):
+        group_roots.retain(store, 'response', identity, {'artifact': offer['context']}, now)
     return ledger.put("response", identity, {"schema": 1, "id": identity,
         "opportunity_id": opportunity_id, "kind": kind, "option_id": str(option_id) if option_id is not None else None,
         "at": now, "observed_at": now, "source": "live", "precision": "exact",
@@ -255,16 +335,20 @@ def safe_respond(*args, **kwargs):
         return False
 
 
-def album_playback_context(store, msg, now, *, identity_id=None):
+def album_playback_context(store, msg, now, *, account_id=None):
     """Resolve a recent deliberate album queue without treating navigation as playback."""
     from yt_playlist.rec import rec_params
     try:
-        pending = json.loads(store.settings.get_setting('listening_album_pending') or 'null')
+        # Playback events overlap TV refills and other serving writes. Pin this
+        # read on its own connection; the context loader owns a read transaction.
+        with store.read_view() as reader:
+            pending = reader.rec_ledger.album_playback_context()
+            attribution_hours = rec_params.get_param(reader, 'choice_attribution_h')
         if (not pending or not 0 <= now - pending['at'] <=
-                rec_params.get_param(store, 'choice_attribution_h') * 3600):
+                attribution_hours * 3600):
             return None
-        if (pending.get('identity_id') is not None and identity_id is not None
-                and pending['identity_id'] != identity_id):
+        if (pending.get('account_id') is not None and account_id is not None
+                and pending['account_id'] != account_id):
             return None
         if pending.get('videos') and msg.get('videoId') not in pending['videos']:
             return None
@@ -276,18 +360,18 @@ def album_playback_context(store, msg, now, *, identity_id=None):
     return None
 
 
-def record_playback(store, msg, now, *, identity_id=None):
+def record_playback(store, msg, now, *, account_id=None):
     """Called only after an eligible, verified new live play, never a heartbeat/navigation."""
     from yt_playlist.rec import rec_params
     def bind(opportunity, option):
-        if identity_id is not None and msg.get('playlist') and msg.get('videoId'):
-            store.rec_ledger.bind_choice_playback(identity_id, msg['playlist'], msg['videoId'],
+        if account_id is not None and msg.get('playlist') and msg.get('videoId'):
+            store.rec_ledger.bind_choice_playback(account_id, msg['playlist'], msg['videoId'],
                 opportunity, option, now, rec_params.get_param(store, 'choice_attribution_h') * 3600)
     try:
-        pending = album_playback_context(store, msg, now, identity_id=identity_id)
+        pending = album_playback_context(store, msg, now, account_id=account_id)
         if pending:
-            if identity_id is not None and pending.get('identity_id') is None:
-                store.settings.set_setting('listening_album_pending', json.dumps({**pending, 'identity_id': identity_id}))
+            if account_id is not None and pending.get('account_id') is None:
+                store.rec_ledger.bind_album_playback_context(pending, account_id)
             for kind in ("start", "experience"):
                 safe_respond(store, pending["opportunity_id"], kind, now, option_id=pending["browse"],
                     action_id=f"album:{pending.get('action_id', pending['opportunity_id'])}:{kind}:{msg.get('videoId')}",
@@ -328,11 +412,13 @@ def refresh_report(store, now):
         'attribution': rec_params.get_param(store, 'choice_attribution_h'),
         'album_identity': [2, store.collection.album_alias_revision()],
     })).hexdigest()
-    previous = store.rec_proposals.get_proposals('listening_choices') or {}
-    refresh = previous.get('refresh') or {}
-    if (refresh.get('generation') == generation and refresh.get('inputs') == inputs
-            and previous['at'] <= now < refresh['next_at']):
-        return previous
+    checkpoint = store.rec_proposals.report_checkpoint('listening_choices') or {}
+    if (checkpoint.get('generation') == generation and checkpoint.get('inputs') == inputs
+            and checkpoint.get('at') is not None and checkpoint.get('next_at') is not None
+            and checkpoint['at'] <= now < checkpoint['next_at']):
+        previous = store.rec_proposals.get_proposals('listening_choices')
+        if previous is not None:
+            return previous
     return compile_report(store, now, refresh={'generation': generation, 'inputs': inputs})
 
 
@@ -340,9 +426,9 @@ def compile_report(store, now, *, refresh=None):
     """Rebuild compact descriptive/predictive findings; never infer missing actions as rejection."""
     ledger = store.rec_ledger.evidence()
     all_offers, all_responses = ledger.records('opportunity'), ledger.records('response')
-    offers = {row["id"]: row for row in all_offers if row["observed_at"] <= now}
-    responses = sorted((r for r in all_responses if r["observed_at"] <= now),
-                       key=lambda r: (r["observed_at"], r["id"]))
+    offers = {row["id"]: row for row in all_offers if row["observed_at"] <= now and row['at'] <= now}
+    responses = sorted((r for r in all_responses if r["observed_at"] <= now and r['at'] <= now),
+                       key=lambda r: (r['at'], r['kind'] != 'visible', r["id"]))
     withdrawn = {r["details"].get("action_id") for r in responses if r["kind"] == "withdraw"}
     rows = {format: {"offered": 0, "visible": 0, "opens": 0, "choices": 0, "predicted_choices": 0,
         "top_choice_hits": 0, "reciprocal_rank": 0., "starts": 0, "saves": 0,
@@ -376,10 +462,14 @@ def compile_report(store, now, *, refresh=None):
                 keys = (details['keys'] if 'keys' in details else
                         [track['key'] for track in tracks if track.get('key')] if edited is not None else
                         option.get('keys') or [track['key'] for track in tracks if track.get('key')])
-                interests.append({"format": offer["format"], "option_id": event["option_id"],
+                interest = {"format": offer["format"], "option_id": event["option_id"],
                     "mode_id": option.get("mode_id"), "intent": option.get("intent"),
                     "keys": sorted(set(keys))[:100], "feature": option.get("feature"), "basis": option.get("basis"),
-                    "at": event["at"], "episode": offer["episode_id"], "opportunity_id": oid})
+                    "at": event["at"], "episode": offer["episode_id"], "opportunity_id": oid}
+                if offer['format'] == 'mixes':
+                    interest.update(keys=[], feature=None, mode_id=None, basis=mix_choices.PRECISION,
+                                    descriptor_id=option.get('descriptor_id') if option.get('genres_complete') else None)
+                interests.append(interest)
             visible = seen.get(oid, set())
             prediction = [identity for identity in offer.get("prediction") or [] if identity in visible]
             if event["option_id"] in prediction:
@@ -390,11 +480,15 @@ def compile_report(store, now, *, refresh=None):
         elif event["kind"] == "feedback" and event.get("details", {}).get("kind") == "more":
             option = next((option for option in offer["options"] if str(option["id"]) == event["option_id"]), None)
             if option:
-                interests.append({"format": offer["format"], "option_id": event["option_id"],
+                interest = {"format": offer["format"], "option_id": event["option_id"],
                     "mode_id": option.get("mode_id"), "intent": option.get("intent"),
                     "keys": sorted(set(option.get("keys") or [track["key"] for track in option.get("tracks", []) if track.get("key")]))[:100],
                     "feature": option.get("feature"), "basis": option.get("basis"),
-                    "at": event["at"], "episode": offer["episode_id"], "opportunity_id": oid})
+                    "at": event["at"], "episode": offer["episode_id"], "opportunity_id": oid}
+                if offer['format'] == 'mixes':
+                    interest.update(keys=[], feature=None, mode_id=None, basis=mix_choices.PRECISION,
+                                    descriptor_id=option.get('descriptor_id') if option.get('genres_complete') else None)
+                interests.append(interest)
         elif event["kind"] in {"open", "start", "save", "promote", "return", "experience"}:
             key = (oid, event["kind"], event["option_id"])
             if key not in stages:
@@ -450,14 +544,15 @@ def compile_report(store, now, *, refresh=None):
         for row in serving_contexts if row['format'] == 'albums' and row['option_id'] in album_days}
     projection['interest_version'] = hashlib.sha256(canonical(
         [serving_contexts, projection['album_track_days']])).hexdigest()
-    from yt_playlist.rec import choice_bandit
-    bandit = choice_bandit.compile(store, offers, [r for r in responses
-        if r['id'] not in withdrawn and r['kind'] != 'withdraw'], now)
+    from yt_playlist.rec import choice_bandit, group_learning
+    # All historical lookups share one pinned reader. In particular, old
+    # checkpoints must not open a connection for each immutable definition.
+    with store.read_view() as reader:
+        eligible = [r for r in responses if r['id'] not in withdrawn and r['kind'] != 'withdraw']
+        bandit = choice_bandit.compile(reader, offers, eligible, now)
+        head = getattr(reader.taste_groups, 'learning_head', reader.taste_groups.head)()
+        group_bandit = group_learning.compile(reader, offers, eligible, now, head) if head else None
     report['bandit'] = bandit
-    from yt_playlist.rec import group_learning
-    head = store.taste_groups.head()
-    group_bandit = group_learning.compile(store, offers, [r for r in responses
-        if r['id'] not in withdrawn and r['kind'] != 'withdraw'], now, head) if head else None
     if refresh is not None:
         deadlines = [now + 900]
         deadlines.extend(row[field] for row in all_offers + all_responses
@@ -465,13 +560,13 @@ def compile_report(store, now, *, refresh=None):
         deadlines.extend(state['expires_at'] for state in (bandit, group_bandit)
                          if state and state.get('expires_at') is not None and state['expires_at'] > now)
         report['refresh'] = {**refresh, 'next_at': min(deadlines)}
-    store.rec_proposals.publish_choice_findings(report, projection, now, bandit=bandit, group_bandit=group_bandit)
+    store.choice_findings.publish(report, projection, now, bandit=bandit, group_bandit=group_bandit)
     return report
 
 
 def daily_due(store, now):
-    previous = store.rec_proposals.get_proposals("choice_daily") or {}
-    return now - previous.get("at", float("-inf")) >= 86400
+    previous = store.rec_proposals.report_checkpoint('choice_daily') or {}
+    return previous.get('at') is None or now - previous['at'] >= 86400
 
 
 def replay(store, now, predictor=None):
@@ -484,14 +579,14 @@ def replay(store, now, predictor=None):
     """
     ledger = store.rec_ledger.evidence()
     offers = {offer["id"]: offer for offer in ledger.records("opportunity")
-              if offer["observed_at"] <= now}
-    events = sorted((event for event in ledger.records("response") if event["observed_at"] <= now),
+              if offer["observed_at"] <= now and offer['at'] <= now}
+    events = sorted((event for event in ledger.records("response") if event["observed_at"] <= now and event['at'] <= now),
                     key=lambda event: (event["observed_at"], event["id"]))
     withdrawn = {event["details"].get("action_id") for event in events if event["kind"] == "withdraw"}
     forecasts, visible, choices, episodes = {}, {}, set(), {}
     counts = {format: {"choices": 0, "scored": 0, "hits": 0, "unseen": 0,
                        "unscored": 0, "future_context": 0, "missing_context": 0,
-                       "released_context": 0} for format in FORMATS}
+                       "released_context": 0, "unsupported_precision": 0} for format in FORMATS}
     # Predict at issue time, rather than on first response. A menu opened tomorrow must
     # not benefit from choices observed after it was originally prepared/issued.
     timeline = [(offer["observed_at"], 0, oid, offer) for oid, offer in offers.items()]
@@ -500,13 +595,20 @@ def replay(store, now, predictor=None):
         check_cancellable_work()
         if phase == 0:
             offer, oid = event, event["id"]
+            if (predictor and offer['format'] == 'mixes'
+                    and getattr(predictor, 'mix_precision', None) != mix_choices.PRECISION):
+                forecasts[oid] = None
+                counts['mixes']['unsupported_precision'] += 1
+                continue
             try:
                 context = (resolve_context(store, {'artifact': offer['context']}) if predictor
                            else learning_context(store, offer['context']))
             except ValueError:
                 context = None
             valid = context is not None and context.get("at", offer["at"]) <= offer["at"]
-            forecasts[oid] = ((predictor.predict(context, offer["options"]) if predictor else offer["prediction"])
+            options = (store.rec_ledger.expand_mix_options(offer['options'])
+                       if offer['format'] == 'mixes' else offer['options'])
+            forecasts[oid] = ((predictor.predict(context, options) if predictor else offer["prediction"])
                               if valid else None)
             if not valid:
                 reason = 'future_context' if context is not None else 'missing_context'
@@ -541,7 +643,7 @@ def replay(store, now, predictor=None):
                 row["hits"] += hit
                 unit = (offer["format"], offer["episode_id"], int(event["at"] // 86400))
                 episodes.setdefault(unit, []).append(hit)
-        if predictor:
+        if predictor and (offer['format'] != 'mixes' or getattr(predictor, 'mix_precision', None) == mix_choices.PRECISION):
             predictor.observe(event)
     for format, row in counts.items():
         units = [sum(values) / len(values) for unit, values in episodes.items() if unit[0] == format]
@@ -563,74 +665,144 @@ def replay(store, now, predictor=None):
 
 
 def maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
+    from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
+    store = group_roots.source(store)
+    # Pending work is scheduling intent, not an unsafe installed format. The
+    # domain admission/read leases fence publication and collection per turn.
+    with store._evidence_state_lock:
+        if getattr(store, '_evidence_maintenance', 0):
+            return {'deferred': True}
+        store._evidence_maintenance = getattr(store, '_evidence_maintenance', 0) + 1
+        store._evidence_recovery_pending = True
+    try:
+        with group_roots.writer(store):
+            store.settings.publish_values({STORAGE_PENDING: '1'})
+        with work_budget(STORAGE_SECONDS), group_roots.admission(store):
+            result = _maintain_storage(store, now, required_bytes=required_bytes,
+                                      protected_artifacts=protected_artifacts)
+        store._evidence_recovery_failed = False
+        if not result.get('deferred'):
+            with group_roots.writer(store):
+                store.settings.publish_values({STORAGE_PENDING: '0', STORAGE_PHASE: 'inventory'})
+            store._evidence_recovery_pending = False
+        return result
+    except WorkBudgetExceeded:
+        store.maintenance_diagnostics.record('deferred', reasons=('evidence-storage-budget',))
+        return {'deferred': True}
+    except Exception:
+        store._evidence_recovery_failed = True
+        raise
+    finally:
+        with store._evidence_state_lock:
+            store._evidence_maintenance -= 1
+
+
+def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
     """Release acknowledged diagnostic contexts; preserve serving and correction inputs.
 
     The short grace protects in-flight preparation between artifact publication
     and its proposal transaction. Durable evidence uses its independent retention.
     """
-    from yt_playlist.rec import choice_retention, rec_params
+    from yt_playlist.rec import choice_retention, group_root_backfill, rec_params
     store = getattr(store, '_evidence_source', store)
+    # Finish the bounded inventory before repeating whole-ledger retention.
+    # Each inventory step commits its own progress and checks the same outer
+    # deadline. A large historical checkpoint should not buy another full scan
+    # merely because it fills the inventory's small byte batch.
+    phase = store.settings.get_setting(STORAGE_PHASE) or 'inventory'
+    if phase not in {'inventory', 'checkpoint', 'retention'}:
+        raise ValueError('Unknown listening evidence maintenance phase: ' + phase)
+    store._evidence_phase = phase
+    if phase == 'inventory':
+        while group_root_backfill.maintain(store):
+            check_cancellable_work()
+        store.settings.set_setting(STORAGE_PHASE, 'checkpoint')
+        phase = store._evidence_phase = 'checkpoint'
     ledger = store.rec_ledger.evidence()
-    compacted = choice_retention.acknowledge(store, now, compile_report)
+    if phase == 'checkpoint':
+        # Small durable prefixes bound individual transactions. Keep using the
+        # allotted slice instead of paying a whole-ledger scan after each prefix.
+        while True:
+            choice_retention.acknowledge(store, now, compile_report)
+            if not store._choice_retention_more:
+                break
+            check_cancellable_work()
+        store.settings.set_setting(STORAGE_PHASE, 'retention')
     protected = set(protected_artifacts)
     opportunities = set()
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
         protected.update(capture.artifacts())
         opportunities.update(capture.opportunities())
-    for format in FORMATS:
-        window = store.rec_proposals.get_proposals('choice_window:' + format) or {}
-        if window.get('opportunity_id'):
-            opportunities.add(window['opportunity_id'])
     from yt_playlist.rec import product_comparison
-    live = product_comparison.state(store)
-    if live.get('phase') in ('preparing', 'observing') and live.get('vectors'):
-        protected.add(live['vectors'])
-    try:
-        radio = json.loads(store.settings.get_setting('radio_current_session') or '{}')
-        if not radio.get('stopped'):
-            direction = radio.get('directions') or {}
-            if direction.get('menu_id'):
-                opportunities.add(direction['menu_id'])
-    except (TypeError, ValueError):
-        pass
-    with store._lock:
-        surfaces = [row[0] for row in store.conn.execute(
-            "SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
-    for surface in surfaces:
-        pair = store.rec_proposals.get_proposals(surface) or {}
-        data = pair.get('data') if isinstance(pair.get('data'), dict) else pair
-        context = data.get('context') or data.get('choice_context') or {}
-        if context.get('artifact'):
-            protected.add(context['artifact'])
-    runs = store.model_selection.selection_runs(limit=12)
-    active = store.settings.get_setting('rec_selection_active_run')
-    if active and not any(str(run['id']) == active for run in runs):
-        run = store.model_selection.selection_run(active)
-        if run:
-            runs.append(run)
-    for run in runs:
-        if run.get('serving_vectors'):
-            protected.add(run['serving_vectors'])
-    for note in (store.rec_proposals.get_proposals('album_notes') or {}).values():
-        if note.get('evidence'):
-            protected.add(note['evidence'])
-    for surface in ('album_prepared', 'home_prepared', 'home_tuned', 'home_choice'):
-        payload = store.rec_proposals.get_proposals(surface) or {}
-        for field in ('context', 'choice_context', 'album_choice_context'):
-            context = payload.get(field) or {}
+    # Gather committed protection inputs on one bounded reader. Release its
+    # file lifetime before retention, which needs exclusive collection access.
+    with store.read_view() as reader:
+        for format in FORMATS:
+            window = reader.rec_proposals.get_proposals('choice_window:' + format) or {}
+            if window.get('opportunity_id'):
+                opportunities.add(window['opportunity_id'])
+        live = product_comparison.state(reader)
+        if live.get('phase') in ('preparing', 'observing') and live.get('vectors'):
+            protected.add(live['vectors'])
+        try:
+            radio = reader.radio_checkpoints.load()[0] or {}
+            if not radio.get('stopped'):
+                direction = radio.get('directions') or {}
+                if direction.get('menu_id'):
+                    opportunities.add(direction['menu_id'])
+        except (TypeError, ValueError):
+            pass
+        pair_artifacts, surfaces = reader.model_selection.retained_pair_artifacts()
+        protected.update(pair_artifacts)
+        for surface in surfaces:
+            pair = reader.rec_proposals.get_proposals(surface) or {}
+            data = pair.get('data') if isinstance(pair.get('data'), dict) else pair
+            context = data.get('context') or data.get('choice_context') or {}
             if context.get('artifact'):
                 protected.add(context['artifact'])
-    monitor = store.rec_proposals.get_proposals(product_comparison.MONITOR) or {}
-    return ledger.maintain(
+        runs = reader.model_selection.selection_runs(limit=12)
+        active = reader.settings.get_setting('rec_selection_active_run')
+        if active and not any(str(run['id']) == active for run in runs):
+            run = reader.model_selection.selection_run(active)
+            if run:
+                runs.append(run)
+        for run in runs:
+            if run.get('serving_vectors'):
+                protected.add(run['serving_vectors'])
+        for note in (reader.rec_proposals.get_proposals('album_notes') or {}).values():
+            if note.get('evidence'):
+                protected.add(note['evidence'])
+        for surface in ('album_prepared', 'home_prepared', 'home_tuned', 'home_choice'):
+            payload = (home_cache.read(reader, surface) if surface in home_cache.SURFACES
+                       else reader.rec_proposals.get_proposals(surface)) or {}
+            for field in ('context', 'choice_context', 'album_choice_context'):
+                context = payload.get(field) or {}
+                if context.get('artifact'):
+                    protected.add(context['artifact'])
+        monitor = reader.rec_proposals.get_proposals(product_comparison.MONITOR) or {}
+    store._evidence_phase = 'retention'
+    progress = store._evidence_progress = {}
+    result = ledger.maintain(
         now - rec_params.get_param(store, "choice_retention_d") * 86400,
         protected_artifacts=protected, protected_runs={live.get('run_id') if live.get('phase') == 'observing' else None,
             monitor.get('run_id') if not monitor.get('complete') else None} - {None},
         protected_opportunities=opportunities, orphan_before=now - 600, pressure_before=now - 3600,
-        compacted_contexts=compacted, context_before=now - choice_retention.DIAGNOSTIC_DAYS * 86400,
+        # Validated durable checkpoints include completed prefixes from before
+        # a restart; this process's iterator is not the acknowledgement record.
+        compacted_contexts=None, context_before=now - choice_retention.DIAGNOSTIC_DAYS * 86400,
         context_byte_budget=int(ledger.byte_budget * choice_retention.DIAGNOSTIC_FRACTION),
         required_bytes=required_bytes,
-        pending_protection=capture.protection if capture is not None else None)
+        progress=progress,
+        pending_protection=lambda: store.album_feedback.protection(capture),
+        retire_references=(lambda offers, checkpoints: group_roots.retired(store, offers, checkpoints))
+            if group_roots.enabled(store) else None)
+    # Derived-history collection has its own RETENTION job and time slices.
+    # It must not consume this owner's deadline after ledger work completed.
+    roots_pending = group_roots.enabled(store) and not store.group_evidence.roots_complete()
+    if getattr(store, '_choice_retention_more', False) or roots_pending:
+        result['deferred'] = True
+    return result
 
 
 def daily(store, now):

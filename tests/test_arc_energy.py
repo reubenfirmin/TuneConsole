@@ -1,5 +1,6 @@
 """Journeys consume saved intensity; they cannot derive a competing definition."""
 import pytest
+from tests.enrichment_support import seed_audio
 
 from tests.musical_support import prepare_profiles
 from yt_playlist.rec import arc_energy, home_cards, journeys, musical_character, recipes
@@ -38,7 +39,7 @@ def test_mix_and_cluster_journeys_read_prepared_intensity_without_loading_audio(
     keys = []
     for i in range(8):
         tid = store.tracks.upsert_track(f'v{i}', f'Song {i}', f'Artist {i}', '', 200)
-        store.tracks.set_track_audio(tid, energy=i / 7, bpm=180 - i * 15)
+        seed_audio(store, tid, energy=i / 7, bpm=180 - i * 15)
         keys.append(store.tracks.catalog_subject(tid)['identity_key'])
     prepare_profiles(store)
     def unexpected():

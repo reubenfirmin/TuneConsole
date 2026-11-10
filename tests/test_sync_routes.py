@@ -1,11 +1,25 @@
 """Sync job streams, failures and identity library reconciliation."""
 import json
+from functools import partial
+import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
+
+@pytest.fixture
+def sync_routes_only(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, sync
+
+    # Stream failure/retry ownership needs the actual sync router and its
+    # lifecycle, without constructing unrelated page and provider routers.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, sync)])
+
+
 def test_dashboard_and_sync(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
         tracks={"PL1": [_track("v1", "A", "X")]})
@@ -23,7 +37,7 @@ def test_dashboard_and_sync(store):
     assert len(store.playlists.get_playlists()) == 1
 
 def test_sync_streams_progress_events(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Roadtrip", "count": 1}],
         tracks={"PL1": [{**_track("v1", "Song", "Artist"), "likeStatus": "INDIFFERENT"}]})
@@ -42,11 +56,21 @@ def test_sync_events_unknown_job_404(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     assert c.get("/sync/events/99999").status_code == 404
 
-def test_sync_reports_failure_in_stream(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+def test_sync_reports_failure_in_stream(store, monkeypatch, sync_routes_only):
+    from yt_playlist.library import sync
+
+    waits = []
+    monkeypatch.setattr(sync, 'with_retry', partial(sync.with_retry, sleep=waits.append))
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     class Boom(FakeClient):
-        def get_library_playlists(self, limit=None): raise RuntimeError("api down")
-    app = create_app(store, lambda: {iid: Boom()}, now_fn=lambda: 1.0)
+        attempts = 0
+
+        def get_library_playlists(self, limit=None):
+            self.attempts += 1
+            raise RuntimeError("api down")
+
+    provider = Boom()
+    app = create_app(store, lambda: {iid: provider}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     jid = c.post("/sync").json()["job_id"]
     with c.stream("GET", f"/sync/events/{jid}") as s:
@@ -62,12 +86,13 @@ def test_sync_reports_failure_in_stream(store):
     assert "api down" in resources["playlist_listing"]["message"]
     assert resources["history"]["status"] == resources["saved_albums"]["status"] == "complete"
     assert store.settings.get_setting("last_sync_at") is None
+    assert provider.attempts == 3 and waits == [0.5, 1.0]
 
 
 def test_sync_keeps_playlists_when_library_comes_back_empty(store):
     # Regression: an empty get_library_playlists (session glitch, not a 401) must NOT prune the store.
     from yt_playlist.library import sync as sync_mod
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", None, None, 1)])
     sync_mod.sync_identity(store, iid, FakeClient(playlists=[], tracks={}, history=[]), now=2.0)
@@ -77,7 +102,7 @@ def test_sync_keeps_playlists_when_library_comes_back_empty(store):
 def test_sync_flags_reauth_when_known_identity_returns_empty(store):
     # An identity that HAD playlists but now returns empty is flagged for re-auth (not silently empty).
     from yt_playlist.library import sync as sync_mod
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
     expired = {}
     sync_mod.sync_identity(store, iid, FakeClient(playlists=[], tracks={}, history=[]), now=2.0,
@@ -89,7 +114,7 @@ def test_sync_flags_reauth_when_known_identity_returns_empty(store):
 def test_sync_prunes_when_library_is_real(store):
     # A genuine, non-empty library still prunes playlists that are actually gone.
     from yt_playlist.library import sync as sync_mod
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "GONE", "Deleted Remotely", 0, "h", 1.0)
     client = FakeClient(playlists=[{"playlistId": "PL2", "title": "New", "count": 1}],
                         tracks={"PL2": [_track("v1", "A", "X")]}, history=[])

@@ -69,7 +69,7 @@ def test_artist_page_verifies_dying_surfer_alias_but_preserves_uncertain_lightni
 
 def test_artist_page_includes_album_tracks_when_following_artist_index_link(store, monkeypatch):
     monkeypatch.setattr("yt_playlist.web.routes.charts.fetch_artist_info", lambda *args: None)
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     playlist = store.playlists.upsert_playlist(iid, "PL1", "Mix", 0, "h", 0.0)
     track = store.tracks.upsert_track("v1", "Playlist song", "Artist", "First", 180,
                                artist_browse_id="UC_artist")
@@ -91,7 +91,7 @@ def test_artist_page_includes_album_tracks_when_following_artist_index_link(stor
 
 
 def test_artist_catalog_channel_resolves_ambiguous_name_without_merging_credits(store, monkeypatch):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     playlist = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 0)
     owned = store.tracks.upsert_track("owned", "Library song", "Same", "First", 180,
                                     artist_browse_id="UC_verified", album_browse_id="B1")
@@ -113,7 +113,7 @@ def test_artist_catalog_channel_resolves_ambiguous_name_without_merging_credits(
 
 
 def test_new_catalog_channel_does_not_hide_unambiguous_library_artist(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     track = store.tracks.upsert_track("v", "Song", "Artist", "Album", 180, album_browse_id="B")
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "Mix", 1, "h", 0), [track])
     assert store.charts.artist_songs("Artist", "new-channel")[0]['playlists'] == [{'title': 'Mix', 'ytm': 'P'}]

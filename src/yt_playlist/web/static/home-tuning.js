@@ -129,9 +129,10 @@ function syncHomeThemes() {
   const options = document.getElementById('home-genre-options');
   if (!summary || !options) return;
   const row = document.getElementById('home-mode-cards');
-  // A new menu restores its applied choices. Unrelated swaps preserve drafts and keyboard focus.
+  // Card refreshes describe applied choices, not an unsent draft. Keep the
+  // draft's controls and focus until it is successfully applied or replaced.
   const signature = JSON.stringify([row?.dataset.epoch, row?.dataset.genreOptions, row?.dataset.requestedGenres]);
-  if (options.dataset.signature !== signature) {
+  if (!options.dataset.draft && options.dataset.signature !== signature) {
     options.dataset.signature = signature;
     const available = JSON.parse(row?.dataset.genreOptions || '[]');
     const selected = JSON.parse(row?.dataset.requestedGenres || '[]');
@@ -204,6 +205,7 @@ document.addEventListener('DOMContentLoaded', syncHomeThemes);
 document.addEventListener('htmx:afterSettle', syncHomeThemes);
 document.addEventListener('change', event => {
   if (event.target.matches('#home-genre-options input')) {
+    document.getElementById('home-genre-options').dataset.draft = 'true';
     updateHomeGenreSelection();
     filterHomeGenres();
   }
@@ -225,20 +227,83 @@ document.addEventListener('htmx:beforeRequest', event => {
 document.addEventListener('htmx:afterRequest', event => {
   if (event.detail.elt?.id !== 'home-mix-form') return;
   document.getElementById('fp-mixes-panel')?.removeAttribute('aria-busy');
+  const applied = event.detail.successful && !document.getElementById('home-mode-cards')?.dataset.genreWarning
+    && document.querySelector('#home-mode-cards [data-genres]');
+  if (applied) {
+    const options = document.getElementById('home-genre-options');
+    delete options.dataset.draft;
+    delete options.dataset.signature;
+  }
   if (!event.detail.successful) {
     const summary = document.getElementById('home-theme-summary');
     summary.dataset.failed = 'true';
     summary.textContent = 'Couldn’t make your mixes. Try again.';
   }
   syncHomeThemes();
-  if (event.detail.successful && !document.getElementById('home-mode-cards')?.dataset.genreWarning
-      && document.querySelector('#home-mode-cards [data-genres]')) {
+  if (applied) {
     window.dispatchEvent(new CustomEvent('home-mixes-applied'));
   }
 });
 
 let homeVibeUpdate = null;
 let homeVibeFeedbackTimer;
+let homeVibePollTimer;
+let homeVibeRead;
+
+function scheduleHomeVibeRead(update, delay = 700) {
+  clearTimeout(homeVibePollTimer);
+  homeVibePollTimer = setTimeout(() => readHomeVibe(update), delay);
+}
+
+async function readHomeVibe(update) {
+  if (homeVibeUpdate !== update || !update.feedback?.isConnected) return;
+  homeVibeRead?.abort();
+  const read = homeVibeRead = new AbortController();
+  try {
+    const response = await fetch('/home/vibe/status', {signal: read.signal});
+    if (!response.ok) throw new Error('Vibe observation unavailable');
+    const state = await response.json();
+    if (homeVibeUpdate !== update || read.signal.aborted) return;
+    if (!state && update.requestId) { clearHomeVibeFeedback(); syncHomeVibe(); return; }
+    // A lost mutation reply is reconciled by reading its persisted receipt.
+    // An older receipt cannot establish that the new selection was accepted.
+    if (!state || (!update.requestId && (state.id === update.previousRequestId || state.vibe !== update.value))) {
+      update.phase = 'error';
+      renderHomeVibeFeedback();
+      syncHomeVibe();
+      return;
+    }
+    update.requestId = state.id;
+    update.value = state.vibe;
+    update.label = homeVibeLabel(state.vibe);
+    if (state.phase === 'failed') {
+      update.phase = 'error';
+      renderHomeVibeFeedback();
+      syncHomeVibe();
+      return;
+    }
+    if (state.phase === 'ready') {
+      if (genHomeBusy(document.getElementById('home-mode-cards'))) {
+        scheduleHomeVibeRead(update);
+        return;
+      }
+      await htmx.ajax('GET', '/home/cards', {target: '#home-mode-cards', swap: 'outerHTML',
+        values: {vibe_request: state.id}});
+      if (homeVibeUpdate === update) {
+        syncHomeVibe();
+        if (update.phase === 'waiting') scheduleHomeVibeRead(update);
+      }
+      return;
+    }
+    update.phase = 'waiting';
+    renderHomeVibeFeedback();
+    scheduleHomeVibeRead(update, state.phase === 'waiting' ? 3000 : 700);
+  } catch (error) {
+    if (read.signal.aborted || homeVibeUpdate !== update) return;
+    console.debug('[Vibe observation]', error);
+    scheduleHomeVibeRead(update, 3000);
+  }
+}
 
 function homeVibeLabel(value) {
   return [...document.querySelectorAll('#home-vibe-form input')]
@@ -252,6 +317,8 @@ function dismissHomeVibeFeedback() {
 
 function clearHomeVibeFeedback() {
   clearTimeout(homeVibeFeedbackTimer);
+  clearTimeout(homeVibePollTimer);
+  homeVibeRead?.abort();
   homeVibeUpdate = null;
   document.getElementById('home-vibe-feedback')?.setAttribute('hidden', '');
 }
@@ -288,11 +355,16 @@ function syncHomeVibeFeedback() {
   if (!feedback || !row) return;
   // Navigation replaces the feed; a previous page's request must not own its status.
   if (homeVibeUpdate?.feedback !== feedback) {
-    clearTimeout(homeVibeFeedbackTimer);
-    homeVibeUpdate = null;
+    clearHomeVibeFeedback();
   }
   const value = row.dataset.vibe || '';
-  if (homeVibeUpdate?.phase === 'saving') return;
+  if (homeVibeUpdate?.phase === 'saving'
+      || (homeVibeUpdate?.phase === 'waiting' && homeVibeUpdate.request && !homeVibeUpdate.requestId)) return;
+  if (homeVibeUpdate?.requestId && (row.dataset.vibeRequest !== homeVibeUpdate.requestId
+      || ['pending', 'waiting'].includes(row.dataset.vibeRequestPhase))) {
+    renderHomeVibeFeedback();
+    return;
+  }
   if (homeVibeUpdate?.phase === 'error') {
     if (value === homeVibeUpdate.previousValue) return;
     clearHomeVibeFeedback();
@@ -303,7 +375,13 @@ function syncHomeVibeFeedback() {
     feedback.hidden = true;
   }
   // Restore ongoing preparation after a reload, without announcing old completed changes.
-  if (!homeVibeUpdate && value && row.dataset.preparing === 'true') {
+  if (!homeVibeUpdate && row.dataset.vibeRequest && ['pending', 'waiting', 'failed'].includes(row.dataset.vibeRequestPhase)) {
+    homeVibeUpdate = {feedback, value, label: homeVibeLabel(value), requestId: row.dataset.vibeRequest,
+      previousValue: value, phase: row.dataset.vibeRequestPhase === 'failed' ? 'error' : 'waiting'};
+    if (homeVibeUpdate.phase === 'waiting') scheduleHomeVibeRead(homeVibeUpdate, 0);
+    renderHomeVibeFeedback();
+    return;
+  } else if (!homeVibeUpdate && value && row.dataset.preparing === 'true') {
     homeVibeUpdate = {feedback, value, label: homeVibeLabel(value), phase: 'waiting'};
   }
   if (!homeVibeUpdate) return;
@@ -337,7 +415,8 @@ function syncHomeVibe() {
   const panel = document.getElementById('fingerprint');
   if (!panel) return;
   const row = document.getElementById('home-mode-cards');
-  const vibe = row?.dataset.vibe ?? panel.dataset.vibe ?? '';
+  const vibe = homeVibeUpdate && ['saving', 'waiting'].includes(homeVibeUpdate.phase)
+    ? homeVibeUpdate.value : row?.dataset.vibe ?? panel.dataset.vibe ?? '';
   panel.querySelectorAll('#home-vibe-form input').forEach(input => { input.checked = input.value === vibe; });
   window.dispatchEvent(new CustomEvent('home-vibe-sync', {detail: vibe}));
 }
@@ -351,6 +430,7 @@ document.addEventListener('htmx:beforeRequest', event => {
     feedback: document.getElementById('home-vibe-feedback'),
     request: event.detail.xhr,
     previousValue: document.getElementById('home-mode-cards')?.dataset.vibe || '',
+    previousRequestId: document.getElementById('home-mode-cards')?.dataset.vibeRequest || '',
     value: selected?.value || '', label: homeVibeLabel(selected?.value || ''), phase: 'saving',
   };
   window.dispatchEvent(new CustomEvent('home-vibe-saving'));
@@ -360,8 +440,10 @@ document.addEventListener('htmx:afterRequest', event => {
   if (event.detail.elt?.id === 'home-vibe-form') {
     if (homeVibeUpdate?.request !== event.detail.xhr) return;
     if (homeVibeUpdate?.request === event.detail.xhr) {
-      homeVibeUpdate.phase = event.detail.successful ? 'waiting' : 'error';
+      homeVibeUpdate.phase = 'waiting';
+      homeVibeUpdate.requestId = event.detail.xhr.getResponseHeader('X-Home-Vibe-Request');
       renderHomeVibeFeedback();
+      scheduleHomeVibeRead(homeVibeUpdate, 0);
     }
     syncHomeVibe();
   }
@@ -372,6 +454,20 @@ document.addEventListener('htmx:afterRequest', event => {
   }
 });
 
+document.addEventListener('htmx:beforeSwap', event => {
+  const id = event.detail.requestConfig?.parameters?.vibe_request;
+  if (id && (homeVibeUpdate?.requestId !== id || genHomeBusy(document.getElementById('home-mode-cards')))) {
+    event.detail.shouldSwap = false;
+  }
+});
+window.addEventListener('pagehide', () => {
+  clearTimeout(homeVibePollTimer);
+  homeVibeRead?.abort();
+});
+window.addEventListener('pageshow', event => {
+  if (event.persisted && homeVibeUpdate?.phase === 'waiting') scheduleHomeVibeRead(homeVibeUpdate, 0);
+});
+
 // Remember the taste panel's open/closed state across page loads and fragment swaps.
 function fpPanel() {
   return {
@@ -379,17 +475,61 @@ function fpPanel() {
     collapsed: localStorage.getItem('fp_collapsed') !== '0',
     tab: ['vibe', 'mixes', 'preferences'].includes(sessionStorage.getItem('fp_tuning_tab')) ? sessionStorage.getItem('fp_tuning_tab') : 'vibe',
     vibe: '',
+    get vibesAvailable() { return this.growth?.vibes_ready === true ||
+      this.growth?.nodes.some(node => node.id === 'vibes' && node.unlocked); },
     init() {
       this.vibe = this.$el.dataset.vibe || '';
+      if (this.tab === 'vibe' && !this.vibesAvailable) this.tab = 'mixes';
+      this.$watch('vibesAvailable', available => {
+        if (!available && this.tab === 'vibe') this.selectTab('mixes');
+      });
+      this._saveRecovery = event => this.saveRecovery(event);
+      this._restoreRecovery = event => this.restoreRecovery(event);
+      window.addEventListener('app-page-leaving', this._saveRecovery);
+      window.addEventListener('app-page-changed', this._restoreRecovery);
       if (!this.collapsed) this.$nextTick(() => this.show());
     },
+    destroy() {
+      window.removeEventListener('app-page-leaving', this._saveRecovery);
+      window.removeEventListener('app-page-changed', this._restoreRecovery);
+    },
+    saveRecovery(event) {
+      if (!event.detail?.state) return;
+      const options = this.$el.querySelector('#home-genre-options');
+      const focused = document.activeElement;
+      event.detail.state.homeMixControls = {
+        options: options.dataset.draft ? options : null,
+        search: this.$el.querySelector('#home-genre-search').value,
+        open: this.$refs.dialog.open,
+        focusId: this.$el.contains(focused) ? focused.id : '',
+        focusGenre: options.contains(focused) ? focused.value : null,
+      };
+    },
+    restoreRecovery(event) {
+      const state = event.detail?.state?.homeMixControls;
+      if (!state) return;
+      // A quiet page reconciliation must not turn an edited draft back into
+      // applied choices. Keep its actual inputs, including unchecked choices.
+      if (state.options) this.$el.querySelector('#home-genre-options').replaceWith(state.options);
+      this.$el.querySelector('#home-genre-search').value = state.search;
+      syncHomeThemes();
+      filterHomeGenres();
+      if (state.open) {
+        this.show();
+        const focused = state.focusGenre !== null
+          ? this.$el.querySelector('#home-genre-options input[value="' + CSS.escape(state.focusGenre) + '"]')
+          : state.focusId ? this.$el.querySelector('#' + CSS.escape(state.focusId)) : null;
+        focused?.focus({preventScroll: true});
+      }
+    },
     selectTab(name, focus = false) {
+      if (name === 'vibe' && !this.vibesAvailable) name = 'mixes';
       this.tab = name;
       sessionStorage.setItem('fp_tuning_tab', name);
       if (focus) this.$nextTick(() => this.$refs[name + 'Tab'].focus());
     },
     moveTab(direction) {
-      const tabs = ['vibe', 'mixes', 'preferences'];
+      const tabs = this.vibesAvailable ? ['vibe', 'mixes', 'preferences'] : ['mixes', 'preferences'];
       this.selectTab(tabs[(tabs.indexOf(this.tab) + direction + tabs.length) % tabs.length], true);
     },
     show() {
@@ -449,7 +589,7 @@ function genrePicker() {
       // Tokenized, order-independent match: every word you type must appear somewhere in the name, so
       // "rock post", "rock-post" and "post rock" all find "post-rock" (a plain substring wouldn't).
       const toks = q.split(/[^a-z0-9]+/).filter(Boolean);
-      return this.opts.filter(o => { const n = o.name.toLowerCase(); return toks.every(t => n.includes(t)); })
+      return this.opts.filter(o => { const n = (o.name + ' ' + (o.label || '')).toLowerCase(); return toks.every(t => n.includes(t)); })
         .slice(0, 10);
     },
     move(d) { const n = this.suggest().length; if (n) this.sel = (this.sel + d + n) % n; },

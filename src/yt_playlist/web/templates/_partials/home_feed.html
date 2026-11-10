@@ -12,7 +12,8 @@
   {# Main and the dashboard panels retain entrance transforms. Keep fixed feedback at body level;
      Alpine removes the teleport when this feed is replaced or the page is left. #}
   <template x-data x-teleport="body">
-  <aside id="home-vibe-feedback" class="home-vibe-feedback" x-data="homeVibeFeedback()" hidden aria-label="Vibe update">
+  <aside id="home-vibe-feedback" class="home-vibe-feedback" x-data="homeVibeFeedback()"
+         x-show="panel === 'directions'" hidden aria-label="Vibe update">
     <span class="home-vibe-progress" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     <div class="home-vibe-feedback-copy" role="status" aria-live="polite" aria-atomic="true">
       <strong id="home-vibe-feedback-title"></strong>

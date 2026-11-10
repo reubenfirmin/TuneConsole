@@ -9,7 +9,8 @@ transient model no longer damps on sync staleness, each event decays on its own 
 and folds likeStatus into the like/dislike model. The daily full sync's get_history() stays as
 backfill for plays that happen while the app is not running; record_history_plays dedups per
 (track, date), so the two sources never double-count a day."""
-from yt_playlist.library import ratings
+from yt_playlist.library import rating_projection as ratings
+from yt_playlist.core import playback_inbox as playback_feedback
 from yt_playlist.util.matching import identity_key as make_key
 
 # Only explicit ratings act from the player pipeline. INDIFFERENT is deliberately excluded: the
@@ -22,7 +23,7 @@ _STATUSES = {"LIKE", "DISLIKE"}
 def resolve_identity(store, brand_id):
     """Map a report's brand id (ytcfg DELEGATED_SESSION_ID; empty on the main account) to an
     identity id. Unknown or ambiguous remote accounts cannot be attributed safely."""
-    matches = [i.id for i in store.identities.get_identities()
+    matches = [i.id for i in store.accounts.get_accounts()
                if (i.brand_account_id or '') == (brand_id or '')]
     return matches[0] if len(matches)==1 else None
 
@@ -30,8 +31,6 @@ def resolve_identity(store, brand_id):
 def handle_play_event(ctx, msg, now) -> bool:
     """Persist one {type:'play'} bridge frame. Returns True when a NEW play was recorded (a
     same-track re-report, e.g. a likeStatus change, merges into the previous event instead)."""
-    if getattr(ctx.store, 'activity_paused', False):
-        return False
     title = (msg.get("title") or "").strip()
     artist = (msg.get("artist") or "").strip()
     if (msg.get('brandKnown') is False or msg.get("paused")
@@ -41,6 +40,17 @@ def handle_play_event(ctx, msg, now) -> bool:
     ident = resolve_identity(store, (msg.get("brandId") or "").strip())
     if ident is None:
         return False
+    if playback_feedback.deferred(store):
+        playback_feedback.capture(store, 'live', ident, msg, now)
+        return True
+    return persist_play_event(ctx, msg, now, ident)
+
+
+def persist_play_event(ctx, msg, now, ident, *, inline_analytics=False):
+    """Project a live observation, retaining its original account and clock."""
+    store = ctx.store
+    title = (msg.get('title') or '').strip()
+    artist = (msg.get('artist') or '').strip()
     metadata_verified = msg.get('metadataVerified') is not False
     if not metadata_verified:
         # The native player can identify an upload before the player bar hydrates its
@@ -64,20 +74,20 @@ def handle_play_event(ctx, msg, now) -> bool:
         # confirmed result; another confirmed action or a library sync can reconcile it.
         status = rating["status"]
     from yt_playlist.rec import choice_evidence
-    context_choice = choice_evidence.album_playback_context(store, msg, now, identity_id=ident)
+    context_choice = choice_evidence.album_playback_context(store, msg, now, account_id=ident)
     new = store.history.record_play_event(ident, key, (msg.get("videoId") or None), now,
                                   playlist_ytm_id=(msg.get("playlist") or None),
                                   like_status=(status or None),source_timezone=msg.get('timeZone'),
                                   context_choice=bool(context_choice))
     if new:
         store.settings.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
-        choice_evidence.record_playback(store, msg, now, identity_id=ident)
+        choice_evidence.record_playback(store, msg, now, account_id=ident)
         from yt_playlist.rec.listening_analytics import capture_start
         # Retained ratings predate this play. An unhydrated indifferent player
         # readout cannot establish that an unobserved song was previously unliked.
         initial = rating['status'] if rating else (status if status in _STATUSES else None)
         capture_start(store, ident, msg.get('videoId'), msg.get('playlist') or None,
-                      initial, now, album=bool(context_choice))
+                      initial, now, album=bool(context_choice), inline=inline_analytics)
     # A title alone cannot attribute an account's rating to an exact upload.
     if status in _STATUSES and msg.get('videoId'):
         if not confirmed:

@@ -26,7 +26,7 @@ def build(ctx) -> APIRouter:
         groups, near_pairs, overlaps = result.groups, result.near_pairs, result.overlaps
         empties, tiny = result.empties, result.tiny
         playlists = result.analysis.memberships.playlists
-        pl_by_ytm = {p.scope_ref: p for p in playlists}
+        pl_by_ytm = {p.playlist_scope_id: p for p in playlists}
         kinds = result.analysis.memberships.kinds
         # Only surface prefs whose playlists still exist: a deleted side leaves a stale pair.
         hidden = [{"a": a, "b": b, "a_title": pl_by_ytm[a].title, "b_title": pl_by_ytm[b].title}
@@ -48,7 +48,7 @@ def build(ctx) -> APIRouter:
         # summary goes stale. Refresh it now so the home "Playlist cleanups" count stays honest.
         if not getattr(store, 'activity_paused', False):
             refresh_cleanup(store, now_fn(), summary=result.summary())
-        identities = store.identities.get_identities()
+        identities = store.accounts.get_accounts()
         return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_pairs": near_pairs, "overlaps": overlaps,
             "empties": empties, "tiny": tiny, "kinds": kinds,

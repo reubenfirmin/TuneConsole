@@ -1,16 +1,19 @@
 """Claimed, journaled playlist recovery with verified remote outcomes."""
 import json
+from contextlib import ExitStack
 from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
-from yt_playlist.library.action_claim import claim_action
+from yt_playlist.core import fao
+
+from yt_playlist.library.action_claim import claim_action, claim_deletion_target
 from yt_playlist.library.sync import refresh_playlist
 from yt_playlist.library.playlist_mutation import mutation_status, restore_playlist_sequence
 from yt_playlist.library.playlist_positions import cancel_insertions
 from yt_playlist.library.playlist_snapshot import (
     http_status as _http_status, playlist_if_present)
-from yt_playlist.library.undo_conflicts import keeper_target, playlist_state, require_unchanged_copy
+from yt_playlist.library.undo_conflicts import UndoConflict, keeper_target, playlist_state, require_unchanged_copy
 
 
 def _existing(client, playlist_id):
@@ -61,7 +64,7 @@ def _verify_restored_sources(clients, steps):
     for step in steps:
         if step["kind"] != "backup":
             continue
-        payload = json.loads(Path(step["backup"]).read_text(encoding="utf-8"))
+        payload = json.loads(fao.read(step["backup"]).bytes)
         client = _client(clients, payload.get("identity_id"))
         detail = _existing(client, step["created_id"])
         required = Counter(t["video_id"] for t in payload.get("tracks", []))
@@ -127,7 +130,7 @@ def _find_created(client, marker):
 
 
 def _restore_backup(store, clients, step, now, save):
-    payload = json.loads(Path(step["backup"]).read_text(encoding="utf-8"))
+    payload = json.loads(fao.read(step["backup"]).bytes)
     if payload.get('snapshot_version', 1) not in (1, 2):
         raise ValueError('Unsupported playlist backup version. Review it before recovering manually.')
     identity = payload.get("identity_id")
@@ -158,6 +161,7 @@ def _restore_backup(store, clients, step, now, save):
         elif step["phase"] == "creating":
             step["created_id"] = _find_created(client, step["marker"])
             step["created_at"] = now
+            step['phase'] = 'created'
             save()
         else:
             step["phase"] = "creating"
@@ -189,11 +193,18 @@ def _restore_backup(store, clients, step, now, save):
              created_at=step.get("created_at"))
 
 
-def _delete_copy(store, clients, step, save):
+def _delete_copy(store, clients, step, save, now):
     client = _client(clients, step["identity"])
     detail = _existing(client, step["ytm"])
     if detail is not None:
+        if step['phase']=='deleting':
+            raise ValueError('The prior copy deletion outcome is unknown. The playlist still appears present; '
+                             'it was preserved and no deletion was replayed. Recheck this same Undo later.')
         require_unchanged_copy(step.get("post"), playlist_state(detail))
+        if store.actions.has_durable_targets() and not step.get('deletion_backup'):
+            from yt_playlist.library.playlist_backups import backup_remote_playlist
+            step['deletion_backup'] = backup_remote_playlist(
+                store,step['identity'],step['ytm'],detail.get('title'),now,detail)
         step["phase"] = "deleting"
         save()
         error = None
@@ -203,18 +214,20 @@ def _delete_copy(store, clients, step, save):
             error, result = exc, None
         status = mutation_status(result)
         if status is not None and status != "STATUS_SUCCEEDED":
+            step['phase'] = 'failed'
+            save()
             raise ValueError("YouTube has not confirmed deletion of the copied playlist: "
                              "it rejected the request. Retry Undo to recheck it.")
         if _existing(client, step["ytm"]) is not None:
             raise ValueError(f"YouTube has not confirmed deletion of copy {step['ytm']}. "
                              "It was preserved. Retry Undo to check again.") from error
     for pl in store.playlists.get_playlists():
-        if pl.identity_id == step["identity"] and pl.ytm_playlist_id == step["ytm"]:
+        if pl.account_id == step["identity"] and pl.provider_playlist_id == step["ytm"]:
             store.playlists.remove_playlist(pl.id)
 
 
 def undo_action(store, action_id, clients, now):
-    with claim_action(store, action_id):
+    with claim_action(store, action_id), ExitStack() as claims:
         action = store.actions.get_action(action_id)
         if action is not None and action.status in ("delete_pending", "delete_failed"):
             from yt_playlist.library.playlist_deletion import reconcile_deletion
@@ -224,9 +237,10 @@ def undo_action(store, action_id, clients, now):
         recovery = undo.get("recovery")
         if recovery is None:
             recovery = undo["recovery"] = {"version": 2, "steps": _steps(undo, action_id)}
+        target_claims = []
 
         def save():
-            store.actions.save_undo_progress(action_id, undo, now)
+            store.actions.save_undo_progress(action_id, undo, now,claim_token=action.execution_token,target_claims=target_claims)
 
         try:
             if recovery["version"] == 1:
@@ -237,7 +251,13 @@ def undo_action(store, action_id, clients, now):
             elif recovery["version"] != 2:
                 raise ValueError("Unsupported recovery journal version. Review this action manually.")
             recovery.pop("error", None)
+            recovery.pop("reason", None)
             save()
+            for identity,remote in store.actions.target_lock_keys(action_id,'recovery'):
+                claims.enter_context(claim_deletion_target(store,identity,remote))
+            target_claims = store.actions.claim_undo_targets(action_id,action.execution_token,now)
+            for target_claim in target_claims:
+                claims.callback(store.actions.release_deletion,target_claim)
             if not recovery["steps"]:
                 raise ValueError("This action has no recovery snapshot. Review it before recovering manually.")
             sources_verified = False
@@ -257,8 +277,8 @@ def undo_action(store, action_id, clients, now):
                             if detail is None:
                                 raise ValueError("The kept playlist is missing. Review it in YouTube Music.")
                             target = keeper_target(entry, playlist_state(detail))
-                    pl = next((p for p in store.playlists.get_playlists() if p.identity_id == entry["identity"]
-                               and p.ytm_playlist_id == entry["ytm"]), None)
+                    pl = next((p for p in store.playlists.get_playlists() if p.account_id == entry["identity"]
+                               and p.provider_playlist_id == entry["ytm"]), None)
                     if pl is not None:
                         # Retire placement intent before recovery writes or its targeted
                         # refresh; a failed recovery must not resume the superseded move.
@@ -269,15 +289,17 @@ def undo_action(store, action_id, clients, now):
                 elif step["kind"] == "backup":
                     _restore_backup(store, clients, step, now, save)
                 elif step["kind"] == "copy":
-                    _delete_copy(store, clients, step, save)
+                    _delete_copy(store, clients, step, save, now)
                 else:
                     raise ValueError("Unsupported recovery step. Review this action before continuing.")
                 step["phase"] = "complete"
                 save()
-            store.actions.finish_undo(action_id, undo, now)
+            store.actions.finish_undo(action_id, undo, now,claim_token=action.execution_token,target_claims=target_claims)
         except Exception as exc:
             recovery["error"] = str(exc) or type(exc).__name__
-            store.actions.save_undo_progress(action_id, undo, now, failed=True)
+            if isinstance(exc, UndoConflict):
+                recovery['reason'] = exc.reason
+            store.actions.save_undo_progress(action_id, undo, now, failed=True,claim_token=action.execution_token,target_claims=target_claims)
             complete = sum(s["phase"] == "complete" for s in recovery["steps"])
             raise ValueError(f"Undo incomplete ({complete}/{len(recovery['steps'])} steps complete). "
                              f"{recovery['error']} Progress is saved; retry this same Undo to continue.") from exc

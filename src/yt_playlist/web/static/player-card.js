@@ -7,6 +7,8 @@ function mountNowPlayingDock() {
   const target = !standalone && window.matchMedia('(min-width: 65rem)').matches ? slot : origin;
   if (card.parentElement !== target) target.appendChild(card);
   const measure = () => {
+    document.body.style.setProperty('--app-topbar-height',
+      (document.querySelector('.topbar')?.getBoundingClientRect().height || 0) + 'px');
     const height = document.body.classList.contains('app-standalone') && card.getClientRects().length
       ? origin.getBoundingClientRect().height : 0;
     document.body.style.setProperty('--playback-dock-height', height + 'px');
@@ -16,7 +18,10 @@ function mountNowPlayingDock() {
     window.__homeDockBound = true;
     window.addEventListener('resize', mountNowPlayingDock);
     window.addEventListener('app-page-changed', mountNowPlayingDock);
-    new ResizeObserver(measure).observe(card);
+    const observer = new ResizeObserver(measure);
+    observer.observe(card);
+    const topbar = document.querySelector('.topbar');
+    if (topbar) observer.observe(topbar);
   }
 }
 
@@ -24,6 +29,7 @@ function playerStatus() {
   return {
     connected: false,
     nowPlaying: null,
+    resumeMode: null,
     timing: {position: null, duration: null},
     metadataOverrides: {},
     pendingRating: null,
@@ -79,7 +85,11 @@ function playerStatus() {
     },
     apply(d) {
       this.connected = !!d.connected;
-      const next = d.now_playing ? { ...d.now_playing } : null;
+      const live = this.connected && d.now_playing;
+      const paused = this.connected && d.resumable_player;
+      const player = live || paused || d.radio_resume;
+      this.resumeMode = live ? null : paused ? 'player' : player ? 'radio' : null;
+      const next = player ? { ...player } : null;
       if (next) Object.assign(next, this.metadataOverrides[next.video_id]);
       if (next && !this.pendingRating) this.confirmedRatings[next.video_id] = next.likeStatus;
       const pending = this.pendingRating;
@@ -166,7 +176,7 @@ function playerStatus() {
       return task;
     },
     async next() {
-      if (!this.nowPlaying?.video_id || this.skipping) return;
+      if (!this.connected || this.resumeMode || !this.nowPlaying?.video_id || this.skipping) return;
       if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command('next');
       const videoId = this.nowPlaying.video_id;
       this.skipping = true;
@@ -182,7 +192,7 @@ function playerStatus() {
       }
     },
     async toggle() {
-      if (!this.nowPlaying || this.toggling) return;
+      if (!this.connected || !this.nowPlaying || this.toggling) return;
       if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command('toggle');
       if (!this.nowPlaying.video_id) {
         window.tcPlaybackError('The playing song is still loading. Try again in a moment.');
@@ -195,8 +205,16 @@ function playerStatus() {
       const deadline = setTimeout(() => controller.abort(), 12000);
       let errorMessage = 'Playback was not confirmed. Check YouTube Music before trying again.';
       try {
-        const response = await fetch('/now-playing/toggle?' + new URLSearchParams({
-          action, videoId, confirm: 'true'}), {method: 'POST', signal: controller.signal});
+        const radio = this.resumeMode === 'radio';
+        const params = new URLSearchParams({action, videoId, confirm: 'true'});
+        if (this.resumeMode === 'player') params.set('resume', 'true');
+        const options = {method: 'POST', signal: controller.signal};
+        if (radio) {
+          options.headers = {'Content-Type': 'application/json'};
+          options.body = JSON.stringify({playlist_id: this.nowPlaying.playlist_ytm_id,
+            video_id: videoId, episode_id: this.nowPlaying.radio_session_id});
+        }
+        const response = await fetch(radio ? '/radio/resume' : '/now-playing/toggle?' + params, options);
         if (!response.ok) throw new Error('Playback was not confirmed. Open YouTube Music and try again.');
         const result = await response.json();
         if (!result.ok) {

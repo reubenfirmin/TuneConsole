@@ -46,7 +46,6 @@ def test_deezer_only_facts_reach_shared_sink_and_preserve_choices(store, request
     class EmptyProvider:
         name = "musicbrainz"
         def available(self, store): return True
-        def reset(self): pass
         def tripped(self): return False
         def probe(self, track, store): return EnrichmentResult(self.name, {})
 

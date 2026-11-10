@@ -1,6 +1,6 @@
 <details class="track-musical-evidence">
   <summary>Musical character <span class="muted">{{ musical.known }} of {{ musical.total }} signals</span></summary>
-  <p>Used by On Air and Mix Tapes. Signals are estimates; model predictions and genre hints have not been validated by listening.</p>
+  <p>Used by On Air and Mix Tapes. Sources below distinguish model estimates, genre hints and your corrections.</p>
   <dl class="track-musical-signals">
     {% for row in musical.rows %}<div data-musical-signal="{{ row.name }}">
       <dt>{{ row.label }}</dt>
@@ -10,6 +10,23 @@
       </dd>
     </div>{% endfor %}
   </dl>
+  <details class="track-vibe-evidence"><summary>Vibe estimates</summary>
+    <p>Estimated suitability for each listening purpose. These scores are model estimates, not your ratings.</p>
+    <dl class="track-musical-signals">
+      {% for row in musical.vibes %}<div data-vibe-evidence="{{ row.name }}">
+        <dt>{{ row.label }}</dt>
+        <dd>{{ row.description }}{% if row.basis %}<small>{{ row.basis }}</small>{% endif %}
+          {% if row.recordings %}<small>Based on {{ row.recordings }} other recording{% if row.recordings != 1 %}s{% endif %}.</small>{% endif %}
+        </dd>
+      </div>{% endfor %}
+    </dl>
+    {% if musical.vibe_version or musical.vibe_inputs_version %}
+    <details><summary>Estimate versions</summary>
+      {% if musical.vibe_version %}<p>Prediction policy: {{ musical.vibe_version }}</p>{% endif %}
+      {% if musical.vibe_inputs_version %}<p style="overflow-wrap:anywhere">Model inputs: {{ musical.vibe_inputs_version }}</p>{% endif %}
+    </details>
+    {% endif %}
+  </details>
   {% if musical.sources %}
   <details class="track-musical-sources"><summary>Source observations</summary>
     <p>Native model outputs describe their classifier result, not confidence that the recording matches. Lookup methods have not been manually verified.</p>

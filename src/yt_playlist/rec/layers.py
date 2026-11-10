@@ -70,6 +70,26 @@ def recent_evidence(store, now, *, window_h=24):
     return RecentEvidence(latest, modes, CV, cidx if CV is not None else {})
 
 
+def _classified_mode_plays(store, evidence, since):
+    """Nearest active mode and latest timestamp per usable key, or None below the gate."""
+    modes, CV, cidx = evidence.modes, evidence.vectors, evidence.index
+    if not modes or CV is None:
+        return None
+    latest = evidence.since(since)
+    played_keys = [key for key in latest if key in cidx]
+    if len(played_keys) < int(rec_params.get_param(store, "now_min_events")):
+        return None
+
+    mode_ids = [mode["mode_id"] for mode in modes]
+    C = np.stack([mode["centroid"].astype(np.float64) for mode in modes])
+    if C.shape[1] != CV.shape[1]:
+        # Content preparation can change dimensions before the modes are rebuilt.
+        # Read that stale-centroid window as quiet rather than crashing Home.
+        return None
+    return [(mode_ids[int((C @ CV[cidx[key]].astype(np.float64)).argmax())], latest[key])
+            for key in played_keys]
+
+
 def now_mode_mix(store, now, *, evidence=None):
     """Shared internals for `now_mode_posterior` and the taste_viz NOW ribbon: the {mode_id: share}
     posterior, `n` (the count of distinct played keys that fed it), and the active mode list used to
@@ -81,32 +101,12 @@ def now_mode_mix(store, now, *, evidence=None):
     window_h = rec_params.get_param(store, "now_window_h")
     evidence = evidence if evidence is not None else recent_evidence(store, now, window_h=window_h)
     modes = evidence.modes
-    if not modes:
-        return None, 0, modes
-    CV, cidx = evidence.vectors, evidence.index
-    if CV is None:
-        return None, 0, modes
-
-    min_events = int(rec_params.get_param(store, "now_min_events"))
-    since = now - window_h * 3600.0
-    latest = evidence.since(since)
-
-    played_keys = [k for k in latest if k in cidx]
-    if len(played_keys) < min_events:
-        return None, 0, modes
-
-    mode_ids = [m["mode_id"] for m in modes]
-    C = np.stack([m["centroid"].astype(np.float64) for m in modes])
-    if C.shape[1] != CV.shape[1]:
-        # Stale modes: autotune rebuilt the content space at a new dim and the mode rebuild has
-        # not re-stacked the centroids yet. That window reads as quiet, never a shape-error crash
-        # on the home render (seen live 2026-07-03).
+    classified = _classified_mode_plays(store, evidence, now - window_h * 3600.0)
+    if classified is None:
         return None, 0, modes
 
     counts: dict = {}
-    for k in played_keys:
-        v = CV[cidx[k]].astype(np.float64)
-        mid = mode_ids[int((C @ v).argmax())]
+    for mid, _timestamp in classified:
         counts[mid] = counts.get(mid, 0) + 1
 
     total = sum(counts.values())
@@ -224,35 +224,17 @@ def session_mode_mix(store, now, *, evidence=None):
     """
     evidence = evidence if evidence is not None else recent_evidence(store, now)
     modes = evidence.modes
-    if not modes:
+    classified = _classified_mode_plays(store, evidence, now - 24 * 3600.0)
+    if classified is None:
         return None, 0, modes
-    CV, cidx = evidence.vectors, evidence.index
-    if CV is None:
-        return None, 0, modes
-
-    min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
-    since = now - 24 * 3600.0
-    latest = evidence.since(since)
-
-    played_keys = [k for k in latest if k in cidx]
-    if len(played_keys) < min_events:
-        return None, 0, modes
-
-    mode_ids = [m["mode_id"] for m in modes]
-    C = np.stack([m["centroid"].astype(np.float64) for m in modes])
-    if C.shape[1] != CV.shape[1]:
-        # Same stale-modes window as now_mode_mix: quiet until the mode rebuild re-stacks centroids.
-        return None, 0, modes
 
     weights: dict = {}
-    for k in played_keys:
-        v = CV[cidx[k]].astype(np.float64)
-        mid = mode_ids[int((C @ v).argmax())]
-        weights[mid] = weights.get(mid, 0.0) + transient.decay_weight(now - latest[k], session_hl_h / 24.0)
+    for mid, timestamp in classified:
+        weights[mid] = weights.get(mid, 0.0) + transient.decay_weight(now - timestamp, session_hl_h / 24.0)
 
     total = sum(weights.values())
-    n = len(played_keys)
+    n = len(classified)
     if total <= 0:
         return None, n, modes
     return {mid: w / total for mid, w in weights.items()}, n, modes

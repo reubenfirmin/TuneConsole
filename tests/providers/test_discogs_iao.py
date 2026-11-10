@@ -121,7 +121,6 @@ def test_outage_defers_every_caller_until_recovery(boundary, store, failure):
     assert len(b.calls) == 1 and len(errors) == 3
     assert all(error.retry_at == 1030 and net.provider_outage(error) for error in errors)
     assert store.enrichment_state.integration_cooldown('discogs')['retry_at'] == 1030
-    discogs.reset()
     assert discogs.tripped()
     b.clock[0] = 1030
     assert discogs.release_details(123, store=store) == release()
@@ -345,7 +344,7 @@ def test_waterfall_keeps_discogs_pending_and_runs_healthy_provider(boundary, sto
         raise http(503, {'Retry-After': '120'})
     b = boundary(fetch)
     store.settings.set_setting('discogs_token', 'secret')
-    identity = store.identities.upsert_identity('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
     playlist = store.playlists.upsert_playlist(identity, 'PL', 'Mix', 4, 'h', 1000)
     tracks = [store.tracks.upsert_track(f'v{i}', f'Song{i}', 'Artist', None, None) for i in range(4)]
     store.playlists.set_playlist_tracks(playlist, tracks)

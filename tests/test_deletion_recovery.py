@@ -10,27 +10,44 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_undo_recovery import RecoveryClient
+from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, without_query_timing
+from yt_playlist.core import fao
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_backups, playlist_deletion, playlist_undo, playlist_generated
 from yt_playlist.web.app import create_app
 
 
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    """Deletion consumes empty admitted SQL; genre preparation is independent."""
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
 @pytest.fixture
-def deletion(tmp_path, monkeypatch):
+def file_backed_store(tmp_path, _pristine_current_schema):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
+
+
+@pytest.fixture
+def deletion(file_backed_store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    database = tmp_path / "deletion.db"
-    store = Store(database)
-    store.init_schema()
-    identity = store.identities.upsert_identity("Main", "bridge", None, True)
+    store = file_backed_store
+    database = store._db_path
+    identity = store.accounts.upsert_account("Main", "bridge", None, True)
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
     keeper = store.playlists.upsert_playlist(identity, "KEEP", "Keeper", 2, "", 1)
     client = RecoveryClient({"SOURCE": ["a", "b"], "KEEP": ["a", "b"]})
-    yield store, database, identity, source, keeper, client
-    store.conn.close()
+    return store, database, identity, source, keeper, client
 
 
 def _reopen(database):
     store = Store(database)
+    store.conn.execute('PRAGMA synchronous=OFF')
     store.init_schema()
     return store
 
@@ -42,7 +59,7 @@ def test_first_backup_syncs_directory_ancestors_and_file_before_intent_and_delet
     backups = home / 'backups'
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(home))
     synced = set()
-    fsync = playlist_backups.os.fsync
+    fsync = fao.os.fsync
 
     def observe(fd):
         info = os.fstat(fd)
@@ -54,7 +71,7 @@ def test_first_backup_syncs_directory_ancestors_and_file_before_intent_and_delet
         else:
             synced.add('file')
 
-    monkeypatch.setattr(playlist_backups.os, 'fsync', observe)
+    monkeypatch.setattr(fao.os, 'fsync', observe)
     record_action = store.actions.record_action
 
     def record(*args, **kwargs):
@@ -82,27 +99,52 @@ def test_parent_sync_failure_prevents_delete_and_retry_resyncs_existing_director
     backups = home / 'backups'
     target = home if ancestor == 'data' else home.parent
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(home))
-    fsync = playlist_backups.os.fsync
-    attempts = []
+    fsync = fao.os.fsync
+    attempt = 'initial'
+    events = []
 
     def fail_once(fd):
         info = os.fstat(fd)
         if stat.S_ISDIR(info.st_mode) and os.path.samestat(info, target.stat()):
-            attempts.append(target)
-            if len(attempts) == 1:
+            if not events:
+                events.append((attempt, 'sync_failed'))
                 raise OSError('parent sync failed')
+            fsync(fd)
+            events.append((attempt, 'synced'))
+            return
         return fsync(fd)
 
-    monkeypatch.setattr(playlist_backups.os, 'fsync', fail_once)
+    monkeypatch.setattr(fao.os, 'fsync', fail_once)
+    record_action = store.actions.record_action
+
+    def record_after_resync(*args, **kwargs):
+        assert attempt == 'retry' and (attempt, 'synced') in events
+        result = record_action(*args, **kwargs)
+        events.append((attempt, 'intent'))
+        return result
+
+    monkeypatch.setattr(store.actions, 'record_action', record_after_resync)
+    delete = client.delete_playlist
+
+    def delete_after_intent(playlist_id):
+        assert events[-1] == ('retry', 'intent')
+        events.append((attempt, 'delete'))
+        return delete(playlist_id)
+
+    monkeypatch.setattr(client, 'delete_playlist', delete_after_intent)
     with pytest.raises(OSError, match='parent sync failed'):
         executor.delete_playlist(store, source, client, 3)
+    assert events == [('initial', 'sync_failed')]
     assert backups.is_dir()
     assert client.deleted == []
     assert store.actions.get_actions() == []
     assert store.playlists.get_playlist(source) is not None
 
+    attempt = 'retry'
     executor.delete_playlist(store, source, client, 4)
-    assert attempts == [target, target]
+    retry_stages = [stage for run, stage in events if run == 'retry']
+    assert retry_stages[-2:] == ['intent', 'delete']
+    assert retry_stages[:-2] and set(retry_stages[:-2]) == {'synced'}
     assert client.deleted == ['SOURCE']
     action, = store.actions.get_actions()
     assert action.status == 'executed'
@@ -154,6 +196,7 @@ def test_deletion_admission_covers_lookup_backup_and_transport_across_stores(del
 
 
 @pytest.mark.parametrize("operation", ["manual", "empty", "planned", "generated"])
+@pytest.mark.usefixtures('native_sql_calls')
 def test_backup_and_intent_are_committed_before_transport_and_survive_lost_reply(deletion, operation):
     store, database, identity, source, keeper, client = deletion
     if operation == "empty":
@@ -170,8 +213,11 @@ def test_backup_and_intent_are_committed_before_transport_and_survive_lost_reply
             assert action.status == "delete_pending"
             undo = json.loads(action.undo_json)
             entry, = undo["deletions"]
-            assert entry["phase"] == "pending" and entry["ytm"] == playlist_id
-            backup = json.loads(Path(entry["backup"]).read_text())
+            assert entry["phase"] == "uncertain" and entry["ytm"] == playlist_id
+            step = reader.conn.execute("SELECT phase,outcome,backup_status,claim_token FROM action_steps "
+                                       "WHERE action_id=? AND operation='delete_playlist'",(action.id,)).fetchone()
+            assert tuple(step[:3])==('uncertain','unknown','verified') and step['claim_token']
+            backup = json.loads(fao.read(entry['backup']).bytes)
             assert backup["ytm_playlist_id"] == playlist_id
             assert [t["video_id"] for t in backup["tracks"]] == ([] if operation == "empty" else ["a", "b"])
         finally:
@@ -218,13 +264,13 @@ def test_restart_after_remote_delete_recovers_local_or_completion_failure(deleti
                 raise OSError("Local database unavailable")
             patch.setattr(store.playlists, "remove_playlist", fail)
         else:
-            update = store.actions.update_action
+            update = store.actions.save_deletion_progress
 
-            def fail(action_id, status, *args, **kwargs):
-                if status == "executed":
+            def fail(action_id, undo, *args, **kwargs):
+                if playlist_deletion.deletion_status(undo) == "executed":
                     raise SystemExit("Process interrupted before completion recording")
-                return update(action_id, status, *args, **kwargs)
-            patch.setattr(store.actions, "update_action", fail)
+                return update(action_id, undo, *args, **kwargs)
+            patch.setattr(store.actions, "save_deletion_progress", fail)
         with pytest.raises((OSError, SystemExit)):
             executor.delete_playlist(store, source, client, 2)
     action, = store.actions.get_actions()

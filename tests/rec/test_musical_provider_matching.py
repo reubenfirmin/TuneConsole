@@ -2,8 +2,7 @@
 import httpx
 import pytest
 
-from tests.bench_getsongbpm_pilot import shortlist
-from tests.bench_musical_provider_pilot import plausible_match, select_sample
+from tests.musical_provider_support import plausible_match, select_sample, shortlist
 from tests.musical_provider_support import PilotHTTP
 
 

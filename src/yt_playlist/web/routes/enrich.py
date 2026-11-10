@@ -11,6 +11,22 @@ from yt_playlist.web import viz
 from yt_playlist.web.routes.genres import genre_list_context
 
 
+def _genre_progress(event):
+    """Project provider progress without forwarding diagnostic text or fields."""
+    kind = event.get('type')
+    kind = kind if kind in {'track', 'activity', 'done', 'err'} else 'info'
+    warning = bool(event.get('warning') or event.get('deferred'))
+    text = ('Genre lookup did not finish. Your changes are kept.' if kind == 'err' else
+            'Some suggestions are not available yet. Checking the rest…' if warning else
+            'Genre lookup finished.' if kind == 'done' else 'Looking up genres…')
+    result = {'type': kind, 'warning': warning, 'text': text}
+    if kind == 'track':
+        for key in ('i', 'n'):
+            value = event.get(key)
+            result[key] = value if type(value) is int and value >= 0 else 0
+    return result
+
+
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
@@ -163,10 +179,16 @@ def build(ctx) -> APIRouter:
         job = ctx.jobs.create()
         job.source = "genre-dialog"
 
+        def progress(event):
+            if event.get('warning') or event.get('deferred') or event.get('type') == 'err':
+                ctx.logger.warning('Genre lookup %s for track %s: %r', job.id, track_id, event)
+            job.events.append(event)
+
         def run():
             try:
-                waterfall.run_waterfall(store, [track], enrichment.load_config(store), job.events.append)
+                waterfall.run_waterfall(store, [track], enrichment.load_config(store), progress)
             except Exception as exc:  # noqa: BLE001
+                ctx.logger.exception('Genre lookup %s for track %s failed', job.id, track_id)
                 job.error = str(exc) or type(exc).__name__
                 job.events.append({"type": "err", "text": f"Lookup failed: {job.error}"})
             finally:
@@ -182,7 +204,8 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="Genre lookup is missing or expired.")
 
         from yt_playlist.web.job_events import stream_job
-        return StreamingResponse(stream_job(job, request), media_type="text/event-stream")
+        return StreamingResponse(stream_job(job, request, transform=_genre_progress,
+            terminal=lambda: {'type': 'end', 'error': bool(job.error)}), media_type="text/event-stream")
 
     @router.post("/track/{track_id}/genre-candidates")
     async def choose_genre_candidate(request: Request, track_id: int):

@@ -45,11 +45,17 @@ class Recording:
                                      for channel in CHANNELS) >= AUDIO_ONLY_SUPPORT)
 
 
-def recording(key, features, profile=None):
-    genre = genre_catalog.canonical_name(features.get('genre') or '')
-    # Unrecognized provider tags are unknown, rather than arbitrary new musical islands.
-    if genre_catalog.normalize(genre) not in genre_catalog.catalog()[1]:
-        genre = ''
+def recording(key, features, profile=None, *, genre_axes=None):
+    raw_genre = features.get('genre') or ''
+    if genre_axes is not None:
+        family, genre = genre_axes.get(raw_genre, ('', None))
+        genre = genre or ''
+    else:
+        genre = genre_catalog.canonical_name(raw_genre)
+        # Unrecognized provider tags cannot establish a musical relationship.
+        if genre_catalog.normalize(genre) not in genre_catalog.catalog()[1]:
+            genre = ''
+        family = genre_map.family(genre) if genre else ''
     dimensions = (profile or {}).get('dimensions', {}) if (profile or {}).get('version') == musical_profiles.VERSION else {}
     values, support = [], []
     for name in DIMENSIONS:
@@ -64,7 +70,7 @@ def recording(key, features, profile=None):
         support.append(weight)
     raw_year = str(features.get('year') or '')[:4]
     year = int(raw_year) if raw_year.isdigit() and 1900 <= int(raw_year) <= 2100 else None
-    return Recording(key, genre, genre_map.family(genre) if genre else '', year,
+    return Recording(key, genre, family if genre else '', year,
                      tuple(values), tuple(support), (profile or {}).get('version'))
 
 

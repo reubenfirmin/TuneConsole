@@ -1,11 +1,22 @@
-function onboardingArrival() {
+function loadHomeArea(element) {
+  // Alpine can initialize a swapped Home before HTMX settles its descendants.
+  // Register the fragment listener before sending the area's first open event.
+  htmx.process(element);
+  htmx.trigger(element, 'home-area-open');
+}
+
+function onboardingArrival(artistsRequired = false) {
   return {
     songs: 0, playlists: 0, albums: 0, covers: [], outcome: null, statusError: '',
     // Import progress belongs to this view, separate from Home's SSE attachment.
     running: false,
     imported: false, analyzed: 0, total: 0, genres: 0, model_tracks: 0, modes: 0, discoveries: 0,
-    listening_format: 'mixes', activity: '', current: null, target: null, starterReady: false,
-    _timer: null, _disposed: false,
+    listening_format: 'mixes', activity: '', current: null, target: null, starterReady: false, starterPlayed: false,
+    generationStarted: false,
+    artists_required: artistsRequired,
+    _timer: null, _homeRetry: null, _homeRetryDelay: 1000, _disposed: false, _suspended: false,
+    _requests: new AbortController(), _readingArrival: false,
+    get choosingArtists() { return this.artists_required && !this.starterReady; },
     get progressLabel() {
       if (this.statusError) return this.statusError;
       if (!this.connected && !this.running) return 'Open YouTube Music to continue setup';
@@ -15,10 +26,34 @@ function onboardingArrival() {
       }
       if (!this.imported && !this.songs) return 'Bringing in your music';
       if (this.listening_format === 'albums') return 'Finding your first album';
-      if (this.listening_format === 'radio') return 'Preparing your first Radio Session';
+      if (this.listening_format === 'radio') return 'Finding songs for your first station';
       return 'Finding your first mix tape';
     },
+    showStarter() {
+      const stage = this.$root.querySelector('.setup-listening');
+      if (this.choosingArtists) stage?.querySelector('[data-onboarding-artists]')?.dispatchEvent(new CustomEvent('artist-choose'));
+      stage?.scrollIntoView({behavior: 'smooth', block: 'start'});
+      this.$nextTick(() => stage?.querySelector(this.choosingArtists ? '#artist-start-search' : '[data-onboarding-play], [data-artist-resuming="true"] a')?.focus({preventScroll: true}));
+    },
+    frameIntro() {
+      if (this._introFramed || window.scrollY > 0) return;
+      this.$nextTick(() => {
+        if (this._disposed || this._introFramed || window.scrollY > 0 || !(this.starterReady || this.choosingArtists) || !this.connected) return;
+        const intro = this.$el.querySelector('.festival-intro');
+        const tent = intro?.querySelector('.festival-destination[data-first-sounds] .landmark-hit');
+        if (!tent || tent.getBoundingClientRect().bottom <= innerHeight) return;
+        // Never trade away an active player's controls to frame the scenery.
+        if (document.querySelector('.global-now-playing')?.getClientRects().length) return;
+        const headerBottom = document.querySelector('.topbar')?.getBoundingClientRect().bottom || 0;
+        const distance = intro.getBoundingClientRect().top - headerBottom - 8;
+        if (distance > 0) {
+          this._introFramed = true;
+          window.scrollBy({top: distance, behavior: 'instant'});
+        }
+      });
+    },
     applyArrival(data) {
+      if (this._disposed || this._suspended) return;
       this.songs = data.songs; this.playlists = data.playlists; this.albums = data.albums;
       this.outcome = data.outcome;
       Object.assign(this, data.setup || {});
@@ -31,28 +66,101 @@ function onboardingArrival() {
         // Replace only Home once complete offers exist. The shared player and setup
         // details stay mounted, and navigating elsewhere never brings the user back.
         htmx.ajax('GET', '/', {target: '#home', select: '#home', swap: 'outerHTML'})
-          .then(() => document.querySelector('main.page-home')?.classList.remove('page-setup'))
-          .catch(() => { this._openingHome = false; });
+          .then(() => {
+            // HTMX resolves HTTP errors as well as successful responses. The
+            // required result is a mounted Home feed, not a settled request.
+            if (document.querySelector('#onboarding-feed')) throw new Error('Home did not arrive.');
+            document.querySelector('main.page-home')?.classList.remove('page-setup');
+          })
+          .catch(() => {
+            this._openingHome = false;
+            if (this._disposed || this._suspended) return;
+            // The document's setup poll stops once offers are ready. Retry the
+            // failed fragment independently, with a capped backoff, until it lands.
+            clearTimeout(this._homeRetry);
+            this._homeRetry = setTimeout(() => this.applyArrival(data), this._homeRetryDelay);
+            this._homeRetryDelay = Math.min(15000, this._homeRetryDelay * 2);
+          });
       }
     },
     async refreshArrival() {
+      if (this._disposed || this._suspended || this._readingArrival) return;
+      this._readingArrival = true;
+      const requests = this._requests;
+      clearTimeout(this._timer);
       try {
-        const response = await fetch('/home/onboard/status');
+        const response = await fetch('/home/onboard/status', {signal: requests.signal});
         if (!response.ok) throw new Error('Import status could not be loaded.');
         const data = await response.json();
-        if (this._disposed) return;
+        if (this._disposed || this._suspended || requests !== this._requests) return;
         this.applyArrival(data);
       } catch (_) {
-        if (!this._disposed) this.statusError = 'Reconnecting to import progress…';
+        if (!this._disposed && !this._suspended && requests === this._requests)
+          this.statusError = 'Reconnecting to import progress…';
       } finally {
-        if (!this._disposed && !this.complete) this._timer = setTimeout(() => this.refreshArrival(), 3000);
+        if (requests === this._requests) {
+          this._readingArrival = false;
+          if (!this._disposed && !this._suspended && !this.complete)
+            this._timer = setTimeout(() => this.refreshArrival(), 3000);
+        }
       }
     },
     init() {
+      this._onLeave = () => this.destroy();
+      this._onHide = event => {
+        if (!event.persisted) { this.destroy(); return; }
+        this._suspended = true;
+        this._requests.abort();
+        clearTimeout(this._timer); clearTimeout(this._homeRetry);
+      };
+      this._onShow = event => {
+        if (!event.persisted) return;
+        this._suspended = false;
+        this._requests = new AbortController();
+        this._readingArrival = false;
+        if (window.setupStatus) {
+          if (window.setupStatus.snapshot) this.applyArrival(window.setupStatus.snapshot);
+        } else this.refreshArrival();
+      };
+      window.addEventListener('app-page-leaving', this._onLeave);
+      window.addEventListener('pagehide', this._onHide);
+      window.addEventListener('pageshow', this._onShow);
+      // Confirmation cues the player immediately. The welcome changes only
+      // when Home is entered again, including a click on its active tab.
+      this.starterPlayed = document.documentElement.dataset.onboardingPlayed === 'true';
       // The starter arrives independently through HTMX, often before sync finishes.
-      this._onStarter = () => { this.starterReady = !!this.$el.querySelector('.starter-mix, [data-onboarding-starter]'); };
+      this._onStarter = () => {
+        const artists = this.$el.querySelector('[data-onboarding-artists]');
+        if (artists) this.artists_required = true;
+        this.starterReady = artists
+          ? artists.dataset.artistStage === 'listen' && !!artists.querySelector('.artist-first-set, [data-generated-playlist], [data-artist-resuming="true"]')
+          : !!this.$el.querySelector('.starter-mix, [data-onboarding-starter]');
+        this.frameIntro();
+      };
       this.$el.addEventListener('htmx:afterSwap', this._onStarter);
+      this.$el.addEventListener('artist-stage', this._onStarter);
+      this._onArtistStarted = () => { this.artists_required = false; this.refresh(); };
+      this.$el.addEventListener('artist-started', this._onArtistStarted);
       this._onStarter();
+      this._onGeneration = event => {
+        if (this.$el.contains(event.detail.elt) && event.detail.requestConfig?.path === '/home/generate') {
+          // A disconnected player must not hide an in-flight save or its result.
+          this.generationStarted = true;
+        }
+      };
+      document.addEventListener('htmx:beforeRequest', this._onGeneration);
+      this._onFrame = () => this.frameIntro();
+      window.addEventListener('bridge-status', this._onFrame);
+      this._onHome = event => {
+        if (!(this.starterReady || this.choosingArtists) || !this.connected || event.button !== 0 || event.metaKey
+            || event.ctrlKey || event.shiftKey || event.altKey
+            || !event.target.closest('.topbar a[href="/"]')) return;
+        event.preventDefault();
+        this.starterPlayed = document.documentElement.dataset.onboardingPlayed === 'true';
+        this.refresh();
+        this.showStarter();
+      };
+      document.addEventListener('click', this._onHome);
       if (window.setupStatus) {
         this._onSetup = event => this.applyArrival(event.detail);
         window.addEventListener('setup-status', this._onSetup);
@@ -60,9 +168,18 @@ function onboardingArrival() {
       } else this.refreshArrival();
     },
     destroy() {
-      this._disposed = true; clearTimeout(this._timer);
+      this._disposed = true; clearTimeout(this._timer); clearTimeout(this._homeRetry);
+      this._requests.abort();
+      window.removeEventListener('app-page-leaving', this._onLeave);
+      window.removeEventListener('pagehide', this._onHide);
+      window.removeEventListener('pageshow', this._onShow);
       window.removeEventListener('setup-status', this._onSetup);
       this.$el.removeEventListener('htmx:afterSwap', this._onStarter);
+      this.$el.removeEventListener('artist-stage', this._onStarter);
+      this.$el.removeEventListener('artist-started', this._onArtistStarted);
+      document.removeEventListener('htmx:beforeRequest', this._onGeneration);
+      document.removeEventListener('click', this._onHome);
+      window.removeEventListener('bridge-status', this._onFrame);
     },
   };
 }
@@ -89,12 +206,17 @@ function homeStatus() {
     sensorHealth: null,
     running: false,
     failed: false,
-    _job: null, _completedJob: null, _checkingJob: false,
-    _scan: null, _stream: null, _disposed: false, _initialized: false,
+    _job: null, _completedJob: null, _checkingJob: false, _refreshPending: false,
+    _scan: null, _stream: null, _disposed: false, _suspended: false, _initialized: false,
+    _requests: new AbortController(), _scanning: false,
     destroy() {
       this._disposed = true;
+      this._requests.abort();
       clearInterval(this._scan);
       this._stream?.close();
+      window.removeEventListener('app-page-leaving', this._onLeave);
+      window.removeEventListener('pagehide', this._onHide);
+      window.removeEventListener('pageshow', this._onShow);
     },
     applyBridgeStatus(data) {
       if (this._disposed) return;
@@ -107,22 +229,48 @@ function homeStatus() {
     init() {
       if (this._initialized) return;
       this._initialized = true;
+      this._onLeave = () => this.destroy();
+      window.addEventListener('app-page-leaving', this._onLeave);
       this.$el.closest('main.page-home')?.classList.toggle('page-setup', !!this.$el.querySelector('#onboarding-feed'));
       window.playbackStatus.start();
       if (window.playbackStatus.snapshot) this.applyBridgeStatus(window.playbackStatus.snapshot);
       // Watch completion without surfacing routine background retries as user actions.
-      const scan = () => { if (this._disposed) return;
+      const scan = () => { if (this._disposed || this._suspended) return;
+        if (this._refreshPending) this.refreshOffers();
         if (this.running) {
           if (!this._stream) this.checkJob(this._job);
           return;
         }
-        fetch('/sync/active').then(r => r.json())
-        .then(d => { if (d && d.job_id) this.attach(d.job_id); }).catch(() => {}); };
+        if (this._scanning) return;
+        this._scanning = true;
+        const requests = this._requests;
+        fetch('/sync/active', {signal: requests.signal}).then(r => r.json())
+        .then(d => {
+          if (!this._suspended && requests === this._requests && d?.job_id) this.attach(d.job_id);
+        }).catch(() => {})
+        .finally(() => { if (requests === this._requests) this._scanning = false; }); };
       scan();
       this._scan = setInterval(scan, 3000);
+      this._onHide = event => {
+        if (!event.persisted) { this.destroy(); return; }
+        this._suspended = true;
+        this._requests.abort();
+        clearInterval(this._scan);
+        this._stream?.close(); this._stream = null;
+      };
+      this._onShow = event => {
+        if (!event.persisted) return;
+        this._suspended = false;
+        this._requests = new AbortController();
+        this._scanning = this._checkingJob = false;
+        scan();
+        this._scan = setInterval(scan, 3000);
+      };
+      window.addEventListener('pagehide', this._onHide);
+      window.addEventListener('pageshow', this._onShow);
     },
     attach(jobId) {
-      if (this._disposed || this.running || this._completedJob === jobId) return;
+      if (this._disposed || this._suspended || this.running || this._completedJob === jobId) return;
       this._job = jobId; this.running = true; this.failed = false;
       this._stream?.close();
       const es = this._stream = new EventSource(`/sync/events/${jobId}`);
@@ -150,19 +298,21 @@ function homeStatus() {
       };
     },
     async checkJob(jobId) {
-      if (this._disposed || this._checkingJob || this._job !== jobId) return;
+      if (this._disposed || this._suspended || this._checkingJob || this._job !== jobId) return;
       this._checkingJob = true;
+      const requests = this._requests;
       try {
-        const response = await fetch(`/sync/status/${jobId}`);
-        if (this._disposed || this._job !== jobId) return;
+        const response = await fetch(`/sync/status/${jobId}`, {signal: requests.signal});
+        if (this._disposed || this._suspended || requests !== this._requests || this._job !== jobId) return;
         if (response.status === 404) {
           this.running = false; this._completedJob = jobId;
         } else if (response.ok) {
           const state = await response.json();
-          if (!this._disposed && this._job === jobId && state.done) this.finishJob(jobId, state);
+          if (!this._disposed && !this._suspended && requests === this._requests
+              && this._job === jobId && state.done) this.finishJob(jobId, state);
         }
       } catch (_) { /* The next scan retries this same known job. */ }
-      finally { this._checkingJob = false; }
+      finally { if (requests === this._requests) this._checkingJob = false; }
     },
     finishJob(jobId, ev) {
       if (this._disposed || this._job !== jobId || this._completedJob === jobId) return;
@@ -170,11 +320,22 @@ function homeStatus() {
       this.running = false; this._completedJob = jobId;
       if (ev.outcome === 'complete' && !ev.error && !this.failed) {
         if (!this.$el.querySelector('#onboarding-feed')) {
-          htmx.ajax('GET', '/', {target: '#home', select: '#home', swap: 'outerHTML'}).catch(() => {});
+          this._refreshPending = true;
+          this.refreshOffers();
         }
       } else {
         this.failed = true;
       }
+    },
+    refreshOffers() {
+      if (this._disposed || this._suspended || this._refreshing || window.genHomeBusy?.(this.$el)) return;
+      this._refreshing = true;
+      htmx.ajax('GET', '/', {target: '#home', select: '#home', swap: 'outerHTML',
+        headers: {'X-Home-Refresh': 'sync'}})
+        .catch(() => {})
+        .finally(() => { this._refreshing = false; });
+      // A successful replacement disposes this instance. A guarded swap or
+      // transport failure leaves the pending refresh for the next normal scan.
     },
   };
 }

@@ -1,0 +1,979 @@
+{
+  "description": "Completed synthetic catalog inputs from recording_catalog.sql plus one legacy taste-mode centroid, through the numbered prefixes at clock 1.0. Later versions replace or remove the listed tables. SQL definitions and migration histories are installed separately; retained files contain their exact logical bytes. Explicit tags preserve SQLite REAL and BLOB values. These are lower-layer inputs, not an assertion that the historical conversion ran.",
+  "versions": {
+    "79": {
+      "playlists": {
+        "columns": ["id","identity_id","ytm_playlist_id","title","track_count","content_hash","first_seen","last_seen","last_changed","created_at","created_at_source","thumbnail","scope_ref"],
+        "rows": [
+          [1,1,"LM","Liked Music",2,"28581d399055f912aaf971d159f375d11644ede69b622ff803bc0708d6d7757e",null,null,null,null,null,null,"@account:1:LM"],
+          [2,1,"GENERATED","Generated mix",1,"56d3817a4bf2e3ce7b6efeaa70d1e2bc596c4d9ba22888f30df064e1a68829c4",null,null,null,null,null,null,"GENERATED"]
+        ]
+      },
+      "play_events": {
+        "columns": ["id","identity_id","identity_key","video_id","played_at","playlist_ytm_id","like_status","source","recording_id","raw_identity_key","is_generated"],
+        "rows": [
+          [1,1,"@recording:8|artist","upload-live",{"sqlite_real":"100.0"},"LM",null,"live",8,"song|artist",0],
+          [2,1,"song|artist",null,{"sqlite_real":"200.0"},null,null,"legacy",null,"song|artist",null],
+          [3,1,"old spelling|artist","unknown-upload",{"sqlite_real":"300.0"},"GENERATED",null,"live",null,"old spelling|artist",1]
+        ]
+      },
+      "rec_feedback": {
+        "columns": ["surface","item_key","kind","reason","scope","until","created_at","target_type","recording_id","artist_id"],
+        "rows": [
+          ["like","song|artist","like",null,"",null,{"sqlite_real":"10.0"},"legacy_unresolved",null,null],
+          ["like_grad","song|artist","like_grad",null,"",null,{"sqlite_real":"10.0"},"legacy_unresolved",null,null],
+          ["like_grad","@recording:8|artist","like_grad","legacy ambiguous graduation guard","",null,{"sqlite_real":"10.0"},"legacy_guard",8,null],
+          ["like_grad","@recording:9|artist","like_grad","legacy ambiguous graduation guard","",null,{"sqlite_real":"10.0"},"legacy_guard",9,null],
+          ["like_grad","discovery spelling|artist","like_grad","legacy ambiguous graduation guard","",null,{"sqlite_real":"10.0"},"legacy_guard",3,null],
+          ["for_you","discovery spelling|artist","less",null,"",null,{"sqlite_real":"11.0"},"recording",3,null]
+        ]
+      },
+      "taste_modes": {
+        "columns": ["mode_id","label","families","centroid","size","rep_keys","active","first_seen","last_seen","space"],
+        "rows": [
+          [1,"House","[]",{"sqlite_blob_hex":"0000803f"},1,"[\"discovery spelling|artist\"]",1,{"sqlite_real":"1.0"},{"sqlite_real":"1.0"},"legacy-identity-v1"]
+        ]
+      },
+      "recordings": {
+        "columns": ["id","identity_key","title","artist","provisional","genre","bpm","energy","danceability","mb_recording_id","music_key","music_scale","mood_happy","mood_sad","mood_relaxed","mood_acoustic","instrumental","created_at","first_enriched_at","last_enriched_at"],
+        "rows": [
+          [3,"discovery spelling|artist","Corrected Song","Artist",1,"House",null,null,null,"same-mbid",null,null,null,null,null,null,null,{"sqlite_real":"20.0"},null,null],
+          [8,"@recording:8|artist","Song (Live)","Artist",1,"Rock",null,null,null,"same-mbid",null,null,null,null,null,null,null,null,null,null],
+          [9,"@recording:9|artist","Song (Remix)","Artist",1,null,null,null,null,"same-mbid",null,null,null,null,null,null,null,null,null,null],
+          [10,"unresolved|artist","Unresolved","Artist",1,"Folk",null,null,null,null,null,null,null,null,null,null,null,null,null,null],
+          [11,"cold|other","Cold","Other",1,null,null,null,null,null,null,null,null,null,null,null,null,{"sqlite_real":"50.0"},null,null]
+        ]
+      },
+      "youtube_items": {
+        "columns": ["video_id","recording_id","title","artist","orig_title","orig_artist","album","duration_s","available","video_type","artist_browse_id","album_browse_id","thumbnail","mb_year","loudness","dynamic_complexity","popularity","gain","label"],
+        "rows": [
+          ["upload-a",3,"Corrected Song","Artist","Song","Artist",null,200,null,null,null,"release-a","cover-a",null,null,null,null,null,null],
+          ["upload-live",8,"Song (Live)","Artist","Song (Live)","Artist",null,240,null,null,null,"release-live",null,null,null,null,null,null,null],
+          ["upload-remix",9,"Song (Remix)","Artist","Song (Remix)","Artist",null,280,null,null,null,null,null,null,null,null,null,null,null],
+          ["cold-upload",11,"Cold","Other","Cold","Other",null,null,null,null,null,null,null,null,null,null,null,null,null]
+        ]
+      },
+      "catalog_entries": {
+        "columns": ["id","recording_id","video_id","source_ref"],
+        "rows": [
+          [3,3,"upload-a",null],
+          [8,8,"upload-live",null],
+          [9,9,"upload-remix",null],
+          [10,10,null,"unresolved:12352fd6fcf7294112198f768354459bae94f144f1a92727c1f8feb3ae75e6d2"],
+          [11,11,"cold-upload",null]
+        ]
+      },
+      "unresolved_items": {
+        "columns": ["entry_id","title","artist","orig_title","orig_artist","album","duration_s","available","video_type","artist_browse_id","album_browse_id","thumbnail","mb_year","loudness","dynamic_complexity","popularity","gain","label"],
+        "rows": [
+          [10,"Unresolved","Artist","Unresolved","Artist",null,180,null,null,null,"saved-release",null,null,null,null,null,null,null]
+        ]
+      },
+      "library_memberships": {
+        "columns": ["entry_id","origin","added_at"],
+        "rows": [
+          [3,"legacy",{"sqlite_real":"20.0"}],
+          [8,"legacy",null],
+          [9,"legacy",null],
+          [10,"legacy",null]
+        ]
+      },
+      "recording_aliases": {
+        "columns": ["alias","recording_id","source"],
+        "rows": [
+          ["song|artist",3,"legacy_library"],
+          ["old spelling|artist",3,"legacy_library"],
+          ["discovery spelling|artist",3,"legacy_discovery"],
+          ["song|artist",8,"legacy_library"],
+          ["song|artist",9,"legacy_library"],
+          ["unresolved|artist",10,"legacy_library"],
+          ["cold|other",11,"legacy_discovery"]
+        ]
+      },
+      "legacy_track_refs": {
+        "columns": ["legacy_id","entry_id","recording_id","video_id"],
+        "rows": [
+          [3,3,3,"upload-a"],
+          [7,3,3,"upload-a"],
+          [8,8,8,"upload-live"],
+          [9,9,9,"upload-remix"],
+          [10,10,10,null]
+        ]
+      },
+      "entry_field_choices": {
+        "columns": ["entry_id","field","value_json","source"],
+        "rows": [
+          [3,"title","\"Corrected Song\"","legacy_edit"],
+          [3,"genre","\"\"","legacy_resolution"],
+          [8,"bpm","121.0","legacy_resolution"]
+        ]
+      },
+      "recording_identifiers": {
+        "columns": ["id","recording_id","scheme","entity_type","value","source","input_video_id","status","observed_at"],
+        "rows": [
+          [1,3,"musicbrainz","recording","same-mbid","legacy_match","upload-a","candidate",{"sqlite_real":"1.0"}],
+          [2,3,"musicbrainz","recording","same-mbid","legacy_match","upload-a","candidate",{"sqlite_real":"1.0"}],
+          [3,8,"musicbrainz","recording","same-mbid","legacy_match","upload-live","candidate",{"sqlite_real":"1.0"}],
+          [4,9,"musicbrainz","recording","same-mbid","legacy_match","upload-remix","candidate",{"sqlite_real":"1.0"}]
+        ]
+      },
+      "item_recording_associations": {
+        "columns": ["id","video_id","recording_id","previous_recording_id","source","evidence","at"],
+        "rows": [
+          [1,"upload-a",3,null,"legacy_exact_video","{\"kind\": \"library\", \"source_id\": \"3\"}",{"sqlite_real":"1.0"}],
+          [2,"upload-a",3,null,"legacy_exact_video","{\"kind\": \"library\", \"source_id\": \"7\"}",{"sqlite_real":"1.0"}],
+          [3,"upload-a",3,null,"legacy_exact_video","{\"kind\": \"discovery\", \"source_id\": \"discovery spelling|artist\"}",{"sqlite_real":"1.0"}],
+          [4,"upload-live",8,null,"legacy_exact_video","{\"kind\": \"library\", \"source_id\": \"8\"}",{"sqlite_real":"1.0"}],
+          [5,"upload-remix",9,null,"legacy_exact_video","{\"kind\": \"library\", \"source_id\": \"9\"}",{"sqlite_real":"1.0"}],
+          [6,"cold-upload",11,null,"legacy_exact_video","{\"kind\": \"discovery\", \"source_id\": \"cold|other\"}",{"sqlite_real":"1.0"}]
+        ]
+      },
+      "discovery_memberships": {
+        "columns": ["recording_id","entry_id","found_at","first_shown","last_shown","offered_count"],
+        "rows": [
+          [3,3,{"sqlite_real":"20.0"},{"sqlite_real":"30.0"},{"sqlite_real":"40.0"},4],
+          [11,11,{"sqlite_real":"50.0"},null,null,0]
+        ]
+      },
+      "discovery_sources": {
+        "columns": ["recording_id","source_token","input_video_id","found_at","source_type","source_id","last_found_at"],
+        "rows": [
+          [3,"release-c","upload-a",{"sqlite_real":"20.0"},"album","release-c",{"sqlite_real":"20.0"}],
+          [11,"radio:seed","cold-upload",{"sqlite_real":"50.0"},"radio","seed",{"sqlite_real":"50.0"}]
+        ]
+      },
+      "playlist_items": {
+        "columns": ["playlist_id","video_id","position"],
+        "rows": [
+          [1,"upload-a",0],
+          [1,"upload-live",2],
+          [2,"upload-remix",0]
+        ]
+      },
+      "provider_attempts": {
+        "columns": ["id","recording_id","input_video_id","provider","at","status","fields_json"],
+        "rows": [
+          [1,11,"","deezer",{"sqlite_real":"60.0"},"found","{\"art\": \"full-cover\", \"isrc\": \"ISRC-ONE\", \"bpm\": 128}"]
+        ]
+      },
+      "metadata_decisions": {
+        "columns": ["id","entry_id","field","value_json","source","chosen_at","legacy_ref"],
+        "rows": [
+          [1,3,"title","\"Corrected Song\"","legacy_edit",null,null],
+          [2,3,"genre","\"\"","legacy_resolution",null,null],
+          [3,8,"bpm","121.0","legacy_resolution",null,null],
+          [4,3,"genre","\"\"","legacy_resolution",{"sqlite_real":"11.0"},"conflict:1"],
+          [5,8,"bpm","121.0","legacy_resolution",{"sqlite_real":"12.0"},"conflict:2"],
+          [6,3,"title","\"Corrected Song\"","legacy_edit",null,"edit:7:title"]
+        ]
+      },
+      "recording_field_sources": {
+        "columns": ["recording_id","field","source","selected_at"],
+        "rows": [
+          [3,"genre","legacy_unknown",null],
+          [3,"mb_recording_id","legacy_unknown",null],
+          [8,"genre","legacy_unknown",null],
+          [8,"mb_recording_id","legacy_unknown",null],
+          [9,"mb_recording_id","legacy_unknown",null],
+          [10,"genre","legacy_unknown",null]
+        ]
+      },
+      "item_field_sources": {
+        "columns": ["entry_id","field","source","selected_at"],
+        "rows": [
+          [3,"title","legacy_unknown",null],
+          [3,"artist","legacy_unknown",null],
+          [3,"orig_title","legacy_unknown",null],
+          [3,"orig_artist","legacy_unknown",null],
+          [3,"duration_s","legacy_unknown",null],
+          [3,"album_browse_id","legacy_unknown",null],
+          [3,"thumbnail","legacy_unknown",null],
+          [8,"title","legacy_unknown",null],
+          [8,"artist","legacy_unknown",null],
+          [8,"orig_title","legacy_unknown",null],
+          [8,"orig_artist","legacy_unknown",null],
+          [8,"duration_s","legacy_unknown",null],
+          [8,"album_browse_id","legacy_unknown",null],
+          [9,"title","legacy_unknown",null],
+          [9,"artist","legacy_unknown",null],
+          [9,"orig_title","legacy_unknown",null],
+          [9,"orig_artist","legacy_unknown",null],
+          [9,"duration_s","legacy_unknown",null],
+          [10,"title","legacy_unknown",null],
+          [10,"artist","legacy_unknown",null],
+          [10,"orig_title","legacy_unknown",null],
+          [10,"orig_artist","legacy_unknown",null],
+          [10,"duration_s","legacy_unknown",null],
+          [10,"available","legacy_unknown",null],
+          [10,"album_browse_id","legacy_unknown",null],
+          [11,"title","legacy_unknown",null],
+          [11,"artist","legacy_unknown",null],
+          [11,"orig_title","legacy_unknown",null],
+          [11,"orig_artist","legacy_unknown",null]
+        ]
+      },
+      "artists": {
+        "columns": ["id","name","provisional"],
+        "rows": [
+          [1,"Artist",1],
+          [2,"Other",1]
+        ]
+      },
+      "artist_aliases": {
+        "columns": ["artist_id","alias","source"],
+        "rows": [
+          [1,"Artist","legacy_credit"],
+          [1,"Artist","legacy_original_credit"],
+          [2,"Other","legacy_credit"],
+          [2,"Other","legacy_original_credit"]
+        ]
+      },
+      "entry_artists": {
+        "columns": ["entry_id","position","artist_id","credit","source"],
+        "rows": [
+          [3,0,1,"Artist","legacy_literal"],
+          [8,0,1,"Artist","legacy_literal"],
+          [9,0,1,"Artist","legacy_literal"],
+          [10,0,1,"Artist","legacy_literal"],
+          [11,0,2,"Other","legacy_literal"]
+        ]
+      },
+      "albums": {
+        "columns": ["id","title","artist","year","type","thumbnail","genre","metadata_rank","legacy_key"],
+        "rows": [
+          [1,null,"Artist",null,null,"cover-a",null,0,null],
+          [2,null,"Artist",null,null,null,null,0,null],
+          [3,null,"Artist",null,null,null,null,0,null],
+          [4,"Album B","Artist",null,null,null,null,3,null],
+          [5,"Album C","Artist",null,null,null,null,1,null]
+        ]
+      },
+      "album_artists": {
+        "columns": ["album_id","position","artist_id","credit"],
+        "rows": [
+          [1,0,1,"Artist"],
+          [2,0,1,"Artist"],
+          [3,0,1,"Artist"],
+          [5,0,1,"Artist"],
+          [4,0,1,"Artist"]
+        ]
+      },
+      "album_discovery_memberships": {
+        "columns": ["album_id","found_at","last_shown","first_shown","offered_count","legacy_offered_count","legacy_first_shown","legacy_last_shown"],
+        "rows": [
+          [5,{"sqlite_real":"1.0"},null,null,0,0,null,null]
+        ]
+      },
+      "album_tracks": {
+        "columns": ["id","album_id","entry_id","recording_id","legacy_track_key","position","disc_number","track_number","is_full","source"],
+        "rows": [
+          [1,1,3,null,null,null,null,null,0,"legacy"],
+          [2,4,3,null,null,null,null,null,1,"legacy"],
+          [3,5,3,null,null,null,null,null,0,"legacy_discovery"],
+          [4,2,8,null,null,null,null,null,0,"legacy"],
+          [5,3,10,null,null,null,null,null,0,"legacy"]
+        ]
+      },
+      "album_fetch_state": {
+        "columns": ["album_id","fetched_at","complete","expected_track_count"],
+        "rows": [
+          [4,null,1,1]
+        ]
+      },
+      "playlist_scopes": {
+        "columns": ["ref","provider_id","identity_id","kind","group_name","hidden","overlap_ignored","overlap_ignored_at","origin","adopted","provenance_description"],
+        "rows": [
+          ["GENERATED","GENERATED",null,"shared","Generated",0,0,null,"tuneconsole",0,null],
+          ["@account:1:LM","LM",1,"account",null,0,0,null,null,null,null],
+          ["CLUSTER","CLUSTER",null,"shared",null,0,0,null,null,null,null]
+        ]
+      },
+      "cluster_canvas": {
+        "columns": ["playlist_ytm","state","created_at"],
+        "rows": [
+          ["CLUSTER","{\"nodes\": [{\"id\": 1, \"key\": \"discovery spelling|artist\", \"seeds\": [{\"keys\": [\"discovery spelling|artist\"], \"catalog_identity_version\": 2}], \"catalog_identity_version\": 2}], \"trunk\": [1], \"label\": \"old spelling|artist\", \"catalog_identity_version\": 2}",null]
+        ]
+      },
+      "playlist_membership_refs": {
+        "columns": ["id","scope_ref","identity_id"],
+        "rows": [
+          [1,"@account:1:LM",1],
+          [2,"GENERATED",1]
+        ]
+      },
+      "enrichment_log": {
+        "columns": ["id","track_id","run_id","provider","field","value","created_at","recording_id","input_video_id","field_scope"],
+        "rows": [
+          [1,3,"run","musicbrainz","genre","Techno",{"sqlite_real":"10.0"},3,"upload-a","legacy_item"]
+        ]
+      },
+      "enrichment_conflict": {
+        "columns": ["id","track_id","field","candidates","resolved","resolved_value","updated_at","recording_id","input_video_id","field_scope"],
+        "rows": [
+          [1,3,"genre","[{\"provider\": \"musicbrainz\", \"value\": \"Techno\"}, {\"provider\": \"lastfm\", \"value\": \"House\"}]",1,"",{"sqlite_real":"11.0"},3,"upload-a","legacy_item"],
+          [2,8,"bpm","[{\"provider\": \"one\", \"value\": 120}, {\"provider\": \"two\", \"value\": 121}]",1,"121",{"sqlite_real":"12.0"},8,"upload-live","legacy_item"]
+        ]
+      },
+      "listening_calendars": {
+        "columns": ["identity_id","timezone","confirmed"],
+        "rows": [
+          [1,"UTC",0]
+        ]
+      },
+      "play_event_sources": {
+        "columns": ["event_id","source"],
+        "rows": [
+          [1,"live"],
+          [2,"legacy"],
+          [3,"live"]
+        ]
+      },
+      "play_event_calendar": {
+        "columns": ["event_id","day","timezone"],
+        "rows": [
+          [1,"1970-01-01","UTC"],
+          [2,"1970-01-01","UTC"],
+          [3,"1970-01-01","UTC"]
+        ]
+      },
+      "listening_capture_receipts": {
+        "columns": ["id","identity_id","captured_at"],
+        "rows": [
+          [1,1,{"sqlite_real":"100.0"}]
+        ]
+      },
+      "listening_observations": {
+        "columns": ["id","identity_id","raw_identity_key","identity_key","recording_id","source_day","day","source","timezone","precision","first_observed_at","last_observed_at","capture_id","capture_item_id"],
+        "rows": [
+          [1,1,"song|artist","song|artist",null,"1970-01-01","1970-01-01","unknown",null,"legacy_unknown",{"sqlite_real":"100.0"},{"sqlite_real":"100.0"},1,1],
+          [2,1,"old spelling|artist","discovery spelling|artist",3,"1970-01-01","1970-01-01","unknown",null,"legacy_unknown",{"sqlite_real":"100.0"},{"sqlite_real":"100.0"},1,2]
+        ]
+      },
+      "rec_change_queue": {
+        "columns": ["kind","item","revision"],
+        "rows": [
+          ["refresh","",1]
+        ]
+      },
+      "rec_content_pending": {
+        "columns": ["position","identity_key","revision"],
+        "rows": [
+          [1,"discovery spelling|artist",2],
+          [2,"@recording:8|artist",2],
+          [3,"@recording:9|artist",2],
+          [4,"unresolved|artist",2],
+          [5,"cold|other",2]
+        ]
+      },
+      "rec_preparation": {
+        "columns": ["id","content_changes","evidence_changes"],
+        "rows": [
+          [1,0,0]
+        ]
+      },
+      "rec_group_clock": {
+        "columns": ["id","serial"],
+        "rows": [
+          [1,0]
+        ]
+      },
+      "rec_vibe_pending": {
+        "columns": ["position","group_key","revision","cursor"],
+        "rows": [
+          [1,"*",2,""]
+        ]
+      },
+      "album_provider_ids": {
+        "columns": ["provider","provider_id","album_id","is_primary","equivalence_digest","verified_at"],
+        "rows": [
+          ["youtube","release-a",1,1,null,null],
+          ["youtube","release-live",2,1,null,null],
+          ["youtube","saved-release",3,1,null,null],
+          ["youtube","release-b",4,1,null,null],
+          ["youtube","release-c",5,1,null,null]
+        ]
+      },
+      "settings": {
+        "columns": ["key","value"],
+        "rows": [
+          ["enrich_ts_backfilled","1"],
+          ["enrich_unattempted_batch_repaired","1"],
+          ["discovery_enrichment_audit_requeued","1"],
+          ["playlist_created_at_backfilled","1"],
+          ["like_ratchet_repaired","adjusted 0 of 0 like-touched axis weight(s); 0 like row(s) stamped sync-provenance; 0 once-ever graduation stamp(s) backfilled"],
+          ["catalog_identity_version","2"]
+        ]
+      },
+      "rec_weights": {
+        "columns": ["axis","weight","updated_at"],
+        "rows": [
+          ["genre:house",{"sqlite_real":"1.3"},{"sqlite_real":"10.0"}]
+        ]
+      },
+      "audio_taxonomies": {
+        "columns": ["taxonomy_version","status"],
+        "rows": [
+          ["audio-feedback-presets-1","supported"],
+          ["audio-session-targets-1","supported"]
+        ]
+      },
+      "audio_taxonomy_labels": {
+        "columns": ["taxonomy_version","vibe"],
+        "rows": [
+          ["audio-feedback-presets-1","boost"],
+          ["audio-feedback-presets-1","bright"],
+          ["audio-feedback-presets-1","focus"],
+          ["audio-feedback-presets-1","gentle"],
+          ["audio-feedback-presets-1","move"],
+          ["audio-feedback-presets-1","unwind"],
+          ["audio-session-targets-1","concentrate"],
+          ["audio-session-targets-1","cruise"],
+          ["audio-session-targets-1","energize"],
+          ["audio-session-targets-1","relax"],
+          ["audio-session-targets-1","release"],
+          ["audio-session-targets-1","uplift"]
+        ]
+      },
+      "group_retention_state": {
+        "columns": ["id","roots_complete"],
+        "rows": [
+          [1,0]
+        ]
+      },
+      "artist_credits": {
+        "columns": ["id","display_credit","content_digest","member_count","complete"],
+        "rows": [
+          [1,"Artist","01148f4e0de7d60db60143db723bb403d35757dac942897f27dfa82e31bd5bfa",1,1],
+          [2,"Other","74cb2d172f2ebe5a8ceec16c52557e6c96d4cbbbb41fd2d254de932fa4b13647",1,1],
+          [3,"Artist","a468352d175035eaaa220cc5bc624dfe5ae14da5ca85a2a228d0abdb5ee5ed5c",1,1],
+          [4,"Other","907e7e49cf1f510b11d0f661b1eb5bc5897291a8da5e8f2bdc58605bdeedf8d3",1,1]
+        ]
+      },
+      "artist_credit_members": {
+        "columns": ["credit_id","position","artist_id","credit_text","provider","raw_id","raw_browse_id","role","presence"],
+        "rows": [
+          [1,0,null,"Artist",null,null,null,null,1],
+          [2,0,null,"Other",null,null,null,null,1],
+          [3,0,1,"Artist",null,null,null,null,0],
+          [4,0,2,"Other",null,null,null,null,0]
+        ]
+      },
+      "artist_credit_observations": {
+        "columns": ["id","entry_id","credit_id","source","delivery_key","first_seen","last_seen","processing_count","capture_kind","metadata_delivery_id"],
+        "rows": [
+          [1,3,1,"legacy_literal",null,null,null,1,"legacy_capture",null],
+          [2,8,1,"legacy_literal",null,null,null,1,"legacy_capture",null],
+          [3,9,1,"legacy_literal",null,null,null,1,"legacy_capture",null],
+          [4,10,1,"legacy_literal",null,null,null,1,"legacy_capture",null],
+          [5,11,2,"legacy_literal",null,null,null,1,"legacy_capture",null],
+          [6,3,3,"legacy_literal",null,null,null,1,"selection_snapshot",null],
+          [7,8,3,"legacy_literal",null,null,null,1,"selection_snapshot",null],
+          [8,9,3,"legacy_literal",null,null,null,1,"selection_snapshot",null],
+          [9,10,3,"legacy_literal",null,null,null,1,"selection_snapshot",null],
+          [10,11,4,"legacy_literal",null,null,null,1,"selection_snapshot",null]
+        ]
+      },
+      "entry_artist_selections": {
+        "columns": ["entry_id","observation_id"],
+        "rows": [
+          [3,6],
+          [8,7],
+          [9,8],
+          [10,9],
+          [11,10]
+        ]
+      },
+      "legacy_catalog_evidence": {
+        "columns": ["kind","source_id","reason","filename","content_digest","byte_size","file_offset","format_version","archived_at","resolution_status","legacy_id","entry_id","recording_id"],
+        "rows": [
+          ["discovery","cold|other","retained original catalog capture","{root}/catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json","09107e8bc0a8822a290d7c50a73942875265ffcc9f14ca5c0f457374d23051e8",792,5375,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null,null,null],
+          ["discovery","discovery spelling|artist","retained original catalog capture","{root}/catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json","b2c26427c9288437e1bdb319ee453a8376f2dc6c7e6e7881f71b8c27b41fa01d",816,1847,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null,null,null],
+          ["library","10","retained original catalog capture","{root}/catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json","64411e323ff86450aabd5733020a633db88d36b794fcc560730dbb9242607ead",899,4476,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",10,10,10],
+          ["library","3","retained original catalog capture","{root}/catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json","91786182e2034986c222b8d7eac7ab9e1f4fbd3b14e0abdbde70e93adb42d574",894,40,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",3,3,3],
+          ["library","7","retained original catalog capture","{root}/catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json","09dda77b5c5f6c8c306c4323ee71e6c41b2e3e5a58e0652008c328ec231336a9",913,934,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",7,3,3],
+          ["library","8","retained original catalog capture","{root}/catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json","6eca2d1520d98139b447fa8e13372cb7495b34ada1bd8ca2d0548b352186320a",913,2663,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",8,8,8],
+          ["library","9","retained original catalog capture","{root}/catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json","03b931fbd4b0864d80b8abb57d09d63b0e5f6ce736b27fd997d6dafdc7d94ac0",900,3576,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",9,9,9]
+        ]
+      },
+      "album_identity_evidence": {
+        "columns": ["kind","source_id","reason","filename","content_digest","byte_size","file_offset","format_version","archived_at","resolution_status","album_id"],
+        "rows": [
+          ["album_legacy:album_track_links","1","original album metadata or relationship","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","500a32c7062c9a593996e229c20e2cc622d40471ab90384a0596c5c030572361",206,893,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["album_legacy:album_track_links","2","original album metadata or relationship","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","79376eee1e8771100ece089fa2f266f9e6206b00629e940a4dfa48dd3ca64ce0",206,1099,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["album_legacy:album_track_links","3","original album metadata or relationship","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","9253ef5f67f1c97539d2927d26d6f4820c02137b508768a771f67b0fbdd5a0f1",216,1305,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["album_legacy:album_track_links","4","original album metadata or relationship","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","8f5bbbe9a3344f549a2eeb8cd78ed8923d0e66f493e13f110cb3c893ba5cb4a7",212,1521,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["album_legacy:album_track_links","5","original album metadata or relationship","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","2cd2a2b0a94846afbe98a941101e0a621013f1e9809e1c4a54cb998ca2a4833c",204,1733,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["album_legacy:album_tracklists","release-b","original album metadata or relationship","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","f288df6c23cf8dc30557d6ff32a7bb1d1aeb09629f10b42922242ba95caf703a",231,662,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["album_legacy:discovered_albums","release-c","original album metadata or relationship","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","edd77bb8ad3c49b78905e4a8b256f689b041a13a7fb1abd2826f8ad83947c36c",399,263,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["album_tracklists","release-b","legacy identity conversion","{root}/catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json","36cc7147a95898f8713248540020dd2f6a3425d301008257766016b8a41c2e8c",225,38,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null]
+        ]
+      },
+      "playlist_legacy_evidence": {
+        "columns": ["kind","source_id","reason","filename","content_digest","byte_size","file_offset","format_version","archived_at","resolution_status","playlist_scope_id"],
+        "rows": [
+          ["cluster_canvas","CLUSTER","legacy identity conversion","{root}/catalog.db.archives/playlist/90/9053623deb0abeb09c1b310b4b9efbab2c5aed5104cd9aa92f4851232b923c71.json","3e7531b1b695f6b8164090b8e015c713b555de40447acdf97e8ec65558ea6f6c",341,774,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["playlist_scope_legacy:cluster_canvas","1","original unscoped curation","{root}/catalog.db.archives/playlist/90/9053623deb0abeb09c1b310b4b9efbab2c5aed5104cd9aa92f4851232b923c71.json","2e8d398178655da88663a4df3a27bd26b6d7af9dc18f2b339bdbcc5a86e23b7e",499,1115,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["playlist_scope_legacy:playlist_group","1","original unscoped curation","{root}/catalog.db.archives/playlist/90/9053623deb0abeb09c1b310b4b9efbab2c5aed5104cd9aa92f4851232b923c71.json","d26ce05b7d416133543d5390aba7d28487ddb30e3359d3e60ac26f0675d01447",151,1808,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["playlist_scope_legacy:playlist_provenance","1","original unscoped curation","{root}/catalog.db.archives/playlist/90/9053623deb0abeb09c1b310b4b9efbab2c5aed5104cd9aa92f4851232b923c71.json","eeb31010acea9016ded9f1fb4837f6ed1c200e9dc2c501b34c85e3b6d3be05ba",194,1614,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["playlists","1","membership deduplicated by exact upload; count/hash reconciled","{root}/catalog.db.archives/playlist/90/9053623deb0abeb09c1b310b4b9efbab2c5aed5104cd9aa92f4851232b923c71.json","22e173dc8fca037f5092699e2e319c5de395d5f2d95c4d07c396975f37c1cb85",357,41,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["playlists","2","membership deduplicated by exact upload; count/hash reconciled","{root}/catalog.db.archives/playlist/90/9053623deb0abeb09c1b310b4b9efbab2c5aed5104cd9aa92f4851232b923c71.json","61aa65291b9ca87cb10f3237808f3691f7d94b432379565452423bddc6804257",376,398,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null]
+        ]
+      },
+      "recommendation_legacy_evidence": {
+        "columns": ["kind","source_id","reason","filename","content_digest","byte_size","file_offset","format_version","archived_at","resolution_status","recording_id"],
+        "rows": [
+          ["rec_feedback","1","legacy identity conversion","{root}/catalog.db.archives/recommendation/ef/efd38c3a3a58093d6d7ff62575754131e1934f884f8588c518e2f87a5ba73f03.json","ff378ad840a8e757d8db71046855f15d513db74d7c8fc5ea5d9783436c846278",320,47,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["rec_feedback","2","legacy identity conversion","{root}/catalog.db.archives/recommendation/ef/efd38c3a3a58093d6d7ff62575754131e1934f884f8588c518e2f87a5ba73f03.json","cca8100dd07da8bbf308eb36afd49008aedcd1317b2d3a3bb71455f2d91d168b",330,367,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["rec_feedback","3","legacy identity conversion","{root}/catalog.db.archives/recommendation/ef/efd38c3a3a58093d6d7ff62575754131e1934f884f8588c518e2f87a5ba73f03.json","8132641ced6f28158338ed092ed1030c686fea492b624514b25eab2c1750944b",331,697,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null],
+          ["taste_modes","1","legacy identity conversion","{root}/catalog.db.archives/recommendation/ef/efd38c3a3a58093d6d7ff62575754131e1934f884f8588c518e2f87a5ba73f03.json","fc92f361ea8f15a477275508ca2c00e1be4349ce1ee4033e1b40767c00c8fd1f",339,1028,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null]
+        ]
+      },
+      "metadata_legacy_evidence": {
+        "columns": ["kind","source_id","reason","filename","content_digest","byte_size","file_offset","format_version","archived_at","resolution_status","entry_id","recording_id"],
+        "rows": [
+          ["constraint_legacy:enrichment_log","1","canonical reference repaired; original context retained","{root}/catalog.db.archives/metadata/0f/0ff2ec9facb7046ee9c1d8e46bc0e16833b055bd4d79451d0fafce3f8609fa34.json","357cdcacd0c9d1e49ccd21aa851db919dae9f36ee316ce1b53ae744145393335",314,883,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",null,3],
+          ["enrichment_conflict","1","legacy identity conversion","{root}/catalog.db.archives/metadata/0f/0ff2ec9facb7046ee9c1d8e46bc0e16833b055bd4d79451d0fafce3f8609fa34.json","17fbef14f7d9e8e65350c4b8a95fae96775cd213ad6ebd0239ea14e20ee715bc",435,41,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",null,3],
+          ["enrichment_conflict","2","legacy identity conversion","{root}/catalog.db.archives/metadata/0f/0ff2ec9facb7046ee9c1d8e46bc0e16833b055bd4d79451d0fafce3f8609fa34.json","ff135258874bceb1defe20970740aea677899ecd1ea3e98d056aac16f5305f7a",407,476,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",null,8],
+          ["legacy_enrichment_attempt","song|artist","unresolved legacy identity or format","{root}/catalog.db.archives/metadata/9b/9b989d7a88443511ceb9d653af069e1f2d23b9b465019ba276b097a9b16eb6a1.json","2697ef7c0bb3949dcee91333d62973461c3b9432b3aff0f655514f62d013725e",137,41,"legacy-evidence-1",{"sqlite_real":"1.0"},"unresolved",null,null]
+        ]
+      },
+      "account_album_state": {
+        "columns": ["account_id","revision","snapshot_observed_at","legacy_cohort_present","legacy_cohort_observed_at"],
+        "rows": [
+          [1,0,null,0,null]
+        ]
+      },
+      "identities": {
+        "columns": ["id","label","credential_ref","brand_account_id","is_master","last_auth_ok","active"],
+        "rows": [
+          [1,"main","credential",null,1,null,1]
+        ]
+      }
+    },
+    "88": {
+      "recordings": {
+        "columns": ["id","identity_key","title","artist","provisional","unresolved_genre","bpm","energy","danceability","mb_recording_id","music_key","music_scale","mood_happy","mood_sad","mood_relaxed","mood_acoustic","instrumental","created_at","first_enriched_at","last_enriched_at","genre_key"],
+        "rows": [
+          [3,"discovery spelling|artist","Corrected Song","Artist",1,null,null,null,null,"same-mbid",null,null,null,null,null,null,null,{"sqlite_real":"20.0"},null,null,"house"],
+          [8,"@recording:8|artist","Song (Live)","Artist",1,null,null,null,null,"same-mbid",null,null,null,null,null,null,null,null,null,null,"rock"],
+          [9,"@recording:9|artist","Song (Remix)","Artist",1,null,null,null,null,"same-mbid",null,null,null,null,null,null,null,null,null,null,null],
+          [10,"unresolved|artist","Unresolved","Artist",1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,"folk"],
+          [11,"cold|other","Cold","Other",1,null,null,null,null,null,null,null,null,null,null,null,null,{"sqlite_real":"50.0"},null,null,null]
+        ]
+      },
+      "entry_field_choices": null,
+      "recording_identifiers": {
+        "columns": ["id","recording_id","scheme","entity_type","value","source","input_video_id","status","observed_at","delivery_id","observation_id"],
+        "rows": [
+          [1,3,"musicbrainz","recording","same-mbid","legacy_match","upload-a","candidate",{"sqlite_real":"1.0"},14,null],
+          [2,3,"musicbrainz","recording","same-mbid","legacy_match","upload-a","candidate",{"sqlite_real":"1.0"},15,null],
+          [3,8,"musicbrainz","recording","same-mbid","legacy_match","upload-live","candidate",{"sqlite_real":"1.0"},16,null],
+          [4,9,"musicbrainz","recording","same-mbid","legacy_match","upload-remix","candidate",{"sqlite_real":"1.0"},17,null]
+        ]
+      },
+      "provider_attempts": {
+        "columns": ["id","recording_id","input_video_id","provider","at","status","delivery_id"],
+        "rows": [
+          [1,11,"","deezer",{"sqlite_real":"60.0"},"found",13]
+        ]
+      },
+      "metadata_decisions": null,
+      "recording_field_sources": null,
+      "item_field_sources": null,
+      "albums": {
+        "columns": ["id","title","artist","year","type","thumbnail","unresolved_genre","metadata_rank","legacy_key","genre_key"],
+        "rows": [
+          [1,null,"Artist",null,null,"cover-a",null,0,null,null],
+          [2,null,"Artist",null,null,null,null,0,null,null],
+          [3,null,"Artist",null,null,null,null,0,null,null],
+          [4,"Album B","Artist",null,null,null,null,3,null,null],
+          [5,"Album C","Artist",null,null,null,null,1,null,null]
+        ]
+      },
+      "enrichment_log": null,
+      "enrichment_conflict": null,
+      "rec_weights": {
+        "columns": ["axis_id","weight","updated_at"],
+        "rows": [
+          [1,{"sqlite_real":"1.3"},{"sqlite_real":"10.0"}]
+        ]
+      },
+      "genre_family": {
+        "columns": ["key","name"],
+        "rows": [
+          ["house","House"],
+          ["techno","Techno"],
+          ["rock","Rock"],
+          ["folk","Folk"]
+        ]
+      },
+      "genre_catalog": {
+        "columns": ["key","name","family_key","source","family_source","description"],
+        "rows": [
+          ["house","House","house","curated","curated",""],
+          ["techno","Techno","techno","curated","curated",""],
+          ["rock","Rock","rock","curated","curated",""],
+          ["folk","Folk","folk","curated","curated",""]
+        ]
+      },
+      "genre_alias": {
+        "columns": ["label_key","label","genre_key","source"],
+        "rows": [
+          ["house","House","house","curated"],
+          ["techno","Techno","techno","curated"],
+          ["rock","Rock","rock","curated"],
+          ["folk","Folk","folk","curated"]
+        ]
+      },
+      "metadata_deliveries": {
+        "columns": ["id","provider","key_contract","delivery_key","provider_entity_type","provider_entity_id","input_entry_id","input_recording_id","input_video_id","observed_at","contract_digest","raw_filename","raw_digest","raw_byte_size","raw_offset","format_version"],
+        "rows": [
+          [1,"musicbrainz","legacy_record","enrichment_log:1","legacy_unknown",null,3,3,"upload-a",{"sqlite_real":"10.0"},"758a547cc48771657efb4f76ace99a8b004a62f48a00b3bac5f436617f6b60ed","{root}/catalog.db.metadata/2c/2c97d07926878b636b1bfa6c6c14b623d1b7bcc5ec0ab5256a6b5fcce2ce0a10.json","2c1a9cd9c8ca64acf1291630ffa8fa21595e316762f6b95aa202b38dd54dd482",313,34,"metadata-delivery-1"],
+          [2,"legacy_edit","legacy_record","metadata_decisions:1","legacy_unknown",null,null,null,null,null,"a4c516b2cebf2869a94885664f8bc4b4c036b42d39ae55405c877e1499f8b07f","{root}/catalog.db.metadata/79/79356896809c7a0acc2ed1f26d8a35d95a2ae3432b5c79345b5e29a9398c7d31.json","f395ac3c7ddefac9b544a4996992951c42048f3e59e55fea93a7c541768b03e4",261,34,"metadata-delivery-1"],
+          [3,"legacy_resolution","legacy_record","metadata_decisions:2","legacy_unknown",null,null,null,null,null,"8dc2e60ef696a5c6fc7f36472b6c3b81cbf684f3ee03f9837d59e343167a0d45","{root}/catalog.db.metadata/79/79356896809c7a0acc2ed1f26d8a35d95a2ae3432b5c79345b5e29a9398c7d31.json","6a94e07407e11f507faba3b1b36321756f92aa59b30a4badc815ce0b8db3ac82",253,295,"metadata-delivery-1"],
+          [4,"legacy_resolution","legacy_record","metadata_decisions:3","legacy_unknown",null,null,null,null,null,"98df6a97eef379eae7cd3ec2b4536876e10e06fe1b95ee497bcf7e45a3f7a5a8","{root}/catalog.db.metadata/79/79356896809c7a0acc2ed1f26d8a35d95a2ae3432b5c79345b5e29a9398c7d31.json","775301ca6f2f9d83bd4d4fabebc90cf14915a84ac59cde390969f8e64ea7656d",252,548,"metadata-delivery-1"],
+          [5,"legacy_resolution","legacy_record","metadata_decisions:4","legacy_unknown",null,null,null,null,{"sqlite_real":"11.0"},"0570a741753a0a758def2258cf4377d32edf16212041d53bb9edea7a8b15d44d","{root}/catalog.db.metadata/79/79356896809c7a0acc2ed1f26d8a35d95a2ae3432b5c79345b5e29a9398c7d31.json","8e3b9bb67f66fac82f5ad0a83d19cf65b482ee25422beaa5d8239cfabf520733",261,800,"metadata-delivery-1"],
+          [6,"legacy_resolution","legacy_record","metadata_decisions:5","legacy_unknown",null,null,null,null,{"sqlite_real":"12.0"},"60295d4f0154748ad1d6b68a70f585c65e077eb5505812f1a76173628696807f","{root}/catalog.db.metadata/79/79356896809c7a0acc2ed1f26d8a35d95a2ae3432b5c79345b5e29a9398c7d31.json","7a75ce6f88a044277f532d6f03e40152766746b5da5a1a736eef3c210aaaffaa",260,1061,"metadata-delivery-1"],
+          [7,"legacy_edit","legacy_record","metadata_decisions:6","legacy_unknown",null,null,null,null,null,"36a873348c61df6089158666f7d05132c37823eed499811764559a5dc3f1f037","{root}/catalog.db.metadata/79/79356896809c7a0acc2ed1f26d8a35d95a2ae3432b5c79345b5e29a9398c7d31.json","68f5cb265631c87f6d8d42519b66176cd52676be5281665cee6faca283c8fa12",271,1321,"metadata-delivery-1"],
+          [8,"legacy_edit","legacy_record","entry_field_choices:1","legacy_unknown",null,null,null,null,null,"b39d9cd3ff3bf5db95d1ba7fefaa9e8e9c90aaad03360a8ff4d16455c53a6959","{root}/catalog.db.metadata/d8/d8c471e8369a9fc100e60a28db922035afb1c9a57f525e5e53fca85c164230ef.json","1f4c421cf42d9ae0139bc1946dfcf7beca8a45c27ad78f3a993c5ad70eded063",220,34,"metadata-delivery-1"],
+          [9,"legacy_resolution","legacy_record","entry_field_choices:2","legacy_unknown",null,null,null,null,null,"c412e4d7c0c87cf8299f9a60067e7e14271317d05c0b5ddd3d74e00431a70717","{root}/catalog.db.metadata/d8/d8c471e8369a9fc100e60a28db922035afb1c9a57f525e5e53fca85c164230ef.json","aa2d9ee46f0fedb5f2c780a183d1a279ea55e3eff5ecd87e36c03851d3a7f70e",212,254,"metadata-delivery-1"],
+          [10,"legacy_resolution","legacy_record","entry_field_choices:3","legacy_unknown",null,null,null,null,null,"5ed914f88b204b7342eabbf5336463be238374f6b8d6e47b4cdc2f930e273475","{root}/catalog.db.metadata/d8/d8c471e8369a9fc100e60a28db922035afb1c9a57f525e5e53fca85c164230ef.json","4c041fdf20f688a8944201c51aef645473090e2312092eceb4c5a49a0735a8ff",211,466,"metadata-delivery-1"],
+          [11,"legacy_unknown","legacy_record","enrichment_conflict:1","legacy_unknown",null,3,3,"upload-a",{"sqlite_real":"11.0"},"b262ab80038dd81d974b2fea65f9ad90d9db0525c41c68fcb334ced3189ee238","{root}/catalog.db.metadata/f4/f432cf152465c61054819e4829b346dfc921233ce4b2d7d8ee4c202a166a0996.json","d483640fa65ef54432f1679e5c1db6dfbfdf629eb5cf64bd63446b51cf25d199",416,34,"metadata-delivery-1"],
+          [12,"legacy_unknown","legacy_record","enrichment_conflict:2","legacy_unknown",null,8,8,"upload-live",{"sqlite_real":"12.0"},"2b2097b24886853820eeccebd4c0db39a6742bc041da1fff39c0ed8e397745cf","{root}/catalog.db.metadata/f4/f432cf152465c61054819e4829b346dfc921233ce4b2d7d8ee4c202a166a0996.json","707378372ed6e767627cba93f70581f64f59140432cf3facdf33e1ca1cc5fa72",396,450,"metadata-delivery-1"],
+          [13,"deezer","legacy_record","provider_attempts:1","legacy_unknown",null,null,null,null,{"sqlite_real":"60.0"},"3487b9fe9095b0eebcf3e242a7012b7a454f94f934e3939f7c0192ea14c73b0a","{root}/catalog.db.metadata/0a/0a701b01b10473f87ccd25e3d35cec2ed95c5ccaa6c865164bca4df6e1637a99.json","a383e2ce3bb4b0bb48b6b23f9253a787e87f57ef559f744d6b974ff7121a8862",304,34,"metadata-delivery-1"],
+          [14,"legacy_match","legacy_record","recording_identifiers:1","legacy_unknown",null,null,null,null,{"sqlite_real":"1.0"},"b4596a0cc5cab958b9f5d113993b971fd431e058246ade0b14015315654784f4","{root}/catalog.db.metadata/74/74e3bee477323652940123968bf0dfad622cef7939b9d25590faf826011c40a4.json","d1435c6eeee33ba203fc73afe9bc8a819f335fb0455cef27e076bfcde63627b7",320,34,"metadata-delivery-1"],
+          [15,"legacy_match","legacy_record","recording_identifiers:2","legacy_unknown",null,null,null,null,{"sqlite_real":"1.0"},"77eb4f718bbbb12c3c278ec89fd3c28e96431f26faffa61148f045171a68bc8a","{root}/catalog.db.metadata/74/74e3bee477323652940123968bf0dfad622cef7939b9d25590faf826011c40a4.json","c44eb6aabed39cd3a4a7329268e869c99b6cb33bffe4f965860b08c36f585794",320,354,"metadata-delivery-1"],
+          [16,"legacy_match","legacy_record","recording_identifiers:3","legacy_unknown",null,null,null,null,{"sqlite_real":"1.0"},"818decd17c398e2200c9447b3d42c76e69a6c137a79fd14376473d6a5dd65890","{root}/catalog.db.metadata/74/74e3bee477323652940123968bf0dfad622cef7939b9d25590faf826011c40a4.json","d18593996d138c357f25cc7c5231a8e0f1bd1d489db4d9cfafa1073ebd2fa661",323,674,"metadata-delivery-1"],
+          [17,"legacy_match","legacy_record","recording_identifiers:4","legacy_unknown",null,null,null,null,{"sqlite_real":"1.0"},"aced95a857b5311a8594b8fb798caf05d6a2b75d07d19df180dc612b627d006b","{root}/catalog.db.metadata/74/74e3bee477323652940123968bf0dfad622cef7939b9d25590faf826011c40a4.json","24913a441f65978bc52f941fbfbd49c2f1b2443f3d76eb7ec9e6b9ee400baec3",324,997,"metadata-delivery-1"]
+        ]
+      },
+      "metadata_legacy_records": {
+        "columns": ["legacy_owner","legacy_id","delivery_id","entry_id","recording_id","input_video_id","disposition"],
+        "rows": [
+          ["enrichment_conflict",1,11,3,3,"upload-a","unproven_scope"],
+          ["enrichment_conflict",2,12,8,8,"upload-live","unproven_scope"],
+          ["enrichment_log",1,1,3,3,"upload-a","unproven_scope"],
+          ["entry_field_choices",1,8,3,null,null,"unproven_scope"],
+          ["entry_field_choices",2,9,3,null,null,"unproven_scope"],
+          ["entry_field_choices",3,10,8,null,null,"unproven_scope"],
+          ["metadata_decisions",1,2,3,null,null,"unproven_scope"],
+          ["metadata_decisions",2,3,3,null,null,"unproven_scope"],
+          ["metadata_decisions",3,4,8,null,null,"unproven_scope"],
+          ["metadata_decisions",4,5,3,null,null,"unproven_scope"],
+          ["metadata_decisions",5,6,8,null,null,"unproven_scope"],
+          ["metadata_decisions",6,7,3,null,null,"unproven_scope"],
+          ["provider_attempts",1,13,null,11,null,"operational_state"],
+          ["recording_identifiers",1,14,null,3,"upload-a","unproven_subject"],
+          ["recording_identifiers",2,15,null,3,"upload-a","unproven_subject"],
+          ["recording_identifiers",3,16,null,8,"upload-live","unproven_subject"],
+          ["recording_identifiers",4,17,null,9,"upload-remix","unproven_subject"]
+        ]
+      },
+      "metadata_observations": {
+        "columns": ["id","delivery_id","entry_id","recording_id","input_video_id","field_scope","field","value_kind","text_value","number_value","genre_key","unit","resolution_reason","observed_at","origin","legacy_source","source_run_id","legacy_reference","legacy_owner","legacy_id","legacy_position","derived_from_observation_id"],
+        "rows": [
+          [1,1,3,3,"upload-a","legacy_item","genre","value","Techno",null,null,null,"unknown_genre",{"sqlite_real":"10.0"},"legacy_log","musicbrainz","run",null,"enrichment_log",1,0,null],
+          [2,2,3,null,null,"legacy_item","title","value","Corrected Song",null,null,null,null,null,"legacy_choice","legacy_edit",null,null,"metadata_decisions",1,0,null],
+          [3,3,3,null,null,"legacy_item","genre","blank","",null,null,null,null,null,"legacy_choice","legacy_resolution",null,null,"metadata_decisions",2,0,null],
+          [4,4,8,null,null,"legacy_item","bpm","value",null,{"sqlite_real":"121.0"},null,"bpm",null,null,"legacy_choice","legacy_resolution",null,null,"metadata_decisions",3,0,null],
+          [5,5,3,null,null,"legacy_item","genre","blank","",null,null,null,null,{"sqlite_real":"11.0"},"legacy_choice","legacy_resolution",null,"conflict:1","metadata_decisions",4,0,null],
+          [6,6,8,null,null,"legacy_item","bpm","value",null,{"sqlite_real":"121.0"},null,"bpm",null,{"sqlite_real":"12.0"},"legacy_choice","legacy_resolution",null,"conflict:2","metadata_decisions",5,0,null],
+          [7,7,3,null,null,"legacy_item","title","value","Corrected Song",null,null,null,null,null,"legacy_choice","legacy_edit",null,"edit:7:title","metadata_decisions",6,0,null],
+          [8,8,3,null,null,"legacy_item","title","value","Corrected Song",null,null,null,null,null,"legacy_choice","legacy_edit",null,null,"entry_field_choices",1,0,null],
+          [9,9,3,null,null,"legacy_item","genre","blank","",null,null,null,null,null,"legacy_choice","legacy_resolution",null,null,"entry_field_choices",2,0,null],
+          [10,10,8,null,null,"legacy_item","bpm","value",null,{"sqlite_real":"121.0"},null,"bpm",null,null,"legacy_choice","legacy_resolution",null,null,"entry_field_choices",3,0,null],
+          [11,11,3,3,"upload-a","legacy_item","genre","blank","",null,null,null,null,{"sqlite_real":"11.0"},"legacy_choice",null,null,null,"enrichment_conflict",1,0,null],
+          [12,11,3,3,"upload-a","legacy_item","genre","value","Techno",null,null,null,"unknown_genre",{"sqlite_real":"11.0"},"legacy_conflict","musicbrainz",null,null,"enrichment_conflict",1,0,null],
+          [13,11,3,3,"upload-a","legacy_item","genre","value","House",null,null,null,"unknown_genre",{"sqlite_real":"11.0"},"legacy_conflict","lastfm",null,null,"enrichment_conflict",1,1,null],
+          [14,12,8,8,"upload-live","legacy_item","bpm","value",null,121,null,"bpm",null,{"sqlite_real":"12.0"},"legacy_choice",null,null,null,"enrichment_conflict",2,0,null],
+          [15,12,8,8,"upload-live","legacy_item","bpm","value",null,120,null,"bpm",null,{"sqlite_real":"12.0"},"legacy_conflict","one",null,null,"enrichment_conflict",2,0,null],
+          [16,12,8,8,"upload-live","legacy_item","bpm","value",null,121,null,"bpm",null,{"sqlite_real":"12.0"},"legacy_conflict","two",null,null,"enrichment_conflict",2,1,null],
+          [17,13,null,11,null,"legacy_recording","bpm","value",null,128,null,"bpm",null,{"sqlite_real":"60.0"},"legacy_attempt","deezer",null,null,"provider_attempts",1,2,null]
+        ]
+      },
+      "recording_metadata_selections": {
+        "columns": ["recording_id","field","observation_id","attribution_status","legacy_source","selected_at"],
+        "rows": [
+          [3,"genre",null,"legacy_unresolved","legacy_unknown",null],
+          [3,"mb_recording_id",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"genre",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"mb_recording_id",null,"legacy_unresolved","legacy_unknown",null],
+          [9,"mb_recording_id",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"genre",null,"legacy_unresolved","legacy_unknown",null]
+        ]
+      },
+      "entry_metadata_selections": {
+        "columns": ["entry_id","field","observation_id","attribution_status","legacy_source","selected_at"],
+        "rows": [
+          [3,"album_browse_id",null,"legacy_unresolved","legacy_unknown",null],
+          [3,"artist",null,"legacy_unresolved","legacy_unknown",null],
+          [3,"duration_s",null,"legacy_unresolved","legacy_unknown",null],
+          [3,"orig_artist",null,"legacy_unresolved","legacy_unknown",null],
+          [3,"orig_title",null,"legacy_unresolved","legacy_unknown",null],
+          [3,"thumbnail",null,"legacy_unresolved","legacy_unknown",null],
+          [3,"title",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"album_browse_id",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"artist",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"duration_s",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"orig_artist",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"orig_title",null,"legacy_unresolved","legacy_unknown",null],
+          [8,"title",null,"legacy_unresolved","legacy_unknown",null],
+          [9,"artist",null,"legacy_unresolved","legacy_unknown",null],
+          [9,"duration_s",null,"legacy_unresolved","legacy_unknown",null],
+          [9,"orig_artist",null,"legacy_unresolved","legacy_unknown",null],
+          [9,"orig_title",null,"legacy_unresolved","legacy_unknown",null],
+          [9,"title",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"album_browse_id",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"artist",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"available",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"duration_s",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"orig_artist",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"orig_title",null,"legacy_unresolved","legacy_unknown",null],
+          [10,"title",null,"legacy_unresolved","legacy_unknown",null],
+          [11,"artist",null,"legacy_unresolved","legacy_unknown",null],
+          [11,"orig_artist",null,"legacy_unresolved","legacy_unknown",null],
+          [11,"orig_title",null,"legacy_unresolved","legacy_unknown",null],
+          [11,"title",null,"legacy_unresolved","legacy_unknown",null]
+        ]
+      },
+      "metadata_choice_heads": {
+        "columns": ["entry_id","field","observation_id"],
+        "rows": [
+          [3,"title",8],
+          [3,"genre",9],
+          [8,"bpm",10]
+        ]
+      },
+      "metadata_conflicts": {
+        "columns": ["id","entry_id","recording_id","field_scope","field","status","selected_observation_id","updated_at","legacy_record_id","legacy_resolution_reason"],
+        "rows": [
+          [1,3,null,"legacy_item","genre","user_resolved",11,{"sqlite_real":"11.0"},1,null],
+          [2,8,null,"legacy_item","bpm","user_resolved",14,{"sqlite_real":"12.0"},2,null]
+        ]
+      },
+      "metadata_conflict_candidates": {
+        "columns": ["conflict_id","observation_id","position"],
+        "rows": [
+          [1,12,0],
+          [1,13,1],
+          [2,15,0],
+          [2,16,1]
+        ]
+      },
+      "provider_attempt_fields": {
+        "columns": ["attempt_id","field","observation_id"],
+        "rows": [
+          [1,"art",null],
+          [1,"bpm",17],
+          [1,"isrc",null]
+        ]
+      },
+      "genre_classification_legacy": {
+        "columns": ["id","recording_id","album_id","artist_id","raw_label","genre_key","resolution_reason"],
+        "rows": [
+          [1,3,null,null,"House","house",null],
+          [2,8,null,null,"Rock","rock",null],
+          [3,10,null,null,"Folk","folk",null]
+        ]
+      },
+      "taste_axes": {
+        "columns": ["id","kind","genre_key","family_key","value","resolution_reason"],
+        "rows": [
+          [1,"family",null,"house",null,null]
+        ]
+      },
+      "taste_axis_legacy": {
+        "columns": ["table_name","row_key","raw_axis","axis_id","weight","lean_value","score","updated_at","last_graduated_day","source","factor","new_weight","created_at"],
+        "rows": [
+          ["rec_weights","genre:house","genre:house",1,{"sqlite_real":"1.3"},null,null,{"sqlite_real":"10.0"},null,null,null,null,null]
+        ]
+      }
+    },
+    "102": {
+      "play_events": {
+        "columns": ["id","identity_id","raw_identity_key","recording_id","unresolved_subject_key","video_id","played_at","playlist_ytm_id","membership_ref_id","like_status","is_generated"],
+        "rows": [
+          [1,1,"song|artist",8,null,"upload-live",{"sqlite_real":"100.0"},"LM",1,null,0],
+          [2,1,"song|artist",null,"song|artist",null,{"sqlite_real":"200.0"},null,null,null,null],
+          [3,1,"old spelling|artist",null,"old spelling|artist","unknown-upload",{"sqlite_real":"300.0"},"GENERATED",2,null,1]
+        ]
+      },
+      "discovery_memberships": {
+        "columns": ["recording_id","entry_id","found_at","first_shown","last_shown","offered_count"],
+        "rows": [
+          [3,3,{"sqlite_real":"20.0"},null,null,0],
+          [11,11,{"sqlite_real":"50.0"},null,null,0]
+        ]
+      },
+      "discovery_sources": {
+        "columns": ["id","recording_id","origin_id","input_video_id","first_found_at","last_found_at"],
+        "rows": [
+          [1,3,1,"upload-a",{"sqlite_real":"20.0"},{"sqlite_real":"20.0"}],
+          [2,11,2,"cold-upload",{"sqlite_real":"50.0"},{"sqlite_real":"50.0"}]
+        ]
+      },
+      "albums": {
+        "columns": ["id","title","artist","year","type","thumbnail","unresolved_genre","metadata_rank","legacy_key","genre_key","current_tracklist_id"],
+        "rows": [
+          [1,null,"Artist",null,null,"cover-a",null,0,null,null,null],
+          [2,null,"Artist",null,null,null,null,0,null,null,null],
+          [3,null,"Artist",null,null,null,null,0,null,null,null],
+          [4,"Album B","Artist",null,null,null,null,3,null,null,1],
+          [5,"Album C","Artist",null,null,null,null,1,null,null,null]
+        ]
+      },
+      "album_tracks": null,
+      "album_fetch_state": null,
+      "cluster_canvas": {
+        "columns": ["id","playlist_scope_id","revision","created_at","recovery_filename","recovery_digest","recovery_bytes"],
+        "rows": [
+          [1,"CLUSTER","be36e4b8a8b64a91b534bfaa56df1c4f",null,"{root}/catalog.db.collections/8a/8a05ac8ee120d4a14d7890c1a9e621aaeabae9f553246f265c398261e08c3f17.json","8a05ac8ee120d4a14d7890c1a9e621aaeabae9f553246f265c398261e08c3f17",357]
+        ]
+      },
+      "listening_observations": {
+        "columns": ["id","identity_id","raw_identity_key","recording_id","unresolved_subject_key","source_day","day","source","timezone","precision","first_observed_at","last_observed_at","capture_id","capture_item_id"],
+        "rows": [
+          [1,1,"song|artist",null,"song|artist","1970-01-01","1970-01-01","unknown",null,"legacy_unknown",{"sqlite_real":"100.0"},{"sqlite_real":"100.0"},1,1],
+          [2,1,"old spelling|artist",3,null,"1970-01-01","1970-01-01","unknown",null,"legacy_unknown",{"sqlite_real":"100.0"},{"sqlite_real":"100.0"},1,2]
+        ]
+      },
+      "rec_change_queue": {
+        "columns": ["kind","item","revision"],
+        "rows": [
+          ["refresh","",8]
+        ]
+      },
+      "rec_preparation": {
+        "columns": ["id","content_changes","evidence_changes"],
+        "rows": [
+          [1,0,7]
+        ]
+      },
+      "discovery_identity_evidence": {
+        "columns": ["kind","source_id","reason","filename","content_digest","byte_size","file_offset","format_version","archived_at","resolution_status","recording_id"],
+        "rows": [
+          ["discovery_cutover:discovery_sources","0","schema 101 retained input before typed discovery conversion","{root}/catalog.db.archives/discovery/36/36d4ebb8a45441f62ede7503b8a6c8b1c6d466abd9104f64b292692ee2f2c4ca.json","366e5b7aea3e48009015be5deb87d9504dada27e7779a385bf7417aa34ff5c41",270,42,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",3],
+          ["discovery_cutover:discovery_sources","1","schema 101 retained input before typed discovery conversion","{root}/catalog.db.archives/discovery/36/36d4ebb8a45441f62ede7503b8a6c8b1c6d466abd9104f64b292692ee2f2c4ca.json","d5f24b3f0a1e85e12e3496cadcb0ddd8df6b6aa61dc601fd0c7f2e6f142fac10",270,312,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",11],
+          ["discovery_cutover:genre_classification_legacy","0","schema 101 retained input before typed discovery conversion","{root}/catalog.db.archives/discovery/22/22072be1b0e2a69dfc99cc79013b61378909042c41b2af468de564fb40db80c9.json","71050d3acded0b4f02d7e780476af4990290ce7a00a20c612120841fb8b9a53f",233,42,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",3],
+          ["discovery_cutover:genre_classification_legacy","1","schema 101 retained input before typed discovery conversion","{root}/catalog.db.archives/discovery/22/22072be1b0e2a69dfc99cc79013b61378909042c41b2af468de564fb40db80c9.json","e9c0e325568f26b83c04a65408d4a89ad2d2566432a6e72746b7f8982c606cba",231,275,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",8],
+          ["discovery_cutover:genre_classification_legacy","2","schema 101 retained input before typed discovery conversion","{root}/catalog.db.archives/discovery/22/22072be1b0e2a69dfc99cc79013b61378909042c41b2af468de564fb40db80c9.json","0239320207fe0ab66d619aba24fa78cba745879ad8b62c957921c1cba8f17733",232,506,"legacy-evidence-1",{"sqlite_real":"1.0"},"resolved",10]
+        ]
+      },
+      "album_tracklists": {
+        "columns": ["id","album_id","provider","provider_id","revision","capture_kind","status","order_status","expected_count","fetched_at"],
+        "rows": [
+          [1,4,"youtube","release-b",1,"legacy_full","complete","unknown",1,null]
+        ]
+      },
+      "album_track_occurrences": {
+        "columns": ["id","tracklist_id","position","disc_number","track_number","recording_id","captured_title","captured_credit","raw_identity_key","raw_source_ref","captured_source","resolution_status","legacy_row_id"],
+        "rows": [
+          [1,1,null,null,null,3,"Corrected Song","Artist",null,"upload-a","legacy","resolved",2]
+        ]
+      },
+      "album_occurrence_sources": {
+        "columns": ["occurrence_id","entry_id","provider"],
+        "rows": [
+          [1,3,"youtube"]
+        ]
+      },
+      "album_item_observations": {
+        "columns": ["id","album_id","entry_id","provider","first_seen","last_seen","recording_id","raw_identity_key","legacy_row_id","captured_position","captured_disc_number","captured_track_number"],
+        "rows": [
+          [1,1,3,"legacy",null,null,null,null,1,null,null,null],
+          [2,5,3,"legacy_discovery",null,null,null,null,3,null,null,null],
+          [3,2,8,"legacy",null,null,null,null,4,null,null,null],
+          [4,3,10,"legacy",null,null,null,null,5,null,null,null]
+        ]
+      },
+      "discovery_origins": {
+        "columns": ["id","kind","account_id","album_id","seed_video_id","genre_key","artist_id","import_key","legacy_source_key","resolution_status","resolution_reason"],
+        "rows": [
+          [1,"album",null,5,null,null,null,null,null,"resolved",null],
+          [2,"legacy_unknown",null,null,null,null,null,null,"radio:seed","unresolved","missing or ambiguous radio owner"]
+        ]
+      },
+      "discovery_legacy_offers": {
+        "columns": ["id","recording_id","artist_id","album_id","offered_count","first_shown","last_shown"],
+        "rows": [
+          [1,3,null,null,4,{"sqlite_real":"30.0"},{"sqlite_real":"40.0"}]
+        ]
+      }
+    },
+    "103": {
+      "playlists": {
+        "columns": ["id","account_id","provider_playlist_id","title","track_count","content_hash","first_seen","last_seen","last_changed","created_at","created_at_source","thumbnail","playlist_scope_id"],
+        "rows": [
+          [1,1,"LM","Liked Music",2,"28581d399055f912aaf971d159f375d11644ede69b622ff803bc0708d6d7757e",null,null,null,null,null,null,"@account:1:LM"],
+          [2,1,"GENERATED","Generated mix",1,"56d3817a4bf2e3ce7b6efeaa70d1e2bc596c4d9ba22888f30df064e1a68829c4",null,null,null,null,null,null,"GENERATED"]
+        ]
+      },
+      "playlist_scopes": {
+        "columns": ["id","provider_playlist_id","account_id","kind","group_name","hidden","overlap_ignored","overlap_ignored_at","origin","adopted","provenance_description"],
+        "rows": [
+          ["GENERATED","GENERATED",null,"shared","Generated",0,0,null,"tuneconsole",0,null],
+          ["@account:1:LM","LM",1,"account",null,0,0,null,null,null,null],
+          ["CLUSTER","CLUSTER",null,"shared",null,0,0,null,null,null,null]
+        ]
+      },
+      "playlist_membership_refs": {
+        "columns": ["id","playlist_scope_id","account_id"],
+        "rows": [
+          [1,"@account:1:LM",1],
+          [2,"GENERATED",1]
+        ]
+      },
+      "listening_calendars": {
+        "columns": ["account_id","timezone","confirmed"],
+        "rows": [
+          [1,"UTC",0]
+        ]
+      },
+      "listening_capture_receipts": {
+        "columns": ["id","account_id","captured_at"],
+        "rows": [
+          [1,1,{"sqlite_real":"100.0"}]
+        ]
+      },
+      "identities": null,
+      "play_events": {
+        "columns": ["id","account_id","raw_identity_key","recording_id","unresolved_subject_key","video_id","played_at","playlist_ytm_id","membership_ref_id","like_status","is_generated"],
+        "rows": [
+          [1,1,"song|artist",8,null,"upload-live",{"sqlite_real":"100.0"},"LM",1,null,0],
+          [2,1,"song|artist",null,"song|artist",null,{"sqlite_real":"200.0"},null,null,null,null],
+          [3,1,"old spelling|artist",null,"old spelling|artist","unknown-upload",{"sqlite_real":"300.0"},"GENERATED",2,null,1]
+        ]
+      },
+      "listening_observations": {
+        "columns": ["id","account_id","raw_identity_key","recording_id","unresolved_subject_key","source_day","day","source","timezone","precision","first_observed_at","last_observed_at","capture_id","capture_item_id"],
+        "rows": [
+          [1,1,"song|artist",null,"song|artist","1970-01-01","1970-01-01","unknown",null,"legacy_unknown",{"sqlite_real":"100.0"},{"sqlite_real":"100.0"},1,1],
+          [2,1,"old spelling|artist",3,null,"1970-01-01","1970-01-01","unknown",null,"legacy_unknown",{"sqlite_real":"100.0"},{"sqlite_real":"100.0"},1,2]
+        ]
+      },
+      "accounts": {
+        "columns": ["id","label","credential_ref","brand_account_id","is_master","last_auth_ok","active"],
+        "rows": [
+          [1,"main","credential",null,1,null,1]
+        ]
+      }
+    }
+  },
+  "files": {
+    "catalog.db.archives/album/a3/a3c9d8197d79fb99fe591f4b7d5a3b17fa9686be310fe667762aa9d2012e8e05.json": "TuneConsole album retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"browse_id\\\": \\\"release-b\\\", \\\"title\\\": \\\"Album B\\\", \\\"artist\\\": \\\"Artist\\\", \\\"thumbnail\\\": null, \\\"track_keys\\\": \\\"[\\\\\\\"old spelling|artist\\\\\\\"]\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"browse_id\\\": \\\"release-c\\\", \\\"artist\\\": \\\"Artist\\\", \\\"title\\\": \\\"Album C\\\", \\\"year\\\": null, \\\"thumbnail\\\": null, \\\"found_at\\\": 1.0, \\\"last_shown\\\": null, \\\"genre\\\": null, \\\"first_shown\\\": null, \\\"offered_count\\\": 0, \\\"legacy_offered_count\\\": 0, \\\"legacy_first_shown\\\": null, \\\"legacy_last_shown\\\": null, \\\"artist_id\\\": 1}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"browse_id\\\": \\\"release-b\\\", \\\"title\\\": \\\"Album B\\\", \\\"artist\\\": \\\"Artist\\\", \\\"thumbnail\\\": null, \\\"track_keys\\\": \\\"[\\\\\\\"discovery spelling|artist\\\\\\\"]\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"id\\\": 1, \\\"browse_id\\\": \\\"release-a\\\", \\\"recording_id\\\": 3, \\\"entry_id\\\": 3, \\\"video_id\\\": \\\"upload-a\\\", \\\"source\\\": \\\"legacy\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"id\\\": 2, \\\"browse_id\\\": \\\"release-b\\\", \\\"recording_id\\\": 3, \\\"entry_id\\\": 3, \\\"video_id\\\": \\\"upload-a\\\", \\\"source\\\": \\\"legacy\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"id\\\": 3, \\\"browse_id\\\": \\\"release-c\\\", \\\"recording_id\\\": 3, \\\"entry_id\\\": 3, \\\"video_id\\\": \\\"upload-a\\\", \\\"source\\\": \\\"legacy_discovery\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"id\\\": 4, \\\"browse_id\\\": \\\"release-live\\\", \\\"recording_id\\\": 8, \\\"entry_id\\\": 8, \\\"video_id\\\": \\\"upload-live\\\", \\\"source\\\": \\\"legacy\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"album\",\"value\":\"{\\\"id\\\": 5, \\\"browse_id\\\": \\\"saved-release\\\", \\\"recording_id\\\": 10, \\\"entry_id\\\": 10, \\\"video_id\\\": null, \\\"source\\\": \\\"legacy\\\"}\"}",
+    "catalog.db.archives/metadata/0f/0ff2ec9facb7046ee9c1d8e46bc0e16833b055bd4d79451d0fafce3f8609fa34.json": "TuneConsole metadata retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"metadata\",\"value\":\"{\\\"id\\\": 1, \\\"track_id\\\": 7, \\\"field\\\": \\\"genre\\\", \\\"candidates\\\": \\\"[{\\\\\\\"provider\\\\\\\":\\\\\\\"musicbrainz\\\\\\\",\\\\\\\"value\\\\\\\":\\\\\\\"Techno\\\\\\\"},{\\\\\\\"provider\\\\\\\":\\\\\\\"lastfm\\\\\\\",\\\\\\\"value\\\\\\\":\\\\\\\"House\\\\\\\"}]\\\", \\\"resolved\\\": 1, \\\"resolved_value\\\": \\\"\\\", \\\"updated_at\\\": 11.0, \\\"recording_id\\\": 3, \\\"input_video_id\\\": \\\"upload-a\\\", \\\"field_scope\\\": \\\"legacy_item\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"metadata\",\"value\":\"{\\\"id\\\": 2, \\\"track_id\\\": 8, \\\"field\\\": \\\"bpm\\\", \\\"candidates\\\": \\\"[{\\\\\\\"provider\\\\\\\":\\\\\\\"one\\\\\\\",\\\\\\\"value\\\\\\\":120},{\\\\\\\"provider\\\\\\\":\\\\\\\"two\\\\\\\",\\\\\\\"value\\\\\\\":121}]\\\", \\\"resolved\\\": 1, \\\"resolved_value\\\": \\\"121\\\", \\\"updated_at\\\": 12.0, \\\"recording_id\\\": 8, \\\"input_video_id\\\": \\\"upload-live\\\", \\\"field_scope\\\": \\\"legacy_item\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"metadata\",\"value\":\"{\\\"id\\\": 1, \\\"track_id\\\": 7, \\\"run_id\\\": \\\"run\\\", \\\"provider\\\": \\\"musicbrainz\\\", \\\"field\\\": \\\"genre\\\", \\\"value\\\": \\\"Techno\\\", \\\"created_at\\\": 10.0, \\\"recording_id\\\": 3, \\\"input_video_id\\\": \\\"upload-a\\\", \\\"field_scope\\\": \\\"legacy_item\\\"}\"}",
+    "catalog.db.archives/metadata/9b/9b989d7a88443511ceb9d653af069e1f2d23b9b465019ba276b097a9b16eb6a1.json": "TuneConsole metadata retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"metadata\",\"value\":\"{\\\"deezer\\\":{\\\"at\\\":60,\\\"status\\\":\\\"retry\\\",\\\"fields\\\":{}}}\"}",
+    "catalog.db.archives/playlist/90/9053623deb0abeb09c1b310b4b9efbab2c5aed5104cd9aa92f4851232b923c71.json": "TuneConsole playlist retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"playlist\",\"value\":\"{\\\"id\\\": 1, \\\"identity_id\\\": 1, \\\"ytm_playlist_id\\\": \\\"LM\\\", \\\"title\\\": \\\"Liked Music\\\", \\\"track_count\\\": 3, \\\"content_hash\\\": \\\"old-hash\\\", \\\"first_seen\\\": null, \\\"last_seen\\\": null, \\\"last_changed\\\": null, \\\"created_at\\\": null, \\\"created_at_source\\\": null, \\\"thumbnail\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"playlist\",\"value\":\"{\\\"id\\\": 2, \\\"identity_id\\\": 1, \\\"ytm_playlist_id\\\": \\\"GENERATED\\\", \\\"title\\\": \\\"Generated mix\\\", \\\"track_count\\\": 1, \\\"content_hash\\\": \\\"old-generated-hash\\\", \\\"first_seen\\\": null, \\\"last_seen\\\": null, \\\"last_changed\\\": null, \\\"created_at\\\": null, \\\"created_at_source\\\": null, \\\"thumbnail\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"playlist\",\"value\":\"{\\\"playlist_ytm\\\": \\\"CLUSTER\\\", \\\"state\\\": \\\"{\\\\\\\"nodes\\\\\\\":[{\\\\\\\"id\\\\\\\":1,\\\\\\\"key\\\\\\\":\\\\\\\"old spelling|artist\\\\\\\",\\\\\\\"seeds\\\\\\\":[{\\\\\\\"keys\\\\\\\":[\\\\\\\"old spelling|artist\\\\\\\"]}]}],\\\\\\\"trunk\\\\\\\":[1],\\\\\\\"label\\\\\\\":\\\\\\\"old spelling|artist\\\\\\\"}\\\", \\\"created_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"playlist\",\"value\":\"{\\\"migration_rowid\\\": 1, \\\"playlist_ytm\\\": \\\"CLUSTER\\\", \\\"state\\\": \\\"{\\\\\\\"nodes\\\\\\\": [{\\\\\\\"id\\\\\\\": 1, \\\\\\\"key\\\\\\\": \\\\\\\"discovery spelling|artist\\\\\\\", \\\\\\\"seeds\\\\\\\": [{\\\\\\\"keys\\\\\\\": [\\\\\\\"discovery spelling|artist\\\\\\\"], \\\\\\\"catalog_identity_version\\\\\\\": 2}], \\\\\\\"catalog_identity_version\\\\\\\": 2}], \\\\\\\"trunk\\\\\\\": [1], \\\\\\\"label\\\\\\\": \\\\\\\"old spelling|artist\\\\\\\", \\\\\\\"catalog_identity_version\\\\\\\": 2}\\\", \\\"created_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"playlist\",\"value\":\"{\\\"migration_rowid\\\": 1, \\\"ytm\\\": \\\"GENERATED\\\", \\\"origin\\\": \\\"tuneconsole\\\", \\\"adopted\\\": 0, \\\"description\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"playlist\",\"value\":\"{\\\"migration_rowid\\\": 1, \\\"ytm\\\": \\\"GENERATED\\\", \\\"name\\\": \\\"Generated\\\"}\"}",
+    "catalog.db.archives/catalog/cf/cfe2e2635e6e565515808d530fb3f07562dc46339db7aadcfd8f5af72ea6fbc6.json": "TuneConsole catalog retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"catalog\",\"value\":\"{\\\"id\\\": 3, \\\"video_id\\\": \\\"upload-a\\\", \\\"title\\\": \\\"Song\\\", \\\"artist\\\": \\\"Artist\\\", \\\"album\\\": null, \\\"duration_s\\\": 200, \\\"orig_title\\\": \\\"Song\\\", \\\"orig_artist\\\": \\\"Artist\\\", \\\"identity_key\\\": \\\"song|artist\\\", \\\"available\\\": null, \\\"video_type\\\": null, \\\"artist_browse_id\\\": null, \\\"album_browse_id\\\": \\\"release-a\\\", \\\"thumbnail\\\": null, \\\"genre\\\": \\\"House\\\", \\\"mb_year\\\": null, \\\"bpm\\\": null, \\\"energy\\\": null, \\\"danceability\\\": null, \\\"mb_recording_id\\\": \\\"same-mbid\\\", \\\"music_key\\\": null, \\\"music_scale\\\": null, \\\"mood_happy\\\": null, \\\"mood_sad\\\": null, \\\"mood_relaxed\\\": null, \\\"mood_acoustic\\\": null, \\\"instrumental\\\": null, \\\"loudness\\\": null, \\\"dynamic_complexity\\\": null, \\\"popularity\\\": null, \\\"gain\\\": null, \\\"label\\\": null, \\\"created_at\\\": null, \\\"first_enriched_at\\\": null, \\\"last_enriched_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"catalog\",\"value\":\"{\\\"id\\\": 7, \\\"video_id\\\": \\\"upload-a\\\", \\\"title\\\": \\\"Corrected Song\\\", \\\"artist\\\": \\\"Artist\\\", \\\"album\\\": null, \\\"duration_s\\\": 201, \\\"orig_title\\\": \\\"Song\\\", \\\"orig_artist\\\": \\\"Artist\\\", \\\"identity_key\\\": \\\"old spelling|artist\\\", \\\"available\\\": null, \\\"video_type\\\": null, \\\"artist_browse_id\\\": null, \\\"album_browse_id\\\": \\\"release-b\\\", \\\"thumbnail\\\": null, \\\"genre\\\": \\\"Techno\\\", \\\"mb_year\\\": null, \\\"bpm\\\": null, \\\"energy\\\": null, \\\"danceability\\\": null, \\\"mb_recording_id\\\": \\\"same-mbid\\\", \\\"music_key\\\": null, \\\"music_scale\\\": null, \\\"mood_happy\\\": null, \\\"mood_sad\\\": null, \\\"mood_relaxed\\\": null, \\\"mood_acoustic\\\": null, \\\"instrumental\\\": null, \\\"loudness\\\": null, \\\"dynamic_complexity\\\": null, \\\"popularity\\\": null, \\\"gain\\\": null, \\\"label\\\": null, \\\"created_at\\\": null, \\\"first_enriched_at\\\": null, \\\"last_enriched_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"catalog\",\"value\":\"{\\\"legacy_rowid\\\": 1, \\\"identity_key\\\": \\\"discovery spelling|artist\\\", \\\"video_id\\\": \\\"upload-a\\\", \\\"title\\\": \\\"Song\\\", \\\"artist\\\": \\\"Artist\\\", \\\"album\\\": null, \\\"thumbnail\\\": \\\"cover-a\\\", \\\"genre\\\": \\\"House\\\", \\\"year\\\": null, \\\"bpm\\\": null, \\\"energy\\\": null, \\\"danceability\\\": null, \\\"mood_happy\\\": null, \\\"mood_sad\\\": null, \\\"mood_relaxed\\\": null, \\\"mood_acoustic\\\": null, \\\"instrumental\\\": null, \\\"loudness\\\": null, \\\"dynamic_complexity\\\": null, \\\"music_key\\\": null, \\\"music_scale\\\": null, \\\"source_browse_id\\\": \\\"release-c\\\", \\\"found_at\\\": 20.0, \\\"last_enriched\\\": null, \\\"first_shown\\\": 30.0, \\\"last_shown\\\": 40.0, \\\"offered_count\\\": 4, \\\"mb_year\\\": null, \\\"created_at\\\": 20.0, \\\"first_enriched_at\\\": null, \\\"last_enriched_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"catalog\",\"value\":\"{\\\"id\\\": 8, \\\"video_id\\\": \\\"upload-live\\\", \\\"title\\\": \\\"Song (Live)\\\", \\\"artist\\\": \\\"Artist\\\", \\\"album\\\": null, \\\"duration_s\\\": 240, \\\"orig_title\\\": \\\"Song (Live)\\\", \\\"orig_artist\\\": \\\"Artist\\\", \\\"identity_key\\\": \\\"song|artist\\\", \\\"available\\\": null, \\\"video_type\\\": null, \\\"artist_browse_id\\\": null, \\\"album_browse_id\\\": \\\"release-live\\\", \\\"thumbnail\\\": null, \\\"genre\\\": \\\"Rock\\\", \\\"mb_year\\\": null, \\\"bpm\\\": null, \\\"energy\\\": null, \\\"danceability\\\": null, \\\"mb_recording_id\\\": \\\"same-mbid\\\", \\\"music_key\\\": null, \\\"music_scale\\\": null, \\\"mood_happy\\\": null, \\\"mood_sad\\\": null, \\\"mood_relaxed\\\": null, \\\"mood_acoustic\\\": null, \\\"instrumental\\\": null, \\\"loudness\\\": null, \\\"dynamic_complexity\\\": null, \\\"popularity\\\": null, \\\"gain\\\": null, \\\"label\\\": null, \\\"created_at\\\": null, \\\"first_enriched_at\\\": null, \\\"last_enriched_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"catalog\",\"value\":\"{\\\"id\\\": 9, \\\"video_id\\\": \\\"upload-remix\\\", \\\"title\\\": \\\"Song (Remix)\\\", \\\"artist\\\": \\\"Artist\\\", \\\"album\\\": null, \\\"duration_s\\\": 280, \\\"orig_title\\\": \\\"Song (Remix)\\\", \\\"orig_artist\\\": \\\"Artist\\\", \\\"identity_key\\\": \\\"song|artist\\\", \\\"available\\\": null, \\\"video_type\\\": null, \\\"artist_browse_id\\\": null, \\\"album_browse_id\\\": null, \\\"thumbnail\\\": null, \\\"genre\\\": null, \\\"mb_year\\\": null, \\\"bpm\\\": null, \\\"energy\\\": null, \\\"danceability\\\": null, \\\"mb_recording_id\\\": \\\"same-mbid\\\", \\\"music_key\\\": null, \\\"music_scale\\\": null, \\\"mood_happy\\\": null, \\\"mood_sad\\\": null, \\\"mood_relaxed\\\": null, \\\"mood_acoustic\\\": null, \\\"instrumental\\\": null, \\\"loudness\\\": null, \\\"dynamic_complexity\\\": null, \\\"popularity\\\": null, \\\"gain\\\": null, \\\"label\\\": null, \\\"created_at\\\": null, \\\"first_enriched_at\\\": null, \\\"last_enriched_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"catalog\",\"value\":\"{\\\"id\\\": 10, \\\"video_id\\\": null, \\\"title\\\": \\\"Unresolved\\\", \\\"artist\\\": \\\"Artist\\\", \\\"album\\\": null, \\\"duration_s\\\": 180, \\\"orig_title\\\": \\\"Unresolved\\\", \\\"orig_artist\\\": \\\"Artist\\\", \\\"identity_key\\\": \\\"unresolved|artist\\\", \\\"available\\\": null, \\\"video_type\\\": null, \\\"artist_browse_id\\\": null, \\\"album_browse_id\\\": \\\"saved-release\\\", \\\"thumbnail\\\": null, \\\"genre\\\": \\\"Folk\\\", \\\"mb_year\\\": null, \\\"bpm\\\": null, \\\"energy\\\": null, \\\"danceability\\\": null, \\\"mb_recording_id\\\": null, \\\"music_key\\\": null, \\\"music_scale\\\": null, \\\"mood_happy\\\": null, \\\"mood_sad\\\": null, \\\"mood_relaxed\\\": null, \\\"mood_acoustic\\\": null, \\\"instrumental\\\": null, \\\"loudness\\\": null, \\\"dynamic_complexity\\\": null, \\\"popularity\\\": null, \\\"gain\\\": null, \\\"label\\\": null, \\\"created_at\\\": null, \\\"first_enriched_at\\\": null, \\\"last_enriched_at\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"catalog\",\"value\":\"{\\\"legacy_rowid\\\": 2, \\\"identity_key\\\": \\\"cold|other\\\", \\\"video_id\\\": \\\"cold-upload\\\", \\\"title\\\": \\\"Cold\\\", \\\"artist\\\": \\\"Other\\\", \\\"album\\\": null, \\\"thumbnail\\\": null, \\\"genre\\\": null, \\\"year\\\": null, \\\"bpm\\\": null, \\\"energy\\\": null, \\\"danceability\\\": null, \\\"mood_happy\\\": null, \\\"mood_sad\\\": null, \\\"mood_relaxed\\\": null, \\\"mood_acoustic\\\": null, \\\"instrumental\\\": null, \\\"loudness\\\": null, \\\"dynamic_complexity\\\": null, \\\"music_key\\\": null, \\\"music_scale\\\": null, \\\"source_browse_id\\\": \\\"radio:seed\\\", \\\"found_at\\\": 50.0, \\\"last_enriched\\\": null, \\\"first_shown\\\": null, \\\"last_shown\\\": null, \\\"offered_count\\\": 0, \\\"mb_year\\\": null, \\\"created_at\\\": 50.0, \\\"first_enriched_at\\\": null, \\\"last_enriched_at\\\": null}\"}",
+    "catalog.db.archives/recommendation/ef/efd38c3a3a58093d6d7ff62575754131e1934f884f8588c518e2f87a5ba73f03.json": "TuneConsole recommendation retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"recommendation\",\"value\":\"{\\\"migration_rowid\\\": 1, \\\"surface\\\": \\\"like\\\", \\\"item_key\\\": \\\"song|artist\\\", \\\"kind\\\": \\\"like\\\", \\\"reason\\\": null, \\\"scope\\\": \\\"\\\", \\\"until\\\": null, \\\"created_at\\\": 10.0, \\\"target_type\\\": \\\"legacy_unresolved\\\", \\\"recording_id\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"recommendation\",\"value\":\"{\\\"migration_rowid\\\": 2, \\\"surface\\\": \\\"like_grad\\\", \\\"item_key\\\": \\\"song|artist\\\", \\\"kind\\\": \\\"like_grad\\\", \\\"reason\\\": null, \\\"scope\\\": \\\"\\\", \\\"until\\\": null, \\\"created_at\\\": 10.0, \\\"target_type\\\": \\\"legacy_unresolved\\\", \\\"recording_id\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"recommendation\",\"value\":\"{\\\"migration_rowid\\\": 3, \\\"surface\\\": \\\"for_you\\\", \\\"item_key\\\": \\\"old spelling|artist\\\", \\\"kind\\\": \\\"less\\\", \\\"reason\\\": null, \\\"scope\\\": \\\"\\\", \\\"until\\\": null, \\\"created_at\\\": 11.0, \\\"target_type\\\": \\\"legacy_unresolved\\\", \\\"recording_id\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"recommendation\",\"value\":\"{\\\"mode_id\\\": 1, \\\"label\\\": \\\"House\\\", \\\"families\\\": \\\"[]\\\", \\\"centroid\\\": {\\\"sqlite_blob_hex\\\": \\\"0000803f\\\"}, \\\"size\\\": 1, \\\"rep_keys\\\": \\\"[\\\\\\\"old spelling|artist\\\\\\\"]\\\", \\\"active\\\": 1, \\\"first_seen\\\": 1.0, \\\"last_seen\\\": 1.0, \\\"space\\\": \\\"old-space\\\"}\"}",
+    "catalog.db.metadata/79/79356896809c7a0acc2ed1f26d8a35d95a2ae3432b5c79345b5e29a9398c7d31.json": "TuneConsole metadata deliveries 1\n{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"metadata_decisions\",\"row\":{\"chosen_at\":null,\"entry_id\":3,\"field\":\"title\",\"id\":1,\"legacy_ref\":null,\"source\":\"legacy_edit\",\"value_json\":\"\\\"Corrected Song\\\"\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"metadata_decisions\",\"row\":{\"chosen_at\":null,\"entry_id\":3,\"field\":\"genre\",\"id\":2,\"legacy_ref\":null,\"source\":\"legacy_resolution\",\"value_json\":\"\\\"\\\"\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"metadata_decisions\",\"row\":{\"chosen_at\":null,\"entry_id\":8,\"field\":\"bpm\",\"id\":3,\"legacy_ref\":null,\"source\":\"legacy_resolution\",\"value_json\":\"121.0\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"metadata_decisions\",\"row\":{\"chosen_at\":11.0,\"entry_id\":3,\"field\":\"genre\",\"id\":4,\"legacy_ref\":\"conflict:1\",\"source\":\"legacy_resolution\",\"value_json\":\"\\\"\\\"\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"metadata_decisions\",\"row\":{\"chosen_at\":12.0,\"entry_id\":8,\"field\":\"bpm\",\"id\":5,\"legacy_ref\":\"conflict:2\",\"source\":\"legacy_resolution\",\"value_json\":\"121.0\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"metadata_decisions\",\"row\":{\"chosen_at\":null,\"entry_id\":3,\"field\":\"title\",\"id\":6,\"legacy_ref\":\"edit:7:title\",\"source\":\"legacy_edit\",\"value_json\":\"\\\"Corrected Song\\\"\"}}}",
+    "catalog.db.metadata/f4/f432cf152465c61054819e4829b346dfc921233ce4b2d7d8ee4c202a166a0996.json": "TuneConsole metadata deliveries 1\n{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"enrichment_conflict\",\"row\":{\"candidates\":\"[{\\\"provider\\\": \\\"musicbrainz\\\", \\\"value\\\": \\\"Techno\\\"}, {\\\"provider\\\": \\\"lastfm\\\", \\\"value\\\": \\\"House\\\"}]\",\"field\":\"genre\",\"field_scope\":\"legacy_item\",\"id\":1,\"input_video_id\":\"upload-a\",\"recording_id\":3,\"resolved\":1,\"resolved_value\":\"\",\"track_id\":3,\"updated_at\":11.0}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"enrichment_conflict\",\"row\":{\"candidates\":\"[{\\\"provider\\\": \\\"one\\\", \\\"value\\\": 120}, {\\\"provider\\\": \\\"two\\\", \\\"value\\\": 121}]\",\"field\":\"bpm\",\"field_scope\":\"legacy_item\",\"id\":2,\"input_video_id\":\"upload-live\",\"recording_id\":8,\"resolved\":1,\"resolved_value\":\"121\",\"track_id\":8,\"updated_at\":12.0}}}",
+    "catalog.db.metadata/74/74e3bee477323652940123968bf0dfad622cef7939b9d25590faf826011c40a4.json": "TuneConsole metadata deliveries 1\n{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"recording_identifiers\",\"row\":{\"entity_type\":\"recording\",\"id\":1,\"input_video_id\":\"upload-a\",\"observed_at\":1.0,\"recording_id\":3,\"scheme\":\"musicbrainz\",\"source\":\"legacy_match\",\"status\":\"candidate\",\"value\":\"same-mbid\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"recording_identifiers\",\"row\":{\"entity_type\":\"recording\",\"id\":2,\"input_video_id\":\"upload-a\",\"observed_at\":1.0,\"recording_id\":3,\"scheme\":\"musicbrainz\",\"source\":\"legacy_match\",\"status\":\"candidate\",\"value\":\"same-mbid\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"recording_identifiers\",\"row\":{\"entity_type\":\"recording\",\"id\":3,\"input_video_id\":\"upload-live\",\"observed_at\":1.0,\"recording_id\":8,\"scheme\":\"musicbrainz\",\"source\":\"legacy_match\",\"status\":\"candidate\",\"value\":\"same-mbid\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"recording_identifiers\",\"row\":{\"entity_type\":\"recording\",\"id\":4,\"input_video_id\":\"upload-remix\",\"observed_at\":1.0,\"recording_id\":9,\"scheme\":\"musicbrainz\",\"source\":\"legacy_match\",\"status\":\"candidate\",\"value\":\"same-mbid\"}}}",
+    "catalog.db.metadata/2c/2c97d07926878b636b1bfa6c6c14b623d1b7bcc5ec0ab5256a6b5fcce2ce0a10.json": "TuneConsole metadata deliveries 1\n{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"enrichment_log\",\"row\":{\"created_at\":10.0,\"field\":\"genre\",\"field_scope\":\"legacy_item\",\"id\":1,\"input_video_id\":\"upload-a\",\"provider\":\"musicbrainz\",\"recording_id\":3,\"run_id\":\"run\",\"track_id\":3,\"value\":\"Techno\"}}}",
+    "catalog.db.metadata/0a/0a701b01b10473f87ccd25e3d35cec2ed95c5ccaa6c865164bca4df6e1637a99.json": "TuneConsole metadata deliveries 1\n{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"provider_attempts\",\"row\":{\"at\":60.0,\"fields_json\":\"{\\\"art\\\": \\\"full-cover\\\", \\\"isrc\\\": \\\"ISRC-ONE\\\", \\\"bpm\\\": 128}\",\"id\":1,\"input_video_id\":\"\",\"provider\":\"deezer\",\"recording_id\":11,\"status\":\"found\"}}}",
+    "catalog.db.metadata/d8/d8c471e8369a9fc100e60a28db922035afb1c9a57f525e5e53fca85c164230ef.json": "TuneConsole metadata deliveries 1\n{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"entry_field_choices\",\"row\":{\"entry_id\":3,\"field\":\"title\",\"source\":\"legacy_edit\",\"value_json\":\"\\\"Corrected Song\\\"\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"entry_field_choices\",\"row\":{\"entry_id\":3,\"field\":\"genre\",\"source\":\"legacy_resolution\",\"value_json\":\"\\\"\\\"\"}}}{\"format\":\"metadata-delivery-1\",\"kind\":\"response\",\"value\":{\"format\":\"legacy-metadata-record-1\",\"owner\":\"entry_field_choices\",\"row\":{\"entry_id\":8,\"field\":\"bpm\",\"source\":\"legacy_resolution\",\"value_json\":\"121.0\"}}}",
+    "catalog.db.archives/discovery/36/36d4ebb8a45441f62ede7503b8a6c8b1c6d466abd9104f64b292692ee2f2c4ca.json": "TuneConsole discovery retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"discovery\",\"value\":\"{\\\"found_at\\\": 20.0, \\\"input_video_id\\\": \\\"upload-a\\\", \\\"last_found_at\\\": 20.0, \\\"recording_id\\\": 3, \\\"source_id\\\": \\\"release-c\\\", \\\"source_token\\\": \\\"release-c\\\", \\\"source_type\\\": \\\"album\\\"}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"discovery\",\"value\":\"{\\\"found_at\\\": 50.0, \\\"input_video_id\\\": \\\"cold-upload\\\", \\\"last_found_at\\\": 50.0, \\\"recording_id\\\": 11, \\\"source_id\\\": \\\"seed\\\", \\\"source_token\\\": \\\"radio:seed\\\", \\\"source_type\\\": \\\"radio\\\"}\"}",
+    "catalog.db.archives/discovery/22/22072be1b0e2a69dfc99cc79013b61378909042c41b2af468de564fb40db80c9.json": "TuneConsole discovery retained evidence 1\n{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"discovery\",\"value\":\"{\\\"album_id\\\": null, \\\"artist_id\\\": null, \\\"genre_key\\\": \\\"house\\\", \\\"id\\\": 1, \\\"raw_label\\\": \\\"House\\\", \\\"recording_id\\\": 3, \\\"resolution_reason\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"discovery\",\"value\":\"{\\\"album_id\\\": null, \\\"artist_id\\\": null, \\\"genre_key\\\": \\\"rock\\\", \\\"id\\\": 2, \\\"raw_label\\\": \\\"Rock\\\", \\\"recording_id\\\": 8, \\\"resolution_reason\\\": null}\"}{\"format\":\"legacy-evidence-1\",\"kind\":\"original\",\"owner\":\"discovery\",\"value\":\"{\\\"album_id\\\": null, \\\"artist_id\\\": null, \\\"genre_key\\\": \\\"folk\\\", \\\"id\\\": 3, \\\"raw_label\\\": \\\"Folk\\\", \\\"recording_id\\\": 10, \\\"resolution_reason\\\": null}\"}",
+    "catalog.db.collections/8a/8a05ac8ee120d4a14d7890c1a9e621aaeabae9f553246f265c398261e08c3f17.json": "{\"format\":\"collection-recovery-1\",\"kind\":\"playlist-canvas\",\"owner\":\"1\",\"state\":\"{\\\"nodes\\\": [{\\\"id\\\": 1, \\\"key\\\": \\\"discovery spelling|artist\\\", \\\"seeds\\\": [{\\\"keys\\\": [\\\"discovery spelling|artist\\\"], \\\"catalog_identity_version\\\": 2}], \\\"catalog_identity_version\\\": 2}], \\\"trunk\\\": [1], \\\"label\\\": \\\"old spelling|artist\\\", \\\"catalog_identity_version\\\": 2}\"}"
+  }
+}

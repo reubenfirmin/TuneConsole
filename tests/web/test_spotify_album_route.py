@@ -5,8 +5,47 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_spotify_album_import import AlbumClient, album_zip
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
+)
+from tests.web_consumer_support import install_routes
 from tests.web.test_spotify_data_route import _prepare_library, _wait_for_library_job
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(scope='module')
+def album_import_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, album_import_schema, native_sql_calls):
+    # Confirmation still executes actual worker lifetime admission, SQL and
+    # files with fresh readers; per-query handle diagnostics have other owners.
+    with _file_consumer_store(tmp_path, album_import_schema) as database:
+        yield database
+
+
+@pytest.fixture(autouse=True)
+def album_import_routes(monkeypatch, without_metadata_providers, home_page_bytecode):
+    from yt_playlist.web import app as webapp
+
+    install_routes(monkeypatch, 'setup')
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        # App recreation keeps private globals and live rendering. Reuse only
+        # source-checked compiled code; the first request pays compilation.
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 def web_client(store, clients):
@@ -15,8 +54,8 @@ def web_client(store, clients):
 
 
 def test_album_preview_binds_release_and_destination_and_report_deletion_preserves_retry(store):
-    first = store.identities.upsert_identity("First", "first", None, True)
-    second = store.identities.upsert_identity("Destination", "second", None, False)
+    first = store.accounts.upsert_account("First", "first", None, True)
+    second = store.accounts.upsert_account("Destination", "second", None, False)
     clients = {first: AlbumClient(), second: AlbumClient()}
     web = web_client(store, clients)
     token = _prepare_library(web, store, second, payload=album_zip("One"), indices=())
@@ -32,11 +71,11 @@ def test_album_preview_binds_release_and_destination_and_report_deletion_preserv
     assert web.post("/import/spotify-library/confirm", data={
         "preview_token": token, "identity_id": first, "album_choice_0": "MPRE-One"},
         follow_redirects=False).status_code == 303
-    assert _wait_for_library_job(store)["report"]["albums_imported"] == 1
+    assert _wait_for_library_job(web)["report"]["albums_imported"] == 1
     assert clients[first].album_ratings == []
     assert clients[second].album_ratings == [("OLAK-One", "LIKE")]
-    assert store.collection.get_saved_albums(identity_id=first) == []
-    assert len(store.collection.get_saved_albums(identity_id=second)) == 1
+    assert store.collection.get_saved_albums(account_id=first) == []
+    assert len(store.collection.get_saved_albums(account_id=second)) == 1
 
     # The latest report survives app recreation; deleting it retains the imported library
     # and the destination-scoped marker, so a later upload remains idempotent.
@@ -46,18 +85,18 @@ def test_album_preview_binds_release_and_destination_and_report_deletion_preserv
     assert 'Delete this report' in report.text
     assert web.post("/import/spotify-library/delete-report", follow_redirects=False).status_code == 303
     assert store.settings.get_setting("spotify_library_import_job") is None
-    assert len(store.collection.get_saved_albums(identity_id=second)) == 1
+    assert len(store.collection.get_saved_albums(account_id=second)) == 1
     token = _prepare_library(web, store, second, payload=album_zip("One"), indices=())
     assert 'Previously imported to this account' in web.get(
         f"/import/spotify-library/preview/{token}").text
     web.post("/import/spotify-library/confirm", data={"preview_token": token}, follow_redirects=False)
-    assert _wait_for_library_job(store)["report"]["albums_skipped"] == 1
+    assert _wait_for_library_job(web)["report"]["albums_skipped"] == 1
     assert clients[second].album_ratings == [("OLAK-One", "LIKE")]
 
 
 @pytest.mark.parametrize("choice,action", [("", "save"), ("MPRE-alternate", "save"), ("MPRE-One", "playlist")])
 def test_ambiguous_album_needs_review_and_playlist_override_is_explicit(store, choice, action):
-    iid = store.identities.upsert_identity("Destination", "bridge", None, True)
+    iid = store.accounts.upsert_account("Destination", "bridge", None, True)
     client = AlbumClient()
     client.results["One Artist"].append({**client.results["One Artist"][0], "browseId": "MPRE-alternate"})
     client._albums["MPRE-alternate"] = {**client._albums["MPRE-One"], "audioPlaylistId": "OLAK-alternate"}
@@ -70,7 +109,7 @@ def test_ambiguous_album_needs_review_and_playlist_override_is_explicit(store, c
     response = web.post("/import/spotify-library/confirm", data={
         "preview_token": token, "album_choice_0": choice, "album_action_0": action}, follow_redirects=False)
     assert response.status_code == 303
-    report = _wait_for_library_job(store)["report"]
+    report = _wait_for_library_job(web)["report"]
     if not choice:
         assert report["albums_unmatched"] == 1
         assert client.album_ratings == [] and client.created == []

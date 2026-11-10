@@ -4,6 +4,7 @@ import functools
 from yt_playlist.util import genre_catalog
 
 _active = None
+_active_keys = None
 
 
 def builtin_names():
@@ -30,19 +31,25 @@ def build_canon(names):
 
 
 def set_active(names):
-    global _active
+    global _active, _active_keys
     _active = build_canon(names) if names is not None else None
+    _active_keys = None
 
 
-def configure(store):
-    """Atomically upgrade the catalog and defaults, then publish the enabled matcher."""
-    store.genres.configure_catalog()
-    set_active(store.genres.get_genre_whitelist())
+def configure(store, *, read_only=False):
+    """Load the enabled matcher; defer catalog upgrades during startup validation."""
+    if not read_only:
+        store.genres.configure_catalog()
+    global _active, _active_keys
+    matcher = store.genres.enabled_matcher()
+    _active = matcher if matcher is not None else build_canon(store.genres.get_genre_whitelist())
+    _active_keys = {genre_catalog.normalize(row['name']):row['key']
+                    for row in store.genres.taxonomy()['genres']} if matcher is not None else None
 
 
 def reset(store):
     store.genres.configure_catalog(reset=True)
-    set_active(store.genres.get_genre_whitelist())
+    configure(store, read_only=True)
 
 
 @functools.lru_cache(maxsize=1)
@@ -67,6 +74,8 @@ def pick_genre(tags):
     selected = None
     for tag in tags:
         genre = match_tag(tag)
-        if genre and (selected is None or genre_catalog.is_subgenre(genre, selected)):
+        key = (_active_keys or {}).get(genre_catalog.normalize(genre or ''),genre)
+        parent = (_active_keys or {}).get(genre_catalog.normalize(selected or ''),selected)
+        if genre and (selected is None or genre_catalog.is_subgenre(key, parent)):
             selected = genre
     return selected

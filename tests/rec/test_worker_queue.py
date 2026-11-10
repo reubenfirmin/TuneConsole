@@ -1,5 +1,6 @@
 """Coalescing, ordering, retry and cancellation across scheduler handoffs."""
 import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,27 @@ from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import rec_worker
 from yt_playlist.rec.maintenance import Projections
 from yt_playlist.rec.worker_queue import Job, PendingJobs, Retry
+
+
+def test_requests_cannot_start_worker_until_storage_is_ready(scheduled, monkeypatch):
+    worker, targets = scheduled
+    ready = threading.Event()
+    worker.ctx.storage_maintenance = SimpleNamespace(ready=ready)
+    worker.ctx.store.settings.set_setting('runtime-is-writable', 'yes')
+    calls = []
+    offer = SimpleNamespace(surface='home', run=lambda: calls.append('measurement'), close=lambda: None)
+    monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('ratings') or set())
+    worker.trigger_rating_update()
+    assert not worker.enqueue_measurement(offer)
+    assert not worker._schedule(full=False, evidence_storage=True)
+    assert not targets and not worker.jobs
+    assert worker.ctx.store.settings.get_setting('runtime-is-writable') == 'yes'
+    ready.set()
+    worker.trigger_rating_update()
+    assert worker.enqueue_measurement(offer)
+    assert len(targets) == 1
+    targets.pop()()
+    assert calls == ['measurement', 'ratings']
 
 
 def test_detached_batches_preserve_new_arrivals_and_bound_artwork():
@@ -182,6 +204,12 @@ def test_model_backoff_preserves_retry_without_delaying_ratings(scheduled, monke
 
     monkeypatch.setattr(worker, "_do_rebuild", fail)
     monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('rating') or set())
+    # Ratings enqueue Home publication separately. Its provider work and retry
+    # clock are independent of the full-model backoff exercised here.
+    monkeypatch.setattr(worker.tasks, 'home', lambda: False)
+    monkeypatch.setattr(worker.tasks, 'tv', lambda: False)
+    monkeypatch.setattr(worker.preparation, 'due', lambda *_: False)
+    worker.ctx.store.settings.set_setting('rec_group_shadow', '0')
     worker.trigger()
     targets.pop()()
     assert calls == ['full', 'rating']
@@ -204,6 +232,10 @@ def test_expiry_refreshes_pools_without_refitting_models(scheduled, monkeypatch)
     from yt_playlist.rec import candidate_refresh
     worker, targets = scheduled
     calls = []
+    wall = [2000]
+    worker.ctx.now_fn = lambda: wall[0]
+    monkeypatch.setattr(worker.preparation, 'due', lambda *_: False)
+    worker.ctx.store.settings.set_setting('rec_group_shadow', '0')
     monkeypatch.setattr(worker.ctx.store.rec_refresh, 'has_pending_changes', lambda: False)
     monkeypatch.setattr(candidate_refresh, 'due', lambda *args: True)
     monkeypatch.setattr(worker, '_do_rebuild', lambda: calls.append('full'))
@@ -211,6 +243,19 @@ def test_expiry_refreshes_pools_without_refitting_models(scheduled, monkeypatch)
     worker._poll_refresh()
     targets.pop()()
     assert calls == ['bundles']
+    # Even the input check waits for the next cadence after an unchanged poll.
+    candidate_refresh.checked(worker.ctx.store, worker.ctx.now_fn())
+    monkeypatch.setattr(candidate_refresh, 'due', lambda *args: pytest.fail('Checked inputs before the cadence'))
+    worker._poll_refresh()
+    assert calls == ['bundles']
+    # A quiet hourly check advances the clock without preparing anything.
+    monkeypatch.setattr(worker.ctx.store.rec_proposals, 'has_proposals', lambda *_: True)
+    monkeypatch.setattr(candidate_refresh, 'due', lambda *_: calls.append('check') or False)
+    wall[0] += candidate_refresh.CHECK_INTERVAL_S
+    worker._poll_refresh()
+    worker._poll_refresh()
+    assert calls == ['bundles', 'check']
+    assert worker.ctx.store.settings.get_setting(candidate_refresh.CHECKED_AT) == str(wall[0])
 
 
 @pytest.mark.parametrize('bundles_pending', [False, True])
@@ -280,11 +325,20 @@ def test_learning_admission_budget_survives_every_outcome(outcome):
 
 
 def test_successful_pool_build_coalesces_next_request_but_keeps_rating_work(scheduled, monkeypatch):
-    from yt_playlist.rec import mode_surfaces
+    from yt_playlist.rec import candidate_refresh, fresh_pool, mode_surfaces
     worker, targets = scheduled
     now, calls = [100], []
     monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: now[0])
-    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', lambda *args: calls.append('pools') or {})
+    worker.ctx.now_fn = lambda: now[0]
+    def prepare(store, at):
+        calls.append('pools')
+        captured = candidate_refresh.prepared_settings(store, at)
+        # Discovery cannot overlap a run even if a whole interval passes.
+        assert fresh_pool.prepare(store, at + candidate_refresh.CHECK_INTERVAL_S) is None
+        store.rec_ledger.bump_card_view('cards', at)
+        store.settings.set_values(captured)
+        return {}
+    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', prepare)
     monkeypatch.setattr(worker, 'trigger_home_refresh', lambda **kwargs: None)
     monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('ratings') or set())
     worker._refresh_bundles()
@@ -293,11 +347,21 @@ def test_successful_pool_build_coalesces_next_request_but_keeps_rating_work(sche
     targets.pop()()
     assert calls == ['pools', 'ratings']
     assert worker.jobs.retry[Job.BUNDLES].dirty
-    now[0] = 160
+    now[0] = 100 + candidate_refresh.CHECK_INTERVAL_S - .001
+    worker._retry_bundles()
+    assert not targets
+    assert fresh_pool.prepare(worker.ctx.store, now[0]) is None
+    now[0] += .001
     worker._retry_bundles()
     targets.pop()()
     assert calls == ['pools', 'ratings', 'pools']
     assert not worker.jobs.retry[Job.BUNDLES].dirty
+    # Restarting resets in-memory retry clocks, but cannot admit another round.
+    worker.shutdown()
+    restarted = rec_worker.RecWorker(worker.ctx, debounce_s=0)
+    assert restarted._refresh_bundles() is None
+    assert calls == ['pools', 'ratings', 'pools']
+    restarted.shutdown()
 
 
 def test_projection_admission_can_be_used_without_a_worker_and_releases_rejected_jobs(store,monkeypatch):

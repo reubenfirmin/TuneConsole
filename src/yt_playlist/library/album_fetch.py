@@ -11,6 +11,7 @@ page dead-ended on "Album unavailable".
 Both endpoints return the fields callers need (title/thumbnails/artists/year, and tracks carrying
 videoId/title/artists/duration), so callers do not care which one ran.
 """
+from yt_playlist.core.action_errors import ActionInputError
 
 UPLOAD_RELEASE_PREFIX = "FEmusic_library_privately_owned_release_detail"
 
@@ -33,7 +34,7 @@ def shareable_album_tracks(album):
     """
     tracks = album.get("tracks") if isinstance(album, dict) else None
     if not isinstance(tracks, list) or not tracks or album.get("continuation") or album.get("continuations"):
-        raise ValueError("The full album track list is unavailable. Reconnect to YouTube Music and try again.")
+        raise ActionInputError('album_tracklist_unavailable')
     count = album.get("trackCount")
     if count is not None:
         try:
@@ -41,8 +42,8 @@ def shareable_album_tracks(album):
         except (TypeError, ValueError):
             complete = False
         if not complete:
-            raise ValueError("The album track list is incomplete. Refresh the album and try again.")
+            raise ActionInputError('album_tracklist_incomplete')
     if any(not isinstance(track, dict) or not isinstance(track.get("videoId"), str)
            or not track["videoId"].strip() for track in tracks):
-        raise ValueError("Some album tracks have no shareable video link. Try again when all tracks are available.")
+        raise ActionInputError('album_unshareable')
     return tracks

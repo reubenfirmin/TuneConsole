@@ -1,21 +1,19 @@
 """Every maintenance publication checkpoints outside the serving lock after atomic commit."""
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from yt_playlist.core import db_checkpoint, db_snapshot
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core.store import Store
+from yt_playlist.rec import bundle_storage
 
 
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'publication.db')
-    store.init_schema()
-    store.conn.execute('PRAGMA wal_autocheckpoint=17')
-    yield store
-    store.conn.close()
+def database(file_backed_store):
+    file_backed_store.conn.execute('PRAGMA wal_autocheckpoint=17')
+    return file_backed_store
 
 
 @pytest.mark.parametrize('failure', [None, 'rollback', 'cancel', 'stale'])
@@ -68,12 +66,20 @@ def test_checkpoint_observes_finished_transaction_without_holding_serving_lock(d
 
 def test_checkpoint_error_does_not_report_a_committed_model_as_failed(database, monkeypatch):
     store = database
+    attempted = []
     with store.read_snapshot() as snapshot:
         def unavailable(*args, **kwargs):
+            attempted.append((args, kwargs))
             raise sqlite3.OperationalError('checkpoint unavailable')
 
-        monkeypatch.setattr(db_checkpoint.sqlite3, 'connect', unavailable)
+        # Replace only the checkpoint module's view of SQLite. Coverage and other
+        # readers must still be able to open their own databases during this test.
+        checkpoint_sqlite = SimpleNamespace(**vars(sqlite3))
+        checkpoint_sqlite.connect = unavailable
+        monkeypatch.setattr(db_checkpoint, 'sqlite3', checkpoint_sqlite)
         assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
+    assert len(attempted) == 1
+    assert attempted[0][0] == (store._db_path.as_uri() + '?mode=rw',)
     assert store.settings.get_setting('model') == 'new'
     assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
 
@@ -90,6 +96,7 @@ def test_explicit_inline_publication_keeps_existing_checkpoint_policy(database, 
 def test_projection_outputs_and_settings_are_committed_before_checkpoint(database, monkeypatch, projection):
     surface = 'trend_rollups' if projection == 'trends' else 'mode_bundles'
     observed = []
+    expected = {'generation': '2'} if projection == 'trends' else 'projection-generation'
 
     def checkpoint(path):
         assert path == database._db_path
@@ -100,7 +107,9 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
                 return 'serving lock held'
             try:
                 with database.read_snapshot() as snapshot:
-                    return (snapshot.store.rec_proposals.get_proposals(surface),
+                    output = (snapshot.store.rec_proposals.get_proposals(surface) if projection == 'trends'
+                              else snapshot.store.recommendations.head('home')['external_key'])
+                    return (output,
                             snapshot.store.settings.get_setting('projection-version'))
             finally:
                 database._lock.release()
@@ -108,19 +117,33 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
             observed.append(pool.submit(read).result(2))
 
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', checkpoint)
+    policies = [('projection-policy', '{}', 2.)] if projection == 'bundles' else []
+    if policies:
+        database.rec_ledger.record_prepared_policies(policies)
     with database.read_snapshot() as snapshot:
+        if projection == 'trends':
+            rows = snapshot.store.trends.prepare_first_play()
+            build = None
+        else:
+            prepared = bundle_storage.prepare(snapshot.store.conn, {'all': {}}, [],
+                external_key=expected, policy_version='projection-policy', input_revision=0,
+                created_at=2., pending_policies=policies)
+            snapshot.release_reader()
+            build = database.recommendations.claim(prepared)
+            database.recommendations.stage(prepared, build)
+        # Staging also checkpoints; only the ordered head/settings publication below is under
+        # test, so discard observations from hidden preparation.
+        observed.clear()
         def publish():
             assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
             if projection == 'trends':
                 database.trends.publish_rollup(
-                    [('track', 'song', 0, 0., 'play_event')], '{"generation":2}', 2., None)
+                    rows, '{"generation":"2"}', 2., None)
             else:
-                database.rec_ledger.publish_prepared_policies([('projection-policy', '{}', 2.)])
-                database.rec_proposals.publish_prepared_bundles(
-                    '{"generation":2}', '[]', 2.)
+                database.recommendations.publish(build, 2.)
             database.settings.publish_values({'projection-version': '2'})
-        assert snapshot.publish(publish)
-    assert observed == [({'generation': 2}, '2')]
+        assert snapshot.publish_ordered(publish)
+    assert observed == [(expected, '2')]
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
 
 
@@ -141,18 +164,15 @@ def test_explicitly_disabled_checkpoint_policy_is_preserved(database, monkeypatc
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
 
 
-def test_in_memory_publication_does_not_attempt_a_file_checkpoint(monkeypatch):
-    store = Store(':memory:')
-    store.init_schema()
-    try:
-        policy = store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0]
-        monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
-        with store.read_snapshot() as snapshot:
-            assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
-        assert store.settings.get_setting('model') == 'new'
-        assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == policy
-    finally:
-        store.conn.close()
+def test_in_memory_publication_does_not_attempt_a_file_checkpoint(store, monkeypatch):
+    assert store._db_path is None
+    assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'memory'
+    policy = store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0]
+    monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
+    with store.read_snapshot() as snapshot:
+        assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
+    assert store.settings.get_setting('model') == 'new'
+    assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == policy
 
 
 def test_cancellation_during_policy_cleanup_does_not_discredit_commit(database, monkeypatch):

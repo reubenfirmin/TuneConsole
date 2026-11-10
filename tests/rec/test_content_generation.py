@@ -23,13 +23,33 @@ def _seed(store):
 def test_failed_publication_rolls_back_all_artifacts_even_after_later_commit(store):
     _seed(store)
     before = store.rec_model.content_generation()
-    store.conn.execute("CREATE TRIGGER reject_content BEFORE INSERT ON rec_discovered_content_vectors "
+    store.conn.execute("CREATE TRIGGER reject_content BEFORE INSERT ON recording_embedding_files "
+                       "WHEN NEW.space='content_discovery' "
                        "BEGIN SELECT RAISE(ABORT,'injected write failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected write failure"):
-        store.rec_model.publish_content_generation([("new|artist", b"new")], [("bad|artist", b"bad")],
-            "new model", "new revision", "new inputs", before["generation"])
+        store.rec_model.publish_content_generation(before['library'], before['discovered'],
+            before['model'], "new revision", "new inputs", before["generation"])
     store.settings.set_setting("unrelated", "committed")
     assert store.rec_model.content_generation() == before
+
+
+def test_bounded_readers_reject_a_cohort_encoded_with_another_equal_dimension_model(store):
+    _seed(store)
+    before = store.rec_model.content_generation()
+    foreign_model = json.loads(before['model'])
+    foreign_model['cat'] = {name: i for i, name in enumerate(reversed(foreign_model['cat']))}
+    foreign_model['different_encoder'] = True
+    from yt_playlist.core import embeddings
+    with store.conn:
+        store.conn.execute('UPDATE settings SET value=value WHERE 0')
+        embeddings.publish(store.conn, 'rec_discovered_content_vectors', before['discovered'],
+            replace=True, model_version=embeddings.version('rec_discovered_content_vectors',
+                {'rec_content_model': json.dumps(foreign_model)}))
+    keys = [key for key, _blob in before['library'] + before['discovered']]
+    pools = store.rec_model.content_vector_pools(keys)
+    assert pools == {'library': dict(before['library']), 'discovered': {}}
+    assert store.rec_model.content_vectors_by_keys(keys) == dict(before['library'])
+    assert not store.rec_model.content_generation()['coherent']
 
 
 def test_discovery_encoder_retries_against_competing_library_generation(store, monkeypatch):
@@ -37,13 +57,13 @@ def test_discovery_encoder_retries_against_competing_library_generation(store, m
     encode = content_model.encode_discovered
     switched = False
 
-    def competing_encode(rows, model):
+    def competing_encode(rows, model, *, genre_axes=None):
         nonlocal switched
         if not switched:
             switched = True
             store.tracks.set_track_genre(tid, "Folk")
             model_support.build_content_model(store)
-        return encode(rows, model)
+        return encode(rows, model, genre_axes=genre_axes)
 
     monkeypatch.setattr(content_model, "encode_discovered", competing_encode)
     assert vectors.build_discovered_content_vectors(store) == 0
@@ -69,13 +89,19 @@ def test_reader_sees_old_then_new_complete_generation_during_publication(tmp_pat
         return 0
 
     writer.conn.create_function("pause_publication", 0, pause)
-    writer.conn.execute("CREATE TRIGGER pause_content BEFORE INSERT ON rec_content_vectors "
+    writer.conn.execute("CREATE TRIGGER pause_content BEFORE INSERT ON recording_embedding_files "
+                        "WHEN NEW.space='content_library' "
                         "BEGIN SELECT pause_publication(); END")
+    replacement_model = {"cat": {"fam:folk-country": 0}, "ncat": 1, "cont": []}
+    replacement = np.array([1], dtype=np.float32).tobytes()
+    with writer.conn:
+        writer.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)',
+                               [('new|artist',), ('new cold|artist',)])
 
     def publish():
         try:
-            assert writer.rec_model.publish_content_generation([("new|artist", b"new library")],
-                [("new cold|artist", b"new discovery")], "new model", "revision", "inputs",
+            assert writer.rec_model.publish_content_generation([("new|artist", replacement)],
+                [("new cold|artist", replacement)], json.dumps(replacement_model), "revision", "inputs",
                 before["generation"])
         except BaseException as error:
             errors.append(error)
@@ -92,9 +118,9 @@ def test_reader_sees_old_then_new_complete_generation_during_publication(tmp_pat
         assert not thread.is_alive() and not errors
         after = reader.rec_model.content_generation()
         assert after["generation"] != before["generation"]
-        assert (after["model"], after["revision"], after["inputs"]) == ("new model", "revision", "inputs")
-        assert after["library"] == [("new|artist", b"new library")]
-        assert after["discovered"] == [("new cold|artist", b"new discovery")]
+        assert (after["model"], after["revision"], after["inputs"]) == (json.dumps(replacement_model), "revision", "inputs")
+        assert after["library"] == [("new|artist", replacement)]
+        assert after["discovered"] == [("new cold|artist", replacement)]
     finally:
         writer.conn.close()
         reader.conn.close()
@@ -160,8 +186,8 @@ def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, mon
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", capture)
-    assert mode_surfaces.prepare_bundles(store, 100_000) is None
-    assert store.rec_proposals.get_proposals("mode_bundles") is None
+    assert mode_surfaces.prepare_bundles(store, 100_000) is not None
+    assert store.recommendations.head('home') is not None
     payload = calculated[0]
     assert payload["_ppr"]["1"][0] == keys[0]
     assert payload["_ppr"]["2"][0] == keys[1]
@@ -170,7 +196,7 @@ def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, mon
 @pytest.mark.parametrize("classifier", [layers.now_mode_mix, layers.session_mode_mix])
 def test_mode_classification_keeps_generation_during_rebuild(store, monkeypatch, classifier):
     _entries, keys, remap = _seed_remappable_space(store)
-    identity = store.identities.upsert_identity("main", "cred", None, True)
+    identity = store.accounts.upsert_account("main", "cred", None, True)
     store.history.import_play_events(identity, [(keys[0], "a", 100_000), (keys[2], "c", 100_000)])
     rec_params.set_param(store, "now_min_events", 2)
     live_modes = taste_modes.live_modes
@@ -188,7 +214,7 @@ def test_mode_classification_keeps_generation_during_rebuild(store, monkeypatch,
 
 def test_catalog_scores_keep_generation_when_rebuild_follows_taste_read(store, monkeypatch):
     entries, keys, remap = _seed_remappable_space(store)
-    identity = store.identities.upsert_identity("main", "cred", None, True)
+    identity = store.accounts.upsert_account("main", "cred", None, True)
     playlist = store.playlists.upsert_playlist(identity, "P", "A context", 1, "h", 0.)
     store.playlists.set_playlist_tracks(playlist, [entries[0]])
     content_taste = surfaces.content_taste

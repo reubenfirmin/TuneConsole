@@ -10,7 +10,7 @@ from yt_playlist.util.action_kinds import APPLY_MERGE, COPY_PLAYLIST
 
 
 def _merge_action(store, before, after, client, *, evidence=True):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     store.playlists.upsert_playlist(iid, "KEEP", "Kept", len(after), "", 1)
     entry = {"ytm": "KEEP", "identity": iid, "prev": before}
     if evidence:
@@ -65,14 +65,14 @@ def test_later_replacement_of_action_added_occurrence_is_not_removed(store):
 @pytest.mark.parametrize("move", [False, True])
 def test_edited_copy_destination_is_never_deleted(store, monkeypatch, tmp_path, change, move):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 2, "", 1)
     tids = [store.tracks.upsert_track(v, v, "Artist", None, 200) for v in ("a", "b")]
     store.playlists.set_playlist_tracks(pid, tids)
     client = FakeClient(tracks={"SOURCE": [_track(v, v, "Artist", set_video_id=v) for v in ("a", "b")]})
     source_client = client
     if move:
-        iid = store.identities.upsert_identity("Target", "bridge", None, False)
+        iid = store.accounts.upsert_account("Target", "bridge", None, False)
         client = FakeClient(catalog=source_client._catalog)
     get = client.get_playlist
     metadata = {"title": "Source" if move else "Copy", "description": "Copied by TuneConsole"}
@@ -113,7 +113,7 @@ def test_legacy_actions_without_post_action_evidence_require_manual_review(store
 
 
 def test_forward_merge_records_actual_post_action_sequence(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     a = store.playlists.upsert_playlist(iid, "KEEP", "A", 2, "", 1)
     b = store.playlists.upsert_playlist(iid, "OTHER", "B", 0, "", 1)
     client = OccurrenceClient(["a", "b"])

@@ -1,36 +1,144 @@
 """Home Discover serves prepared pools immediately and never fits models on a request."""
 import re
+from contextlib import ExitStack
+from functools import wraps
+import time
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from yt_playlist.rec import discover, fresh_pool, home_prepared, surfaces
+from tests.home_fixture_support import home_page_bytecode, publish_cards, returning_listener, without_metadata_providers
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import (
+    bounded_consumer_schema, native_sql_calls, uncontended_file_consumer_store as store)
+from yt_playlist.core.recommendation_invalidation import clear_model_display
+from yt_playlist.rec import discover, fresh_pool, home_cards, home_prepared, home_vibe, surfaces
 from yt_playlist.web.app import create_app
 
 
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    from yt_playlist.core.migrations import current, regular
+
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('house', 'House')),
+                                 snapshot_guards=False) as schema:
+        assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+        assert regular.validate(schema) == len(regular.CHANGES)
+        assert schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def discovery_clients(monkeypatch, request):
+    make_client = client_for
+    with ExitStack() as clients:
+        monkeypatch.setattr(request.module, 'client_for',
+                            lambda *args, **kwargs: clients.enter_context(make_client(*args, **kwargs)))
+        yield
+
+
+@pytest.fixture(autouse=True)
+def discovery_routes(monkeypatch, home_page_bytecode, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, discovery, home
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, discovery, home)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
+
+
 def seed_songs(store, count=40):
-    for i in range(count):
-        store.discovery.upsert_discovered_track(f"song {i}|artist {i}", f"v{i}", f"Song {i}",
-            f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", 1)
-    fresh_pool.prepare(store, 2)
+    # Discovery reads consume ranked output. The Fresh producer has its own
+    # worker owners; retain all forty subjects and real typed pool publication.
+    tracks = [{'key': f'song {i}|artist {i}', 'video_id': f'v{i}', 'title': f'Song {i}',
+               'artist': f'Artist {i}', 'genre': 'Jazz', 'year': '2020'} for i in range(count)]
+    seed_publication_subjects(store, tracks, discoveries=[track['key'] for track in tracks])
+    publish_bundles(store, {'all': {'fresh': tracks}}, 2, fresh=tracks)
 
 
-def client_for(store, busy="idle"):
+def prepare_client_state(store):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    assert home_prepared.prepare(store, 3) is not None
-    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 3)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    assert home_prepared.prepare_discovery(store, 3) is not None
+    # The page consumes the completed Fresh mix alongside the independent
+    # discovery pool. Keep that real offer without preparing unrelated lanes.
+    # Discovery still retains all forty ranked subjects. Its companion needs
+    # only the four playable tracks required for a real saved-mix offer.
+    fresh = fresh_pool.pick(store, 3, size=4)
+    protos = [home_cards._proto(store, 'fresh', 'Fresh songs', fresh, 3)] if fresh else []
+    for proto in protos:
+        proto['recipe'] = {'model': 'fresh', 'lane': 'fresh'}
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, [], [], home_cards._epoch(store, 'cards'), None)
+    publish_cards(store, result, 3)
+    returning_listener(store, 'mixes', now=3)
+    return iid
+
+
+def client_for(store, busy="idle", *, prepare=True):
+    iid = prepare_client_state(store) if prepare else store.accounts.get_master_account().id
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 3, background_work=False)
     app.state.ctx.rec_worker._model_active = busy == "rebuild"
     app.state.ctx.rec_worker._discovering = busy == "discovery"
     return TestClient(app, base_url="http://127.0.0.1")
 
 
-@pytest.mark.parametrize("busy", ["idle", "rebuild", "discovery"])
-def test_persisted_recommendations_are_in_initial_home_and_survive_refresh(store, monkeypatch, busy):
+@pytest.fixture
+def discovery_songs(store):
     seed_songs(store)
+
+
+@pytest.fixture
+def empty_discovery_home(store):
+    assert prepare_client_state(store) == 1
+
+
+@pytest.fixture(autouse=True)
+def discovery_costs(monkeypatch, record_property, request):
+    totals = {}
+
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                values = totals.setdefault(name, [0, 0.0])
+                values[0] += 1
+                values[1] += time.perf_counter() - started
+        return call
+
+    for owner, attribute in ((request.module, 'seed_songs'), (request.module, 'client_for'),
+            (fresh_pool, 'prepare'), (home_prepared, 'prepare'), (home_prepared, 'prepare_discovery'),
+            (TestClient, 'request')):
+        name = owner.__name__.rsplit('.', 1)[-1] + '_' + attribute
+        monkeypatch.setattr(owner, attribute, timed(name, getattr(owner, attribute)))
+    yield
+    for name, (calls, seconds) in totals.items():
+        record_property(name + '_calls', calls)
+        record_property(name + '_seconds', seconds)
+
+
+@pytest.mark.parametrize("busy", ["idle", "rebuild", "discovery"])
+def test_persisted_recommendations_are_in_initial_home_and_survive_refresh(store, monkeypatch, busy, discovery_songs):
     store.discovery.upsert_discovered_album("album", "Artist", "Ready album", "2026", None, 1)
     store.discovery.upsert_discovered_artist("New artist", 1, [], [], None, 1)
     client = client_for(store, busy)
@@ -57,15 +165,16 @@ def test_persisted_recommendations_are_in_initial_home_and_survive_refresh(store
         assert 'fitting the playlists' not in fragment
         counts = {row["identity_key"]: row["offered_count"] for row in store.discovery.get_discovered_tracks()}
         if mix_offers is None:
-            mix_offers = counts  # The inline Fresh mix is an actual offer; tiles wait for visibility.
+            # Initial Home is a display-only read. Visible tiles report their
+            # impressions separately through /discovery/impressions below.
+            mix_offers = counts
         else:
             assert counts == mix_offers
     assert store.discovery.get_discovered_albums()[0]["offered_count"] == 0
     assert store.discovery.get_discovered_artists()[0]["offered_count"] == 0
 
 
-def test_song_only_pool_fills_discover_and_honors_current_exclusions(store):
-    seed_songs(store)
+def test_song_only_pool_fills_discover_and_honors_current_exclusions(store, discovery_songs):
     store.rec_model.record_feedback("for_you", "song 0|artist 0", "dismiss", now=2)
     store.rec_model.record_feedback("for_you", "artist:Artist 1", "mute", now=2)
     store.tracks.upsert_track("v2", "Song 2", "Artist 2", None, None)
@@ -92,21 +201,27 @@ def test_discovery_can_show_one_song_without_claiming_a_mix_is_ready(store):
     assert "New recommendations will appear" not in response.text
 
 
-def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(store, monkeypatch):
-    seed_songs(store)
+def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(store, monkeypatch, discovery_songs):
     store.discovery.upsert_discovered_album('retained-album', 'Artist', 'Retained album', '2026', None, 1)
     client = client_for(store, 'discovery')
     assert 'Retained album' in client.get('/home/discovery').text
     with store.conn:
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-                           "('home_prepared','home_tuned','home_choice','mode_bundles','fresh_pool')")
+        store.conn.execute('BEGIN IMMEDIATE')
+        clear_model_display(store.conn)
+    assert store.rec_proposals.get_proposals('home_choice') is None
 
     def forbidden(*args, **kwargs):
         raise AssertionError('Refreshing discovery must not prepare or rank candidates')
 
     monkeypatch.setattr(home_prepared, 'prepare', forbidden)
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', forbidden)
     monkeypatch.setattr(discover, 'pick_discovered_albums', forbidden)
-    monkeypatch.setattr(fresh_pool, 'pick', forbidden)
+    monkeypatch.setattr(discover.ContentProjection, 'fit', forbidden)
+    monkeypatch.setattr(surfaces, 'cold_candidates', forbidden)
+    monkeypatch.setattr(fresh_pool, 'prepare', forbidden)
+    # The journey gate may read the existing ranked Fresh reserve. Forbid
+    # ranking itself, rather than its bounded, eligibility-filtered reader.
+    monkeypatch.setattr(home_vibe, 'rank', forbidden)
     response = client.get('/home/discovery')
     assert 'Retained album' in response.text and 'Songs to discover' in response.text
     assert 'Finding new music for you' not in response.text
@@ -120,10 +235,9 @@ def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(st
     assert 'data-discovery-id="song 1|artist 1"' not in response.text
 
 
-def test_discovery_publishes_even_when_mix_assembly_is_deferred(store, monkeypatch):
+def test_discovery_publishes_even_when_mix_assembly_is_deferred(store, monkeypatch, discovery_songs):
     from yt_playlist.core.activity import WorkBudgetExceeded
 
-    seed_songs(store)
     store.discovery.upsert_discovered_album('ready', 'Artist', 'Ready independently', '2026', None, 1)
     def exhausted(*args):
         raise WorkBudgetExceeded('Mix assembly is still catching up')
@@ -135,13 +249,15 @@ def test_discovery_publishes_even_when_mix_assembly_is_deferred(store, monkeypat
     assert len(selection['discovery_tracks']) == 10
 
 
-def test_new_discovery_pool_is_served_while_mix_projection_is_unchanged(store):
-    seed_songs(store)
+def test_new_discovery_pool_is_served_while_mix_projection_is_unchanged(store, discovery_songs):
     home_prepared.prepare(store, 3)
     old_mix_projection = home_prepared.load(store, 3)
     assert old_mix_projection and not old_mix_projection['discovery_albums']
+    persisted_mix = store.rec_proposals.get_proposals(home_prepared.SURFACE)
+    assert persisted_mix is not None
     store.discovery.upsert_discovered_album('new-album', 'Artist', 'Fresh arrival', '2026', None, 4)
     home_prepared.prepare_discovery(store, 4)
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == persisted_mix
     selection = home_prepared.discovery(store, old_mix_projection, 4)
     assert [a['browse_id'] for a in selection['discovery_albums']] == ['new-album']
 
@@ -149,8 +265,8 @@ def test_new_discovery_pool_is_served_while_mix_projection_is_unchanged(store):
 @pytest.mark.parametrize('bad_row', [None, {'browse_id': []},
     {'browse_id': 'bad', 'artist': []}, {'browse_id': 'bad', 'artist': 'Artist', 'genre': {}},
 ])
-def test_corrupt_independent_discovery_pool_cannot_crash_a_refresh(store, bad_row):
-    client = client_for(store)
+def test_corrupt_independent_discovery_pool_cannot_crash_a_refresh(store, bad_row, empty_discovery_home):
+    client = client_for(store, prepare=False)
     store.rec_proposals.put_proposals(home_prepared.DISCOVERY_SURFACE, {
         'discovery_albums': [bad_row], 'discovery_artists': [], 'discovery_tracks': []}, 1)
     assert home_prepared.load_discovery(store) is None
@@ -178,8 +294,8 @@ def test_missing_artist_art_is_queued_and_repaired_image_appears_without_reranki
 
 
 @pytest.mark.parametrize("busy", ["idle", "rebuild", "discovery"])
-def test_empty_discovery_has_one_honest_state_and_no_idle_polling(store, busy):
-    response = client_for(store, busy).get("/home/discovery")
+def test_empty_discovery_has_one_honest_state_and_no_idle_polling(store, busy, empty_discovery_home):
+    response = client_for(store, busy, prepare=False).get("/home/discovery")
     assert response.status_code == 200
     assert response.text.count('role="status"') == 1
     assert response.text.count('hx-get="/home/discovery"') == int(busy != "idle")

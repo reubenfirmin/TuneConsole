@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from yt_playlist.rec import embed, graduation, rec_params, scoring, surfaces
-from yt_playlist.util import genre_map
 from yt_playlist.web.context import request_form
 
 # feedback kinds that suppress an item (vs 'more'/'less' which only nudge future weights)
@@ -21,10 +20,18 @@ def _feedback_axis(store, form, reason, item):
     axis = form.get("axis")
     if axis and axis.split(":", 1)[0] in ("genre", "era", "artist", "pop"):
         return axis
+    if reason not in ("vibe", "era", "artist", "mainstream"):
+        return None
+    # Metadata and its canonical facet must come from one owned read. A
+    # synchronized metadata method alone does not protect the later raw genre
+    # lookup from borrowing another thread's uncommitted serving transaction.
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return _feedback_axis(reader, form, reason, item)
     dao = store.rec_query
     if reason == "vibe":
         g = dao.track_genres([item]).get(item)
-        return f"genre:{genre_map.family(g)}" if g else None
+        return f"genre:{store.genres.feature_axes([g])[g][0]}" if g else None
     if reason == "era":
         d = dao.track_decades([item]).get(item)
         return f"era:{d}" if d else None
@@ -178,7 +185,7 @@ def build(ctx) -> APIRouter:
         except (TypeError, ValueError):
             return HTMLResponse("", status_code=422)
         pl = store.playlists.get_playlist(pid)
-        recipe = store.playlist_recipes.get_recipe(pl.scope_ref) if pl else None
+        recipe = store.playlist_recipes.get_recipe(pl.playlist_scope_id) if pl else None
         journey = (recipe or {}).get("journey")
         if journey:
             graduation.graduate_facet(store, f"journey:{journey}", 1 if direction >= 0 else -1, now_fn())

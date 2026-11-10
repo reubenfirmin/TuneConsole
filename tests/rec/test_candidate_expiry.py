@@ -2,12 +2,139 @@
 import logging
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
-from tests.rec.test_candidate_refresh import candidate, library, no_fit, refresh
+from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
+from tests.genre_catalog_support import bound_catalog
+from tests.rec.test_model_refresh import native_model_input_sql, refresh_costs
+from tests.prepared_fixture_support import prepared_template
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema
+from tests.rec.test_candidate_refresh import candidate, no_fit
 from yt_playlist.core.store import Store
-from yt_playlist.rec import candidate_refresh, embedding_training as embed
+from yt_playlist.rec import candidate_refresh, embedding_training as embed, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
+
+
+@pytest.fixture(scope='module')
+def expiry_rankers():
+    from yt_playlist.rec import measurement, rec_params, surfaces, taste_modes, vibe_pools
+
+    # The subject is suppression expiry in Wheelhouse. Keep its real eligibility,
+    # policy capture and typed publication; other lanes/presets have independent
+    # ranking owners and need not be republished for every expiry transition.
+    # Every expiry transition and the idle maintenance loop below execute
+    # synchronously on private SQL. Handle admission and diagnostic clocks
+    # belong below this owner; real snapshots, guards and publications remain.
+    with pytest.MonkeyPatch.context() as patch, native_model_input_sql():
+        rank = surfaces.for_you
+        patch.setattr(surfaces, 'for_you',
+            lambda store, now, **kw: rank(store, now, limit=1))
+        # Fitted scores are a lower-layer input. Their derivation from playlist
+        # taste, decayed weights and transient mood is owned by test_recommend,
+        # test_playlist_taste and test_mood. The real ranker reads SQL candidates,
+        # applies suppression and excludes removed/unavailable recordings.
+        patch.setattr(surfaces, 'playlist_taste', lambda *a, **kw: object())
+        patch.setattr(surfaces, '_score_candidates',
+            lambda store, pt, keys, vectors, index, now, **kw:
+                {key: float(i) for i, key in enumerate(keys)})
+        for name in ('explore_for_you', 'comfort_listening', 'cold_candidates'):
+            patch.setattr(surfaces, name, lambda *a, **kw: [])
+        # Expiry applies to the complete Wheelhouse pool independently of mode
+        # attribution. Mode buckets, Radio membership and temporal lanes have
+        # their own publication checks in test_ranking_playback_publication.
+        patch.setattr(taste_modes, 'live_modes', lambda *a, **kw: [])
+        patch.setattr(vibe_pools, 'prepare', lambda *a, **kw: None)
+        # Retiring unrelated old policies is not part of feedback expiry. The
+        # retention and policy-storage modules own that lower-layer operation.
+        patch.setattr(measurement, 'maintain_storage', lambda *a, **kw: None)
+        # Model/policy fingerprinting is independently covered by
+        # test_measurement_isolation and test_typed_policy_storage. Keep real
+        # suppression reads, policy records and publication here.
+        patch.setattr(measurement, 'serving_policy', lambda store, now, **kw:
+            ('expiry-inputs', {'schema': 4, 'algorithm': 'expiry-fixture',
+                              'suppressed': sorted(store.rec_model.suppressed_keys('for_you', now))}))
+        # These checks never change result-shaping knobs. Their registry and
+        # persisted overrides are covered by test_rec_params/candidate_refresh.
+        defaults = {spec.name: int(spec.default) if spec.integer else spec.default
+                    for spec in rec_params.PARAMS}
+        patch.setattr(rec_params, 'get_param', lambda store, name: defaults[name])
+        calculate = mode_surfaces._calculate_bundles
+
+        def wheelhouse(reader, now, policies):
+            payload, _ = calculate(reader, now, policies)
+            # Do not stage four unrelated empty surface pools on every clock
+            # transition. The selected pool, durable policies and deadline
+            # settings still pass through the actual typed publisher.
+            return {'all': {'wheelhouse': payload['all']['wheelhouse']},
+                    '_meta': payload['_meta']}, None
+
+        patch.setattr(mode_surfaces, '_calculate_bundles', wheelhouse)
+        yield
+
+
+@pytest.fixture(scope='module')
+def candidate_expiry_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'))) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def candidate_library_template(candidate_expiry_schema, expiry_rankers):
+    """Expiry needs ranked subjects and fitted vectors, not mode discovery.
+
+    Keep three genres, overlapping playlists and real saved vectors/ranks. The
+    mode-discovery threshold and full model/pool comparison remain covered by
+    test_model_refresh and test_ranking_playback_publication.
+    """
+    def build(store):
+        with store._lock:
+            account = store.accounts.upsert_account('Listener', 'fixture', None, True)
+            # Expiry consumes completed catalog inputs. Keep all three subjects,
+            # memberships and genres without provider delivery/artist inference.
+            seed_publication_subjects(store, [
+                {'key': f'expiry-{i}', 'title': f'Song {i}', 'artist': f'Artist {i}',
+                 'video_id': f'v{i}', 'genre': ('Techno', 'Jazz', 'Rock')[i]}
+                for i in range(3)])
+            tids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+            for i, members in enumerate((tids[:2], tids[1:])):
+                playlist = store.playlists.upsert_playlist(account, f'p{i}', f'Playlist {i}', len(members), '', 1)
+                store.playlists.set_playlist_tracks(playlist, members)
+            store.history.import_play_events(account, [(f'expiry-{i}', f'v{i}', 1000 + i) for i in range(3)])
+            # A completed fit is an input to expiry. Training itself is owned by
+            # test_model_refresh; retain nonempty vectors so no-refit assertions
+            # cannot pass merely because this fixture has no model.
+            store.rec_model.replace_rec_vectors([
+                (f'expiry-{i}', np.array([1., (i + 1) / 3], np.float32).tobytes())
+                for i in range(3)])
+        refresh(store)
+        rows = store.recommendations.page('home', 'all', 'wheelhouse')
+        assert rows
+        return rows[0]['key']
+
+    with prepared_template(candidate_expiry_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def store(candidate_library_template):
+    # Every case consumes already ranked inputs. Clone those once, including
+    # their genuine guards/files, instead of initializing and replacing an
+    # empty consumer before restoring the same prepared inputs again.
+    with candidate_library_template.open(':memory:') as consumer:
+        # These clock/feedback transitions are synchronous and uncontended.
+        # Read their committed results under the consumer's real lock rather
+        # than cloning the same in-memory SQL for each reporting assertion.
+        # refresh() still opens its actual guarded publication snapshots.
+        with consumer._lock:
+            yield consumer
+
+
+def refresh(store, now=2000):
+    # Feedback and expiry change ranking eligibility, not fitted inputs. These
+    # cases own real reranking/publication; model rebuilding has separate owners.
+    assert mode_surfaces.prepare_bundles(store, now) is not None
 
 
 def snooze(store, key, until=3000.1, now=2100):
@@ -16,8 +143,18 @@ def snooze(store, key, until=3000.1, now=2100):
     assert candidate(store, key) is None
 
 
-def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeypatch):
-    key = library(store)
+def test_candidate_expiry_inputs_publish_a_ranked_wheelhouse(candidate_library_template):
+    source = candidate_library_template.source
+    with source._lock:
+        assert candidate(source, candidate_library_template.result)
+        assert {key for key, _vector in source.rec_model.get_rec_vectors()} == {'expiry-0', 'expiry-1', 'expiry-2'}
+        assert len(source.rec_query.library_keys()) == 3
+        assert source.rec_model.suppressed_keys('for_you', 2000) == set()
+        assert source.recommendations.head('home') is not None
+
+
+def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeypatch, candidate_library_template):
+    key = candidate_library_template.result
     snooze(store, key)
     vectors = store.rec_model.get_rec_vectors()
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
@@ -30,8 +167,9 @@ def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeyp
 
 
 @pytest.mark.parametrize('permanent', [False, True])
-def test_old_deadline_respects_renewal_and_permanent_blocks(store, monkeypatch, permanent):
-    key = library(store)
+def test_old_deadline_respects_renewal_and_permanent_blocks(
+        store, monkeypatch, permanent, candidate_library_template):
+    key = candidate_library_template.result
     snooze(store, key)
     store.rec_model.record_feedback('for_you', key, 'dismiss' if permanent else 'not_now',
                                    until=None if permanent else 4000, now=2500)
@@ -44,8 +182,9 @@ def test_old_deadline_respects_renewal_and_permanent_blocks(store, monkeypatch, 
 
 
 @pytest.mark.parametrize('removed', [False, True])
-def test_expiry_preserves_unavailable_and_removed_sources(store, monkeypatch, removed):
-    key = library(store)
+def test_expiry_preserves_unavailable_and_removed_sources(
+        store, monkeypatch, removed, candidate_library_template):
+    key = candidate_library_template.result
     snooze(store, key)
     with store.conn:
         if removed:
@@ -61,26 +200,42 @@ def test_expiry_preserves_unavailable_and_removed_sources(store, monkeypatch, re
     assert candidate(store, key) is None
 
 
-def test_expiry_survives_restart(tmp_path, monkeypatch):
+def test_expiry_survives_restart(tmp_path, monkeypatch, candidate_library_template):
+    # Reopen the actual snoozed file. Capturing and cloning a second snoozed
+    # template repeats the same SQL/file copy without another expiry state.
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock')))
     path = tmp_path / 'expiry.db'
-    store = Store(path)
-    store.init_schema()
-    key = library(store)
-    snooze(store, key)
-    store.conn.close()
+    key = candidate_library_template.result
+    with candidate_library_template.source._lock:
+        original_vectors = candidate_library_template.source.rec_model.get_rec_vectors()
+    with candidate_library_template.open(path) as store, store._lock:
+        vectors = store.rec_model.get_rec_vectors()
+        assert vectors == original_vectors
+        snooze(store, key)
+        assert not candidate_refresh.due(store, 3000)
+        assert candidate_refresh.due(store, 3000.1)
+        assert store.rec_model.get_rec_vectors() == vectors
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     store = Store(path)
     try:
+        # Keep real startup admission and committed persistence across restart;
+        # power-loss durability is outside this disposable fixture's contract.
+        store.conn.execute('PRAGMA synchronous=OFF')
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
         store.init_schema()
-        assert candidate_refresh.due(store, 3100)
+        with store.read_view() as reader:
+            assert reader.rec_model.get_rec_vectors() == vectors
+            assert candidate_refresh.due(reader, 3100)
         refresh(store, 3100)
-        assert candidate(store, key)
+        with store.read_view() as reader:
+            assert candidate(reader, key)
+            assert reader.rec_model.get_rec_vectors() == vectors
     finally:
         store.conn.close()
 
 
-def test_idle_worker_notices_expiry(store, monkeypatch):
-    key = library(store)
+def test_idle_worker_notices_expiry(store, monkeypatch, candidate_library_template):
+    key = candidate_library_template.result
     snooze(store, key)
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 3100,
         logger=logging.getLogger(__name__)), enabled=False)
@@ -89,8 +244,10 @@ def test_idle_worker_notices_expiry(store, monkeypatch):
     monkeypatch.setattr(worker.projections, 'poll', lambda: None)
     # This check isolates suppression expiry from independent content preparation.
     monkeypatch.setattr(worker.preparation, 'due', lambda now: False)
+    monkeypatch.setattr(worker.preparation, 'full_due', lambda now: False)
     monkeypatch.setattr(worker, '_poll_choices', lambda: None)
     monkeypatch.setattr(worker, '_poll_evidence_storage', lambda: None)
+    monkeypatch.setattr(worker, '_poll_retention', lambda: None)
     monkeypatch.setattr(worker, '_poll_tv', lambda: None)
     triggers = []
     monkeypatch.setattr(worker, '_schedule', lambda **kwargs: triggers.append(kwargs))

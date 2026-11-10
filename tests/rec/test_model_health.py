@@ -1,5 +1,6 @@
 """Requests read bounded prepared diagnostics; the worker owns all fitting."""
 import logging
+from tests.enrichment_support import seed_audio
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -98,13 +99,13 @@ def test_worker_failure_retries_with_backoff(store, monkeypatch):
 
 
 def test_health_generation_tracks_enrichment_listening_and_model_settings(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     track = store.tracks.upsert_track('v', 'Song', 'Artist', None, 180)
     mutations = [
-        lambda: store.tracks.set_track_audio(track, energy=0.8),
+        lambda: seed_audio(store, track, energy=0.8),
         lambda: store.history.record_history_plays(iid, 1000, ['song'], source_timezone='UTC'),
         lambda: store.settings.set_setting('rec_cooc_weighting', '1'),
-        lambda: store.rec_model.replace_rec_vectors([('song', b'\0\0\0\0')]),
+        lambda: store.rec_model.replace_rec_vectors([('song|artist', b'\0\0\0\0')]),
     ]
     for mutate in mutations:
         before = model_health.input_key(store, 1000)
@@ -113,3 +114,31 @@ def test_health_generation_tracks_enrichment_listening_and_model_settings(store)
     before = model_health.input_key(store, 1000)
     store.player_events.record_player_event(iid, 'progress', 'v', 30, 200, None, '{}', 1000)
     assert model_health.input_key(store, 1000) == before
+
+
+def test_new_embedding_publication_invalidates_report_and_rejects_stale_refresh(store, monkeypatch):
+    import numpy as np
+
+    store.tracks.upsert_track('v', 'Song', 'Artist', None, 180)
+    key = store.tracks.identity_key_for_video('v')
+    store.rec_model.replace_rec_vectors([(key, np.array([1., 0.], dtype=np.float32).tobytes())])
+    previous = model_health.prepare(store, 1000)
+    assert previous is not None and not model_health.view(store, 1000)['health_pending']
+
+    store.rec_model.replace_rec_vectors([(key, np.array([0., 1.], dtype=np.float32).tobytes())])
+    assert model_health.view(store, 1000)['health_pending']
+    assert store.rec_proposals.get_proposals(model_health.SURFACE) == previous
+
+    def replace_while_fitting(*args, **kwargs):
+        store.rec_model.replace_rec_vectors([(key, np.array([.5, .5], dtype=np.float32).tobytes())])
+        return previous['proj']
+
+    with monkeypatch.context() as patch:
+        patch.setattr(eval_recs, 'projection_recall', replace_while_fitting)
+        assert model_health.prepare(store, 1001) is None
+    assert store.rec_proposals.get_proposals(model_health.SURFACE) == previous
+    assert model_health.view(store, 1001)['health_pending']
+
+    refreshed = model_health.prepare(store, 1002)
+    assert refreshed is not None and refreshed['inputs'] != previous['inputs']
+    assert not model_health.view(store, 1002)['health_pending']

@@ -4,41 +4,15 @@ The hand-editable genre_families.json supplies curated anchors, distance and ene
 catalog projects explicit MusicBrainz parent relationships onto those same two levels. Unmapped
 or ambiguous genres keep a singleton family (distance 1 to everything else).
 """
-import functools
-import json
-from pathlib import Path
-
-from yt_playlist.util import genre_catalog
-_DATA = Path(__file__).parent.parent / "data" / "genre_families.json"   # data/ lives at the package root
-
-
-@functools.lru_cache(maxsize=1)
-def _load():
-    raw = json.loads(_DATA.read_text())
-    families = raw["families"]
-    adjacency = raw["adjacency"]
-    energy = raw.get("energy", {})
-    genre_to_family = {}
-    for fam, genres in families.items():
-        for g in genres:
-            genre_to_family[genre_catalog.normalize(g)] = fam
-    records, labels = genre_catalog.catalog()
-    for label, (key, _, _) in labels.items():
-        if fam := records[key]["family"]:
-            genre_to_family[label] = fam
-    families = {fam: sorted(set(members) | {
-        r["name"].lower() for r in records.values() if r["family"] == fam
-    }) for fam, members in families.items()}
-    return genre_to_family, adjacency, energy, families
+from yt_playlist.util import genre_catalog, genre_family_data
+from yt_playlist.util.genre_family_data import load as _load
 
 
 def family(genre) -> str:
     """Family for a genre (case-insensitive). Unknown genres map to 'other:<genre>' (singleton)."""
     if not genre:
         return ""
-    g = genre.strip().lower()
-    g2f, _, _, _ = _load()
-    return g2f.get(genre_catalog.normalize(g), f"other:{g}")
+    return genre_family_data.family(genre)
 
 
 def family_distance(fam_a, fam_b) -> float:

@@ -2,7 +2,7 @@
 # Build a Chrome Web Store upload package (a ZIP of the extension/ directory).
 #
 # The Web Store wants a plain ZIP of the extension's files: it repackages and signs the upload.
-# Public builds omit the manifest's development `key`.
+# Public builds include the verified audio runtime and omit the development `key`.
 # Run: scripts/build-extension.sh
 set -euo pipefail
 
@@ -22,13 +22,13 @@ VERSION="$(python3 -c "import json; print(json.load(open('$EXT_DIR/manifest.json
 mkdir -p "$OUT_DIR"
 ZIP="$OUT_DIR/tuneconsole-extension-$VERSION.zip"
 ZIP_ABS="$(pwd)/$ZIP"
-rm -f "$ZIP_ABS"
 
 # Stage into a temp dir so the source manifest stays unchanged.
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -r "$EXT_DIR/." "$STAGE/"
 rm -f "$STAGE/README.md"
+python3 scripts/audio_model/bundle.py --destination "$STAGE/audio_model"
 python3 - "$STAGE" <<'PY'
 import json
 import sys
@@ -42,7 +42,10 @@ manifest.write_text(json.dumps(m, indent=2) + "\n")
 
 PY
 
-( cd "$STAGE" && zip -rq "$ZIP_ABS" . -x ".*" -x "*/.*" -x "*.map" -x "audio_model/*" )
+# Use a fresh ZIP so removed source files cannot survive an incremental rebuild.
+ARCHIVE="$STAGE/package.zip"
+( cd "$STAGE" && zip -rq "$ARCHIVE" . -x ".*" -x "*/.*" -x "*.map" -x "package.zip" )
+mv "$ARCHIVE" "$ZIP_ABS"
 
 echo "Built $ZIP"
 echo "Development key stripped for the Web Store."

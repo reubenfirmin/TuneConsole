@@ -19,6 +19,7 @@ from yt_playlist.core.metadata_observations import SubjectChanged
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz
 from yt_playlist.providers import base, coverart
+from yt_playlist.core import provider_queries
 from yt_playlist.providers.enrich_queue import PriorityGate
 from yt_playlist.util.thumbnails import is_placeholder_art
 from yt_playlist.util import net
@@ -44,10 +45,26 @@ class TrackSink:
     def __init__(self, store, track, providers=()):
         self.store, self.track = store, track
         self.providers = providers
+        self.results = {}
+
+    def capture_result(self, run_id, provider, fields, now):
+        captured = self.store.enrichment_state.capture_provider_result(
+            self.track['id'], provider, fields, run_id=run_id, now=now)
+        if captured is not None:
+            self.results[provider] = captured
+
+    def result_delivery(self, provider):
+        return self.results.get(provider, (None, {}))[0]
 
     def apply_fields(self, provider, fields):
         self.store.enrichment.apply_provider_fields(self.track['id'],provider,fields,
-                                                   providers=self.providers)
+            providers=self.providers, delivery_id=self.result_delivery(provider))
+
+    def reuse_fields(self, provider, fields, now, *, select=True):
+        observations = self.store.enrichment.reuse_provider_fields(
+            self.track['id'], provider, fields, providers=self.providers, now=now, select=select)
+        if observations is not None:
+            self.results[provider] = None, observations
 
     def record_observations(self, run_id, provider, observations, now):
         self.store.enrichment_state.record_metadata_observations(
@@ -63,9 +80,14 @@ class TrackSink:
             self.store.enrichment_state.record_artwork_result(self.track["id"], release_ids, outcome, now)
 
     def log(self, run_id, provider, field, value):
-        self.store.enrichment_state.log_enrichment(self.track["id"], run_id, provider, field, value)
+        self.store.enrichment_state.log_enrichment(self.track["id"], run_id, provider, field, value,
+                                                   delivery_id=self.result_delivery(provider))
 
     def upsert_conflict(self, field, candidates, *, refreshed_providers=None):
+        canonical = 'mb_year' if field == 'year' else field
+        candidates = [{**candidate, 'observation_id': self.results[candidate['provider']][1][canonical]}
+                      if canonical in self.results.get(candidate['provider'], (None, {}))[1] else candidate
+                      for candidate in candidates]
         self.store.enrichment.upsert_conflict(self.track["id"], field, candidates,
                                    refreshed_providers=refreshed_providers)
 
@@ -187,9 +209,6 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
         return []
 
     cooldowns = store.enrichment_state.enrichment_cooldowns()
-    for m in chosen:
-        if cooldowns.get(m.name, {}).get("retry_at", 0) <= now_fn():
-            m.reset()
     names = ", ".join(m.name for m in chosen)
     on_progress({"type": "info", "text": f"Enriching {total} track(s) via {names}…", "total": total})
     seq = _gate.enter()
@@ -218,7 +237,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
             stale = False
             key = t.get("identity_key") or identity_key(t["title"], t.get("artist", ""))
             coverage = t.get("provider_jobs")
-            saved = store.enrichment_state.enrichment_provider_state(t["recording_id"], include_previous=coverage is not None)
+            saved = store.enrichment_state.enrichment_provider_state(t["recording_id"], include_previous=coverage is not None, entry_id=t['id'])
             if coverage is not None:
                 # Historical attempts predate explicit coverage scheduling. Their retained answers
                 # still supply context while only the newly available provider performs requests.
@@ -234,6 +253,13 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 prior = saved.get(m.name, {})
                 if coverage is not None and m.name not in coverage:
                     if prior.get("status") in ("found", "no_match"):
+                        if isinstance(sink, TrackSink):
+                            try:
+                                with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
+                                    sink.reuse_fields(m.name, prior['fields'], now_fn(), select=False)
+                            except SubjectChanged:
+                                stale = True
+                                break
                         results.append(base.EnrichmentResult(m.name, prior["fields"]))
                         successful.add(m.name)
                     attempted += 1
@@ -242,7 +268,12 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     res = base.EnrichmentResult(m.name, prior["fields"])
                     try:
                         with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
-                            _apply(sink, t, res)
+                            if isinstance(sink, TrackSink):
+                                sink.reuse_fields(m.name, res.fields, now_fn())
+                                if res.fields.get('mb_recording_id'):
+                                    t['mb_recording_id'] = store.tracks.track_for_waterfall(t['id'])['mb_recording_id']
+                            else:
+                                _apply(sink, t, res)
                     except SubjectChanged:
                         stale = True
                         break
@@ -251,6 +282,11 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     attempted += 1
                     continue
                 if m.name in dead:
+                    continue
+                reason = provider_queries.deferred_reason(m.name, t)
+                if reason:
+                    on_progress({"type": "info", "provider": m.name, "deferred": "metadata",
+                                 "text": f"{labels[m.name]}: {reason}"})
                     continue
                 deadline = max(prior.get("retry_at", 0),
                                cooldowns.get(m.name, {}).get("retry_at", 0))
@@ -266,8 +302,14 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 with net.probe_errors() as errors:
                     try:
                         res = m.probe(t, store)
+                        if res.deferred_reason:
+                            on_progress({"type": "info", "provider": m.name, "deferred": "metadata",
+                                         "text": f"{labels[m.name]}: {res.deferred_reason}"})
+                            continue
                         with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
                             fields = dict(res.fields)
+                            if isinstance(sink, TrackSink):
+                                sink.capture_result(run_id, m.name, fields, now_fn())
                             if res.observations:
                                 sink.record_observations(run_id, m.name, res.observations, now_fn())
                             for fld, val in fields.items():
@@ -282,12 +324,15 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                         raise
                     except Exception as exc:
                         # One malformed answer must not abort healthy providers or later tracks.
-                        fields = {}
+                        # A result captured before native validation/application
+                        # remains the supplying evidence for its retry outcome.
+                        # Replacing it with an empty answer would change the
+                        # immutable delivery under the same actual run identity.
+                        if not isinstance(sink, TrackSink) or sink.result_delivery(m.name) is None:
+                            fields = {}
                         if not any(error is exc for error in errors):
                             net.record_probe_failure(exc)
                 retry = bool(errors) or m.tripped()
-                outage = m.tripped() or any(net.provider_outage(e) and
-                    getattr(e, 'provider', m.name) == m.name for e in errors)
                 now = now_fn()
                 error = "; ".join(str(e) or type(e).__name__ for e in errors)
                 if m.tripped() and not error:
@@ -296,10 +341,11 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
                         store.enrichment_state.record_enrichment_attempt(
                             key, m.name, fields, retry=retry, video_id=t.get("video_id"), now=now,
-                            error=error, cooldown=outage,
+                            error=error,
                             retry_after=max((net.retry_after(e, now) for e in errors), default=0),
                             providers=[mod.name for mod in chosen],
-                            manage_cooldown=not getattr(m, 'manages_availability', False))
+                            **({'run_id': run_id, 'delivery_id': sink.result_delivery(m.name)}
+                               if isinstance(sink, TrackSink) else {}))
                 except SubjectChanged:
                     stale = True
                     break
@@ -354,7 +400,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
         remaining = total - len(fully_attempted)
         retry_note = f" {remaining} track(s) remain queued for retry." if remaining else ""
         on_progress({"type": "done", "text": f"Checked {len(fully_attempted)} track(s).{note}{retry_note}",
-                     "total": len(fully_attempted), "conflicts": conflicts_found})
+                     "total": len(fully_attempted), "remaining": remaining, "conflicts": conflicts_found})
         return fully_attempted
     finally:
         _gate.leave(seq)

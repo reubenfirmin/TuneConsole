@@ -16,13 +16,18 @@ const window = new EventTarget(), document = new EventTarget(), calls = [], hand
 const session = {setActionHandler: (name,handler) => { handlers[name]=handler; }};
 window.navigator = {mediaSession:session};
 window.MediaMetadata = class {constructor(data) {Object.assign(this,data);}};
-let refreshes = 0, releaseNext;
+let refreshes = 0, releaseNext, holdControl = false, timerId = 0;
+const deadlines = new Map();
 window.playbackStatus = {snapshot:{connected:true,now_playing:{video_id:'one',title:'Song',artist:'Artist',paused:false}},
   refresh: () => {refreshes++;}};
 const context = vm.createContext({window,document,fetch: (url,options) => {
   calls.push({url,options});
+  if (holdControl) return new Promise((resolve,reject) =>
+    options.signal.addEventListener('abort', () => reject(Error('timeout')), {once:true}));
   return url.endsWith('/next') ? new Promise(resolve => {releaseNext=resolve;}) : Promise.resolve({ok:true});
-}, encodeURIComponent});
+}, encodeURIComponent, AbortController,
+  setTimeout: (fn,ms) => {deadlines.set(++timerId,{fn,ms}); return timerId;},
+  clearTimeout: id => deadlines.delete(id)});
 const source = fs.readFileSync('src/yt_playlist/web/static/playback-controls.js','utf8');
 vm.runInContext(source,context); vm.runInContext(source,context);
 const key = (properties={}) => {
@@ -84,11 +89,33 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(calls.length,resumedCalls,'expired display cannot skip and pause is idempotent');
   window.playbackStatus.snapshot.connected=false;
   assert(!key().defaultPrevented); handlers.play(); assert.equal(calls.length,resumedCalls);
+  // A browser restart has no native paused player. Space/media Play reclaim
+  // the checkpoint once, then release the control after a bounded lost reply.
+  const saved = {video_id:'saved-upload',title:'Saved radio',paused:true,
+    playlist_ytm_id:'PLSAVED',radio_session_id:'episode'};
+  window.playbackStatus.snapshot = {connected:true,radio_resume:saved};
+  window.dispatchEvent(new Event('bridge-status'));
+  assert.equal(session.playbackState,'paused');
+  assert.equal(session.metadata.title,'Saved radio');
+  holdControl=true;
+  const beforeRecovery=calls.length;
+  assert(key().defaultPrevented); handlers.play(); handlers.nexttrack(); await flush();
+  assert.equal(calls.length,beforeRecovery+1);
+  assert.equal(calls.at(-1).url,'/radio/resume');
+  assert.deepEqual(JSON.parse(calls.at(-1).options.body),
+    {playlist_id:'PLSAVED',video_id:'saved-upload',episode_id:'episode'});
+  assert.equal(session.playbackState,'paused','navigation is not playing confirmation');
+  [...deadlines.values()].find(timer => timer.ms===12000).fn(); await flush();
+  assert(calls.at(-1).options.signal.aborted);
+  assert.equal(deadlines.size,0);
+  holdControl=false; handlers.play(); await flush();
+  assert.equal(calls.length,beforeRecovery+2,'the user can retake control after a stalled request');
+  const recoveredCalls=calls.length;
   // Clicking a playback anchor leaves it focused, but anchors have no native Space action.
   window.playbackStatus.snapshot = {connected:true,now_playing:{video_id:'one',paused:false}};
   const anchor = {closest: filter => filter.split(',').some(part => part.trim() === 'a') ? anchor : null};
   assert(key({target:anchor}).defaultPrevented); await flush();
-  assert.equal(calls.length,resumedCalls+1);
+  assert.equal(calls.length,recoveredCalls+1);
   // Browsers without Media Session retain the keyboard shortcut.
   const plainWindow = new EventTarget(); plainWindow.playbackStatus = window.playbackStatus;
   vm.runInContext(source,vm.createContext({window:plainWindow,document:new EventTarget(),fetch:()=>{},encodeURIComponent}));

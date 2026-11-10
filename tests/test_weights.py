@@ -6,7 +6,7 @@ from yt_playlist.web.app import create_app
 
 def test_nudge_clamps_and_shrinks(store):
     import pytest
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     w = store.rec_model.nudge_weight("lane:deep_cut", 0.5)
     assert 0.2 <= w < 1.0                       # moved down, within clamp
     store.rec_model.set_weight("lane:x", 2.0, now=1000.0)
@@ -16,7 +16,7 @@ def test_nudge_clamps_and_shrinks(store):
 
 
 def test_dismiss_with_lane_downweights_that_lane(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     c.post("/recs/feedback", data={"item": "x|y", "kind": "dismiss", "lane": "deep_cut"})
@@ -26,7 +26,7 @@ def test_dismiss_with_lane_downweights_that_lane(store):
 
 
 def test_for_you_prefers_higher_weighted_lane(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     day = 86400.0; now = 200 * day
     # a deep cut (deep_cut lane): artist played, plus a neglected track
     hit = store.tracks.upsert_track("h", "Hit", "Fav", None, None)

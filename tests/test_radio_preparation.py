@@ -1,11 +1,105 @@
 """Prepared-region upgrades and metadata enrichment during playback."""
-import json
+from contextlib import closing
 from types import SimpleNamespace
+from tests.enrichment_support import seed_enrichment
+import sqlite3
+import threading
 
 import pytest
 from yt_playlist.web import radio_session
 from yt_playlist.rec.radio_directions import RadioDirections
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import play, radio_controller
+from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import file_consumer_store, without_query_timing
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'native_sql_calls')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    """These controllers never construct the HTTP app or its periodic workers."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    from tests.store_fixture_support import bounded_consumer_schema
+
+    genres = (('ambient', 'Ambient'), ('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'))
+    with bounded_consumer_schema(genres) as schema:
+        yield schema
+
+
+@pytest.fixture
+def poc(monkeypatch, file_consumer_store):
+    from tests.recommendation_support import seed_publication_subjects
+    from yt_playlist.util.matching import identity_key
+
+    # Recovery consumes completed catalog rows; ingestion has its own owners.
+    # Keep all 32 subjects, actual SQL, revision guards and published files.
+    pool = [{'video_id': f'v{i}', 'title': f'Song {i}', 'artist': f'Artist {i}'}
+            for i in range(1, 33)]
+    for track in pool:
+        track['key'] = identity_key(track['title'], track['artist'])
+    seed_publication_subjects(file_consumer_store, pool)
+    with radio_controller(monkeypatch, file_consumer_store, pool) as state:
+        yield state
+
+
+@pytest.mark.parametrize('paused,ready', [(True, True), (False, False), (True, False)])
+def test_heartbeat_preparation_waits_until_maintenance_finishes(poc, monkeypatch, paused, ready):
+    c, _, _, workers, _ = poc
+    gate = threading.Event()
+    if ready:
+        gate.set()
+    c.ctx.storage_maintenance = SimpleNamespace(ready=gate)
+    c.ctx.store.activity_paused = paused
+    c.prepare()
+    assert not workers and not c.preparing
+    c.ctx.store.activity_paused = False
+    gate.set()
+    c.prepare()
+    assert len(workers) == 1 and c.preparing
+    calls = []
+    monkeypatch.setattr(c, 'join', lambda: calls.append('join'))
+    monkeypatch.setattr(c, 'seeds', lambda: calls.append('seeds'))
+    # A pause after scheduling also prevents work when the thread begins.
+    c.ctx.store.activity_paused = True
+    workers[0][0][0]()
+    assert calls == [] and not c.preparing
+    c.ctx.store.activity_paused = False
+    c.prepare()
+    workers[1][0][0]()
+    assert calls == ['join', 'seeds'] and not c.preparing
+
+
+@pytest.mark.parametrize('reader_first', [False, True])
+def test_prepared_reader_retires_its_lease_before_database_close(file_backed_store, reader_first):
+    from yt_playlist.core import group_documents
+    from yt_playlist.rec.stored_radio import PreparedRadio
+
+    store = file_backed_store
+    generation = publish_bundles(store, {'all': {}}, now=1000)
+    reader = PreparedRadio(store, 1001)
+    assert reader.generation == generation and reader._lifetime.alive
+    pending = group_documents.directory(store.conn) / '.pending'
+    assert len(list(pending.glob('*.lock'))) == 1
+    assert store.conn.execute("SELECT count(*) FROM group_evidence_owners WHERE kind='pending'").fetchone()[0] == 1
+    if reader_first:
+        reader.close()
+        assert not store.conn._before_close_callbacks
+    store.conn.close()
+    assert not list(pending.glob('*.lock'))
+    assert not store.conn._before_close_callbacks
+    # A session or old candidate can outlive shutdown. Its finalizer must be
+    # harmless after SQLite has closed, rather than attempting another write.
+    reader.close()
+    reader.close()
+    assert not reader._lifetime.alive
+    # Inspect the persisted rows before any startup repair can clean up leases.
+    with closing(sqlite3.connect(store._db_path)) as reopened:
+        assert not reopened.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+
 
 def prepare_radio_styles(controller, pool, monkeypatch):
     """Publish four real prepared regions after a session has already started cold."""
@@ -19,7 +113,7 @@ def prepare_radio_styles(controller, pool, monkeypatch):
     bundles, modes = {}, []
     genres = ("Ambient", "Techno", "Jazz", "Rock")
     for index, track in enumerate(pool):
-        store.tracks.set_track_enrichment(ids[track["video_id"]], genres[index // 8], "2001")
+        seed_enrichment(store, ids[track["video_id"]], genres[index // 8], "2001")
     build_content_model(store)
     keys = [pool[index * 8]["key"] for index in range(4)]
     vectors = store.rec_model.content_vectors_by_keys(keys)
@@ -31,7 +125,7 @@ def prepare_radio_styles(controller, pool, monkeypatch):
             "centroid": np.frombuffer(vectors[keys[index]], dtype=np.float32), "size": 8,
             "rep_keys": [keys[index]], "space": embed.content_space_id(store)})
     store.modes.replace_modes(modes, retired_ids=[], now=1234)
-    store.rec_proposals.put_proposals("mode_bundles", bundles, 1234)
+    publish_bundles(store, bundles, 1234)
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
 
 
@@ -71,7 +165,7 @@ def test_monitor_upgrades_fallback_to_distinct_prepared_streams_without_changing
     assert c.ctx.bridge.now_playing["video_id"] == "v2"
     assert remote.ids == [t["video_id"] for t in tracks]
     assert not remote.adds and not remote.removes and len(frames) == 1
-    saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+    saved = c.persistence.load()
     assert saved["fingerprint"] == s.candidates.fingerprint
 
 
@@ -176,7 +270,7 @@ def test_radio_refreshes_metadata_for_current_and_played_table_rows(poc, monkeyp
     ids = c.ctx.store.tracks.track_ids_for_videos([t["video_id"] for t in s.tracks[:2]])
     for track in s.tracks[:2]:
         tid = ids[track["video_id"]]
-        c.ctx.store.tracks.set_track_enrichment(tid, "Techno", "2001")
+        seed_enrichment(c.ctx.store, tid, "Techno", "2001")
     # Use the production catalog refresh against the fixture's deterministic sampler.
     s.candidates.store = c.ctx.store
     s.candidates.affinities = {}

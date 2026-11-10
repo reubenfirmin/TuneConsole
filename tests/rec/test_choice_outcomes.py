@@ -12,7 +12,7 @@ def menu(store, oid='menu', now=100, size=4):
 
 
 def test_player_ingest_attributes_only_confirmed_exact_account_queue_and_track(store):
-    iid = store.identities.upsert_identity('main', 'test', None, True)
+    iid = store.accounts.upsert_account('main', 'test', None, True)
     oid = menu(store)
     outcomes.bind(store, iid, 'OLAK-record', 'video-0', oid, 'record', 101)
     assert not outcomes.observe(store, iid + 1, 'OLAK-record', 'video-0', 'track_exit', 180, 200, 1, 102)
@@ -68,7 +68,7 @@ def test_fresh_choice_on_another_day_is_a_return_but_continuation_and_tab_close_
 
 
 def test_automatic_continuation_extends_experience_without_a_new_choice_or_start(store):
-    iid = store.identities.upsert_identity('main', 'test', None, True)
+    iid = store.accounts.upsert_account('main', 'test', None, True)
     oid = choices.issue(store, 'radio', [{'id': 'direction', 'tracks': []}], 100,
                         context={}, opportunity_id='direction-menu', episode_id='session')
     choices.respond(store, oid, 'choice', 101, option_id='direction')

@@ -4,9 +4,8 @@ import zipfile
 
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.library.spotify_data import (SpotifyDataFormatError, import_spotify_data,
-                                               load_streaming_history, prepare_streaming_history)
+                                               prepare_streaming_history)
 
 
 def _row(title="Song", artist="Artist", ts="2024-01-01T10:00:00Z", uri="spotify:track:abc"):
@@ -32,35 +31,37 @@ def test_zip_loads_every_audio_history_file_and_ignores_video_and_podcasts():
              "spotify_episode_uri": "spotify:episode:x"}],
         "Spotify Extended Streaming History/Streaming_History_Video_2024.json": [_row(title="Video")],
     })
-    rows, skipped = load_streaming_history(raw)
+    rows, quality = prepare_streaming_history(raw)
     assert [row["ts"] for row in rows] == sorted(row["ts"] for row in rows)
-    assert len(rows) == 2 and skipped == 1
+    assert len(rows) == 2
+    assert quality == {'invalid': 1, 'duplicates': 0, 'conflicting_duplicates': 0,
+                       'private': 0, 'short': 0, 'unknown_duration': 0,
+                       'parsed': 3, 'eligible': 2, 'skipped': 1}
 
 
 def test_plain_audio_json_is_supported_and_bad_upload_is_rejected():
-    assert len(load_streaming_history(json.dumps([_row()]))[0]) == 1
+    rows, quality = prepare_streaming_history(json.dumps([_row()]))
+    assert len(rows) == quality['eligible'] == 1 and quality['skipped'] == 0
     with pytest.raises(SpotifyDataFormatError):
-        load_streaming_history(b"not json")
+        prepare_streaming_history(b"not json")
     with pytest.raises(SpotifyDataFormatError):
-        load_streaming_history(_zip({"unrelated.json": []}))
+        prepare_streaming_history(_zip({"unrelated.json": []}))
 
 
-def test_import_matches_library_is_idempotent_and_marks_event_source():
-    store = Store(":memory:"); store.init_schema()
-    store.identities.upsert_identity("main", "bridge", None, True)
+def test_import_matches_library_is_idempotent_and_marks_event_source(store):
+    store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("yt-song", "Song", "Artist", None, 180)
     raw = json.dumps([_row(), _row("Unknown", "Elsewhere", "2024-01-02T10:00:00Z")])
     report = import_spotify_data(store, raw)
     assert report["matched"] == 1 and report["unmatched"] == 1
     assert report["plays_added"] == 1 and report["events_added"] == 1
-    event = store.conn.execute("SELECT video_id, source FROM play_events").fetchone()
+    event = store.conn.execute("SELECT p.video_id,s.source FROM play_events p JOIN play_event_sources s ON s.event_id=p.id").fetchone()
     assert tuple(event) == (None, "spotify_export")
     again = import_spotify_data(store, raw)
     assert again["plays_added"] == 0 and again["events_added"] == 0
 
 
-def test_no_identity_returns_error():
-    store = Store(":memory:"); store.init_schema()
+def test_no_identity_returns_error(store):
     assert import_spotify_data(store, json.dumps([])) == {"error": "no identity configured"}
 
 
@@ -73,17 +74,17 @@ def test_local_export_uses_configured_main_identity_instead_of_live_player_accou
     rows = [('main', main_brand, True), ('other', other_brand, False)]
     if not main_first:
         rows.reverse()
-    ids = {label:store.identities.upsert_identity(label, 'bridge', brand, main)
+    ids = {label:store.accounts.upsert_account(label, 'bridge', brand, main)
            for label,brand,main in rows}
     store.tracks.upsert_track('yt', 'Song', 'Artist', None, 180)
     report = import_spotify_data(store, json.dumps([_row()]))
     assert report['identity_id'] == ids['main']
-    assert store.conn.execute('SELECT identity_id FROM play_events').fetchone()[0] == ids['main']
-    assert store.conn.execute('SELECT identity_id FROM spotify_history_listens').fetchone()[0] == ids['main']
+    assert store.conn.execute('SELECT account_id FROM play_events').fetchone()[0] == ids['main']
+    assert store.conn.execute('SELECT account_id FROM spotify_history_listens').fetchone()[0] == ids['main']
 
 
 def test_local_export_works_when_the_only_identity_is_a_brand_account(store):
-    iid = store.identities.upsert_identity('My music', 'bridge', 'brand', True)
+    iid = store.accounts.upsert_account('My music', 'bridge', 'brand', True)
     store.tracks.upsert_track('yt', 'Song', 'Artist', None, 180)
     assert import_spotify_data(store, json.dumps([_row()]))['identity_id'] == iid
 
@@ -128,11 +129,11 @@ def test_conflicting_duplicates_are_order_independent_and_private_wins():
 
 
 def test_overlap_and_metadata_changes_use_persistent_spotify_occurrence_id(store):
-    iid = store.identities.upsert_identity('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main','bridge',None,True)
     store.tracks.upsert_track('one','Song','Artist',None,180)
     store.tracks.upsert_track('two','Other title','Other artist',None,180)
     first = import_spotify_data(store,json.dumps([_row()]))
     again = import_spotify_data(store,json.dumps([_row('Other title','Other artist')]))
     assert first['events_added'] == 1 and again['events_added'] == 0
     assert len(store.history.play_events_since(0)) == 1
-    assert store.conn.execute('SELECT COUNT(*) FROM spotify_history_listens WHERE identity_id=?',(iid,)).fetchone()[0] == 1
+    assert store.conn.execute('SELECT COUNT(*) FROM spotify_history_listens WHERE account_id=?',(iid,)).fetchone()[0] == 1

@@ -39,7 +39,7 @@ def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
     first,second = albums.lookup(store.conn,'first'),albums.lookup(store.conn,'second')
     assert first != second
     assert {r[0] for r in store.conn.execute('SELECT album_id FROM album_tracks WHERE entry_id=?', (entry,))} == {first,second}
-    assert store.conn.execute('SELECT COUNT(*) FROM album_library_memberships WHERE album_id=?', (first,)).fetchone()[0] == 1
+    assert store.conn.execute('SELECT COUNT(*) FROM saved_album_memberships WHERE album_id=?', (first,)).fetchone()[0] == 1
     assert store.conn.execute('SELECT COUNT(*) FROM album_discovery_memberships WHERE album_id=?', (second,)).fetchone()[0] == 1
     store.conn.execute('DELETE FROM discovered_albums WHERE browse_id=\'second\'')
     assert albums.lookup(store.conn,'second') == second
@@ -57,7 +57,7 @@ def test_full_fetch_retains_order_repeats_and_disc_numbers(store):
             {'entry_id':b,'disc_number':2,'track_number':2}],now=50)
     assert list(map(tuple,store.conn.execute('SELECT entry_id,position,disc_number,track_number FROM album_tracks WHERE album_id=? ORDER BY position', (aid,)))) == [(b,0,1,1),(a,1,2,1),(b,2,2,2)]
     assert store.conn.execute('SELECT fetched_at,complete,expected_track_count FROM album_fetch_state').fetchone()[:] == (50,1,3)
-    assert json.loads(store.conn.execute('SELECT track_keys FROM album_tracklists').fetchone()[0]) == ['second|artist','first|artist','second|artist']
+    assert json.loads(store.conn.execute('SELECT track_keys FROM album_tracklist_keys').fetchone()[0]) == ['second|artist','first|artist','second|artist']
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -87,15 +87,16 @@ def test_populated_album_upgrade_rolls_back_and_reopens_without_backups(installe
 
     monkeypatch.setattr(registry,'MIGRATIONS',(*DRAFT[:22],Migration(23,DRAFT[22].name,fail)))
     with pytest.raises(MigrationError,match='interrupted album'):
-        migrate(store.conn)
+        migrate(store.conn, registry=registry.MIGRATIONS)
     assert list(store.conn.iterdump()) == before
     monkeypatch.setattr(registry,'MIGRATIONS',DRAFT)
-    store.init_schema()
+    migrate(store.conn, registry=DRAFT)
+    store._bind_repositories()
     assert store.collection.saved_album_ids() == {'release'}
     assert store.conn.execute('SELECT found_at,first_shown,offered_count FROM discovered_albums').fetchone()[:] == (5,10,1)
     assert store.conn.execute('SELECT entry_id FROM album_track_links').fetchone()[0] == entry
     state = list(store.conn.iterdump())
-    store.init_schema()
+    migrate(store.conn, registry=DRAFT)
     assert list(store.conn.iterdump()) == state
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     assert not (tmp_path / 'backups').exists()
@@ -106,7 +107,7 @@ def test_release_consumers_keep_same_title_releases_and_previous_associations(st
     from random import Random
     from yt_playlist.rec.discover import _scan_artist_albums
 
-    iid = store.identities.upsert_identity('me','c',None,True)
+    iid = store.accounts.upsert_account('me','c',None,True)
     pid = store.playlists.upsert_playlist(iid,'P','Mix',1,'h',0)
     entry = store.tracks.upsert_track('v','Song','Artist','Same',10,album_browse_id='first',artist_browse_id='UC_artist')
     store.tracks.upsert_track('v','Song','Artist','Same',10,album_browse_id='second',artist_browse_id='UC_artist')
@@ -154,7 +155,10 @@ def test_full_fetch_round_trip_order_coverage_and_conflicts_follow_all_releases(
     store.conn.commit()
     assert store.collection.cached_album_tracklist_ids()=={'release'}
     assert store.collection.complete_album_tracklist_ids()==set()
-    assert store.collection.cached_album_share('release') is None
+    # Library membership is independent of the complete provider publication.
+    assert store.collection.has_published_album_tracklist('release')
+    assert store.collection.cached_album_share('release') == {
+        'title': 'Album', 'video_ids': ['b', 'a', 'b']}
 
 
 def test_recording_reassociation_preserves_release_relationships(store):
@@ -169,18 +173,17 @@ def test_recording_reassociation_preserves_release_relationships(store):
 
 def test_recap_uses_all_release_relationships_without_inventing_playback_context(store):
     from yt_playlist.rec.recap_metrics import month_bounds,profile
-    from yt_playlist.repos.recap import RecapRepo
 
-    iid = store.identities.upsert_identity('me','c',None,True)
+    iid = store.accounts.upsert_account('me','c',None,True)
     keys = []
     for i in range(3):
         entry = store.tracks.upsert_track(str(i),f'Song {i}','Artist','Album',10,album_browse_id='release')
         store.tracks.upsert_track(str(i),f'Song {i}','Artist','Other',10,album_browse_id=f'other-{i}')
         keys.append(store.tracks.catalog_subject(entry)['identity_key'])
     since,until = month_bounds('2026-09')
-    data = RecapRepo(store).snapshot(since,until)
+    data = store.recap.snapshot(since,until)
     assert all(data['meta'][k]['album_browse_ids']=={'release',f'other-{i}'} for i,k in enumerate(keys))
     assert all(data['meta'][k]['album_browse_id'] is None for k in keys)
-    events = [dict(identity_id=iid,source='live',identity_key=k,played_at=since+i*60) for i,k in enumerate(keys)]
+    events = [dict(account_id=iid,source='live',identity_key=k,played_at=since+i*60) for i,k in enumerate(keys)]
     stats = profile('2026-09',events,data['meta'],{(iid,'live'):(since-1,until)},[])
     assert stats.album_covered_plays==stats.album_run_plays==3

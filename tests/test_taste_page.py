@@ -1,5 +1,6 @@
 """Taste overview, topic navigation and listening readings."""
 import numpy as np
+from tests.derived_rating_support import seed_dislike, seed_like
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,6 +8,26 @@ from yt_playlist.rec import embedding_vectors as embed, rec_params, taste_viz
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.taste_support import _client
+from tests.store_fixture_support import bounded_consumer_schema
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    # Page consumers use real SQL and guards with the genres present in their
+    # complete datasets. Catalog curation and schema admission have their own tests.
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def taste_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, taste
+
+    # Keep the actual Taste handlers and shared template dependencies. Building
+    # unrelated page routers is not part of these requests.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, taste)])
 
 
 def test_taste_page_renders_status_and_controls(store):
@@ -57,21 +78,23 @@ def test_taste_shell_and_overview_do_not_compute_hidden_tabs(store, monkeypatch)
 def test_overview_shows_weekly_model_inputs_when_the_play_comparison_is_unavailable(store, source, explanation):
     now = 20 * 86400.0
     client = _client(store, now=now)
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.modes.replace_modes([
         {"mode_id": 1, "label": "Jazz", "families": [["jazz", 1]],
          "centroid": np.ones(1, dtype=np.float32), "size": 3, "rep_keys": []},
     ], retired_ids=[], now=now)
-    store.settings.set_setting("radio_session_playlist_ids", '["radio"]')
+    from yt_playlist.core import radio_provenance
+    with store._lock, store.conn:
+        radio_provenance.remember(store.conn, 'radio', iid)
     if source in ("radio", "unmapped"):
         store.history.record_play_event(iid, "song|artist", "v1", now,
                                         playlist_ytm_id="radio" if source == "radio" else None,
                                         source_timezone="UTC")
     elif source == "dated":
         store.history.record_history_plays(iid, now, ["song|artist"], source_timezone="UTC")
-    store.rec_model.record_like("liked|artist", now - 6 * 86400, provenance="action")
-    store.rec_model.record_like("synced|artist", now, provenance="sync")
-    store.rec_model.record_dislike("disliked|artist", now + 86400, now - 2 * 86400)
+    seed_like(store, "liked|artist", now - 6 * 86400, provenance="action")
+    seed_like(store, "synced|artist", now, provenance="sync")
+    seed_dislike(store, "disliked|artist", now + 86400, now - 2 * 86400)
     store.rec_signals.log_graduation("era:1990", "like", 2, 1.1, 1.1, now - 5 * 86400)
 
     html = client.get("/taste/panels/overview").text
@@ -93,7 +116,7 @@ def test_overview_shows_weekly_model_inputs_when_the_play_comparison_is_unavaila
 
 
 def test_overview_shows_feedback_even_without_a_content_model_or_music_groups(store):
-    store.rec_model.record_like("liked|artist", 1, provenance="action")
+    seed_like(store, "liked|artist", 1, provenance="action")
 
     html = _client(store).get("/taste/panels/overview").text
 
@@ -104,7 +127,7 @@ def test_overview_shows_feedback_even_without_a_content_model_or_music_groups(st
 
 def test_genre_coverage_counts_tracks_instead_of_weighted_plays(store):
     c = _client(store)
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     tagged = store.tracks.upsert_track("tagged", "Tagged", "Artist", None, None)
     store.tracks.set_track_genre(tagged, "Jazz")
     store.tracks.upsert_track("untagged", "Untagged", "Artist", None, None)
@@ -147,7 +170,7 @@ def test_taste_page_shows_transient_and_graduation_controls(store):
 
 
 def test_taste_page_has_one_bar_of_section_tabs(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste").text
@@ -246,7 +269,7 @@ def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {k: i for i, k in enumerate(keys)}
     monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     now = 100_000.0
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
     store.history.import_play_events(iid, rows)
@@ -271,7 +294,7 @@ def test_taste_page_hides_now_and_session_reading_when_quiet(store):
 def test_taste_page_draws_the_full_chain_on_a_facet_axis(store):
     # #88: wherever the page contrasts permanent and transient it must draw every layer that exists
     # on that axis - here, the whole multiplier chain, not just a share and a shrug.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("vj", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Jazz")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")

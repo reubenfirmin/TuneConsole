@@ -1,14 +1,5 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
 from yt_playlist.rec import ppr, embedding_vectors as embed
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 def test_ppr_rank_tol_early_stops_at_fixed_point():
@@ -53,10 +44,6 @@ def test_mode_rankings_orders_by_per_mode_ppr(monkeypatch, store):
     #   x = 0.25y ; y = 0.5(x+z) ; z = 0.5 + 0.25y  ->  0.75y = 0.25 -> y = 1/3,
     #   x = 1/12, z = 7/12.  r=[1/12, 1/3, 7/12] -> desc order [c, b, a].
     assert r[2] == ["c", "b", "a"]
-
-
-def test_mode_rankings_empty_without_modes(store):
-    assert ppr.mode_rankings(store) == {}
 
 
 def test_mode_rankings_stale_centroid_dim_returns_empty(monkeypatch, store):

@@ -50,7 +50,7 @@ def apply(conn, context):
     conn.execute('DROP TABLE album_ids_before')
 
 
-def validate(conn):
+def validate(conn, *, replaced=frozenset(), data=True):
     from .current import _table, _tokens
     from .runner import MigrationError
     import sqlite3
@@ -61,6 +61,8 @@ def validate(conn):
             reference.execute(sql)
         for name, kind, sql in reference.execute(
                 "SELECT name,type,sql FROM sqlite_master WHERE name<>'albums' AND sql IS NOT NULL"):
+            if name in replaced:
+                continue
             actual = conn.execute('SELECT type,sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
             if actual is None or actual[0] != kind:
                 raise MigrationError(f'Missing album alias structure: {name}')
@@ -72,6 +74,6 @@ def validate(conn):
                 raise MigrationError(f'Incompatible album alias structure: {name}')
     finally:
         reference.close()
-    if conn.execute('SELECT 1 FROM album_provider_ids GROUP BY album_id,provider '
+    if data and conn.execute('SELECT 1 FROM album_provider_ids GROUP BY album_id,provider '
                     'HAVING SUM(is_primary)<>1 LIMIT 1').fetchone():
         raise MigrationError('Album representations require exactly one preferred provider ID')

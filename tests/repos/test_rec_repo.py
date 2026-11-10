@@ -14,17 +14,17 @@ from yt_playlist.repos.artist_similarity import ArtistSimilarityRepo
 
 def test_named_recommendation_repositories(store):
     import pytest
-    assert isinstance(store.rec_model, RecModelRepo)
-    assert isinstance(store.rec_ledger, RecLedgerRepo)
-    assert isinstance(store.rec_proposals, RecProposalsRepo)
-    assert isinstance(store.rec_signals, RecSignalsRepo)
-    assert isinstance(store.playlist_recipes, PlaylistRecipesRepo)
-    assert isinstance(store.artist_similarity, ArtistSimilarityRepo)
+    assert isinstance(store.rec_model.repository, RecModelRepo)
+    assert isinstance(store.rec_ledger.repository, RecLedgerRepo)
+    assert isinstance(store.rec_proposals.repository, RecProposalsRepo)
+    assert isinstance(store.rec_signals.repository, RecSignalsRepo)
+    assert isinstance(store.playlist_recipes.repository, PlaylistRecipesRepo)
+    assert isinstance(store.artist_similarity.repository, ArtistSimilarityRepo)
     assert not hasattr(store, "rec_surface")
-    assert isinstance(store.rec_query, RecQueryRepo)
-    assert isinstance(store.rec_candidates, RecCandidatesRepo)
-    assert isinstance(store.rec_evidence, RecEvidenceRepo)
-    assert isinstance(store.rec_eligibility, RecEligibilityRepo)
+    assert isinstance(store.rec_query.repository, RecQueryRepo)
+    assert isinstance(store.rec_candidates.repository, RecCandidatesRepo)
+    assert isinstance(store.rec_evidence.repository, RecEvidenceRepo)
+    assert isinstance(store.rec_eligibility.repository, RecEligibilityRepo)
     store.rec_model.set_weight("lane:neighbourhood", 1.1)
     assert store.rec_model.get_weights()["lane:neighbourhood"] == pytest.approx(1.1)
     assert store.rec_query.tracks_total() == 0
@@ -32,9 +32,9 @@ def test_named_recommendation_repositories(store):
 
 
 def test_unified_onto_repo_base(store):
-    for dao in (store.rec_model, store.rec_ledger, store.rec_proposals, store.rec_signals,
-                store.playlist_recipes, store.artist_similarity, store.rec_query,
-                store.rec_candidates, store.rec_evidence, store.rec_eligibility):
+    for dao in (store.rec_model.repository, store.rec_ledger.repository, store.rec_proposals.repository, store.rec_signals.repository,
+                store.playlist_recipes.repository, store.artist_similarity.repository, store.rec_query.repository,
+                store.rec_candidates.repository, store.rec_evidence.repository, store.rec_eligibility.repository):
         assert isinstance(dao, Repo)
         assert dao.conn is store.conn and dao._lock is store._lock
 
@@ -52,9 +52,9 @@ def test_card_view_counter_ticks_and_reads(store):
 
 def test_proposals_roundtrip_and_missing(store):
     dao = store.rec_proposals
-    assert dao.get_proposals("discover") is None
-    dao.put_proposals("discover", [{"artist": "X", "title": "LP"}], now=1.0)
-    assert dao.get_proposals("discover") == [{"artist": "X", "title": "LP"}]
+    assert dao.get_proposals("home_discovery") is None
+    dao.put_proposals("home_discovery", [{"artist": "X", "title": "LP"}], now=1.0)
+    assert dao.get_proposals("home_discovery") == [{"artist": "X", "title": "LP"}]
 
 
 def test_tracks_total_replaces_raw_sql(store):
@@ -91,9 +91,12 @@ def test_feedback_suppression_and_mutes(store):
 def test_vectors_roundtrip(store):
     dao = store.rec_model
     assert dao.rec_vectors_count() == 0
-    dao.replace_rec_vectors([("a", b"\x00\x01"), ("b", b"\x02\x03")])
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)', [('a',), ('b',)])
+    rows = [("a", b"\x00\x00\x80\x3f"), ("b", b"\x00\x00\x00\x40")]
+    dao.replace_rec_vectors(rows)
     assert dao.rec_vectors_count() == 2
-    assert dict(dao.get_rec_vectors()) == {"a": b"\x00\x01", "b": b"\x02\x03"}
+    assert dict(dao.get_rec_vectors()) == dict(rows)
     dao.replace_rec_vectors([])                          # wholesale replace
     assert dao.rec_vectors_count() == 0
 
@@ -107,7 +110,7 @@ def test_model_state_is_separate_from_library_queries(store):
 
 
 def test_track_decades_and_artists_and_era_distribution(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "A", "Alpha", None, None)   # key "a|alpha"
     b = store.tracks.upsert_track("v2", "B", "Beta", None, None)    # key "b|beta"
     store.tracks.set_track_year(a, "1991")                          # -> decade "1990"

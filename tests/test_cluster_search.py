@@ -20,7 +20,7 @@ def _vec(store, keys):
 
 
 def _seed_library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # Two Ritmo tracks, one Mogwai track, all modelled; one unmodelled Ritmo track (no vector).
     r1 = store.tracks.upsert_track("r1", "Spektrum", "Ritmo", None, None)
     r2 = store.tracks.upsert_track("r2", "Pranava", "Ritmo", None, None)
@@ -65,7 +65,7 @@ def test_matches_nothing_returns_empty(store):
 def test_song_ranking_prefers_exact_then_prefix(store):
     """Best match lands within the limit: an exact title beats a prefix match beats a mid-string hit,
     even when alphabetical order would bury it (an old pure-alpha ORDER BY surfaced the wrong rows)."""
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     # Alphabetically: "Acid LSD" < "LSD" < "LSD Trip" < "The LSD Song". Relevance wants "LSD" first.
     titles = ["Acid LSD", "LSD", "LSD Trip", "The LSD Song"]
     for i, title in enumerate(titles):
@@ -82,7 +82,7 @@ def test_song_ranking_prefers_exact_then_prefix(store):
 def test_search_is_punctuation_insensitive(store):
     """#48: typing 'LSD' must find a track stored as 'L.S.D.' (and 'cafe' must find 'Café'). The
     period/accent fall out of the normalized match key, so the query needn't reproduce them."""
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "L.S.D.", "Hallucinogen", None, None)
     store.tracks.upsert_track("v2", "Café", "Charlotte", None, None)
     _vec(store, [identity_key("L.S.D.", "Hallucinogen"), identity_key("Café", "Charlotte")])

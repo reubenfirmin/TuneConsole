@@ -3,7 +3,7 @@ from yt_playlist.rec import artist_model, surfaces
 
 
 def test_completion_ranks_once_without_public_names_or_repeated_credit_reads(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "bridge", None, True)
+    iid = store.accounts.upsert_account("main", "bridge", None, True)
     entries = []
     for video, title, name, provider in [
         ("seed", "Anchor", "Seed", "seed"),
@@ -44,7 +44,7 @@ def test_completion_ranks_once_without_public_names_or_repeated_credit_reads(sto
 
 
 def test_shared_artist_scores_expand_owned_and_discovered_tracks_without_reranking(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "bridge", None, True)
+    iid = store.accounts.upsert_account("main", "bridge", None, True)
     tid = store.tracks.upsert_track("owned", "Owned song", "Related", None, 200)
     library = store.playlists.upsert_playlist(iid, "LIB", "Library", 1, "", 1)
     store.playlists.set_playlist_tracks(library, [tid])

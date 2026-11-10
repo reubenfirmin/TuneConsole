@@ -3,6 +3,8 @@ import pytest
 
 from yt_playlist.providers import discogs
 
+pytestmark = pytest.mark.usefixtures('canonical_genre_matcher')
+
 
 def test_unrelated_search_hit_cannot_supply_earliest_year(monkeypatch):
     # Actual search results for Critical Choice: the old minimum over all hits mixed its genre

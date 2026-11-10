@@ -17,7 +17,7 @@ def _field(item, name):
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
 
-def attach_genres(store, items):
+def attach_genres(store, items, *, genres=None):
     """Fill each item's genre from the library (by identity_key) so dj_order can do genre segues.
 
     Works for both ForYouItem objects (preview) and plain track dicts (DOM/save); mutates in place
@@ -32,7 +32,8 @@ def attach_genres(store, items):
     key_of = {id(it): (_field(it, "key")
                        or identity_key(_field(it, "title") or "", _field(it, "artist") or ""))
               for it in items}
-    genres = store.rec_query.track_genres([k for k in key_of.values() if k])
+    if genres is None:
+        genres = store.rec_query.track_genres([k for k in key_of.values() if k])
     for it in items:
         g = genres.get(key_of[id(it)]) or (_field(it, "genre") or "")
         if isinstance(it, dict):
@@ -64,9 +65,11 @@ def dj_order(tracks, stickiness=0.0, seed=0, *, feat=None):
         if feat:
             features = feat(item)
             artist, genre = features.get("artist"), features.get("genre")
+            family = features.get('family',genre_map.family(genre))
         else:
             artist, genre = _field(item, "artist"), _field(item, "genre")
-        rows.append((item, artist, genre_map.family(genre)))
+            family = _field(item,'family') or genre_map.family(genre)
+        rows.append((item, artist, family))
     rng = random.Random(seed)
     rng.shuffle(rows)
     remaining = Counter(row[1] for row in rows)

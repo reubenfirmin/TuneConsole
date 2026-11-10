@@ -6,7 +6,7 @@ from yt_playlist.core.accounts import client_for
 from urllib.parse import quote
 from html import escape
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
@@ -44,14 +44,18 @@ def build(ctx) -> APIRouter:
 
     def _saved_identities():
         return [{"id": i.id, "label": i.label, "brand": i.brand_account_id or "",
-                 "is_master": i.is_master} for i in store.identities.get_identities()]
+                 "is_master": i.is_master} for i in store.accounts.get_accounts()]
 
     def _setup_context(request, *, rows, master_idx, error=None, status_code=200):
+        from yt_playlist.rec import home_preferences
+        home_format = store.settings.get_setting('home_format')
+        if home_format not in {*home_preferences.PANELS, 'both'}:
+            home_format = home_preferences.default_format(store)
         return templates.TemplateResponse(request, "setup.html", {
             "rows": rows, "master_idx": master_idx, "error": error,
             "saved_identities": _saved_identities(),
             "configured": (setup.configured if setup else True),
-            "home_format": store.settings.get_setting('home_format') or 'auto',
+            "home_format": home_format,
             "flash": request.query_params.get("flash"),
             "enrichment": enrichment.load_config(store),
             "lastfm_configured": lastfm.api_key(store) is not None,
@@ -63,7 +67,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/setup")
     def setup_page(request: Request):
-        idents = store.identities.get_identities()
+        idents = store.accounts.get_accounts()
         if idents:
             rows = [{"id": i.id, "label": i.label, "brand": i.brand_account_id or ""} for i in idents]
             master_idx = next((n for n, i in enumerate(idents) if i.is_master), 0)
@@ -73,19 +77,19 @@ def build(ctx) -> APIRouter:
         return _setup_context(request, rows=rows, master_idx=master_idx)
 
     @router.get("/setup/identities/check")
-    def setup_identity_checks(identity_id: int | None = None):
+    def setup_identity_checks(account_id: int | None = Query(None,alias='identity_id')):
         # A sync route runs in a worker thread: bridge calls must leave the WebSocket loop free.
-        return {"checks": check_identities(ctx, identity_id), "auth_labels": list(ctx.auth_expired.values())}
+        return {"checks": check_identities(ctx, account_id), "auth_labels": list(ctx.auth_expired.values())}
 
-    @router.post("/setup/identities/{identity_id}/remove")
-    def setup_remove_identity(identity_id: int):
+    @router.post("/setup/identities/{account_id}/remove")
+    def setup_remove_identity(account_id: int):
         if setup is None:
             raise HTTPException(status_code=404, detail="setup not available")
-        identities = store.identities.get_identities()
-        removed = next((i for i in identities if i.id == identity_id), None)
+        identities = store.accounts.get_accounts()
+        removed = next((i for i in identities if i.id == account_id), None)
         if removed is None:
-            raise HTTPException(status_code=404, detail="Identity no longer exists.")
-        remaining = [i for i in identities if i.id != identity_id]
+            raise HTTPException(status_code=404, detail="Account no longer exists.")
+        remaining = [i for i in identities if i.id != account_id]
         if not remaining:
             raise HTTPException(status_code=409, detail="Keep at least one identity.")
         main = next((i for i in remaining if i.is_master), remaining[0])
@@ -95,7 +99,7 @@ def build(ctx) -> APIRouter:
                                for i in remaining])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        ctx.clear_auth_expired(identity_id)
+        ctx.clear_auth_expired(account_id)
         return {"message": f'Removed identity "{removed.label}".', "main_identity_id": main.id,
                 "identity_count": len(remaining), "auth_labels": list(ctx.auth_expired.values())}
 
@@ -129,7 +133,7 @@ def build(ctx) -> APIRouter:
         if not re.fullmatch(r'sk-[A-Za-z0-9_-]{8,240}', key):
             return Response(status_code=400)
         store.settings.set_setting('deepseek_api_key', key)
-        store.rec_proposals.wake_album_descriptions(ctx.now_fn())
+        store.album_notes.wake(ctx.now_fn())
         if ctx.rec_worker:
             ctx.rec_worker.trigger_home_refresh()
         return Response(status_code=204)
@@ -158,7 +162,7 @@ def build(ctx) -> APIRouter:
                 if key:
                     values['deepseek_api_key'] = key
                 store.settings.set_values(values)
-                store.rec_proposals.wake_album_descriptions(ctx.now_fn())
+                store.album_notes.wake(ctx.now_fn())
                 if ctx.rec_worker:
                     ctx.rec_worker.trigger_home_refresh()
                 message = 'Album description settings saved.'
@@ -194,7 +198,7 @@ def build(ctx) -> APIRouter:
         except ValueError as e:
             if wants_json:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            active_ids = {str(i.id): i.id for i in store.identities.get_identities()}
+            active_ids = {str(i.id): i.id for i in store.accounts.get_accounts()}
             rows = [{"id": active_ids.get(identity_ids[idx]) if idx < len(identity_ids) else None,
                      "label": label, "brand": brands[idx] if idx < len(brands) else ""}
                     for idx, label in enumerate(labels)] or [{"id": None, "label": "", "brand": ""}]
@@ -203,10 +207,10 @@ def build(ctx) -> APIRouter:
                                   error=str(e), status_code=400)
         # Saving definitions does not authenticate them. The Identities tab checks live access and
         # clears expired-session flags only for identities whose checks actually succeed.
-        active = {i.id for i in store.identities.get_identities()}
-        for identity_id in list(ctx.auth_expired):
-            if identity_id not in active:
-                ctx.clear_auth_expired(identity_id)
+        active = {i.id for i in store.accounts.get_accounts()}
+        for account_id in list(ctx.auth_expired):
+            if account_id not in active:
+                ctx.clear_auth_expired(account_id)
         if wants_json:
             return {"identities": _saved_identities(), "auth_labels": list(ctx.auth_expired.values())}
         n = len(identities)
@@ -216,12 +220,13 @@ def build(ctx) -> APIRouter:
     @router.post("/import/spotify")
     @router.post("/import/spotify/v2")
     async def import_spotify_route(request: Request):
-        form = await request.form()
-        up = form.get("file")
-        if up is None or not hasattr(up, "read"):
-            return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
+        async with request.form() as form:
+            up = form.get("file")
+            if up is None or not hasattr(up, "read"):
+                return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
+            raw = await up.read()
         try:
-            result = await history_imports.run('spotify', await up.read())
+            result = await history_imports.run('spotify', raw)
             report, seeded = result['report'], result['seeded']
         except SpotifyDataFormatError:
             return HTMLResponse(
@@ -269,21 +274,22 @@ def build(ctx) -> APIRouter:
     @router.post("/import/spotify-library/v5")
     @router.post("/import/spotify-library/v6")
     async def import_spotify_library_route(request: Request):
-        form = await request.form()
-        up = form.get("file")
-        if up is None or not hasattr(up, "read"):
-            return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
-        existing = current_job(ctx)
-        if existing and existing.get("status") in ACTIVE_STATUSES:
-            return templates.TemplateResponse(
-                request, "_partials/spotify_library_status.html", {"job": existing},
-                headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
-        identities = store.identities.get_identities()
-        if not identities:
-            return HTMLResponse(
-                '<p class="section-note">Connect the extension and configure an identity first.</p>')
+        async with request.form() as form:
+            up = form.get("file")
+            if up is None or not hasattr(up, "read"):
+                return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
+            existing = current_job(ctx)
+            if existing and existing.get("status") in ACTIVE_STATUSES:
+                return templates.TemplateResponse(
+                    request, "_partials/spotify_library_status.html", {"job": existing},
+                    headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
+            identities = store.accounts.get_accounts()
+            if not identities:
+                return HTMLResponse(
+                    '<p class="section-note">Connect the extension and configure an identity first.</p>')
+            raw = await up.read()
         try:
-            parsed = await activity_for(ctx).to_thread(load_spotify_library, await up.read())
+            parsed = await activity_for(ctx).to_thread(load_spotify_library, raw)
         except SpotifyLibraryFormatError:
             return HTMLResponse(
                 '<p class="section-note">Could not find Spotify playlists or saved albums. '
@@ -297,12 +303,12 @@ def build(ctx) -> APIRouter:
 
     def _destination(value):
         try:
-            identity_id = int(value)
+            account_id = int(value)
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Choose a destination identity") from None
-        identity = next((i for i in store.identities.get_identities() if i.id == identity_id), None)
+        identity = next((i for i in store.accounts.get_accounts() if i.id == account_id), None)
         try:
-            _,client = client_for(store,ctx.client_provider(),identity_id=identity_id)
+            _,client = client_for(store,ctx.client_provider(),account_id=account_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail="Connect the selected YouTube Music identity") from exc
         return identity, client
@@ -331,21 +337,12 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=400, detail="Select at least one playlist or saved albums")
         if not ctx.spotify_import_lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="Another Spotify import is running")
-        try:
-            _snapshot(form.get("selection_token"), "selection", consume=True)
-        except HTTPException:
-            ctx.spotify_import_lock.release()
-            raise
-        job = {"status": "running", "phase": "preview", "started_at": ctx.now_fn(),
-               "identity_id": identity.id, "identity_label": identity.label,
-               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(selected)}
-        save_job(store, job)
 
         def prepare():
             try:
-                prepared = prepare_spotify_library(selected, client, store=store, identity_id=identity.id)
+                prepared = prepare_spotify_library(selected, client, store=store, account_id=identity.id)
                 token = previews.put({"stage": "ready", "prepared": prepared,
-                                      "identity_id": identity.id}, ctx.now_fn())
+                                      "account_id": identity.id}, ctx.now_fn())
                 save_job(store, {**job, "status": "preview", "preview_token": token})
             except Exception:
                 ctx.logger.exception("Spotify import preview failed")
@@ -353,7 +350,17 @@ def build(ctx) -> APIRouter:
             finally:
                 ctx.spotify_import_lock.release()
 
-        activity_for(ctx).start_thread(prepare, name="spotify-library-preview")
+        try:
+            _snapshot(form.get("selection_token"), "selection", consume=True)
+            job = {"status": "running", "phase": "preview", "started_at": ctx.now_fn(),
+                   "account_id": identity.id, "identity_label": identity.label,
+                   "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(selected)}
+            save_job(store, job)
+            activity_for(ctx).start_thread(prepare, name="spotify-library-preview")
+        except BaseException:
+            # Until scheduling succeeds, no worker owns the release above.
+            ctx.spotify_import_lock.release()
+            raise
         return templates.TemplateResponse(
             request, "_partials/spotify_library_status.html", {"job": current_job(ctx)},
             headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
@@ -361,7 +368,7 @@ def build(ctx) -> APIRouter:
     @router.get("/import/spotify-library/preview/{token}")
     def spotify_library_preview(request: Request, token: str):
         snapshot = _snapshot(token, "ready")
-        identity, _ = _destination(snapshot["identity_id"])
+        identity, _ = _destination(snapshot["account_id"])
         return templates.TemplateResponse(request, "spotify_library_preview.html", {
             "prepared": snapshot["prepared"], "identity": identity, "preview_token": token})
 
@@ -370,7 +377,7 @@ def build(ctx) -> APIRouter:
         form = await request.form()
         token = form.get("preview_token")
         snapshot = _snapshot(token, "ready")
-        identity, client = _destination(snapshot["identity_id"])
+        identity, client = _destination(snapshot["account_id"])
         albums = []
         for index, source in enumerate(snapshot["prepared"]["albums"]):
             resolution = source["resolution"]
@@ -388,15 +395,6 @@ def build(ctx) -> APIRouter:
         prepared = {**snapshot["prepared"], "albums": albums}
         if not ctx.spotify_import_lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="Another Spotify import is running")
-        try:
-            snapshot = _snapshot(token, "ready", consume=True)
-        except HTTPException:
-            ctx.spotify_import_lock.release()
-            raise
-        job = {"status": "running", "phase": "import", "started_at": ctx.now_fn(),
-               "identity_id": identity.id, "identity_label": identity.label,
-               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(prepared)}
-        save_job(store, job)
 
         def run_import():
             try:
@@ -412,7 +410,16 @@ def build(ctx) -> APIRouter:
             finally:
                 ctx.spotify_import_lock.release()
 
-        activity_for(ctx).start_thread(run_import, name="spotify-library-import")
+        try:
+            snapshot = _snapshot(token, "ready", consume=True)
+            job = {"status": "running", "phase": "import", "started_at": ctx.now_fn(),
+                   "account_id": identity.id, "identity_label": identity.label,
+                   "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(prepared)}
+            save_job(store, job)
+            activity_for(ctx).start_thread(run_import, name="spotify-library-import")
+        except BaseException:
+            ctx.spotify_import_lock.release()
+            raise
         return RedirectResponse("/#notices", status_code=303)
 
     @router.post("/import/spotify-library/cancel")
@@ -481,8 +488,8 @@ def build(ctx) -> APIRouter:
         return item
 
     def _spotify_destination(job):
-        if job and job.get("identity_id") is not None:
-            identity,remote = _destination(job["identity_id"])
+        if job and job.get("account_id") is not None:
+            identity,remote = _destination(job["account_id"])
             return identity.id,remote
         try:
             return client_for(store,ctx.client_provider())
@@ -492,52 +499,60 @@ def build(ctx) -> APIRouter:
     @router.post("/import/spotify-library/find-album-candidates")
     async def spotify_library_find_candidates(request: Request):
         form = await request.form()
-        with _spotify_report_operation():
-            job = current_job(ctx)
-            if not job or job.get("status") != "done":
-                raise HTTPException(status_code=404, detail="report not found")
-            item = _report_album(job, form.get("album_index"))
-            try:
-                # Keep the report owner while provider work runs off the WebSocket loop.
-                item["candidates"] = await activity_for(ctx).to_thread(
-                    find_album_candidates, _spotify_destination(job)[1], item)
-                save_job(store, job)
-            except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
-                ctx.logger.exception("Spotify import candidate lookup failed")
-                message = quote("YouTube Music could not search for candidates. Try again when connected.")
-                return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-        return RedirectResponse(
-            f"/import/spotify-library/report#album-{form.get('album_index')}", status_code=303)
+        album_index = form.get('album_index')
+
+        def find_candidates():
+            # Provider work and publication have one admitted owner. Cancelling
+            # the awaiting request cannot release the report halfway through.
+            with _spotify_report_operation():
+                job = current_job(ctx)
+                if not job or job.get("status") != "done":
+                    raise HTTPException(status_code=404, detail="report not found")
+                item = _report_album(job, album_index)
+                try:
+                    item["candidates"] = find_album_candidates(_spotify_destination(job)[1], item)
+                    save_job(store, job)
+                except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
+                    ctx.logger.exception("Spotify import candidate lookup failed")
+                    message = quote("YouTube Music could not search for candidates. Try again when connected.")
+                    return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+            return RedirectResponse(
+                f"/import/spotify-library/report#album-{album_index}", status_code=303)
+
+        return await activity_for(ctx).to_thread(find_candidates)
 
     @router.post("/import/spotify-library/resolve-album")
     async def spotify_library_resolve_album(request: Request):
         form = await request.form()
-        with _spotify_report_operation():
-            job = current_job(ctx)
-            if not job or job.get("status") != "done":
-                raise HTTPException(status_code=404, detail="report not found")
-            item = _report_album(job, form.get("album_index"))
-            try:
-                identity_id,remote = _spotify_destination(job)
-                outcome = await activity_for(ctx).to_thread(
-                    save_selected_album, store, remote, item,
-                    (form.get("browse_id") or "").strip(), identity_id=identity_id)
-            except (ValueError, HTTPException) as exc:
-                message = quote(str(exc.detail if isinstance(exc, HTTPException) else exc))
-                return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-            except Exception:  # noqa: BLE001 - preserve the report and surface a usable failure
-                ctx.logger.exception("Spotify import selected-album save failed")
-                message = quote("YouTube Music could not save that album. Try again when connected.")
-                return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-            report = job["report"]
-            item.update(outcome)
-            item.pop("candidates", None)
-            report["albums_unmatched"] = max(0, report["albums_unmatched"] - 1)
-            report["albums_imported" if outcome["status"] == "imported" else "albums_skipped"] += 1
-            save_job(store, {**job, "report": report})
-            if outcome["status"] == "imported":
-                store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
-        return RedirectResponse("/import/spotify-library/report", status_code=303)
+        album_index, browse_id = form.get('album_index'), (form.get('browse_id') or '').strip()
+
+        def resolve_album():
+            with _spotify_report_operation():
+                job = current_job(ctx)
+                if not job or job.get("status") != "done":
+                    raise HTTPException(status_code=404, detail="report not found")
+                item = _report_album(job, album_index)
+                try:
+                    account_id,remote = _spotify_destination(job)
+                    outcome = save_selected_album(store, remote, item, browse_id, account_id=account_id)
+                except (ValueError, HTTPException) as exc:
+                    message = quote(str(exc.detail if isinstance(exc, HTTPException) else exc))
+                    return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+                except Exception:  # noqa: BLE001 - preserve the report and surface a usable failure
+                    ctx.logger.exception("Spotify import selected-album save failed")
+                    message = quote("YouTube Music could not save that album. Try again when connected.")
+                    return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+                report = job["report"]
+                item.update(outcome)
+                item.pop("candidates", None)
+                report["albums_unmatched"] = max(0, report["albums_unmatched"] - 1)
+                report["albums_imported" if outcome["status"] == "imported" else "albums_skipped"] += 1
+                save_job(store, {**job, "report": report})
+                if outcome["status"] == "imported":
+                    store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
+            return RedirectResponse("/import/spotify-library/report", status_code=303)
+
+        return await activity_for(ctx).to_thread(resolve_album)
 
     @router.get("/import/spotify-library/spotify-thumbnail")
     def spotify_library_thumbnail(url: str):
@@ -570,11 +585,11 @@ def build(ctx) -> APIRouter:
         # Google Takeout watch-history upload (#61). Everything is processed locally: the file
         # is parsed in this request and never leaves the machine. Unmatched artists with enough
         # plays seed the discovery pool automatically (the min-plays gate filters one-off noise).
-        form = await request.form()
-        up = form.get("file")
-        if up is None or not hasattr(up, "read"):    # absent field, or a stray text value
-            return HTMLResponse("<p class=\"section-note\">No file selected.</p>", status_code=400)
-        raw = await up.read()
+        async with request.form() as form:
+            up = form.get("file")
+            if up is None or not hasattr(up, "read"):    # absent field, or a stray text value
+                return HTMLResponse("<p class=\"section-note\">No file selected.</p>", status_code=400)
+            raw = await up.read()
         try:
             result = await history_imports.run('takeout', raw)
             report, n = result['report'], result['seeded']

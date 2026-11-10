@@ -94,7 +94,7 @@ def _read(client, playlist_id):
     return validate_playlist(detail)
 
 
-def add_items(client, ytm_playlist_id, video_ids, set_video_ids=None, *, prior_tracks=None):
+def add_items(client, provider_playlist_id, video_ids, set_video_ids=None, *, prior_tracks=None):
     """Add occurrences; retry only confirmed rejections after complete reconciliation.
 
     A known empty baseline can be supplied immediately after creating a playlist, before its
@@ -102,7 +102,7 @@ def add_items(client, ytm_playlist_id, video_ids, set_video_ids=None, *, prior_t
     Unknown outcomes raise instead of letting callers publish an optimistic membership guess.
     """
     ids = list(video_ids)
-    return _add_batches(client, ytm_playlist_id, ids, max(1, len(ids)), set_video_ids, prior_tracks)
+    return _add_batches(client, provider_playlist_id, ids, max(1, len(ids)), set_video_ids, prior_tracks)
 
 
 def _add_batches(client, playlist_id, ids, batch_size, handles, prior_tracks):

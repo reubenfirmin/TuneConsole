@@ -1,5 +1,5 @@
 """Interrupted staging resumes committed prefixes without weakening publication guards."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 import sqlite3
@@ -8,18 +8,48 @@ import pytest
 
 from tests.group_support import publish, recordings
 from tests.test_group_preparation import seed
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as file_backed_store,
+    native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import group_discovery, group_preparation, group_versions
 from yt_playlist.repos import group_publication
 
 
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # These committed-prefix cases do not construct an HTTP app.
+    pass
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+def test_group_resume_input_keeps_empty_heads_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM group_generations').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'resume.db')
-    store.init_schema()
-    yield store
-    store.conn.close()
+def database(file_backed_store):
+    # Real WAL commits, lease ownership and rollback remain under test; machine
+    # power-loss durability is independent of these committed-prefix cases.
+    file_backed_store.conn.execute('PRAGMA synchronous=NORMAL')
+    # Checkpoint scheduling has independent real owners in
+    # core/test_publication_checkpoint; retain every WAL commit here.
+    file_backed_store.conn.execute('PRAGMA wal_autocheckpoint=0')
+    return file_backed_store
 
 
 def legacy(store):
@@ -35,27 +65,35 @@ def pending(store, tracks, previous, now=2000):
         legacy_versions=store.taste_groups.legacy_versions())
 
 
-def interrupt(monkeypatch, *, writes=3, error=WorkBudgetExceeded):
+def interrupt(monkeypatch, *, member_batches=1, error=WorkBudgetExceeded):
     original = group_publication._write
-    completed = 0
 
     @contextmanager
     def write(repo):
-        nonlocal completed
         with original(repo) as conn:
             yield conn
-        completed += 1
-        if completed == writes:
-            raise error('Controlled interruption after a committed batch')
+        # Header/input batches precede membership in the compact protocol.
+        # Interrupt a committed membership prefix, independent of those steps.
+        pending = repo.conn.execute('SELECT g.external_key FROM group_generations g '
+            'JOIN group_builds b ON b.generation_id=g.id WHERE b.ready=0').fetchall()
+        if any(len(members(repo._store, row[0])) >= member_batches * group_publication.BATCH_ROWS
+               for row in pending):
+            raise error('Controlled interruption after a committed membership batch')
 
     monkeypatch.setattr(group_publication, '_write', write)
     return original
 
 
 def members(store, generation):
-    return [tuple(row) for row in store.conn.execute('SELECT m.version,m.identity_key,m.similarity,m.support '
-        'FROM rec_group_definitions d JOIN rec_group_members m USING(version) '
-        'WHERE d.generation=? ORDER BY m.version,m.identity_key', (generation,))]
+    return [tuple(row) for row in store.conn.execute('WITH selected AS ('
+        'SELECT generation_id,group_version_id,external_version FROM generation_groups UNION '
+        'SELECT generation_id,group_version_id,external_version FROM group_build_versions), '
+        'members AS (SELECT m.group_version_id,r.identity_key,m.similarity,m.support '
+        'FROM group_members m JOIN recordings r ON r.id=m.recording_id UNION ALL '
+        'SELECT group_version_id,raw_key,similarity,support FROM unresolved_group_members) '
+        'SELECT s.external_version,m.identity_key,m.similarity,m.support FROM selected s '
+        'JOIN group_generations g ON g.id=s.generation_id JOIN members m USING(group_version_id) '
+        'WHERE g.external_key=? ORDER BY s.external_version,m.identity_key', (generation,))]
 
 
 def finish(store, prepared, owner):
@@ -66,16 +104,22 @@ def finish(store, prepared, owner):
 
 @pytest.mark.parametrize('restart', [False, True])
 @pytest.mark.parametrize('error', [WorkBudgetExceeded, WorkClosing])
-def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatch, request, restart, error):
-    tracks = recordings([('House', 12, .3)])
+def test_preparation_resumes_exact_plan_and_legacy_versions(
+        database, monkeypatch, request, restart, error, _pristine_current_schema):
+    tracks = recordings([('House', 2, .3)])
     seed(database, tracks)
-    worker = group_preparation.Preparation(database)
-    assert worker.step(1000)
-    first = database.taste_groups.head(members=True)
     legacy_version = legacy(database)
-    monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
+    # Model an already published historical definition. Current preparation
+    # must preserve it without importing mutable retired modes into new heads.
+    first = publish(database, tracks, now=1000)
+    worker = group_preparation.Preparation(database)
+    # Unchanged compact definitions reuse their completed membership. Give the
+    # next publication genuinely new content so interruption exercises a prefix.
+    # The existing two inputs are unchanged. Add only the new member instead
+    # of rewriting their prepared payloads and musical profiles as well.
+    seed(database, recordings([('House', 3, .3)])[-1:])
+    monkeypatch.setattr(group_publication, 'BATCH_ROWS', 2)
     original = interrupt(monkeypatch, error=error)
-    worker.request_rebuild()
     if error is WorkClosing:
         with pytest.raises(WorkClosing):
             worker.step(2000)
@@ -85,6 +129,7 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
     generation = plan['generation']
     prefix = members(database, generation)
     assert 0 < len(prefix) < sum(len(group['members']) for group in plan['groups'])
+    assert plan['edges']
     assert database.taste_groups.head(members=True) == first
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
         snapshot.store.conn.execute('SELECT 1')
@@ -102,29 +147,43 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
         # is a controlled fixture; the independent actual-library audit waits
         # the production interval and lease in real wall time.
         with database.conn:
-            database.conn.execute('UPDATE rec_group_builds SET expires_at=0 WHERE generation=?', (generation,))
+            database.conn.execute('UPDATE group_builds SET expires_at=0 WHERE generation_id='
+                '(SELECT id FROM group_generations WHERE external_key=?)', (generation,))
         path = database._db_path
         database.conn.close()
         database = Store(path)
         request.addfinalizer(database.conn.close)
-        database.init_schema()
+        database.conn.execute('PRAGMA synchronous=NORMAL')
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with schema_inspection.reuse_tables(database.conn):
+            # This case restarts the repository worker on already admitted SQL.
+            # Rebind real owners and connection-local guards without repeating
+            # application migrations, repairs and installed-format validation.
+            database._schema_compatibility = False
+            database._rebuild_source_version = None
+            database._schema_recovery_pending = False
+            database._bind_repositories()
+            database._snapshot_revisions = _pristine_current_schema.bind_revisions(database.conn)
         worker = group_preparation.Preparation(database)
-    assert worker.step(2060)
-    assert len(discovered) == int(restart)
-    assert worker._pending is None
-    assert database.taste_groups.head_generation() == generation
-    assert database.taste_groups.head()['created_at'] == 2000
-    assert members(database, generation) == sorted((group['version'], *member)
-        for group in plan['groups'] for member in group['members'])
-    assert database.conn.execute('SELECT COUNT(*) FROM rec_group_graph WHERE generation=?',
-                                 (generation,)).fetchone()[0] == len(plan['edges'])
-    assert legacy_version in database.taste_groups.legacy_versions()
-    assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']
-    assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
+    with (schema_inspection.reuse_tables(database.conn),
+          reuse_reporting_reader(database, monkeypatch) if restart else nullcontext()):
+        assert worker.step(2060)
+        assert len(discovered) == int(restart)
+        assert worker._pending is None
+        assert database.taste_groups.head_generation() == generation
+        assert database.taste_groups.head()['created_at'] == 2000
+        assert members(database, generation) == sorted((group['version'], *member)
+            for group in plan['groups'] for member in group['members'])
+        assert sum(database.conn.execute(f'SELECT COUNT(*) FROM {table} WHERE generation_id='
+            '(SELECT id FROM group_generations WHERE external_key=?)', (generation,)).fetchone()[0]
+            for table in ('group_graph', 'unresolved_group_graph')) == len(plan['edges'])
+        assert legacy_version in database.taste_groups.legacy_versions()
+        assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']
+        assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_foreign_live_lease_cannot_be_adopted(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     first = publish(database, tracks)
     plan = pending(database, tracks, first)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
@@ -140,27 +199,44 @@ def test_foreign_live_lease_cannot_be_adopted(database, monkeypatch):
     with pytest.raises(WorkBudgetExceeded, match='leased by another worker'):
         database.taste_groups.stage(other)
     assert members(database, plan['generation']) == prefix
-    assert database.conn.execute('SELECT owner FROM rec_group_builds WHERE generation=?',
-                                 (plan['generation'],)).fetchone()[0] == owner
+    assert database.conn.execute('SELECT b.owner FROM group_builds b JOIN group_generations g '
+        'ON g.id=b.generation_id WHERE g.external_key=?', (plan['generation'],)).fetchone()[0] == owner
     finish(database, plan, database.taste_groups.stage(plan))
     assert database.taste_groups.head_generation() == plan['generation']
 
 
 def test_cleanup_prefix_is_finished_before_rebuilding_same_generation(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 9, .3)])
     first = publish(database, tracks)
-    plan = pending(database, tracks, first)
+    plan = pending(database, recordings([('House', 10, .3)]), first)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
-    original = interrupt(monkeypatch, writes=4)
+    original = interrupt(monkeypatch, member_batches=2)
     with pytest.raises(WorkBudgetExceeded):
         database.taste_groups.stage(plan)
     prefix = members(database, plan['generation'])
     assert len(prefix) == 8
+    version_ids = [row[0] for row in database.conn.execute(
+        'SELECT group_version_id FROM group_build_versions WHERE generation_id='
+        '(SELECT id FROM group_generations WHERE external_key=?)', (plan['generation'],))]
+
+    def payload_size():
+        return sum(database.conn.execute(f'SELECT COUNT(*) FROM {table} WHERE group_version_id=?',
+            (version,)).fetchone()[0] for table in ('group_members', 'unresolved_group_members')
+            for version in version_ids)
+
+    assert payload_size() == 8
     monkeypatch.setattr(group_publication, '_write', original)
     with database.conn:
-        database.conn.execute('UPDATE rec_group_builds SET expires_at=0')
-    assert database.taste_groups.cleanup_staged()
-    assert len(members(database, plan['generation'])) == 4
+        database.conn.execute('UPDATE group_builds SET expires_at=0')
+    # Compact cleanup detaches build aliases before deleting payload batches.
+    # Check the physical prefix, including while it is no longer selectable.
+    for _ in range(32):
+        assert database.taste_groups.cleanup_staged()
+        if payload_size() < 8:
+            break
+    else:
+        pytest.fail('Expired build did not begin deleting its member payload')
+    assert payload_size() == 4
     finish(database, plan, database.taste_groups.stage(plan))
     assert members(database, plan['generation']) == sorted((group['version'], *member)
         for group in plan['groups'] for member in group['members'])
@@ -169,7 +245,7 @@ def test_cleanup_prefix_is_finished_before_rebuilding_same_generation(database, 
 
 
 def test_different_output_cannot_reuse_staged_prefix(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     first = publish(database, tracks)
     plan = pending(database, tracks, first)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
@@ -189,7 +265,7 @@ def test_different_output_cannot_reuse_staged_prefix(database, monkeypatch):
 
 
 def test_unpublished_legacy_collision_waits_then_cleans_expired_owner(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     first = publish(database, tracks)
     version = legacy(database)
     old = pending(database, tracks, first)
@@ -199,17 +275,20 @@ def test_unpublished_legacy_collision_waits_then_cleans_expired_owner(database, 
     with pytest.raises(WorkBudgetExceeded):
         database.taste_groups.stage(old)
     monkeypatch.setattr(group_publication, '_write', original)
-    with pytest.raises(WorkBudgetExceeded, match='still owned'):
+    with pytest.raises(WorkBudgetExceeded, match='leased by another unpublished build'):
         database.taste_groups.stage(new)
-    assert database.conn.execute('SELECT generation FROM rec_group_definitions WHERE version=?',
-                                 (version,)).fetchone()[0] == old['generation']
+    assert database.conn.execute('SELECT g.external_key FROM group_build_versions b '
+        'JOIN group_generations g ON g.id=b.generation_id WHERE b.external_version=?',
+        (version,)).fetchone()[0] == old['generation']
     assert database.taste_groups.head(members=True) == first
     with database.conn:
-        database.conn.execute('UPDATE rec_group_builds SET expires_at=0 WHERE generation=?', (old['generation'],))
+        database.conn.execute('UPDATE group_builds SET expires_at=0 WHERE generation_id='
+            '(SELECT id FROM group_generations WHERE external_key=?)', (old['generation'],))
     finish(database, new, database.taste_groups.stage(new))
-    assert database.conn.execute('SELECT generation FROM rec_group_definitions WHERE version=?',
-                                 (version,)).fetchone()[0] == new['generation']
-    assert not database.conn.execute('SELECT 1 FROM rec_group_generations WHERE generation=?',
+    assert database.conn.execute('SELECT g.external_key FROM group_version_aliases a '
+        'JOIN group_generations g ON g.id=a.first_generation_id WHERE a.external_version=?',
+        (version,)).fetchone()[0] == new['generation']
+    assert not database.conn.execute('SELECT 1 FROM group_generations WHERE external_key=?',
                                      (old['generation'],)).fetchone()
     assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']
     assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -217,35 +296,44 @@ def test_unpublished_legacy_collision_waits_then_cleans_expired_owner(database, 
 
 @pytest.mark.parametrize('change', ['input', 'unrelated-setting', 'external-writer'])
 def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypatch, change):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     seed(database, tracks)
     worker = group_preparation.Preparation(database)
     assert worker.step(1000)
     first = database.taste_groups.head(members=True)
+    seed(database, recordings([('House', 6, .3)]))
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
     original = interrupt(monkeypatch)
-    worker.request_rebuild()
     assert not worker.step(2000)
     snapshot, plan = worker._pending
-    probe = snapshot.publish
+    probe = snapshot.publish_ordered
     results = []
+    current = snapshot.is_current
+    checks = []
+
+    def check_guard(*args, **kwargs):
+        result = current(*args, **kwargs)
+        checks.append(result)
+        return result
 
     def publish_guard(*args, **kwargs):
         result = probe(*args, **kwargs)
         results.append(result)
         return result
 
-    monkeypatch.setattr(snapshot, 'publish', publish_guard)
+    monkeypatch.setattr(snapshot, 'publish_ordered', publish_guard)
+    monkeypatch.setattr(snapshot, 'is_current', check_guard)
     monkeypatch.setattr(group_publication, '_write', original)
     if change == 'input':
         seed(database, [replace(tracks[0], values=(.95,) * len(tracks[0].values))])
     elif change == 'unrelated-setting':
         database.settings.set_setting('foreground-setting', 'new')
     else:
-        with sqlite3.connect(database._db_path) as other:
+        with closing(sqlite3.connect(database._db_path)) as other, other:
             other.execute("INSERT INTO settings VALUES ('external-setting','new')")
     assert worker.step(2060)
-    assert results == ([True, True] if change == 'unrelated-setting' else [False])
+    assert checks == [change == 'unrelated-setting']
+    assert results == ([True] if change == 'unrelated-setting' else [])
     if change == 'input':
         assert database.taste_groups.head_generation() != plan['generation']
     assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']

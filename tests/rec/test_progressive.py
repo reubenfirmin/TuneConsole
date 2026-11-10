@@ -1,5 +1,6 @@
 """Progress without a quiet catalog, using guarded, resumable inputs."""
 from dataclasses import replace
+from tests.enrichment_support import seed_enrichment
 import json
 import logging
 from types import SimpleNamespace
@@ -8,25 +9,79 @@ import numpy as np
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as svd_cache_store,
+    initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.core import catalog as catalog_writes
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.rec import content_model, embedding_training, embedding_vectors, model_refresh, rec_params
-from yt_playlist.rec import musical_preparation, vibe_preparation
+from yt_playlist.rec import musical_preparation, vibe_preparation, vibe_joint_preparation
 from yt_playlist.rec.progressive import BASIS_STATE, Budget, Preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
-from yt_playlist.repos.prepared_content import PreparedContentRepo
+from yt_playlist.controllers.prepared_content import PreparedContent
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Preparation checks do not construct the HTTP application or sync daemon."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'),
+                                 ('rock', 'Rock'), ('folk', 'Folk'),
+                                 ('classical', 'Classical'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def grouping_schedule_store(svd_cache_store, monkeypatch):
+    # Successful snapshot admission is a lower input to scheduling. The case
+    # still uses a separate SQL reader and actual content-file publications.
+    with mock_snapshot_coordinator(svd_cache_store, monkeypatch):
+        yield svd_cache_store
+
+
+@pytest.fixture
+def live_metadata_library(native_sql_calls, svd_cache_store, monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    # Keep all 96 recordings and the real fit/publication race on private WAL.
+    # Reporting setup and unrelated taxonomy are below accepted-input fitting.
+    entries = (('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'),
+               ('folk', 'Folk'), ('classical', 'Classical'))
+    bound_catalog(monkeypatch, entries=entries)
+    # test_vibe_prediction's ordinary qualified-release case owns joint-audio
+    # fitting; this case owns the content basis while metadata keeps changing.
+    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda *args, **kwargs: False)
+    return svd_cache_store
 
 
 def catalog(store, n=12):
-    ids = []
-    for i in range(n):
-        tid = seed_catalog_track(store, f'song {i:04}|artist {i}', f'Song {i:04}',
-                                 f'Artist {i}', video_id=f'v{i}',
-                                 genre=('Techno', 'Jazz', 'Rock')[i % 3],
-                                 bpm=80 + i, energy=(i % 10) / 10)
-        ids.append(tid)
+    # Preparation consumes selected catalog inputs. Provider observations and
+    # per-field reconciliation have their own owners; retain every recording,
+    # artist credit and audio value without repeating that ingestion workflow.
+    items = [dict(key=f'song {i:04}|artist {i}', title=f'Song {i:04}',
+                  artist=f'Artist {i}', video_id=f'v{i}',
+                  genre=('Techno', 'Jazz', 'Rock')[i % 3]) for i in range(n)]
+    seed_publication_subjects(store, items)
+    ids = [store.conn.execute('SELECT id FROM recordings WHERE identity_key=?',
+                             (item['key'],)).fetchone()[0] for item in items]
+    first_artist = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM artists').fetchone()[0]
+    with store.conn:
+        store.conn.executemany('UPDATE recordings SET bpm=?,energy=? WHERE id=?',
+                               [(80 + i, (i % 10) / 10, rid) for i, rid in enumerate(ids)])
+        store.conn.executemany('INSERT INTO artists(id,name,provisional) VALUES (?,?,1)',
+                               [(first_artist + i, item['artist']) for i, item in enumerate(items)])
+        store.conn.executemany("INSERT INTO artist_aliases VALUES (?,?,'fixture')",
+                               [(first_artist + i, item['artist'].lower()) for i, item in enumerate(items)])
+        store.conn.executemany("INSERT INTO entry_artists VALUES (?,0,?,?,'fixture')",
+                               [(rid, first_artist + i, items[i]['artist']) for i, rid in enumerate(ids)])
     return ids
 
 
@@ -34,7 +89,8 @@ def audio(store, tid, bpm):
     # Re-enrichment may replace a selected finding. The provider convenience
     # setter is deliberately fill-only and would leave an existing BPM intact.
     with store.conn:
-        store.conn.execute('UPDATE catalog_tracks SET bpm=? WHERE id=?', (bpm, tid))
+        store.conn.execute('UPDATE recordings SET bpm=? WHERE id IN '
+                           '(SELECT recording_id FROM catalog_entries WHERE id=?)', (bpm, tid))
 
 
 def drain(preparation, now=1000):
@@ -64,14 +120,14 @@ def test_empty_then_single_recording_can_prepare_without_coverage_gate(store):
 def test_unrelated_enrichment_does_not_discard_captured_batch(store, monkeypatch):
     ids = catalog(store)
     p = Preparation(store, budget=replace(Budget(), batch=3))
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
 
     def write_elsewhere(repo, pending):
         rows = capture(repo, pending)
         audio(store, ids[-1], 200)
         return rows
 
-    monkeypatch.setattr(PreparedContentRepo, 'capture', write_elsewhere)
+    monkeypatch.setattr(PreparedContent, 'capture', write_elsewhere)
     assert p.capture(1000)
     assert p.status()['prepared'] == 3
     assert p.status()['pending'] == 9
@@ -80,7 +136,7 @@ def test_unrelated_enrichment_does_not_discard_captured_batch(store, monkeypatch
 def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeypatch):
     ids = catalog(store, 3)
     p = Preparation(store, budget=replace(Budget(), batch=1))
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
 
     def write_same(repo, pending):
         rows = capture(repo, pending)
@@ -88,7 +144,7 @@ def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeyp
         return rows
 
     with monkeypatch.context() as patch:
-        patch.setattr(PreparedContentRepo, 'capture', write_same)
+        patch.setattr(PreparedContent, 'capture', write_same)
         assert not p.capture(1000)
     assert p.status()['prepared'] == 0 and p.status()['pending'] == 3
     assert p.capture(1001)
@@ -97,7 +153,33 @@ def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeyp
     assert p.status()['prepared'] == 3
 
 
-def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(store, monkeypatch):
+def test_repeated_unrelated_enrichment_keeps_advancing_bounded_batches(store, monkeypatch):
+    p = Preparation(store, budget=replace(Budget(), batch=3))
+    drain(p)  # Finish version bootstrap/fanout before measuring recording batches.
+    ids = catalog(store)
+    capture = PreparedContent.capture
+    writes = []
+
+    def write_elsewhere(repo, pending):
+        rows = capture(repo, pending)
+        assert store.tracks.identity_key_for_video('v11') not in {key for key, _revision in pending}
+        writes.append(True)
+        audio(store, ids[-1], 200 + len(writes))
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PreparedContent, 'capture', write_elsewhere)
+        for prepared in (3, 6, 9):
+            assert p.capture(1000)
+            assert p.status()['prepared'] == prepared
+            assert p.status()['pending'] == 12 - prepared
+    assert len(writes) == 3
+    drain(p)
+    assert p.status()['prepared'] == 12 and p.status()['pending'] == 0
+
+
+def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(live_metadata_library, monkeypatch):
+    store = live_metadata_library
     ids = catalog(store, 96)
     rec_params.set_param(store, 'modes_k', 4)
     rec_params.set_param(store, 'modes_min_members', 10)
@@ -106,11 +188,11 @@ def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(stor
     build = content_model.build_library_content
     writes = []
 
-    def enrich_during_fit(inputs):
+    def enrich_during_fit(inputs, *, genre_axes=None):
         for i, tid in enumerate(ids):
             audio(store, tid, 300 + i)
             writes.append(tid)
-        return build(inputs)
+        return build(inputs,genre_axes=genre_axes)
 
     monkeypatch.setattr(content_model, 'build_library_content', enrich_during_fit)
     assert p.fit(1000)
@@ -120,7 +202,8 @@ def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(stor
     assert json.loads(store.settings.get_setting('rec_content_model'))['cont'][0][1] < 200
 
 
-def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store):
+def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store, monkeypatch):
+    from yt_playlist.core import fao
     ids = catalog(store, 20)
     p = Preparation(store)
     drain(p)
@@ -128,7 +211,18 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store):
     before = store.rec_model.content_generation()
     key = store.tracks.identity_key_for_video('v0')
     audio(store, ids[0], 190)
+    writes, write = [], fao.write
+
+    def off_lock(path, *args, **kwargs):
+        if path.suffix == '.bin':
+            assert not store._lock.held_by_current_thread
+            assert not store.conn.in_transaction
+            writes.append(path)
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(fao, 'write', off_lock)
     assert p.capture(1001)
+    assert writes
     after = store.rec_model.content_generation()
     assert after['model'] == before['model']
     assert after['generation'] != before['generation']
@@ -140,31 +234,36 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store):
     np.testing.assert_array_equal(np.frombuffer(new[key], np.float32), expected)
 
 
-def test_pending_and_accepted_work_survive_restart_and_timestamp_only_reenrichment(tmp_path):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_pending_and_accepted_work_survive_restart_and_timestamp_only_reenrichment(
+        tmp_path, _pristine_current_schema, monkeypatch):
     path = tmp_path / 'library.db'
     store = Store(path)
-    store.init_schema()
+    store.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(store, _pristine_current_schema)
     ids = catalog(store, 6)
     p = Preparation(store, budget=replace(Budget(), batch=2))
     assert p.capture(1000)
     before = p.status()
     store.conn.close()
     store = Store(path)
+    store.conn.execute('PRAGMA synchronous=OFF')
     store.init_schema()
     try:
-        p = Preparation(store)
-        assert p.status()['pending'] == before['pending'] == 4
-        assert p.status()['prepared'] == before['prepared'] == 2
-        drain(p)
-        assert p.fit(1000)
-        generation = store.rec_model.content_generation()
-        with store.conn:
-            store.conn.execute('UPDATE recordings SET last_enriched_at=1100')
-        assert not p.due(1100)
-        assert store.rec_model.content_generation() == generation
-        # A provider re-read with the same values retains every accepted row.
-        store.tracks.set_track_enrichment(ids[0], 'Techno', None)
-        assert not p.due(1101)
+        with reuse_reporting_reader(store, monkeypatch):
+            p = Preparation(store)
+            assert p.status()['pending'] == before['pending'] == 4
+            assert p.status()['prepared'] == before['prepared'] == 2
+            drain(p)
+            assert p.fit(1000)
+            generation = store.rec_model.content_generation()
+            with store.conn:
+                store.conn.execute('UPDATE recordings SET last_enriched_at=1100')
+            assert not p.due(1100)
+            assert store.rec_model.content_generation() == generation
+            # A provider re-read with the same values retains every accepted row.
+            seed_enrichment(store, ids[0], 'Techno', None)
+            assert not p.due(1101)
     finally:
         store.conn.close()
 
@@ -175,7 +274,7 @@ def test_drain_does_not_swallow_deferred_fit_or_aged_small_update(store, monkeyp
     drain(p)
     build = content_model.build_library_content
     monkeypatch.setattr(content_model, 'build_library_content',
-                        lambda _: (_ for _ in ()).throw(WorkBudgetExceeded()))
+                        lambda _, **kwargs: (_ for _ in ()).throw(WorkBudgetExceeded()))
     assert not p.fit(1000) and not p.due(1059)
     monkeypatch.setattr(content_model, 'build_library_content', build)
     assert p.due(1060) and p.fit(1060)
@@ -200,10 +299,10 @@ def test_deferred_or_cancelled_fit_keeps_last_good_generation(store, monkeypatch
     if failure == 'memory':
         p.budget = replace(p.budget, memory_bytes=1)
     else:
-        def fail(inputs):
+        def fail(inputs, *, genre_axes=None):
             if failure == 'competing-publisher':
                 store.settings.set_setting('rec_content_generation', 'newer')
-                return build(inputs)
+                return build(inputs,genre_axes=genre_axes)
             raise WorkBudgetExceeded() if failure == 'time' else WorkClosing()
         monkeypatch.setattr(content_model, 'build_library_content', fail)
     if failure == 'cancel':
@@ -217,7 +316,9 @@ def test_deferred_or_cancelled_fit_keeps_last_good_generation(store, monkeypatch
     assert after == before
 
 
-def test_larger_fit_waits_for_accumulated_changes_or_aged_evidence(store):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_larger_fit_waits_for_accumulated_changes_or_aged_evidence(svd_cache_store):
+    store = svd_cache_store
     ids = catalog(store, 20)
     p = Preparation(store)
     drain(p)
@@ -258,7 +359,9 @@ def test_stable_corpus_can_repair_missing_or_obsolete_encoder(store, repair):
     assert p.status()['library_vectors'] == 12
 
 
-def test_bootstrap_never_replaces_a_larger_published_cohort_with_partial_inputs(store):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_bootstrap_never_replaces_a_larger_published_cohort_with_partial_inputs(svd_cache_store):
+    store = svd_cache_store
     catalog(store, 12)
     assert model_refresh.rebuild(store, 1000)
     before = store.rec_model.content_generation()
@@ -289,13 +392,13 @@ def test_external_writer_still_invalidates_capture(tmp_path, monkeypatch):
     store.init_schema()
     store.conn.execute('PRAGMA journal_mode=WAL')
     catalog(store, 2)
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
     def external(repo, pending):
         rows = capture(repo, pending)
         with sqlite3.connect(store._db_path) as writer:
             writer.execute("UPDATE recordings SET bpm=200 WHERE identity_key='song 0001|artist 1'")
         return rows
-    monkeypatch.setattr(PreparedContentRepo, 'capture', external)
+    monkeypatch.setattr(PreparedContent, 'capture', external)
     try:
         assert not Preparation(store).capture(1000)
         assert store.prepared_content.progress()['pending'] == 2
@@ -314,23 +417,56 @@ def test_full_fit_memory_limit_preserves_previous_publication_and_pending_work(s
     assert store.rec_refresh.has_pending_changes()
 
 
-def test_grouping_settings_are_not_held_behind_metadata_accumulation(store):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_grouping_settings_are_not_held_behind_metadata_accumulation(
+        grouping_schedule_store, monkeypatch, _pristine_current_schema):
+    store = grouping_schedule_store
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+    # Joint audio-model qualification is independent of grouping scheduling.
+    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
+    # Keep both real fits and their publications. Numerical mode clustering is
+    # below this scheduling contract; record the settings passed to that input.
+    initial_groups = rec_params.get_param(store, 'modes_k')
+    clustered_groups = []
+
+    def completed_modes(reader, *args, **kwargs):
+        clustered_groups.append(rec_params.get_param(reader, 'modes_k'))
+        return None
+
+    monkeypatch.setattr(model_refresh.taste_modes, 'prepare_modes', completed_modes)
     catalog(store, 96)
     p = Preparation(store)
     drain(p)
     assert p.fit(1000)
-    assert model_refresh.rebuild(store, 1000)
+    # The full-model producer owns its numerical rebuild. This scheduling
+    # input says both completed fits are present; the checkpoint remains real.
+    store.settings.publish_values({'rec_fit_inputs': 'completed-track-fit',
+                                   'rec_artist_fit_inputs': 'completed-artist-fit'})
     p.completed_full(p.full_checkpoint(1000))
     assert not p.due(1060) and not p.full_due(1060)
     rec_params.set_param(store, 'modes_k', 2)
+    changed_groups = rec_params.get_param(store, 'modes_k')
     assert p.due(1060) and p.full_due(1060)
     assert p.fit(1060)
     assert json.loads(store.settings.get_setting(BASIS_STATE))['reason'] == 'grouping-settings'
+    assert changed_groups != initial_groups
+    assert clustered_groups == [initial_groups, changed_groups]
 
 
-def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_baskets(store, monkeypatch):
-    from tests.rec.test_model_refresh import seed
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_baskets(svd_cache_store, monkeypatch):
+    from tests.model_refresh_support import seed
+    store = svd_cache_store
     ids = seed(store)
+    # This case owns the track SVD cache, content-input conflicts and changed
+    # track baskets. Independent artist fitting and mode clustering are lower
+    # collaborators; retain the full catalog and actual track/content fits.
+    monkeypatch.setattr(model_refresh.artist_model, 'artist_content_profiles', lambda reader: {})
+    monkeypatch.setattr(model_refresh.artist_model, '_discovered_artist_profiles', lambda reader: {})
+    monkeypatch.setattr(model_refresh.artist_model, 'artist_baskets', lambda reader: [])
+    monkeypatch.setattr(model_refresh.taste_modes, 'prepare_modes', lambda *args, **kwargs: None)
     cache = model_refresh.FitCache()
     train = embedding_training.build_vectors_from_baskets
     build = content_model.build_library_content
@@ -338,9 +474,9 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     def counted(*args, **kwargs):
         calls.append(kwargs['method'])
         return train(*args, **kwargs)
-    def changed_after_svd(inputs):
+    def changed_after_svd(inputs, *, genre_axes=None):
         audio(store, ids[0], 300 + len(calls))
-        return build(inputs)
+        return build(inputs,genre_axes=genre_axes)
     monkeypatch.setattr(embedding_training, 'build_vectors_from_baskets', counted)
     with monkeypatch.context() as patch:
         patch.setattr(content_model, 'build_library_content', changed_after_svd)
@@ -353,7 +489,7 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     store.tracks.set_track_genre(ids[0], 'Classical')
     assert model_refresh.rebuild(store, 1003, fit_cache=cache)
     assert calls == ['svd', 'svd']
-    assert store.rec_model.rec_vectors_count() == 96
+    assert store.rec_model.rec_vectors_count() == len(ids)
 
 
 def test_unresolved_metadata_capture_notifies_full_models_without_eager_rebuild(store):

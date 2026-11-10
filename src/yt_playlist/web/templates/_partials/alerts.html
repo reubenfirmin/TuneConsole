@@ -52,7 +52,7 @@
         {% if backend_update.kind == 'flatpak' %}
         <button type="button" class="btn btn-sm alert-go" @click="restart()" :disabled="working"
                 x-show="phase === 'ready'" x-cloak>Restart to update</button>
-        <button type="button" class="btn btn-sm" @click="cancelRestart()" :disabled="pending"
+        <button type="button" class="btn btn-sm" @click="cancelRestart()" :disabled="pending || uncertain"
                 x-show="canCancel" x-cloak>Cancel restart</button>
         <a class="btn btn-sm alert-go" href="appstream://com.tuneconsole.TuneConsole"
            x-show="phase === 'unavailable'" x-cloak>Open software manager</a>
@@ -61,7 +61,7 @@
            x-show="phase === 'unavailable'" target="_blank" rel="noopener" x-cloak>Get the latest release</a>
         {% endif %}
         <button type="button" class="btn btn-sm alert-go" @click="reconnect()"
-                x-show="phase === 'reconnect'" x-cloak>Reload tab</button>
+                x-show="phase === 'reconnect' || uncertain" x-cloak>Reload tab</button>
         {% elif backend_update.link %}
         <a class="btn btn-sm alert-go" href="{{ backend_update.link }}" target="_blank" rel="noopener">{{ backend_update.command }} {{ arrow_icon('external') }}</a>
         {% else %}

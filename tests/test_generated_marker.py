@@ -6,16 +6,23 @@ Which group a playlist is in lives in the local database, so it doesn't exist on
 as ordinary library playlists, and start reading its suggestions back as your taste. The YouTube
 account is the one thing every install shares, so the marker lives there and sync reconciles from it.
 """
+import pytest
+
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.library import playlist_generated, sync, playlist_metadata
-from yt_playlist.core.store import Store
 from yt_playlist.repos.base import GENERATED_GROUP
 from tests.conftest import FakeClient, _track
 
 
-def _store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Playlist marker checks do not construct an HTTP application."""
 
 
 class _DescClient(FakeClient):
@@ -32,15 +39,15 @@ class _DescClient(FakeClient):
 
 
 def _sync(store, client):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     sync.sync_identity(store, iid, client, now=1000.0)
     return iid
 
 
-def test_a_generated_playlist_syncs_into_quarantine_on_a_fresh_machine():
+def test_a_generated_playlist_syncs_into_quarantine_on_a_fresh_machine(store):
     """The case that started this: a second install syncs the same account and has never been told
     these are the app's own playlists."""
-    s = _store()
+    s = store
     client = _DescClient(
         playlists=[{"playlistId": "PLGEN", "title": "Road Trip: Beach Run", "count": 1},
                    {"playlistId": "PLMINE", "title": "My Mix", "count": 1}],
@@ -54,9 +61,9 @@ def test_a_generated_playlist_syncs_into_quarantine_on_a_fresh_machine():
     assert groups.get("PLMINE") is None               # an ordinary playlist is left alone
 
 
-def test_promoting_elsewhere_releases_it_here():
+def test_promoting_elsewhere_releases_it_here(store):
     """Promotion rewrites the description upstream, so the next sync on any other machine agrees."""
-    s = _store()
+    s = store
     s.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     client = _DescClient(
         playlists=[{"playlistId": "PLGEN", "title": "Road Trip: Beach Run", "count": 1}],
@@ -68,9 +75,9 @@ def test_promoting_elsewhere_releases_it_here():
     assert s.playlists.get_playlist_groups().get("PLGEN") is None
 
 
-def test_a_group_you_chose_is_never_overwritten():
+def test_a_group_you_chose_is_never_overwritten(store):
     """Only the Generated group is managed from the marker; your own filing is yours."""
-    s = _store()
+    s = store
     s.playlists.set_playlist_group("PLGEN", "Road trips")
     client = _DescClient(
         playlists=[{"playlistId": "PLGEN", "title": "Road Trip: Beach Run", "count": 1}],
@@ -82,8 +89,8 @@ def test_a_group_you_chose_is_never_overwritten():
     assert s.playlists.get_playlist_groups().get("PLGEN") == "Road trips"
 
 
-def test_a_playlist_with_no_description_is_left_alone():
-    s = _store()
+def test_a_playlist_with_no_description_is_left_alone(store):
+    s = store
     client = _DescClient(
         playlists=[{"playlistId": "PLMINE", "title": "My Mix", "count": 1}],
         tracks={"PLMINE": [_track("v1", "A", "X")]},
@@ -94,10 +101,10 @@ def test_a_playlist_with_no_description_is_left_alone():
     assert s.playlists.get_playlist_groups() == {}
 
 
-def test_creating_a_generated_playlist_writes_the_marker():
-    s = _store()
-    iid = s.identities.upsert_identity("main", "cred", None, True)
-    client = FakeClient()
+def test_creating_a_generated_playlist_writes_the_marker(store):
+    s = store
+    iid = s.accounts.upsert_account("main", "cred", None, True)
+    client = FakeClient(catalog={'v1': _track('v1', 'A', 'X')})
 
     playlist_generated.create_generated_playlist(
         s, "Road Trip: Beach Run",

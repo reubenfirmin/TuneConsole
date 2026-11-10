@@ -1,38 +1,21 @@
 # Packaging
 
-Build TuneConsole (package `yt-playlist`) as a **Flatpak** (Linux), a **self-contained `.app` +
-`.dmg`** (macOS), or a **Docker / Podman image** (Linux x86-64 and ARM64).
-The desktop launchers start the local server and open it in your browser automatically
-(`yt-playlist --open`; the Flatpak opens the host browser via the OpenURI portal).
+TuneConsole ships as Linux Flatpak bundles, macOS apps/DMGs and Linux container
+images, each for x86-64 and ARM64. Desktop launchers start the local server and
+open the browser. All formats need the [browser extension](../extension/README.md).
 
-> **You also need the TuneConsole browser extension.** The app doesn't talk to YouTube Music
-> directly — a lightweight Chrome/Chromium extension bridges your signed-in YouTube Music tab to the
-> local app over `127.0.0.1:8765`, so your session never leaves the browser. Install it from the
-> Chrome Web Store (or load `../extension/` unpacked) and keep a `music.youtube.com` tab open.
-> Without it the app still runs, it just has nothing to sync.
+| Format | Data location |
+| --- | --- |
+| Flatpak | `~/.var/app/com.tuneconsole.TuneConsole/{config,data}` |
+| macOS | `~/Library/Application Support/TuneConsole`; logs in `~/Library/Logs/TuneConsole` |
+| Container | `/data`, normally the `tuneconsole-data` volume |
 
-Where the app keeps its data:
-
-- **Linux/Flatpak:** `~/.var/app/com.tuneconsole.TuneConsole/{config,data}` — its private sandbox dir.
-- **macOS:** `~/Library/Application Support/TuneConsole` for config/data and
-  `~/Library/Logs/TuneConsole` for logs.
-- **Docker / Podman:** `/data` in the container, backed by the `tuneconsole-data` named volume.
-
-`paths.py` honours `$YT_PLAYLIST_HOME` first and explicit `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`
-second. Otherwise it uses the platform-native paths above on macOS and the usual XDG fallbacks on
-Linux.
-
----
+`YT_PLAYLIST_HOME` overrides these locations. Explicit XDG paths are also
+supported. See [platforms.toml](platforms.toml) for Python ABIs and runtime pins.
 
 ## Docker / Podman
 
-Run the container engine on the same computer as your browser. The extension connects to
-`127.0.0.1:8765`; a remote server or NAS needs a local tunnel and is not the default setup.
-On macOS or Windows, Docker Desktop or a Podman machine supplies the Linux runtime; the
-browser and extension stay on the host. CI tests the Linux images on native x86-64 and ARM64
-runners; desktop VM integrations need verification on those hosts.
-
-### Install and run
+Run on the same computer as your browser:
 
 ```sh
 docker run -d --name tuneconsole \
@@ -41,25 +24,12 @@ docker run -d --name tuneconsole \
   ghcr.io/reubenfirmin/tuneconsole:latest
 ```
 
-Replace `docker` with `podman` throughout these instructions for rootless Podman.
-Open <http://127.0.0.1:8765> and install the browser extension as usual. The container keeps
-running when you close the UI; `docker stop tuneconsole` stops it and
-`docker start tuneconsole` starts it again. Use `docker logs tuneconsole` for server output.
+Use `podman` in place of `docker` for rootless Podman. Open
+<http://127.0.0.1:8765>. The image runs as UID/GID 10001. Keep the loopback port
+binding: the app has no remote-user authentication. The browser and extension
+stay on the host; the container needs no browser or audio device.
 
-The image runs as UID/GID 10001, sets `YT_PLAYLIST_HOME=/data`, and keeps config, SQLite,
-logs, and backups in that directory. The engine creates the named volume with suitable
-ownership on first use. Removing the container preserves the volume. Removing the volume
-deletes the app's data. Existing desktop installations have separate data; this starts a new
-library unless you deliberately migrate your config/data while both instances are stopped.
-
-The server listens on `0.0.0.0` inside the container; the published host port binds to
-`127.0.0.1`. Keep that host binding: this is a local application without remote-user
-authentication. The browser bridge retains its extension-origin checks. No browser, audio
-device, privileged mode, or host-network access is needed inside the container.
-
-### Update
-
-Wait for syncs, imports, and model jobs to finish, then pull and replace the container:
+To update, wait for active jobs, then replace the container using the same volume:
 
 ```sh
 docker pull ghcr.io/reubenfirmin/tuneconsole:latest
@@ -71,74 +41,47 @@ docker run -d --name tuneconsole \
   ghcr.io/reubenfirmin/tuneconsole:latest
 ```
 
-Use the same volume each time. Reload the existing browser tab after the new container starts.
-The app's update card links to these instructions on the website. Versioned tags are also
-published (`:X.Y.Z` and `:vX.Y.Z`); `:latest` follows stable releases. Back up your data before
-upgrading; older images may not understand a newer database schema.
+Reload the app tab after startup. Removing a container preserves its volume;
+removing the volume deletes the data. Back up before upgrading: older images
+may not read a newer schema. Version tags are `:X.Y.Z` and `:vX.Y.Z`;
+`:latest` follows stable releases. `docker logs tuneconsole` shows server output.
 
-### Build and verify locally
+Local build and check:
 
 ```sh
 docker build -t tuneconsole:local .
 python3 packaging/container/smoke.py --engine docker --image tuneconsole:local --version 0.0.0.dev0
 ```
 
-Use `podman build --format docker -t tuneconsole:local .` and `--engine podman` to verify Podman.
-For a disposable build and smoke check under the shared test lock, run
-`TUNECONSOLE_TEST_CONTAINER_ENGINE=podman uv run pytest tests/test_container_packaged.py`
-(or select `docker`). The check removes its own image, container and volume afterwards.
-The Docker image format preserves the health check, which Podman's default OCI build format omits.
-The multi-stage Dockerfile installs
-runtime dependencies from `uv.lock`, builds a wheel, and copies only the installed environment
-into the runtime image. Git history and local app data are excluded from the build context.
-A local build defaults to version `0.0.0.dev0`; `--build-arg VERSION=X.Y.Z` stamps a release
-version without needing Git inside the image.
+For Podman, build with `--format docker` to retain the health check, and pass
+`--engine podman` to the smoke check. `--build-arg VERSION=X.Y.Z` stamps a version.
+`tests/test_container_packaged.py` builds and checks disposable resources.
 
-### Controlled dependencies
+## Controlled dependencies
 
-`uv.lock` controls runtime versions on all shipped platforms. `packaging/platforms.toml`
-records each Python ABI and architecture. Flatpak uses Python 3.13; containers and macOS use
-3.12. Environment markers retain Linux-only D-Bus support and omit Windows-only packages;
-uvicorn's `standard` extras remain included. Platform wheels differ, while compatible
-runtime package versions come from the same resolution.
+`uv.lock` pins runtime and build dependencies. Flatpak uses Python 3.13;
+containers and macOS use 3.12. Builders install the locked `build`/`macos` groups
+and build without isolation.
 
-The `build` and `macos` dependency groups pin the packaging tools in that lock. Wheel,
-container, and macOS builds install those groups before building without isolation, so the
-build backend cannot resolve another set of tools. macOS requires uv and Python 3.12.
+After changing dependencies:
 
-For an upgrade, update `pyproject.toml` as needed, run `uv lock` (or `uv lock --upgrade-package
-NAME` for a deliberate package upgrade), then `packaging/flatpak/generate-pip-sources.sh`.
-Review the lock and generated wheel URLs/hashes together. CI uses `uv sync --locked` and
-`packaging/generate_deps.py --check` to reject stale inputs. The generator consumes uv's
-marker-aware export, selects locked wheels for both Flatpak architectures, and fails if a
-compatible wheel is absent; it downloads no generator and repeats no dependency list.
+```sh
+uv lock
+packaging/flatpak/generate-pip-sources.sh
+python3 packaging/generate_deps.py --check
+```
 
-The smoke test uses its own disposable container, volume, and random loopback port. It checks
-the UI/static assets, installed version, non-root storage, extension WebSocket handshake,
-rejection of untrusted origins, persisted database/backups across replacement, and clean
-shutdown. It removes only its own test resources afterward.
+Review the lock and generated wheel URLs/hashes together. Both Flatpak
+architectures must have compatible locked wheels.
 
-### Release publishing
+## Release publishing
 
-Tests run only on pull requests, validating GitHub's synthetic merge revision.
-The CI workflow has only a pull-request trigger: no main pushes, manual dispatch or
-reusable test entry point.
-Unit/browser suites, coverage, metrics, package smoke tests and synthetic publisher
-rehearsals have explicit PR-only guards. Main and releases cannot start those tests.
-Releases build and publish from main independently of PR results and test history.
-There is no requirement to find a matching PR or a successful CI run.
+Tests run only on pull requests. After the source checks pass, PR workflows
+build both architectures and run packaged checks. Main and release workflows
+build and publish without unit/browser suites, package smoke tests, synthetic
+publisher rehearsals or a test-history gate.
 
-After both source suites and packaged-resolution checks pass, `ci.yml` calls the container,
-macOS and Flatpak build workflows. Both supported architectures build the actual locked
-packages and run their packaged startup checks, including the Flatpak extension bridge.
-Fork CI needs no signing or publication secrets. Flatpak PR checks install an unsigned
-local candidate. Final release preparation uses the same builders with the prospective
-release version, signed bundles and architecture-specific update feeds. Package smoke
-tests run only on PRs. Main builds and signs final-version candidates without executing
-application tests; provenance records those exact bytes without claiming a smoke test
-of the final-version payload.
-
-To release, tag the chosen main commit and push that tag:
+Tag the selected main commit:
 
 ```sh
 git fetch origin main
@@ -146,266 +89,81 @@ git tag vX.Y.Z origin/main
 git push origin vX.Y.Z
 ```
 
-That starts one release workflow. It normalizes the version, builds and signs the
-wheel, both container architectures, both macOS DMGs/feeds and both Flatpak bundles,
-then publishes them. Every builder checks out the same pinned release commit.
-The workflow retains the package hashes and merged signed Flatpak repository so a
-publication retry can use the completed builds without rebuilding. No separate
-preparation run is needed, and the release does not run application tests.
+`release.yml` builds the wheel, container images, macOS DMGs/feeds and signed
+Flatpak bundles/repository from that commit. It retains hashes and exact build
+artifacts before publication. Manual dispatch on main with `tag=vX.Y.Z` uses
+the same flow. Tag normalization and prerelease policy live in
+[release_policy.py](release_policy.py). Prereleases do not move stable channels.
 
-`.github/workflows/container.yml` is reusable and also supports intentional manual runs.
-Preparation stages the exact candidate image digests, and the release coordinator publishes their
-multi-platform manifest after validating candidate provenance. Publishing uses the repository's
-`GITHUB_TOKEN` with `packages: write`; no registry password or additional secret is needed.
-The image carries source, revision, version, and license labels.
+The serialized `release-production` publisher uploads a draft and SHA256
+manifest, promotes container digests and the Flatpak repository, then publishes
+GitHub latest last. Older releases publish immutable version downloads without
+moving stable channels. Published tags accept only an identical manifest.
 
-After the first tagged publication, set the GitHub container package's visibility to **Public**
-in its package settings and verify an unauthenticated pull before deploying the website's
-container install option. GHCR creates new packages as private even for public repositories.
-Prerelease tags get their versioned images without moving `latest`.
+Before changing channels, the publisher saves `channel-recovery.json` on the
+draft and as an Actions artifact. It records the old channels and candidate
+identity. A confirmed failed draft restores that baseline; an ambiguous outcome
+retains the checkpoint and blocks another promotion. Do not delete checkpoints
+or change channels outside the coordinator. Public releases remain immutable.
 
-All packaging workflows use `packaging/release_policy.py`. Supported release tags are `vX.Y.Z`,
-PEP 440 prereleases (`vX.Y.ZrcN`, `vX.Y.ZbN`, `vX.Y.ZaN`, `vX.Y.Z.devN`) and their
-`-rc.N`, `-beta.N`, `-alpha.N`, `-dev.N` equivalents. Package versions normalize to PEP 440;
-unsupported tags fail before publication. Prereleases and development builds are explicitly
-GitHub prereleases, never become GitHub/container `latest`, and never deploy the stable
-Flatpak repository. There is currently no opt-in Flatpak prerelease update channel.
+### Publication recovery
 
-`release.yml` owns release builds and publication. Its `prepared` job calls the existing
-package builders for the tagged commit and final version. An optional manual dispatch
-on main with `tag=vX.Y.Z` starts the same build and publication flow. Build jobs upload
-Actions candidates and never change stable channels. One serialized
-promotion job validates versions, feeds, digests and the complete artifact set, uploads a
-draft GitHub release with a SHA256 manifest, and promotes the built container digests.
-It snapshots the existing Flatpak deployment and container `latest`, deploys the candidate
-repository, moves container `latest`, then publishes GitHub latest last. Older completed
-runs publish their immutable version downloads without moving any stable channel.
-
-A failed upload leaves a draft. Before stable channels change, the coordinator uploads and
-reads back `channel-recovery.json` on that draft, recording the previous Pages deployment,
-container digest, latest release and exact candidate manifest identity. The workflow also
-retains this evidence as an Actions artifact. A failed promotion restores the baseline only
-when GitHub confirms non-publication. If publication or its manifest cannot be read, the
-outcome is explicitly unresolved: channels remain in place and the checkpoint is retained.
-Rollback failures also retain the checkpoint. Another tag cannot promote while a draft has
-an unresolved checkpoint.
-
-Retry the same tag and identical candidates through the coordinator when services recover.
-A confirmed public release retains its channels; a confirmed draft restores its original
-baseline before a fresh attempt. A changed GitHub latest blocks stale automatic rollback.
-Successful publication keeps the checkpoint as immutable audit evidence; successful rollback
-removes it from the draft. The first release has no prior channels to restore. The services
-do not provide a shared atomic transaction, so a forced runner termination can require this
-reconciliation. Do not delete a checkpoint or publish candidates manually outside the shared
-`release-production` lock. A published tag accepts only an identical manifest.
-
-After source checks on same-repository PRs, CI rehearses the real GitHub draft and
-asset API with a unique `publisher-contract-ci-*` draft. The fixture uploads are
-small, include a partial upload followed by complete staging and an idempotent
-repeat, and are removed in both a `finally` block and an `always()` workflow step.
-Fork PRs do not receive this write token. No rehearsal publishes a release, creates a
-Git tag, or touches an update channel. Focused local contract tests also cover
-published tag lookup, authenticated paginated draft lookup, upload metadata,
-interrupted uploads, HTTP errors and unreachable services.
-
-Publisher and GHCR blob rehearsals run only on PRs. Main/release preflight checks
-the required tools, requests a Cloudflare Pages upload token (requires Pages Write),
-and checks the recoverable stable baseline. It creates no synthetic draft or registry
-blob. Failures identify the service without dumping authenticated responses. An outage
-can prevent PR draft cleanup; retry the cleanup step using the exact `REHEARSAL_TAG`
-shown in that run before abandoning it.
-
-After publication, focused anonymous checks download every asset and verify its
-SHA256 against the candidate, check both versioned container architectures and
-stable `latest` against the built digests, and fetch the Flatpak summary/signature
-from `https://repo.tuneconsole.com/`. Flatpak then verifies the signed remote in
-isolated user state and confirms both architectures and the release version.
-Repository assembly uses one signed summary rather than architecture-filtered summary
-indexes, allowing a fresh verifier to fetch both AppStream branches. After refreshing
-each branch, verification checks its catalog's newest release and architecture-specific
-bundle; `remote-ls` alone can omit a non-host architecture's display version.
-Anonymous Python downloads identify themselves as `TuneConsole-release-verifier/1`;
-Cloudflare denies the default `Python-urllib` user agent with HTTP 403. Failures
-identify the public GET target and HTTP status without response bodies or URL credentials.
-To check an already published Flatpak repository without changing production channels,
-use its trusted retained `release-manifest.json` under the shared test lock:
-
-```sh
-TUNECONSOLE_PUBLIC_RELEASE_MANIFEST=/path/to/release-manifest.json \
-  uv run pytest -s tests/bench_public_flatpak.py
-```
-
-This also checks the repository descriptor against the retained hash before importing
-its embedded GPG key, then verifies both signed architecture catalogs in temporary user state.
-The workflow summary records each verified download and channel. A failure here
-leaves the published release immutable; retry verification with the same candidates
-through the coordinator instead of deleting or replacing public assets.
-
-Publication recovery does not rebuild successful candidates. The release coordinator
-has a `workflow_dispatch` form with `tag` and `source_run`: choose the original tag
-build run, not a later publication-only retry. Omit `source_run` for a new build and
-publication. Before retrying publication, inspect availability
-with an authenticated token in `GITHUB_TOKEN`:
+Completed candidates are retained for 30 days. To reuse the original build:
 
 ```sh
 python3 packaging/release_candidates.py RUN_ID vX.Y.Z EXACT_TAG_COMMIT --repository reubenfirmin/TuneConsole
 gh workflow run release.yml --ref main -f tag=vX.Y.Z -f source_run=RUN_ID
 ```
 
-The inspection requires the exact tag and SHA from the original release build (nine
-artifact groups, including provenance and the assembled signed repository), and lists
-byte sizes and expiry state. A failed publisher run is an acceptable source when
-every candidate was uploaded successfully.
-An active unrelated run, wrong revision/tag, failed/skipped platform with missing
-artifacts, ambiguous duplicates or expired artifacts blocks promotion. Rerun only
-failed source jobs to complete missing candidates; expired candidates require rebuilding
-the affected platform. Artifact IDs, not mutable names alone, select the downloads.
-Candidates remain available for 30 days. Publication retries skip every build job
-and use the same production lock, immutable manifest and channel reconciliation.
-The release build retains the exact assembled signed repository, so retries never regenerate
-its timestamped summary. For a legacy confirmed draft, recovery validates the saved
-checkpoint against the remote draft manifest and restores the original stable
-baseline before validating or staging newly assembled bytes. Public releases always
-require the original manifest; a mismatched retry cannot modify their assets.
+The inspection needs an authenticated `GITHUB_TOKEN`. Choose the original build
+run, including a failed publisher run with all candidates uploaded. Wrong
+revisions, missing/expired artifacts or ambiguous duplicates block reuse. Rerun
+failed build jobs for missing candidates; expired candidates need rebuilding.
+Retries retain the original release clock and exact signed repository bytes.
 
-Setup has independent budgets: apt operations use 15-second network timeouts and
-two transient retries within bounded tool-install steps; Flatpak runtime/source
-downloads each allow two 120-second attempts; macOS dependency preparation allows
-two 240-second attempts, with bounded Sparkle downloads and uv requests. Application
-builds have separate step limits. Architecture-specific startup checks run only on PRs.
-Trusted uv, Sparkle archive and Flatpak runtime/source caches reduce repeated setup;
-lockfiles, Sparkle SHA256 and signed runtime metadata remain authoritative.
-Setup timing JSON is uploaded even after failure, and the final run summary preserves
-candidate availability, completed stages and a publication-only recovery command.
-Publication commands have a 180-second bound. A timed-out channel command keeps
-its saved baseline for reconciliation instead of assuming it did not commit.
+Public verification checks asset hashes, both container digests, update feeds
+and both signed Flatpak catalogs. A verification failure leaves public assets
+intact; retry through the coordinator. The target is ten minutes, with a
+15-minute limit from the original request through public verification.
+`release-timing.json` and `candidate-status.json` retain timings and provenance.
 
-The release target is 10 minutes, with a 15-minute limit measured from the original
-release request through successful **public** endpoint verification. The durable
-`release-timing.json` includes builds, runner queue delays, retrieval, tools, channel
-promotion and verification, the exact release attempt, build-run link and candidate
-sizes. `candidate-status.json` binds those sizes to the tag, revision and original
-release start. Publication retries keep that clock without consulting CI. The final
-summary fails the timing check if publication is incomplete or exceeds 900 seconds.
-It does not roll back an already public release to make a timing result pass.
-
-| Critical path stage | Normal target | Bound / recovery |
-| --- | --- | --- |
-| Version and candidate selection | 60s | Each read job has a 1–2 minute limit; retry reads |
-| Service preflight | 30s | 2 minutes; service and permission reported |
-| Package builds | Parallel platform jobs | Retain completed architectures for recovery |
-| Candidate retrieval and publication tools | 90s | Bounded download/setup steps; retain build artifacts |
-| Restore the signed repository | 15s | 2 minutes; exact archive retained |
-| Draft upload and channel promotion | 120s | 180s shared command/API budget; retain checkpoint on ambiguity |
-| Anonymous downloads, feeds and registry verification | 90s | 2 minutes; published assets remain immutable |
-| Runner queues and variance | 195s | Included in measured elapsed time |
-
-Before accepting the duration target, collect three hosted runs of this handoff,
-including a cold setup, with release/build-run links, artifact sizes and `release-timing.json`.
-Those rehearsals are **pending**; local fixture tests do not establish hosted duration.
-Retain each run's `release-status-<attempt>` artifact, including `release-timing.json`.
-After checking the cold runner's setup logs, validate the three records together:
+Compare complete hosted records, including a cold setup:
 
 ```sh
 python3 packaging/release_timing.py --compare run-1/release-timing.json run-2/release-timing.json run-3/release-timing.json --cold-run COLD_RELEASE_RUN_ID
 ```
 
-The resulting `release-rehearsals.json` records source/release links, revisions,
-sizes and timings. It rejects duplicate runs, incomplete architecture artifacts,
-missing provenance and late or failed public verification. Cold setup is identified
-by the reviewer from runner logs; the checker also requires that run's successful
-tool-install stage. Use representative publications that exercise the complete
-handoff rather than repeated verification of an already public release.
-
-The earlier [publication-only recovery run](https://github.com/reubenfirmin/TuneConsole/actions/runs/39986299269)
-completed in 100 seconds (16:23:02–16:24:42 UTC on 2026-10-23), showing the cost of
-promotion without rebuilding, but it did not exercise this new handoff or its public
-verification checks. The [original source run](https://github.com/reubenfirmin/TuneConsole/actions/runs/39982084139)
-retained 536,621,081 bytes across the seven platform artifact groups. Its first x86_64
-setup spent 533 seconds in tool installation before cancellation; these are baseline
-observations, not successful rehearsals of the new 15-minute path.
-
----
+Signing/publishing uses the Sparkle keys below, the configured Flatpak signing
+key, Cloudflare Pages Write access and `GITHUB_TOKEN` package/release access.
+Set the GHCR package to Public after its first publication and check anonymous
+pulls. Keep private keys out of source.
 
 ## Serial CI shards
 
-Ordinary CI uses four unit runners and four browser runners. Each owns one serial
-pytest process and the usual machine lock. The `checks` job remains the admission
-gate for PR packaging workflows; failed, cancelled or unexpectedly skipped matrix
-jobs or the coverage check fail admission. Python 3.12 and Node remain on the unit
-runners, with the separate packaged-resolution check on unit shard 1 only.
+PR CI uses eight serial unit shards and four serial browser shards. Whole files
+are partitioned using verified timing artifacts, falling back to
+`.github/test-durations.json`. The coverage job checks that completed cases
+equal normal collection exactly once. Browser jobs use the Playwright image
+pinned to `uv.lock`. Per-shard artifacts retain JUnit, timings and failure traces.
 
-The planner pins one immutable timing artifact from a successful same-repository PR for
-all eight runners. Whole files are assigned deterministically by measured duration;
-new files use measured median per-case estimates and join the partition automatically.
-The committed `.github/test-durations.json` is also a measured fallback. Its PR #351
-weights have a partial refresh from PR #425's complete raw reports: new files and
-files whose scaled estimate missed by more than eight seconds use the newer observed
-cost. The source revisions and refresh date are recorded. A timing artifact older than
-that refresh cannot override it; a newer passing PR supplies timings again.
-These failed runs supply diagnostic timing weights only; they cannot admit packaging
-or stand in for a passing performance comparison.
-Every shard records normal collection before partitioning, including parametrized
-case IDs. The coverage job compares both collections, source revisions and file plans,
-then requires the union of completed cases to equal normal collection exactly once.
-It does not collect or execute another full test suite.
+Automatic selection compares the measured run's date, rather than its later
+export date. A newer passing run can replace exported historical measurements.
+When failed workflows leave the committed weights stale, explicitly refresh
+them from one run's twelve downloaded shard artifacts:
 
-Per-shard artifacts retain JUnit, setup/call/teardown timings and browser failure
-traces for 30 days. The combined timing artifact feeds subsequent partitions.
-`ci-test-metrics.json` records queue/setup/execution time, test runner minutes and
-failed-job links. It measures planning through the completed `checks` gate; the
-separate reporting job and downstream packaging are excluded from that source-test
-budget. Compare repeated clean runs on the same revision, including cold setup and
-repeated session-fixture cost, when comparing the two- and four-runner split.
+```sh
+python3 ci_test_shards.py evidence/ baseline --total=8 --browser-total=4 \
+  --run https://github.com/reubenfirmin/TuneConsole/actions/runs/RUN_ID \
+  --output .github/test-durations.json
+```
 
-Browser jobs use the [official Playwright container](https://playwright.dev/python/docs/docker)
-with the version pinned to `uv.lock`, so browsers and their OS dependencies are
-already present. The workflow contract check rejects a mismatched image version.
-Image pulling remains part of hosted setup and must be included in measurements.
-This removes the per-runner apt installation that took 363 seconds in browser
-shard 1 of [run 40050066995](https://github.com/reubenfirmin/TuneConsole/actions/runs/40050066995);
-the log attributes 344 seconds to downloading 25.9 MB of apt packages.
+The refresh requires complete, consistent, exactly-once receipts from both
+suites and includes all three test phases. It retains failed case IDs and prints
+the projected loads. These diagnostic estimates do not establish passing
+coverage or browser budget acceptance. Normal CI verification still requires
+passing shards; automatic artifacts come only from successful PR workflows.
 
-That run's source checks took 1,357 seconds through the aggregate gate and consumed
-78.07 runner minutes (77.68 in test runners). It failed three tests and the coverage
-gate, so these numbers are diagnostics, not a clean baseline. The retained reports
-contain 5,488 unit cases across 515 files and 543 browser cases across 47 files.
-Repartitioning their measured setup/call/teardown durations gives these estimates:
-
-| Runners per suite | Longest unit file load | Longest browser file load | Total test phase minutes |
-| --- | ---: | ---: | ---: |
-| 2, rebalanced | 1,188.66s | 894.93s | 69.44 |
-| 4, rebalanced | 594.33s | 447.68s | 69.44 |
-
-These are file-load projections, excluding queues, container pulls, dependency
-setup, collection and additional session-fixture work. The four-runner split
-doubles the number of test runners; repeated setup and fixtures can increase
-runner minutes even when elapsed time falls. A hosted four-runner improvement
-still needs a controlled comparison.
-
-The later PR #425 run executed all 6,197 unit and 603 browser cases exactly once,
-but failed seven tests. Its browser phase loads were 732.49s, 528.65s, 409.00s and
-452.43s. Repartitioning those same recorded file costs with the refreshed weights
-projects 532.31s, 538.69s, 518.62s and 532.95s. Unit phase loads project a longest
-shard of 467.37s instead of the observed 521.94s. These are projections on the old
-inventory, excluding runner setup, collection and any subsequent source changes.
-They do not establish a passing end-to-end improvement.
-
-The radio geometry checks now bound arc-length samples and measure curve-join
-tangents directly; they retain intermediate positions, fixed-control clearance,
-both motion preferences, phone/desktop coverage and rapid reversals. Long record-art
-geometry scans advance the listening phase and render a frame instead of replaying
-ninety seconds of unrelated animation frames in each viewport. Real wall-clock
-record/ring motion, polling continuity and elapsed-time integration remain separately
-covered.
-
-Hosted source measurements come only from PR runs. The workflow uses four shards
-per suite; there is no manual source-test dispatch on main or another branch.
-Historical one/two/four-shard control reports remain available for offline comparison.
-Test runners restore no uv cache; dependency installation and browser-container pulling
-remain in the measurement.
-Download each run's `source-test-run-metrics-<attempt>` artifact into a separate
-directory, then compare the retained JSON without executing tests:
+Compare complete, clean runs on the same revision using retained metrics:
 
 ```sh
 python3 packaging/ci_test_metrics.py --compare \
@@ -413,119 +171,50 @@ python3 packaging/ci_test_metrics.py --compare \
   sharded-1/ci-test-metrics.json sharded-2/ci-test-metrics.json
 ```
 
-`ci-test-comparison.json` reports median elapsed time, the observed range, setup and
-fixture phase costs, runner-minute change, skipped cases and run links. It rejects
-failed or incomplete evidence, duplicate inputs, different revisions and differences
-in parametrized test coverage. Retain failed attempts as well when assessing flakes.
-If the hosted API had not finalized all job timestamps, refresh that run's metrics
-using `--repository OWNER/REPO --run-id ID --attempt N --shards 2` (or `4`, or serial `1`) and
-`--timings DIR` pointing at its verified `source-test-timings-<attempt>` artifact.
-API refreshes require `GITHUB_TOKEN` with repository Actions read access.
-
-The clean baseline at `6285d06` was 774.24s for 4,914 unit passes and 1,387.71s
-for 501 browser passes; a duplicate unit run took 1,250.21s on the same revision.
-Clean hosted comparison runs of the four-runner partition are **pending**; local
-checks and projected file loads do not establish a measured speedup.
-
----
+The comparison includes setup, queues and runner minutes. Projected file loads
+are not measured end-to-end improvements. Local test commands and fixture rules
+live in [tests/README.md](../tests/README.md).
 
 ## Linux — Flatpak
 
-The sandbox is deliberately tight: the only host permission is `--share=network`. No host filesystem
-access is granted; config, `state.db`, and backups live in the per-app directory (Flatpak redirects
-`XDG_*_HOME` there). Opening the browser uses the OpenURI portal. Downloaded share `.txt` files are
-written by your browser, which runs outside the sandbox.
+Install the Freedesktop 25.08 Platform/SDK and `flatpak-builder`, then build:
 
-### Prerequisites
 ```sh
 flatpak install flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
-# flatpak-builder: e.g. `sudo dnf install flatpak-builder` or `flatpak install flathub org.flatpak.Builder`
-```
-
-### Build
-```sh
-# from the repo root
 uv sync --locked --only-group build --no-install-project
 uv build --wheel --no-build-isolation --python .venv/bin/python
-
 cd packaging/flatpak
-./generate-pip-sources.sh                          # -> locked Python 3.13 wheels for both architectures
-
+./generate-pip-sources.sh
 flatpak-builder --user --install --force-clean build-dir com.tuneconsole.TuneConsole.yaml
+flatpak run com.tuneconsole.TuneConsole
 ```
 
-### Run
+Keep one application wheel in `dist/`; rebuild it after code changes and regenerate
+pip sources after dependency changes. The sandbox grants network access and
+uses the OpenURI portal for the host browser. It grants no host filesystem access.
+
+Run real installation/update checks explicitly:
+
 ```sh
-flatpak run com.tuneconsole.TuneConsole            # starts the server + opens the browser
-flatpak run com.tuneconsole.TuneConsole --port 9000   # extra args pass through
+uv run pytest --run-flatpak-build -m '' tests/test_flatpak_packaged.py
 ```
 
-Regenerate `python3-requirements.json` whenever `[project.dependencies]` changes, and rebuild the
-wheel (using that same build command) whenever the app code changes, before re-running
-`flatpak-builder`. Keep exactly one application wheel in `dist/`.
-
-To check a real local build without changing your installed app, run
-`uv run pytest --run-flatpak-build -m '' tests/test_flatpak_packaged.py`.
-The second check also needs Chromium from Playwright, GPG, D-Bus, and the host's
-`flatpak-portal`, `flatpak-session-helper`, and `xdg-permission-store` executables. It builds
-two real application versions, installs a signed bundle into a clean temporary user
-installation, and uses the Home card to update and restart. Its private session bus and
-permission store pregrant update consent without touching desktop settings. It verifies
-the new running commit, the same tab reconnecting, and preserved library, config, and
-browser pairing. It covers an automatic restart on 25.08/Python 3.13 and the safe fresh-launch
-fallback when migrating from 24.08/Python 3.12. No application repository or runtime is installed into your user account.
-It builds a wheel and the offline Flatpak inputs in temporary directories, then checks the
-supported runtime, startup, extension WebSocket origins, logs, and persisted state. The
-PR workflow installs each architecture's candidate and runs `flatpak/smoke.py` against it.
-Release builds sign and publish the final bundles without running that check.
-The build stamps AppStream's newest release from the wheel's own metadata before
-exporting it. The packaged smoke check verifies that exported version too, so signed
-repository version checks track the actual candidate rather than the checked-in release history.
-
-Freedesktop 25.08 is supported through September 2027 according to the
-[upstream release timeline](https://freedesktop-sdk.gitlab.io/documentation/wiki/Releases.html).
-The repository release maintainer owns runtime support. Review the next runtime migration
-by June 2027 and complete it before September; dates are recorded in `platforms.toml`.
-Changing the runtime also requires changing its Python ABI, regenerating both wheel sets,
-and running the packaged installation/upgrade, startup, browser bridge and updater checks.
-The retired Flathub submission has no maintained manifest to migrate.
-
-### Notes
-- The repo ships an MIT `LICENSE` at its root, matching `project_license` in the metainfo.
-- **Distribution ownership:** the repository maintainer owns the signed, self-hosted Flatpak
-  repository and release bundles. Flathub application submission is deferred; its obsolete
-  manifest and duplicated dependency snapshot have been removed. See the
-  [reopening requirements](flathub/README.md) before starting a new submission.
-
----
+These use temporary installations; update checks also need Playwright Chromium,
+GPG, D-Bus and the host Flatpak portal/session/permission-store executables.
+The maintainer owns runtime upgrades; pins and review dates are in
+[platforms.toml](platforms.toml). Flathub submission is deferred; see its
+[reopening requirements](flathub/README.md).
 
 ### Linux updates
 
-The Home update card offers **Update now**. Flatpak may show a desktop permission dialog on the
-first update; the card then shows download/install progress and **Restart to update**. Restart waits
-for sync, imports, and registered background jobs to finish, launches the installed version in a new
-sandbox, and reconnects the same browser tab. Updating doesn't change the app's sandbox permissions.
+The Home card installs from `https://repo.tuneconsole.com/`, then offers a
+restart after active work finishes. Same-runtime updates reconnect the existing
+tab. Runtime changes may require closing all app tabs and launching again.
+Closing all tabs normally stops a packaged Linux launch; source launches stop
+with Ctrl-C.
 
-If an update requires additional permissions, or self-updates are denied/unavailable, the card links
-to the desktop software manager. Updates installed independently by the software manager are also
-detected, so the running app can offer a restart. Published updates must be in the installed app's
-configured Flatpak repository; the GitHub release notice alone doesn't install an update.
-
-When a runtime change prevents the installed version from starting in the current sandbox,
-TuneConsole keeps the current server available and asks you to close all TuneConsole tabs,
-wait for the application to exit, and open it again from your applications menu. The Flatpak Spawn portal retains the
-caller's runtime branch even when launching the latest application commit; a fresh desktop
-launch selects the new runtime. The app checks that the replacement can start before stopping
-the current server. See the [portal implementation](https://github.com/flatpak/flatpak/blob/main/portal/flatpak-portal.c).
-
-Release bundles embed the application repository URL (`https://repo.tuneconsole.com/`) and
-its signing key, separately from the Flathub runtime repository. Installing a new bundle
-therefore configures a verified application origin automatically. See the
-[Flatpak bundle options](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-build-bundle).
-
-For an older bundle installed without an update origin, close TuneConsole and reconnect it
-to the signed repository in the **same installation scope** (these commands use `--user`;
-use `--system` for a system installation):
+For an old bundle without an application origin, close the app and reconnect
+it in the same installation scope (`--user` below):
 
 ```sh
 flatpak remote-add --user --if-not-exists tuneconsole https://repo.tuneconsole.com/tuneconsole.flatpakrepo
@@ -534,16 +223,9 @@ flatpak info --user --show-origin com.tuneconsole.TuneConsole
 flatpak update --user com.tuneconsole.TuneConsole
 ```
 
-Reinstallation preserves the app's private config and data. Do not uninstall with
-`--delete-data`. The release check must install the bundle in a clean user installation,
-inspect its origin and GPG verification, serve a newer signed commit from that origin,
-then update and restart through the Home card. Check that the version changes while the
-existing library and browser pairing remain available.
-
-To stop a packaged Linux launch normally, close all TuneConsole tabs and wait a few seconds. A
-development launch (`uv run yt-playlist`) stays running until Ctrl-C in its terminal.
-
----
+Reinstallation preserves private data. Do not uninstall with `--delete-data`.
+An opt-in published-repository check uses `tests/bench_public_flatpak.py` with
+`TUNECONSOLE_PUBLIC_RELEASE_MANIFEST` set to the trusted retained manifest.
 
 ## macOS — PyInstaller `.app` + `.dmg`
 
@@ -551,83 +233,29 @@ development launch (`uv run yt-playlist`) stays running until Ctrl-C in its term
 cd packaging/macos
 export SPARKLE_PUBLIC_ED_KEY="<your Sparkle public key>"
 ./build.sh
-```
-
-Produces `dist/TuneConsole.app` and `dist/TuneConsole-0.1.1.dmg`. Python and all dependencies are
-embedded — nothing is required on the target Mac. The DMG contains an Applications shortcut for
-normal drag-to-install behavior.
-
-The release workflow builds two independent packages:
-
-- `TuneConsole-macos-arm64.dmg` for Apple Silicon Macs.
-- `TuneConsole-macos-x86_64.dmg` for Intel Macs.
-
-`TuneConsole-macos.dmg` remains an Apple Silicon alias for the website's stable download URL.
-
-### First launch
-The macOS bundle is ad-hoc signed without an Apple Developer ID certificate. Gatekeeper therefore
-blocks an ordinary double-click the first time:
-
-1. Open the downloaded DMG and drag TuneConsole to Applications.
-2. In Applications, Control-click or right-click TuneConsole and choose **Open**.
-3. Confirm **Open** in the warning dialog.
-
-If macOS does not offer Open there, attempt one normal launch, then use System Settings → Privacy &
-Security → **Open Anyway**. Do not disable Gatekeeper globally. Subsequent launches open normally.
-
-The server opens your browser; a small Cocoa host provides **Check for Updates…** and **Quit
-TuneConsole** in the app menu. Dock → **Quit** also works. Quitting waits for active syncs, imports,
-and registered background jobs before shutting down the server.
-
-### Custom icon (optional)
-`build.sh` calls `make-icns.sh`, which converts the 1024px `TuneConsole.png` export to
-`TuneConsole.icns` using macOS's built-in `sips` and `iconutil`. Without them the app gets PyInstaller's default
-icon — harmless.
-
-### Verify the packaged app
-
-```sh
 ./smoke.sh
 ```
 
-This launches the frozen executable without opening a browser, waits for its HTTP server, checks a
-live endpoint, confirms its database/log files, and verifies the DMG. CI runs it on both CPU builds.
+The build embeds Python and dependencies. Releases provide separate arm64 and
+x86-64 DMGs; `TuneConsole-macos.dmg` aliases arm64. Install in Applications.
+The ad-hoc signed app may require **Open Anyway** in System Settings,
+**Privacy & Security** on first launch. Do not disable Gatekeeper globally.
 
-### Updates
+The app menu provides **Check for Updates…** and **Quit TuneConsole**. Sparkle
+verifies Ed25519 updates and relaunches after active jobs drain, preserving data
+and the existing browser tab. Each architecture has its own signed appcast.
+Sparkle's pinned framework and helpers are copied intact; the app is not
+Developer ID signed or notarized.
 
-The Home card's **Update now** button opens Sparkle's native update window. Sparkle handles the
-download, Ed25519 signature verification, replacement, and **Install and Relaunch**. It also checks
-automatically (daily by default); users can change automatic-update preferences in its window.
-The app waits for active syncs/imports/jobs, shuts down its server, and reconnects the existing
-browser tab at the same address after relaunch. User data remains in Application Support.
-
-The bundle includes Sparkle 2.10.0, fetched from its upstream release with a pinned SHA-256. Its
-signed framework and helper tools are copied intact. The app remains ad-hoc signed rather than
-Developer ID signed/notarized, so the first-install Gatekeeper instructions above still apply.
-Install in Applications before updating; Sparkle handles read-only disk images and installation
-authorization through its native UI.
-
-Each architecture has its own feed (`appcast-macos-arm64.xml` / `appcast-macos-x86_64.xml`) attached
-to GitHub Releases, pointing to immutable DMG URLs on that tag. The release workflow uses Sparkle's
-`generate_appcast` to sign the DMG and generate the feed. The private key is passed on stdin and
-never bundled. A missing or invalid signing configuration fails the build instead of publishing
-unsigned updates.
-
-One-time release setup, on a Mac with the downloaded Sparkle tools:
+Generate signing keys once using the downloaded Sparkle tools:
 
 ```sh
-# build.sh downloads .sparkle/ before checking the public-key setting.
 packaging/macos/.sparkle/bin/generate_keys
 packaging/macos/.sparkle/bin/generate_keys -p
 ```
 
-Store the printed public key as the repository Actions variable `SPARKLE_PUBLIC_ED_KEY`, and export
-the same value for local builds. Back up the private key from Keychain using
-`generate_keys -x <secure-file>` and store that exported value as the Actions secret
-`SPARKLE_PRIVATE_ED_KEY`. Keep
-the key stable across releases. Do not commit private keys. These are separate from Apple Developer
-ID certificates and the Flatpak repository signing key.
-
-Existing macOS installs need one manual DMG replacement to acquire Sparkle. Test two successive
-tagged builds on a Mac before shipping broadly: update from Applications, cancel/retry a download,
-reject an invalid signature, wait for active work, and verify relaunch without a second tab.
+Set Actions variable `SPARKLE_PUBLIC_ED_KEY` and export it for local builds.
+Export the Keychain private key with `generate_keys -x <secure-file>` and save
+it as Actions secret `SPARKLE_PRIVATE_ED_KEY`. Keep the key stable across
+releases. Verify two successive builds on a Mac, including cancelled downloads,
+invalid signatures, active-work drain and relaunch without a second tab.

@@ -7,8 +7,51 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.rec import rec_params
 from yt_playlist.web.app import create_app
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 from tests.taste_support import _client
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
+from tests.recommendation_support import seed_publication_subjects
+from tests.home_fixture_support import without_metadata_providers
+
+
+@pytest.fixture
+def checkpoint_controls(monkeypatch, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.rec import candidate_refresh
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, taste
+
+    # Checkpoint persistence owns the real controls and rendered checkpoint;
+    # background candidate ranking and other feature routers are lower inputs.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, taste)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(candidate_refresh, 'due', lambda *args: False)
+
+
+@pytest.fixture(scope='module')
+def controls_schema():
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def duration_store(monkeypatch, tmp_path, controls_schema, without_metadata_providers):
+    """Real control SQL and rendering, below vocabulary and reader admission."""
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, taste
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, taste)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+
+    with _file_consumer_store(tmp_path, controls_schema, snapshot_guards=False) as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 def test_retired_source_weight_cannot_be_saved_or_learned(store):
     client = _client(store)
@@ -60,9 +103,10 @@ def test_taste_page_separates_semantic_controls_from_topic_settings(store):
         assert html.count(f'id="param-{name}"') == 1
 
 
-def test_maximum_track_length_setting_controls_generated_playlists(store):
+def test_maximum_track_length_setting_controls_generated_playlists(duration_store):
     from yt_playlist.library.playlist_generated import create_generated_playlist
 
+    store = duration_store
     client = _client(store)
     html = client.get("/taste/panels/recommendations").text
     panel = html.split('id="taste-feature-home"', 1)[1].split('</section>', 1)[0]
@@ -71,7 +115,8 @@ def test_maximum_track_length_setting_controls_generated_playlists(store):
     assert 'Default 20' in panel
     assert client.post("/taste/param", data={"name": "max_track_minutes", "value": "120"}).status_code == 200
 
-    remote = FakeClient(song_durations={"concert": 7200})
+    remote = FakeClient(catalog={'concert': _track('concert', 'Concert', 'Artist')},
+                        song_durations={"concert": 7200})
     result = create_generated_playlist(store, "Gen", [{"video_id": "concert"}], remote, 1)
     assert result["added"] == 1
     assert client.post("/taste/reset-param", data={"name": "max_track_minutes"}).status_code == 200
@@ -82,7 +127,7 @@ def test_maximum_track_length_setting_controls_generated_playlists(store):
 
 
 def test_taste_page_uses_sliders_not_number_fields(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste/panels/recommendations").text
@@ -94,7 +139,7 @@ def test_taste_page_uses_sliders_not_number_fields(store):
 
 
 def test_taste_page_renders_genre_slider_for_tagged_library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -168,23 +213,29 @@ def test_retired_genre_familiarity_control_cannot_be_saved_or_restored(store):
     assert rec_params.get_param(store, 'breadth_bias') == 0.0
 
 
-@pytest.mark.parametrize("name", ["onboard_coverage_min", "onboard_library_min"])
-def test_retired_onboarding_control_cannot_be_saved_or_restored(store, name):
+def test_retired_onboarding_control_cannot_be_saved_or_restored(store):
     c = _client(store)
-    key = rec_params.SETTING_PREFIX + name
+    retired = ('onboard_coverage_min', 'onboard_library_min', 'onboard_feedback_min')
+    old_key = 'rec_param:onboard_feedback_min'
+    store.settings.set_setting(old_key, '3')
     store.settings.set_setting("taste_settings_checkpoint_v1", json.dumps({
-        "saved_at": 1.0, "params": {key: "100", "rec_param:onboard_feedback_min": "15"},
+        "saved_at": 1.0, "params": {**{rec_params.SETTING_PREFIX + name: '100' for name in retired},
+                                  'rec_param:erosion_view_cap': '5'},
         "weights": [],
     }))
     html = c.get("/taste/panels/recommendations").text
-    assert name not in html
-    assert 'id="param-onboard_feedback_min"' in html
-    assert c.post("/taste/param", data={"name": name, "value": "100"}).status_code == 200
+    assert 'Getting started' not in html
+    for name in retired:
+        assert name not in html
+        assert c.post("/taste/param", data={"name": name, "value": "100"}).status_code == 200
     assert c.post("/taste/checkpoint/restore").status_code == 200
-    assert store.settings.get_setting(key) is None
-    assert rec_params.get_param(store, "onboard_feedback_min") == 15
-    assert c.post("/taste/reset-param", data={"name": name}).status_code == 200
-    assert store.settings.get_setting(key) is None
+    assert rec_params.get_param(store, 'erosion_view_cap') == 5
+    for name in retired:
+        assert c.post("/taste/reset-param", data={"name": name}).status_code == 200
+        assert store.settings.get_setting(rec_params.SETTING_PREFIX + name) == ('3' if name == 'onboard_feedback_min' else None)
+    assert c.post('/taste/reset-all').status_code == 200
+    assert rec_params.get_param(store, 'erosion_view_cap') == 3
+    assert store.settings.get_setting(old_key) == '3'
 
 
 def test_taste_genre_weight_uses_genre_band(store):
@@ -210,7 +261,9 @@ def test_taste_reset_all_clears_weights_and_params(store):
     assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
-def test_recommendation_controls_are_all_available_and_rendered_once(store):
+def test_recommendation_controls_are_all_available_and_rendered_once(
+        duration_store, native_sql_calls, without_query_timing):
+    store = duration_store
     class RecommendationPanel(HTMLParser):
         def __init__(self):
             super().__init__()
@@ -246,8 +299,11 @@ def test_recommendation_controls_are_all_available_and_rendered_once(store):
         assert 'hx-get="/taste/panels/recommendations"' in client.get("/taste" + query).text
 
 
-def test_first_change_saves_recovery_point_and_later_changes_keep_it(store):
+def test_first_change_saves_recovery_point_and_later_changes_keep_it(
+        store, native_sql_calls, without_query_timing, checkpoint_controls):
     client = _client(store)
+    seed_publication_subjects(store, [dict(key='song|artist', video_id='checkpoint-song',
+        title='Song', artist='Artist', duration_s=200)])
     store.rec_model.set_weight("genre:rock", 0, lo=0, now=-1000)
     store.rec_model.set_weight("era:1990s", 1.7, now=-500)
     original_weights = store.rec_model.weight_records()

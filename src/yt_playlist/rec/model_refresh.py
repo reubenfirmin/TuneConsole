@@ -13,7 +13,7 @@ from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.rec import (artist_model, content_model, embedding_training as training,
                              embedding_vectors as vector_reads, rec_params, taste_modes)
 from yt_playlist.util import genre_catalog
-from yt_playlist.repos.rec_refresh import VERSION
+from yt_playlist.controllers.recommendation_refresh import VERSION
 
 
 class MemoryBudgetExceeded(RuntimeError):
@@ -86,21 +86,24 @@ def prepare(reader, now, *, keep_collaborative=False, memory_bytes=None, fit_cac
 
     previous = reader.rec_model.content_generation()
     inputs = vector_reads.content_inputs(reader)
-    content_inputs = content_model.input_fingerprint(inputs)
-    content_changed = (not previous["model"] or previous["inputs"] != content_inputs
+    discoveries = reader.discovery.get_discovered_tracks()
+    axes = reader.genres.feature_axes([*(value[0] for value in inputs.content.values()),
+                                      *(row.get('genre') for row in discoveries)])
+    content_inputs = content_model.input_fingerprint(inputs,genre_axes=axes)
+    content_changed = (not previous["model"] or not previous.get('coherent', True) or previous["inputs"] != content_inputs
                        or previous["revision"] != genre_catalog.REVISION)
     generation = previous
     if content_changed:
         if memory_bytes is not None:
-            model = content_model.build_content_model(inputs.content, inputs.audio)
+            model = content_model.build_content_model(inputs.content, inputs.audio,genre_axes=axes)
             estimated = (len(inputs.keys) * (2048 + (model['ncat'] + len(model['cont'])) * 32))
             if estimated > memory_bytes:
                 raise MemoryBudgetExceeded(f'Content fit estimate {estimated} exceeds {memory_bytes} bytes')
-        keys, matrix, model = content_model.build_library_content(inputs)
+        keys, matrix, model = content_model.build_library_content(inputs,genre_axes=axes)
         generation = {"generation": uuid.uuid4().hex, "model": json.dumps(model),
                       "revision": genre_catalog.REVISION, "inputs": content_inputs,
                       "library": [(key, matrix[i].tobytes()) for i, key in enumerate(keys)],
-                      "discovered": content_model.encode_discovered(reader.discovery.get_discovered_tracks(), model)}
+                      "discovered": content_model.encode_discovered(discoveries, model,genre_axes=axes)}
         vectors["rec_content_vectors"] = generation["library"]
         vectors["rec_discovered_content_vectors"] = generation["discovered"]
         settings.update(rec_content_model=generation["model"],
@@ -109,8 +112,8 @@ def prepare(reader, now, *, keep_collaborative=False, memory_bytes=None, fit_cac
                         rec_content_inputs=content_inputs)
     elif generation["model"]:
         # Discovery membership can change without changing the library's encoder.
-        rows = content_model.encode_discovered(reader.discovery.get_discovered_tracks(),
-                                       json.loads(generation["model"]))
+        rows = content_model.encode_discovered(discoveries,
+                                       json.loads(generation["model"]),genre_axes=axes)
         if dict(rows) != dict(generation["discovered"]):
             generation = {**generation, "generation": uuid.uuid4().hex, "discovered": rows}
             vectors["rec_discovered_content_vectors"] = rows
@@ -165,7 +168,7 @@ def rebuild(store, now, *, keep_collaborative=False, memory_bytes=None, fit_cach
         with column_group_reads(snapshot.store, "recordings", "catalog"):
             prepared = prepare(snapshot.store, now, keep_collaborative=keep_collaborative,
                                memory_bytes=memory_bytes, fit_cache=fit_cache)
-        changes = snapshot.store.rec_model.prepare_training_changes(prepared['vectors'])
+        changes = snapshot.store.rec_model.prepare_training_changes(prepared['vectors'], prepared['settings'])
         prepared['vector_changes'] = changes
         def publish():
             store.rec_model.publish_training_generation(changes)
@@ -173,6 +176,6 @@ def rebuild(store, now, *, keep_collaborative=False, memory_bytes=None, fit_cach
             if prepared['modes'] is not None:
                 store.modes.publish_generation(*prepared['modes'])
             store.rec_refresh.acknowledge(revision)
-        if not snapshot.publish(publish):
+        if not snapshot.publish_ordered(publish):
             return None
         return prepared

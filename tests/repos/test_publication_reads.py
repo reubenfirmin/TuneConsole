@@ -8,17 +8,34 @@ import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.core import json_cache
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.rec import content_model, radio_candidates
-from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.core.proposal_codec import encode_proposals
+from tests.recommendation_support import publish_bundles
 
 
-@pytest.mark.parametrize('operation', ['setting', 'namespace', 'present', 'bundle', 'groups'])
+@pytest.fixture
+def historical_publication_store(tmp_path, _pristine_installed_schema):
+    store = Store(tmp_path / 'publication.db')
+    try:
+        # Keep the genuine hidden-row owner, including its historical guards.
+        _pristine_installed_schema(69).backup(store.conn)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._bind_repositories()
+        store._snapshot_revisions = Revisions(store.conn)
+        yield store
+    finally:
+        store.conn.close()
+
+
 @pytest.mark.parametrize('commit', [True, False])
 @pytest.mark.parametrize('staged', [False, True])
 def test_foreground_reads_see_last_good_while_publication_holds_writer(
-        tmp_path, monkeypatch, operation, commit, staged):
-    store = Store(tmp_path / 'publication.db')
-    store.init_schema()
+        historical_publication_store, monkeypatch, commit, staged):
+    store = historical_publication_store
+    assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+    # Exercise the retained predecessor cache protocol. Current typed head
+    # publication and its foreground readers are checked independently.
     old = {'all': {'fresh': [{'key': 'old'}]}, '_meta': {'full_pools': True}}
     new = {'all': {'fresh': [{'key': 'new'}]}, '_meta': {'full_pools': True}}
     store.rec_proposals.put_proposals('mode_bundles', old, 1)
@@ -52,7 +69,7 @@ def test_foreground_reads_see_last_good_while_publication_holds_writer(
             finally:
                 store.conn.rollback()
 
-    def read():
+    def read(operation):
         if operation == 'setting':
             return store.settings.get_setting('config_input')
         if operation == 'namespace':
@@ -64,20 +81,22 @@ def test_foreground_reads_see_last_good_while_publication_holds_writer(
         return store.rec_proposals.get_proposals('mode_bundles')
 
     expected = {'setting': 'old', 'namespace': {'config_input': 'old'},
-                'present': True, 'bundle': old, 'groups': old}[operation]
+                'present': True, 'bundle': old, 'groups': old}
     try:
         with ThreadPoolExecutor(2) as workers:
             writing = workers.submit(publish)
             try:
                 assert entered.wait(5)
-                assert workers.submit(read).result(2) == expected
-                assert not writing.done(), 'Writer did not remain active during the read'
+                for operation, value in expected.items():
+                    assert workers.submit(read, operation).result(2) == value, operation
+                    assert not writing.done(), 'Writer did not remain active during the read'
             finally:
                 release.set()
             writing.result(5)
-        assert len(connections) == 1
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            connections[0].execute('SELECT 1')
+        assert len(connections) == len(expected)
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                connection.execute('SELECT 1')
         assert store.settings.get_setting('config_input') == ('new' if commit else 'old')
         assert store.rec_proposals.get_proposals('mode_bundles') == (new if commit else old)
     finally:
@@ -86,9 +105,8 @@ def test_foreground_reads_see_last_good_while_publication_holds_writer(
 
 @pytest.mark.parametrize('file_backed', [True, False])
 def test_settings_lookup_reuses_available_connection_and_owned_transaction(
-        tmp_path, monkeypatch, file_backed):
-    store = Store(tmp_path / 'lookup.db' if file_backed else ':memory:')
-    store.init_schema()
+        tmp_path, monkeypatch, file_backed, consumer_store):
+    store = consumer_store(tmp_path / 'lookup.db' if file_backed else ':memory:')
     store.settings.set_setting('config_input', 'old')
 
     def no_reader():
@@ -114,13 +132,18 @@ def test_settings_lookup_reuses_available_connection_and_owned_transaction(
         store.conn.close()
 
 
-def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, monkeypatch):
-    store = Store(tmp_path / 'radio.db')
-    store.init_schema()
+def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, monkeypatch, consumer_store):
+    from yt_playlist.core import recommendation_outputs
+    store = consumer_store(tmp_path / 'radio.db')
+    store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     old_model = json.dumps({'cat': {'old': 0}})
     new_model = json.dumps({'cat': {'new': 0}})
     store.settings.set_values({'rec_content_generation': 'old', 'rec_content_model': old_model})
-    store.rec_proposals.put_proposals('mode_bundles', {'_meta': {'generation': 'old'}}, 1)
+    publish_bundles(store, {'_meta': {'musical_generation': 'old'},
+        'all': {'wheelhouse': [{'key': 'song|artist', 'video_id': 'video',
+                               'title': 'Song', 'artist': 'Artist', 'reason': 'Retained explanation'}]}}, 1)
+    from yt_playlist.rec.stored_radio import PreparedRadio
+    prepared_radio = PreparedRadio(store, 1)
     original_reader, connections = store._make_reader, []
 
     def reader():
@@ -129,35 +152,56 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
         return view
 
     space_id = radio_candidates.vectors.content_space_id
+    # Stage outside the input reader: only the head/settings commit belongs
+    # inside the deliberately pinned read.
+    from yt_playlist.rec import bundle_storage
+    policy = store.recommendations.head('home')['policy_version']
+    plan = bundle_storage.prepare(store.conn, {'_meta': {'musical_generation': 'new'}}, [],
+        external_key='coherent-new', policy_version=policy, input_revision=1, created_at=2)
+    build = store.recommendations.claim(plan)
+    store.recommendations.stage(plan, build)
 
     def publish_during_read(view, **kwargs):
         assert view.conn is not store.conn
         result = space_id(view, **kwargs)
         # A real commit while the input reader is pinned must not mix generations.
-        with store._lock, store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
+        with store._lock:
             store.settings.publish_values({'rec_content_generation': 'new',
                                            'rec_content_model': new_model})
-            store.rec_proposals.publish_prepared_bundles('{"_meta":{"generation":"new"}}', '[]', 2)
+            store.recommendations.publish(build, 2)
         return result
 
-    decode = json_cache.decode
+    def no_global_decode(*args, **kwargs):
+        pytest.fail('Typed Radio inputs inflated a retired global JSON bundle')
 
-    def after_close(encoded, **kwargs):
+    original_decode, observations = recommendation_outputs._decode, []
+
+    def decode(encoded, *args, **kwargs):
+        assert not store._lock.held_by_current_thread
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                connection.execute('SELECT 1')
+        observations.append(True)
+        return original_decode(encoded, *args, **kwargs)
+
+    monkeypatch.setattr(store, '_make_reader', reader)
+    monkeypatch.setattr(radio_candidates.vectors, 'content_space_id', publish_during_read)
+    monkeypatch.setattr(json_cache, 'decode', no_global_decode)
+    monkeypatch.setattr(recommendation_outputs, '_decode', decode)
+    try:
+        generation, encoding_model, space, modes, bundles = radio_candidates._prepared_inputs(store, prepared=prepared_radio)
+        assert generation == 'old' and encoding_model == old_model
+        assert space == content_model.content_model_fingerprint(json.loads(old_model))
+        assert modes == {} and bundles['_meta']['musical_generation'] == 'old'
+        assert bundles['all']['wheelhouse'][0]['key'] == 'song|artist'
+        assert bundles['all']['wheelhouse'][0]['reason'] == 'Retained explanation'
+        assert observations, 'The fixture must reach real nonempty output decoding'
+        assert store.recommendations.framing('home')['musical_generation'] == 'new'
         assert not store._lock.held_by_current_thread
         assert len(connections) == 1
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             connections[0].execute('SELECT 1')
-        return decode(encoded, **kwargs)
-
-    monkeypatch.setattr(store, '_make_reader', reader)
-    monkeypatch.setattr(radio_candidates.vectors, 'content_space_id', publish_during_read)
-    monkeypatch.setattr(json_cache, 'decode', after_close)
-    try:
-        generation, encoding_model, space, modes, bundles = radio_candidates._prepared_inputs(store)
-        assert generation == 'old' and encoding_model == old_model
-        assert space == content_model.content_model_fingerprint(json.loads(old_model))
-        assert modes == {} and bundles == {'_meta': {'generation': 'old'}}
         assert store.settings.get_setting('rec_content_generation') == 'new'
     finally:
+        prepared_radio.close()
         store.conn.close()

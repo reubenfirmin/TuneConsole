@@ -5,6 +5,7 @@ from yt_playlist.rec import measurement, rec_params, scorecard
 
 
 def test_policy_fingerprint_tracks_preferences_parameters_and_actual_vectors(store):
+    store.tracks.upsert_track('song', 'Song', 'Artist', None, None)
     baseline, _ = measurement.serving_policy(store, 100)
     assert measurement.serving_policy(store, 100)[0] == baseline
     rec_params.set_param(store, "axis_weight_cap", 2)
@@ -40,7 +41,7 @@ def test_cached_score_and_build_policy_survive_new_rendering_preferences(store):
 
 
 def test_policy_fingerprint_tracks_playlist_taste_without_vector_rebuild(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("a", "A", "Artist", None, None)
     b = store.tracks.upsert_track("b", "B", "Artist", None, None)
     pid = store.playlists.upsert_playlist(iid, "PL", "Listening", 1, "h", 0)

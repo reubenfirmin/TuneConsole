@@ -1,0 +1,77 @@
+<section class="account-growth-map{% if growth_intro|default(false) %} festival-intro{% endif %}" aria-labelledby="{{ 'arrival-title' if growth_intro|default(false) else 'growth-title' }}">
+  {% if growth_intro|default(false) %}
+  <header class="festival-intro-copy">
+    <h1 id="arrival-title">Welcome to TuneConsole</h1>
+    <p class="festival-intro-sub" x-show="(starterReady || choosingArtists) && connected" x-cloak x-text="choosingArtists ? 'Choose your artists' : starterPlayed ? 'Enjoy your first set while we find more music for you' : 'Your first set is ready'"></p>
+    <div class="festival-entry-action" x-show="!connected && !imported && !running && !songs && !artists_required" x-cloak>
+      <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
+         target="_blank" rel="noopener">Get the extension {{ arrow_icon('external') }}</a>
+      <p>Then open <a href="https://music.youtube.com/" target="_blank" rel="noopener">YouTube Music</a>.</p>
+    </div>
+    <div class="arrival-progress" x-show="(!starterReady && !choosingArtists || !connected) && (connected || running || imported || songs > 0)" x-cloak
+         :class="{ 'is-working': !statusError && (connected || running) }" role="status" aria-live="polite">
+      <span class="arrival-wave" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
+      <span x-text="progressLabel">Bringing in your music</span>
+    </div>
+    <button class="btn btn-primary festival-first-set" type="button" x-show="(starterReady || choosingArtists) && connected" x-cloak @click="showStarter()"><span x-text="choosingArtists ? 'Choose artists' : 'Go to my first set'">Go to my first set</span> {{ arrow_icon('right') }}</button>
+  </header>
+  {% else %}
+  <div class="growth-map-tools">
+    <h1 id="growth-title">Your unlocks</h1>
+    <button class="btn-ghost" type="button" x-show="growth.home_choice_available && !choosing" @click="openChoice()">Choose my Home</button>
+  </div>
+  {% endif %}
+  <div class="festival-map-scroll" role="region" aria-label="Festival roadmap" tabindex="0"
+       @scroll.passive="if ($el.scrollLeft > 16) mapPanned = true">
+    <svg class="festival-map" viewBox="0 0 1536 1024" aria-label="A lakeside music festival. Choose a tent or stage to explore." role="group">
+      <defs>
+        <filter id="festival-glow"><feGaussianBlur stdDeviation="9"/></filter>
+        <filter id="festival-path-light" filterUnits="userSpaceOnUse" x="0" y="0" width="1536" height="1024"><feGaussianBlur stdDeviation="2"/></filter>
+        <filter id="festival-cutout-edge"><feGaussianBlur stdDeviation="1.3"/></filter>
+        <filter id="festival-foreground-edge"><feGaussianBlur stdDeviation="0.45"/></filter>
+        {% include '_partials/festival_trail_mask.svg' %}
+        {% for stop in growth.nodes %}<mask id="festival-{{ stop.id }}" maskUnits="userSpaceOnUse" x="0" y="0" width="1536" height="1024"><path fill="white" d="{{ stop.shape }}" filter="url(#festival-cutout-edge)"/></mask>{% endfor %}
+      </defs>
+      <image class="festival-grounds" href="/static/festival-grounds-v4.png" width="1536" height="1024"/>
+      <g class="festival-routes" mask="url(#festival-path-surface)" aria-hidden="true">
+        {# Available trails and the single preparation frontier get light; later paths stay in the art. #}
+        {% for trail in growth.trails %}
+        <g data-destination="{{ trail.id }}" data-destinations="{{ trail.destinations|join(' ') }}" data-parent="{{ trail.parent }}"
+           class="growth-route" :class="'is-' + trail('{{ trail.id }}').state"
+           x-show="trail('{{ trail.id }}').state !== 'untouched'"{% if trail.state == 'untouched' %} style="display:none"{% endif %}>
+          <path d="{{ trail.path }}"/>
+        </g>
+        {% endfor %}
+      </g>
+      {% for stop in growth.nodes %}
+      <g class="landmark-art{% if growth_intro|default(false) and stop.id == 'first' %} is-soundcheck{% endif %}" data-landmark="{{ stop.id }}" :class="{['is-' + node('{{ stop.id }}').state]: true, 'is-connected': node('{{ stop.id }}').connected, 'is-lit': hovered === '{{ stop.id }}' || selected === '{{ stop.id }}'}" aria-hidden="true">
+        <path class="landmark-halo" d="{{ stop.shape }}" filter="url(#festival-glow)"/>
+        <image class="landmark-light" href="/static/festival-grounds-v4.png" width="1536" height="1024" mask="url(#festival-{{ stop.id }})"/>
+      </g>
+      {% endfor %}
+      {# Put every label above every cutout; a later tent must never cover a sign. #}
+      {% for stop in growth.nodes %}
+      <g class="festival-destination" :class="{['is-' + node('{{ stop.id }}').state]: true, 'is-current': selected === '{{ stop.id }}'}"
+         {% if stop.id != 'first' %}role="button" tabindex="0" aria-haspopup="dialog"
+         :aria-label="node('{{ stop.id }}').label + ', ' + (node('{{ stop.id }}').optional ? 'optional, ' : '') + node('{{ stop.id }}').status"
+         @click="openNode('{{ stop.id }}')" @keydown.enter.prevent="openNode('{{ stop.id }}')" @keydown.space.prevent="openNode('{{ stop.id }}')"
+         @mouseenter="hovered = '{{ stop.id }}'" @mouseleave="hovered = null" @focus="hovered = '{{ stop.id }}'" @blur="hovered = null"
+        {% elif growth_intro|default(false) %}role="button" tabindex="0" data-first-sounds aria-label="Go to my first set"
+         :aria-label="choosingArtists ? 'Choose your artists' : 'Go to my first set'"
+         :aria-disabled="!(starterReady || choosingArtists) || !connected" @click="(starterReady || choosingArtists) && connected && showStarter()"
+         @keydown.enter.prevent="(starterReady || choosingArtists) && connected && showStarter()" @keydown.space.prevent="(starterReady || choosingArtists) && connected && showStarter()"
+        {% else %}role="img" aria-label="First sounds, your starting point"{% endif %}>
+        <path class="landmark-hit" d="{{ stop.shape }}"/>
+        <g class="landmark-sign" text-anchor="start" transform="translate({{ stop.sign_x }}, {{ stop.sign_y }})">
+          <text class="landmark-label">{{ {'takeout': 'Past listening', 'lastfm': 'Music details', 'deepseek': 'Album stories'}.get(stop.id, stop.label) }}</text>
+          <text class="landmark-hint" y="25" x-show="node('{{ stop.id }}').upcoming"{% if not stop.upcoming %} style="display:none"{% endif %} x-text="node('{{ stop.id }}').state === 'preparing' ? 'Getting ready' : 'Up next'"></text>
+        </g>
+      </g>
+      {% endfor %}
+    </svg>
+  </div>
+  <p class="festival-swipe-hint" x-show="!mapPanned">Swipe to explore the festival</p>
+  <ul class="growth-legend" aria-label="Path key" x-show="pathStates.includes('open')" x-cloak>
+    <li class="is-explored" x-show="pathStates.includes('open')" x-cloak><i></i>Open paths</li>
+  </ul>
+</section>

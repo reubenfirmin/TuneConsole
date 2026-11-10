@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 
 from yt_playlist.integrations.lastfm import LastFmIAO, POSITIVE_TTL
-from yt_playlist.providers import lastfm
+from yt_playlist.providers import genres, lastfm
 from yt_playlist.rec import discover, road_trip_candidates as candidates
 from yt_playlist.util import net
 
 
 @pytest.fixture
-def provider(store, monkeypatch):
+def provider(store, monkeypatch, canonical_genre_matcher):
     clock, calls = [1000.0], []
     monkeypatch.delenv('LASTFM_API_KEY', raising=False)
     store.settings.set_setting('lastfm_api_key', 'controlled-key')
@@ -39,7 +39,7 @@ def outage():
     raise urllib.error.HTTPError('https://ws.audioscrobbler.com/2.0/', 503, 'controlled outage', {}, None)
 
 
-def test_artist_metadata_keeps_last_good_value_and_pending_state_on_cache_hits(provider, store):
+def assert_artist_metadata_recovery(provider, store):
     def fetch():
         if len(p.calls) == 2:
             outage()
@@ -59,6 +59,19 @@ def test_artist_metadata_keeps_last_good_value_and_pending_state_on_cache_hits(p
     with net.probe_errors() as recovered:
         assert candidates.artist_genre(store, 'Artist') == 'Folk'
     assert not recovered and len(p.calls) == 3
+
+
+def test_artist_metadata_keeps_last_good_value_and_pending_state_on_cache_hits(provider, store):
+    assert_artist_metadata_recovery(provider, store)
+
+
+def test_provider_fixture_isolates_prior_app_genre_configuration(store, monkeypatch, request):
+    monkeypatch.setattr(genres, '_active', genres.build_canon(['Jazz']))
+    monkeypatch.setattr(genres, '_active_keys', {'jazz': 'jazz'})
+    assert genres.pick_genre(['house']) is None
+    # Resolve the provider after the prior app's configuration is installed.
+    provider = request.getfixturevalue('provider')
+    assert_artist_metadata_recovery(provider, store)
 
 
 def test_genre_fallback_remains_usable_without_caching_failure_for_a_day(provider, store, monkeypatch):

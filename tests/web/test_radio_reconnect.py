@@ -7,10 +7,18 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    uncontended_poc as session_poc, completed_radio_schema, completed_radio_store,
+    poc, play,
+)
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN, build
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These isolated controllers and transport routers have no app jobs."""
 
 
 def _run_preparation(worker):
@@ -19,8 +27,8 @@ def _run_preparation(worker):
     args[0]()
 
 
-def test_playback_arriving_after_startup_restores_and_extends_the_last_saved_song(poc):
-    original, remote, frames, workers, _ = poc
+def test_playback_arriving_after_startup_restores_and_extends_the_last_saved_song(session_poc):
+    original, remote, frames, workers, _ = session_poc
     original.start()
     play(original, 'v2')
     original.suspend()
@@ -58,8 +66,8 @@ def test_playback_arriving_after_startup_restores_and_extends_the_last_saved_son
     assert len(workers) == queued + 1
 
 
-def test_reconnect_restarts_one_suspended_monitor_but_never_restarts_explicit_stop(poc):
-    controller, remote, frames, workers, _ = poc
+def test_reconnect_restarts_one_suspended_monitor_but_never_restarts_explicit_stop(session_poc):
+    controller, remote, frames, workers, _ = session_poc
     controller.start()
     play(controller, 'v2')
     controller.seeds()
@@ -108,6 +116,31 @@ def test_preparation_does_not_wait_on_a_busy_session_lock(poc):
         owner.join(timeout=2)
         if caller.ident is not None:
             caller.join(timeout=2)
+
+
+def test_seed_preparation_yields_to_an_active_foreground_request(poc, monkeypatch):
+    from yt_playlist.core.activity import check_stopping
+    controller, _, _, workers, _ = poc
+    entered, continued = threading.Event(), threading.Event()
+    release = controller.ctx.store.priority.enter()
+    def seeds():
+        entered.set()
+        check_stopping()
+        continued.set()
+    monkeypatch.setattr(controller, 'join', lambda: None)
+    monkeypatch.setattr(controller, 'seeds', seeds)
+    controller.prepare()
+    task = threading.Thread(target=lambda: _run_preparation(workers[-1]))
+    task.start()
+    try:
+        assert not continued.wait(.05)
+        release()
+        task.join(2)
+        assert entered.is_set() and continued.is_set()
+        assert not task.is_alive() and not controller.preparing
+    finally:
+        release()
+        task.join(2)
 
 
 def _presence_app(bridge, prepare):

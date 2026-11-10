@@ -1,7 +1,13 @@
 import importlib.util
 import inspect
+import sqlite3
+import time
+from contextlib import ExitStack, closing
 
 import pytest
+from tests.compaction_fixture_support import compaction_inputs
+from tests.genre_catalog_support import use_shipped_catalog
+from tests.store_fixture_support import consumer_schema, initialize_consumer, native_sql_calls
 from yt_playlist.core.store import Store
 
 
@@ -42,11 +48,728 @@ def disable_periodic_library_sync(monkeypatch):
     monkeypatch.setattr(webapp, "BACKGROUND_WORK", False)
 
 
+@pytest.fixture(scope="session")
+def _pristine_current_schema():
+    """Read-only shipped SQL below tests of application consumers.
+
+    Fresh-bootstrap and historical-upgrade tests construct their own Stores.
+    Every consumer still owns a new connection, file namespace and revision
+    guards. Startup admission belongs to tests that call it themselves.
+    """
+    with consumer_schema() as template:
+        yield template
+
+
 @pytest.fixture
-def store():
+def store(_pristine_current_schema, request):
     s = Store(":memory:")
-    s.init_schema()
-    return s
+    try:
+        initialize_consumer(s, _pristine_current_schema)
+        if 'genre_pools' in request.fixturenames:
+            # The DJ account and session fixtures must be added after cloning:
+            # restoring from genre_pools itself would erase their SQL state.
+            s._fixture_genre_pools = request.getfixturevalue('radio_genre_template').restore(s)
+        if 'poc' in request.fixturenames:
+            # Restore before downstream fixtures add accounts or custom seeds.
+            if 'genre_pools' in request.fixturenames:
+                from tests.radio_session_support import seed_pool
+
+                s._fixture_radio_pool = seed_pool(s)
+            else:
+                s._fixture_radio_pool = request.getfixturevalue('radio_catalog_template').restore(s)
+        if 'radio_ui' in request.fixturenames:
+            request.getfixturevalue('radio_browser_template').restore(s)
+        yield s
+    finally:
+        s.conn.close()
+
+
+@pytest.fixture(scope='session')
+def vibe_menu_template(_pristine_current_schema, tmp_path_factory):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.store_fixture_support import reuse_reporting_reader
+    from tests.test_growth_readiness import publish_vibe_menus
+
+    # Register once here: importing a session fixture into several test modules
+    # creates separate pytest owners and repeats the same profile preparation.
+    def seed(source):
+        with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+            return publish_vibe_menus(source)
+    path = tmp_path_factory.mktemp('vibe-menu-inputs') / 'source.db'
+    with prepared_template(_pristine_current_schema, seed, database=path) as template:
+        yield template
+
+
+@pytest.fixture
+def vibe_menus(store, vibe_menu_template):
+    return vibe_menu_template.restore(store)
+
+
+@pytest.fixture(scope='session')
+def full_journey_prefix(_pristine_current_schema, vibe_menu_template):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_growth_destinations import publish_journey_prefix
+
+    # Keep actual catalog subjects, profiles, policies and menu files. Account
+    # setup, destination publication and live readiness remain with each case.
+    with prepared_template(_pristine_current_schema,
+                           lambda source: publish_journey_prefix(source, vibe_template=vibe_menu_template)) as template:
+        yield template
+
+
+@pytest.fixture(scope="session")
+def radio_browser_template(_pristine_current_schema):
+    from tests.onboarding_support import publish_personal_mix
+    from tests.prepared_fixture_support import prepared_template
+
+    with prepared_template(_pristine_current_schema,
+                           lambda source: publish_personal_mix(source, now=1)) as template:
+        yield template
+
+
+@pytest.fixture(scope="session")
+def radio_catalog_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.radio_session_support import seed_pool
+
+    with prepared_template(_pristine_current_schema, seed_pool) as template:
+        yield template
+
+
+@pytest.fixture(scope="session")
+def radio_genre_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_radio_genres import seed_genre_pools
+
+    # Keep all nine modes, 108 recordings, metadata and typed publications.
+    # Each consumer receives private SQL, retained files and detached rows.
+    with prepared_template(_pristine_current_schema, seed_genre_pools) as template:
+        yield template
+
+
+@pytest.fixture(scope="session")
+def measured_sounds_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_home_vibe import seed_sounds
+
+    # Keep the complete default measured input. The distinct by-mode comparison
+    # still builds its own audio pattern in the test that exercises it.
+    with prepared_template(_pristine_current_schema, seed_sounds) as template:
+        yield template
+
+
+@pytest.fixture
+def measured_sounds_store(store, measured_sounds_template):
+    measured_sounds_template.restore(store)
+    return store
+
+
+@pytest.fixture(scope='session')
+def measured_home_templates(_pristine_current_schema, measured_sounds_template):
+    """Prepare each ordinary consumer prefix once, after the unchanged input boundary."""
+    from tests.prepared_fixture_support import prepared_template
+
+    with ExitStack() as resources:
+        templates = {}
+
+        def prepared(kind):
+            assert kind in {'backend', 'browser'}
+            if kind not in templates:
+                def build(source):
+                    measured_sounds_template.restore(source)
+                    if kind == 'backend':
+                        from tests.test_home_tuning import prepare_tuning_home
+                        prepare_tuning_home(source, 1000)
+                    else:
+                        from tests.measured_home_support import prepare
+                        identity = source.accounts.upsert_account('main', 'cred', None, True)
+                        # Match live_app's pre-preparation state, including its
+                        # existing playlist. live_app later upserts these same
+                        # identities while creating the private application.
+                        source.playlists.upsert_playlist(identity, 'PLZ', 'Old Mix', 3, 'h', 0.0)
+                        prepare(source)
+
+                templates[kind] = resources.enter_context(
+                    prepared_template(_pristine_current_schema, build))
+            return templates[kind]
+
+        yield prepared
+
+
+@pytest.fixture
+def measured_home_store(store, measured_home_templates):
+    measured_home_templates('backend').restore(store)
+    return store
+
+
+@pytest.fixture
+def measured_browser_home_store(store, measured_home_templates):
+    measured_home_templates('browser').restore(store)
+    return store
+
+
+@pytest.fixture(scope="session")
+def home_seed_templates(_pristine_current_schema):
+    from tests.home_prepared_support import seed
+    from tests.prepared_fixture_support import prepared_template
+    from tests.recommendation_support import publish_bundles
+
+    # Keep four- and eight-track consumers distinct, including the genuinely
+    # unpublished cold-start input. No source has already prepared Home menus.
+    with ExitStack() as resources:
+        templates = {}
+
+        def inputs(tracks_per_lane=8, *, publish=True):
+            key = (tracks_per_lane, publish)
+            if key not in templates:
+                def build(source):
+                    if not publish:
+                        return seed(source, tracks_per_lane=tracks_per_lane, publish=False)
+                    bundles = inputs(tracks_per_lane, publish=False).restore(source)
+                    publish_bundles(source, bundles, vibes=True)
+                    return bundles
+
+                templates[key] = resources.enter_context(
+                    prepared_template(_pristine_current_schema, build))
+            return templates[key]
+
+        yield inputs
+
+
+@pytest.fixture(scope="session")
+def home_seed_template(home_seed_templates):
+    return home_seed_templates(4)
+
+
+@pytest.fixture
+def home_seed_inputs(store, home_seed_templates):
+    """Private eight-track inputs, before the consumer's own preparation."""
+    return home_seed_templates().restore(store)
+
+
+@pytest.fixture(scope="session")
+def home_prepared_template(_pristine_current_schema, home_seed_template):
+    from tests.prepared_fixture_support import prepared_template
+    from yt_playlist.rec import home_prepared
+
+    def build(source):
+        home_seed_template.restore(source)
+        result = home_prepared.prepare(source, 1000)
+        assert result is not None
+        return result
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture(scope='session')
+def mode_cards_inputs_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_mode_cards_route import _seed_bundles
+
+    # Both original modes and every twenty-track surface, before Home
+    # preparation or exposure. Fresh-only consumers still publish their change.
+    with prepared_template(_pristine_current_schema, _seed_bundles) as template:
+        yield template
+
+
+@pytest.fixture(scope='session')
+def mode_cards_home_template(_pristine_current_schema, mode_cards_inputs_template):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_mode_cards_route import prepare_home
+    from yt_playlist.rec import home_prepared
+
+    def build(source):
+        mode_cards_inputs_template.restore(source)
+        # Match _client's account-before-preparation order, without creating
+        # an app or recording any route's offer on the shared source.
+        source.accounts.upsert_account('main', 'cred', None, True)
+        prepare_home(source)
+        return source.rec_proposals.get_proposals(home_prepared.SURFACE)
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture(scope='session')
+def genre_candidates_template(_pristine_current_schema, tmp_path_factory):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_home_other_genres import seed_genres
+
+    # Keep the original six genres, four lanes and twenty songs per lane.
+    # Give memory input private evidence before function-scoped homes exist.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('genre-candidates-home')))
+        with prepared_template(_pristine_current_schema,
+                               seed_genres) as template:
+            yield template
+
+
+@pytest.fixture
+def genre_candidates(store, genre_candidates_template):
+    return genre_candidates_template.restore(store)
+
+
+@pytest.fixture(scope='session')
+def fresh_genre_candidates_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_fresh_pool import _without_fresh
+
+    with prepared_template(_pristine_current_schema, _without_fresh) as template:
+        yield template
+
+
+@pytest.fixture(scope='session')
+def fresh_home_template(_pristine_current_schema, fresh_genre_candidates_template):
+    from tests.home_fixture_support import returning_listener
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_mode_cards_route import prepare_home
+    from yt_playlist.rec import home_prepared
+
+    def build(source):
+        fresh_genre_candidates_template.restore(source)
+        returning_listener(source, 'mixes', now=1000)
+        source.accounts.upsert_account('main', 'cred', None, True)
+        prepare_home(source)
+        return source.rec_proposals.get_proposals(home_prepared.SURFACE)
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture(scope='session')
+def adaptive_library_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_group_home import library
+
+    # Real group discovery, bundles and serving, with no prepared Home menus.
+    # In particular, the history-retirement regression must accumulate its own.
+    with prepared_template(_pristine_current_schema, library) as template:
+        yield template
+
+
+@pytest.fixture(scope="session")
+def production64_template():
+    from tests.db_rebuild_support import build_production64
+
+    template = sqlite3.connect(':memory:')
+    try:
+        build_production64(template)
+        template.execute('PRAGMA query_only=ON')
+        yield template
+    finally:
+        template.close()
+
+
+@pytest.fixture(scope="session")
+def development93_template(production64_template):
+    import time
+    from tests.db_rebuild_support import build_development93
+    from tests.prepared_fixture_support import coordinates
+
+    with closing(sqlite3.connect(':memory:')) as template:
+        started = time.perf_counter()
+        build_development93(template, production64_template)
+        # This historical input has SQL only; never lose retained files by
+        # silently treating a populated file-backed owner as a SQL template.
+        assert coordinates(template) == []
+        seconds = time.perf_counter() - started
+        template.execute('PRAGMA query_only=ON')
+        yield template, seconds
+
+
+@pytest.fixture(scope="session")
+def _pristine_installed_schema(tmp_path_factory):
+    """Lazily build genuine historical SQL once per version and worker.
+
+    Consumers still reopen and admit independent databases. Only empty layouts
+    qualify: retained file coordinates must never escape into a SQL-only clone.
+    Populated upgrades and migration fault injection keep their own builders.
+    """
+    from yt_playlist.core.migrations import registry, runner
+
+    root = tmp_path_factory.mktemp("installed-schema-templates")
+    templates = {}
+    with ExitStack() as resources:
+        def template(version):
+            if version not in templates:
+                directory = root / str(version)
+                directory.mkdir()
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setenv("YT_PLAYLIST_HOME", str(directory / "app-home"))
+                    use_shipped_catalog(patch)
+                    # Empty SQL construction needs neither Store diagnostics
+                    # nor a disk commit for every historical version. Consumers
+                    # still own real disk/Store admission and populated upgrades.
+                    initial = resources.enter_context(closing(sqlite3.connect(":memory:")))
+                    initial.row_factory = sqlite3.Row
+                    initial.execute('PRAGMA foreign_keys=ON')
+                    previous = max((old for old in templates if old < version), default=None)
+                    if previous is not None:
+                        templates[previous].backup(initial)
+                    runner.migrate(initial, registry=registry.MIGRATIONS[:version])
+                    for table, in initial.execute(
+                            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                        quoted = '"' + table.replace('"', '""') + '"'
+                        for column in initial.execute(f'PRAGMA table_info({quoted})'):
+                            if column[1] == 'filename' or column[1].endswith('_filename'):
+                                field = '"' + column[1].replace('"', '""') + '"'
+                                assert initial.execute(
+                                    f'SELECT 1 FROM {quoted} WHERE {field} IS NOT NULL LIMIT 1'
+                                ).fetchone() is None, f"Installed template retains files: {table}.{column[1]}"
+                    initial.execute("PRAGMA query_only=ON")
+                    templates[version] = initial
+            return templates[version]
+
+        yield template
+
+
+@pytest.fixture(scope='session')
+def _admitted_installed_schema(tmp_path_factory, _pristine_installed_schema):
+    """Admission is setup for publication consumers, owned separately in startup tests."""
+    from tests.prepared_fixture_support import prepared_template
+
+    root = tmp_path_factory.mktemp('admitted-installed-schemas')
+    templates = {}
+    with ExitStack() as resources:
+        def template(version):
+            if version not in templates:
+                admitted = resources.enter_context(prepared_template(
+                    _pristine_installed_schema(version), lambda source: None,
+                    database=root / f'{version}.db', defer_metadata=True))
+                assert admitted.source.conn.execute(
+                    'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+                # PreparedTemplate owns the admitted source's revision tracker
+                # and installs its TEMP guards when restoring each consumer.
+                templates[version] = admitted
+            return templates[version]
+
+        yield template
+
+
+@pytest.fixture(scope='session')
+def _bounded_installed_schema(tmp_path_factory):
+    """Build empty publication inputs below admission, with real TEMP guards."""
+    from tests.genre_catalog_support import bound_catalog
+    from tests.prepared_fixture_support import capture_template
+    from tests.store_fixture_support import PristineSchema, install_numbered_input
+    from yt_playlist.core.db_revisions import Revisions
+    from yt_playlist.core.migrations import registry
+
+    root = tmp_path_factory.mktemp('bounded-installed-schemas')
+    templates = {}
+    with ExitStack() as resources:
+        def template(version):
+            if version not in templates:
+                with pytest.MonkeyPatch.context() as patch:
+                    bound_catalog(patch)
+                    patch.setenv('YT_PLAYLIST_HOME', str(root / f'{version}-home'))
+                    patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+                    patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+                    patch.delenv('DEEPSEEK_API_KEY', raising=False)
+                    source = resources.enter_context(closing(sqlite3.connect(
+                        ':memory:', factory=PristineSchema)))
+                    install_numbered_input(source, version)
+                    source.capture_revisions(Revisions(source))
+                    source.execute('PRAGMA query_only=ON')
+                    store = Store(root / f'{version}.db')
+                    resources.callback(store.conn.close)
+                    store.conn.execute('PRAGMA synchronous=OFF')
+                    initialize_consumer(store, source, compatibility=version < len(registry.MIGRATIONS))
+                    templates[version] = capture_template(store, None)
+                    assert templates[version].source.conn.execute(
+                        'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+            return templates[version]
+
+        yield template
+
+
+@pytest.fixture(scope='session')
+def legacy_owner_schema(tmp_path_factory):
+    """Preserve the exact empty v92/v98 builders used by owner cutover tests."""
+    from tests.core.test_collection_state_migration import installed_92
+    from tests.core.test_album_occurrences_migration import installed_98
+    from tests.prepared_fixture_support import coordinates
+
+    builders, templates = {92: installed_92, 98: installed_98}, {}
+    root = tmp_path_factory.mktemp('legacy-owner-schemas')
+    with ExitStack() as resources:
+        def get(version):
+            if version not in templates:
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setenv('YT_PLAYLIST_HOME', str(root / str(version)))
+                    initial = builders[version](root / f'{version}.db')
+                    try:
+                        assert coordinates(initial.conn) == []
+                        snapshot = resources.enter_context(closing(sqlite3.connect(':memory:')))
+                        initial.conn.backup(snapshot)
+                        snapshot.execute('PRAGMA query_only=ON')
+                        templates[version] = snapshot
+                    finally:
+                        initial.conn.close()
+            return templates[version]
+
+        yield get
+
+
+@pytest.fixture
+def legacy_owner_store(legacy_owner_schema, record_property):
+    import time
+
+    with ExitStack() as resources:
+        def open_store(path, version=92):
+            began = time.perf_counter()
+            template = legacy_owner_schema(version)
+            record_property('legacy_prefix_seconds', time.perf_counter() - began)
+            store = Store(path)
+            resources.callback(store.conn.close)
+            began = time.perf_counter()
+            template.backup(store.conn)
+            store.conn.execute('PRAGMA journal_mode=WAL')
+            store._bind_repositories()
+            assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == version
+            assert not store.conn.in_transaction
+            record_property('legacy_clone_seconds', time.perf_counter() - began)
+            return store
+
+        yield open_store
+
+
+@pytest.fixture(scope='session')
+def metadata_predecessor_schema():
+    """Completed v79 SQL shared by metadata conversion and publication owners."""
+    from tests.genre_catalog_support import bound_catalog
+    from tests.store_fixture_support import install_numbered_input
+
+    with closing(sqlite3.connect(':memory:')) as schema:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch, entries=(('rock', 'Rock'), ('jazz', 'Jazz'), ('blues', 'Blues')))
+            install_numbered_input(schema, 79)
+        schema.execute('PRAGMA query_only=ON')
+        yield schema
+
+
+@pytest.fixture(scope='session')
+def staged_custody_templates(tmp_path_factory, _pristine_installed_schema):
+    from tests.prepared_fixture_support import custody_templates
+
+    with custody_templates(tmp_path_factory, _pristine_installed_schema) as get:
+        yield get
+
+
+@pytest.fixture
+def staged_custody(staged_custody_templates, record_property):
+    import time
+
+    def restore(installed, owner, build, *, completed=None, **options):
+        store, version = installed
+        began = time.perf_counter()
+        template = staged_custody_templates(version, owner, build,
+            completed=completed or getattr(store, '_fixture_installed_template', None), **options)
+        record_property('staged_custody_builder_seconds', time.perf_counter() - began)
+        began = time.perf_counter()
+        result = template.restore(store)
+        # PreparedTemplate.restore installs the source's real private TEMP
+        # guards, including owners added while staging. Keep those guards;
+        # rebind historical repository views without rebuilding every trigger.
+        store._bind_repositories()
+        if hasattr(store, '_snapshot_revisions'):
+            store._snapshot_revisions.refresh()
+        record_property('staged_custody_restore_seconds', time.perf_counter() - began)
+        return result
+
+    return restore
+
+
+@pytest.fixture(scope='module')
+def upgraded_custody_inputs(tmp_path_factory, _pristine_installed_schema, _bounded_installed_schema):
+    """Run real historical upgrades in independently measured retained phases.
+
+    Each phase owns private SQL and file copies. Callers name cold preparation
+    and every upgrade phase before consuming the completed read-only input.
+    """
+    from yt_playlist.core.db_revisions import Revisions
+    from yt_playlist.core.migrations import registry, runner
+    from tests.prepared_fixture_support import (
+        CUSTODY_UPGRADE_PHASES, capture_template, custody_predecessor, custody_templates)
+    from types import SimpleNamespace
+
+    seeded, inputs, converted, captured = {}, {}, {}, {}
+    attempts = {}
+
+    def get(version, target, owner, build, *, phase='captured', external_files=None, prepared=None):
+        if target == version:
+            seeded[version, owner] = staged_custody_templates(version, owner, build, admit=False,
+                completed=prepared or _bounded_installed_schema(version))
+            return seeded[version, owner]
+        key = (version, target, owner)
+        if phase == 'input':
+            if key not in inputs or key in converted:
+                completed = get(version, custody_predecessor(version, target), owner, build,
+                    external_files=external_files, prepared=prepared)
+
+                def bare_input(source):
+                    # Historical DDL starts with backed-up SQL and retained
+                    # files, without installed connection-local read adapters.
+                    Revisions.unbind(source.conn)
+                    source._snapshot_revisions = None
+                    adapters = source.conn.execute("SELECT type,name FROM sqlite_temp_schema "
+                        "WHERE type IN ('trigger','view') ORDER BY type").fetchall()
+                    for kind, name in adapters:
+                        quoted = '"' + name.replace('"', '""') + '"'
+                        source.conn.execute(f'DROP {kind.upper()} IF EXISTS temp.{quoted}')
+                    source.conn.execute('PRAGMA synchronous=NORMAL')
+                    return completed.result
+
+                # A repeated input inspection after conversion receives another
+                # private predecessor; it cannot observe the upgraded source.
+                attempts[key] = attempts.get(key, 0) + 1
+                inputs[key] = staged_custody_templates(version,
+                    f'{owner}:input:{target}:{attempts[key]}', bare_input,
+                    admit=False, completed=completed)
+            return inputs[key]
+        if key not in converted:
+            predecessor = get(version, target, owner, build, phase='input', external_files=external_files,
+                prepared=prepared)
+            source = predecessor.source
+            source.conn.execute('PRAGMA query_only=OFF')
+            try:
+                runner.migrate(source.conn, registry=registry.MIGRATIONS[:target])
+            finally:
+                source.conn.execute('PRAGMA query_only=ON')
+            converted[key] = SimpleNamespace(source=source, result=predecessor.result)
+        if phase == 'converted':
+            return converted[key]
+        if key not in captured:
+            source = converted[key].source
+            if target == CUSTODY_UPGRADE_PHASES[-1]:
+                source.conn.execute('PRAGMA query_only=OFF')
+                source._snapshot_revisions = Revisions(source.conn)
+            captured[key] = capture_template(source, converted[key].result,
+                external_files=external_files(source) if external_files is not None else ())
+        return captured[key]
+
+    def release(version, owner):
+        # Finish one independently built predecessor's handles at a time, so
+        # cleanup remains measured with the obligations that created them.
+        sources = {id(value.source): value.source for cache in (inputs, converted, captured)
+                   for key, value in cache.items() if key[0] == version and key[2] == owner}
+        initial = seeded.pop((version, owner))
+        sources[id(initial.source)] = initial.source
+        for cache in (inputs, converted, captured):
+            for key in tuple(cache):
+                if key[0] == version and key[2] == owner:
+                    del cache[key]
+        for source in sources.values():
+            assert not source.conn.in_transaction
+            assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+            source._fixture_released = True
+            source.conn.close()
+        return tuple(sources.values())
+
+    get.release = release
+    with custody_templates(tmp_path_factory, _pristine_installed_schema) as staged_custody_templates:
+        yield get
+
+
+@pytest.fixture(scope='session')
+def legacy_radio_template(tmp_path_factory, _bounded_installed_schema):
+    from tests.core.test_legacy_radio_upgrade import seed_installed_radio
+    from tests.prepared_fixture_support import historical_template
+
+    root = tmp_path_factory.mktemp('legacy-radio-template')
+    completed = _bounded_installed_schema(93)
+    with historical_template(completed.source.conn, seed_installed_radio,
+                             database=root / 'source.db') as template:
+        yield template
+
+
+@pytest.fixture
+def installed_radio(legacy_radio_template, request):
+    import json
+    from yt_playlist.core import radio_storage
+
+    def restore(path, *, account_id=3, playlist='RADIO'):
+        store = Store(path)
+        request.addfinalizer(store.conn.close)
+        try:
+            state, raw = legacy_radio_template.restore(store)
+            if (account_id, playlist) != (3, 'RADIO'):
+                state.update(identity=account_id, playlist=playlist)
+                raw = json.dumps(state)
+                with store.conn:
+                    store.conn.execute('UPDATE settings SET value=? WHERE key=?',
+                                       (raw, radio_storage.SESSION_KEY))
+            return store, state, raw
+        except BaseException:
+            store.conn.close()
+            raise
+
+    return restore
+
+
+@pytest.fixture(scope='session')
+def compact_group_template(tmp_path_factory, _pristine_installed_schema):
+    from tests.repos.test_compact_group_publication import compacted_groups
+
+    root = tmp_path_factory.mktemp('compact-group-template')
+    with compacted_groups(_pristine_installed_schema(69), root / 'source.db') as template:
+        yield template
+
+
+@pytest.fixture
+def consumer_store(_pristine_current_schema, request):
+    """Create owned empty consumers; populated reopens still use real admission."""
+    def create(path=":memory:", *, snapshot_guards=True):
+        started = time.perf_counter()
+        target = Store(path)
+        request.addfinalizer(target.conn.close)
+        try:
+            # Disposable consumers require real commits and restart visibility,
+            # without host power-loss durability for their private input files.
+            target.conn.execute('PRAGMA synchronous=OFF')
+            assert not target.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' LIMIT 1").fetchone(), \
+                'Consumer templates are only for a new empty Store; populated reopens need init_schema()'
+            initialize_consumer(target, _pristine_current_schema, snapshot_guards=snapshot_guards)
+        finally:
+            request.node.user_properties.append(('consumer_initialization_seconds', time.perf_counter() - started))
+        return target
+    return create
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    s = Store(tmp_path / "store.db")
+    try:
+        initialize_consumer(s, _pristine_current_schema)
+        yield s
+    finally:
+        s.conn.close()
+
+
+@pytest.fixture
+def unlocked_home_controls(monkeypatch):
+    """Isolate existing post-unlock feature tests from onboarding preparation.
+
+    Growth readiness and journey tests deliberately do not use this fixture.
+    """
+    from yt_playlist.rec import account_growth
+    monkeypatch.setattr(account_growth, 'vibe_access', lambda *_args, **_kwargs: True)
+
+    monkeypatch.setattr(account_growth, 'view', lambda *_args, **_kwargs: {
+        'nodes': [], 'trails': [], 'achievements': [], 'health': {'total': 0, 'processed': 0},
+        'vibes_ready': True, 'ready_areas': {'directions': True, 'discover': True, 'recent': True},
+        'ready_formats': {'mixes': True, 'albums': False, 'radio': False},
+        'home_choice_available': False})
+
+
+@pytest.fixture
+def canonical_genre_matcher(monkeypatch):
+    """Provider matching tests use the catalog rather than a prior app's settings."""
+    from yt_playlist.providers import genres
+
+    monkeypatch.setattr(genres, '_active', None)
+    monkeypatch.setattr(genres, '_active_keys', None)
 
 
 @pytest.fixture
@@ -55,10 +778,12 @@ def legacy_store(tmp_path):
     from yt_playlist.core.migrations import migrate
     from yt_playlist.core.migrations.registry import MIGRATIONS
     s = Store(tmp_path / 'legacy.db')
-    migrate(s.conn, registry=MIGRATIONS[:7])
-    s._bind_repositories()
-    yield s
-    s.conn.close()
+    try:
+        migrate(s.conn, registry=MIGRATIONS[:7])
+        s._bind_repositories()
+        yield s
+    finally:
+        s.conn.close()
 
 
 def only_provider(store, name):
@@ -86,10 +811,11 @@ def seed_catalog_track(store, key, title, artist, *, video_id=None, track_id=Non
         store.conn.execute("INSERT INTO library_memberships VALUES (?,'fixture',NULL)", (rid,))
         store.conn.execute("INSERT INTO recording_aliases VALUES (?,?,'fixture')", (key,rid))
         if metadata:
-            columns = {r[1] for r in store.conn.execute('PRAGMA table_info(catalog_tracks)')}
-            assert metadata.keys() <= columns
-            store.conn.execute('UPDATE catalog_tracks SET '+','.join(f'{field}=?' for field in metadata)+' WHERE id=?',
-                               [*metadata.values(),rid])
+            from yt_playlist.core import metadata as metadata_owner
+            # The metadata owner validates each field. Resolving the complete
+            # catalog view's columns again for every seeded track is redundant.
+            for field,value in metadata.items():
+                metadata_owner.select(store.conn,rid,field,value,'fixture')
         from yt_playlist.core import artists
         artists.observe(store.conn,rid,artist,browse_id=metadata.get('artist_browse_id'))
     return rid

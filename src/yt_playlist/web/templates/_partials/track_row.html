@@ -3,7 +3,7 @@
    manual edit and enrichment always render the genre/year cells identically. The whole <tr> is the
    swap unit, keeping the data-* attributes the client sort reads in sync. Needs: t, idx, pl. #}
 {% from "_partials/song_menu_button.html" import song_menu %}
-{% set play_url = 'https://music.youtube.com/watch?v=' ~ (t.video_id|urlencode) ~ '&list=' ~ (pl.ytm_playlist_id|urlencode) %}
+{% set play_url = 'https://music.youtube.com/watch?v=' ~ (t.video_id|urlencode) ~ '&list=' ~ (pl.provider_playlist_id|urlencode) %}
 <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
     data-album="{{ t.album|lower }}" data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}"
     data-year="{{ t.year or 0 }}" data-genre="{{ t.genre|lower }}" :class="{ rowdel: false }">
@@ -44,7 +44,7 @@
   <td class="num mono col-length"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
   <td class="rowmenu"{% if is_generated and t.identity_key %} x-data="{ mood: {{ (mood_states|default({})).get(t.identity_key, 0) }} }"{% endif %}>
     <div class="track-cell">
-    {{ song_menu(t, {"playlist": true, "play_url": play_url, "mood_key": t.identity_key if is_generated else ''}) }}
+    {{ song_menu(t, {"playlist": pl.id is not none, "play_url": play_url, "mood_key": t.identity_key if is_generated else ''}) }}
     </div>
   </td>
 </tr>

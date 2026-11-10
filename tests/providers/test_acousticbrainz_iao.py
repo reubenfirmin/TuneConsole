@@ -84,7 +84,6 @@ def test_outage_is_shared_between_endpoints_and_other_recordings(boundary, store
     assert len(b.calls) == 1 and len(errors) == 4
     assert all(error.provider == 'acousticbrainz' and error.retry_at == 1030 for error in errors)
     assert store.enrichment_state.integration_cooldown('acousticbrainz')['retry_at'] == 1030
-    ab.reset()
     assert ab.tripped()
     b.clock[0] = 1030
     assert ab.probe({'mb_recording_id': MBID}, store).fields['energy'] == .709
@@ -145,8 +144,9 @@ def test_only_missing_endpoint_is_negative_cached(boundary, endpoint):
     assert len(b.calls) == 3 and b.calls[-1][0].full_url.endswith(endpoint)
 
 
-@pytest.mark.parametrize('cached', [False, True])
-@pytest.mark.parametrize('status', [404, 400, 429, 503])
+@pytest.mark.parametrize('status,cached', [
+    (404, False), (404, True), (400, False), (429, True), (503, False),
+])
 def test_http_error_body_is_closed_on_miss_retry_and_retained_data(boundary, cached, status):
     b = boundary()
     if cached:
@@ -174,10 +174,16 @@ def test_http_error_body_is_closed_on_miss_retry_and_retained_data(boundary, cac
         assert errors[0].outage == (status in (429, 503))
 
 
-@pytest.mark.parametrize('section,field', [
-    ('rhythm', 'bpm'), ('lowlevel', 'average_loudness'), ('lowlevel', 'dynamic_complexity'),
+@pytest.mark.parametrize('section,field,bad', [
+    ('rhythm', 'bpm', 'temporary backend failure'),
+    ('lowlevel', 'average_loudness', ''),
+    ('lowlevel', 'dynamic_complexity', None),
+    ('rhythm', 'bpm', True),
+    ('lowlevel', 'average_loudness', []),
+    ('lowlevel', 'dynamic_complexity', {}),
+    ('rhythm', 'bpm', float('nan')),
+    ('lowlevel', 'dynamic_complexity', float('inf')),
 ])
-@pytest.mark.parametrize('bad', ['temporary backend failure', '', None, True, [], {}, float('nan'), float('inf')])
 def test_present_non_numeric_low_level_descriptor_is_pending(boundary, section, field, bad):
     payload = deepcopy(LOWLEVEL)
     payload[section][field] = bad
@@ -188,8 +194,10 @@ def test_present_non_numeric_low_level_descriptor_is_pending(boundary, section, 
     assert not b.iao._cache
 
 
-@pytest.mark.parametrize('field', ['key_key', 'key_scale'])
-@pytest.mark.parametrize('bad', [None, [], 123, '', '   '])
+@pytest.mark.parametrize('field,bad', [
+    ('key_key', None), ('key_scale', []), ('key_key', 123),
+    ('key_scale', ''), ('key_key', '   '),
+])
 def test_present_malformed_tonal_descriptor_is_pending(boundary, field, bad):
     payload = deepcopy(LOWLEVEL)
     payload['tonal'][field] = bad

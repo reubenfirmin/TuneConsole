@@ -1,5 +1,6 @@
 """Local fitting must not leak songs between folds or rewrite observed evidence."""
 from copy import deepcopy
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -9,13 +10,13 @@ import sys
 from fastapi.testclient import TestClient
 import pytest
 
-from experiments.audio_lab_tools import train_vibes as trainer
+from experiments.audio_lab_tools.training import train_vibes as trainer
 from tests.test_audio_vibes import sample
 from yt_playlist.core import catalog
 from yt_playlist.core import features
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import audio_vibe_model as model
-from yt_playlist.rec import audio_vibe_preview as heuristic
+from yt_playlist.rec import audio_vibe_prediction as heuristic
 from yt_playlist.core import audio_vibe_metadata
 from yt_playlist.web.app import create_app
 
@@ -99,7 +100,7 @@ def test_readonly_loader_joins_early_answer_without_changing_snapshot_and_dedupl
         store.audio_vibes.save_feedback(samples[0]['run_id'], [s['id'] for s in samples[:answered_count]],
                                         labels, heuristic.TAXONOMY_VERSION, None, now)
     path = tmp_path / 'snapshot.db'
-    with sqlite3.connect(path) as destination:
+    with closing(sqlite3.connect(path)) as destination:
         store.conn.backup(destination)
     before = path.read_bytes()
     records, skipped = trainer.examples_from_db(path)
@@ -124,8 +125,8 @@ def test_track_feedback_joins_samples_from_independent_playbacks(store, tmp_path
     store.audio_vibes.save_playback(answer['run_id'], video, 'Song', 'Artist', 1)
 
     def leave_feedback():
-        # Historical sample IDs are not training requirements or joins.
-        store.audio_vibes.save_feedback(answer['run_id'], ['historical-sample-no-longer-present'], ['cruise'],
+        # A judgment without analysis still joins independent captured playbacks.
+        store.audio_vibes.save_feedback(answer['run_id'], [], ['cruise'],
                                         heuristic.TAXONOMY_VERSION, None, 5)
 
     if feedback_first:
@@ -137,7 +138,7 @@ def test_track_feedback_joins_samples_from_independent_playbacks(store, tmp_path
         leave_feedback()
     frozen = store.audio_vibes.feedback(answer['run_id'])
     database = tmp_path / 'track-join.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     before = database.read_bytes()
     rows, skipped = trainer.examples_from_db(database)
@@ -173,7 +174,7 @@ def test_replay_replaces_old_measurements_without_requiring_another_answer(store
     unrelated['video_id'] = 'another-track-with-the-same-title'
     store.audio_vibes.save_sample(unrelated, 11)
     database = tmp_path / 'replay.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     rows, skipped = trainer.examples_from_db(database)
     assert skipped == {} and len(rows) == 1
@@ -197,7 +198,7 @@ def test_latest_track_answer_wins_even_when_its_playback_has_no_samples(store, t
     store.audio_vibes.save_playback(latest['run_id'], latest['video_id'], 'Song', 'Artist', 3)
     store.audio_vibes.save_feedback(latest['run_id'], [], latest_labels, heuristic.TAXONOMY_VERSION, None, 4)
     database = tmp_path / 'latest-answer.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     rows, skipped = trainer.examples_from_db(database)
     assert skipped['earlier_answer_for_same_song'] == 1
@@ -256,8 +257,11 @@ def test_local_configuration_enables_model_and_environment_can_disable_it(tmp_pa
     local.write_text('YT_PLAYLIST_AUDIO_VIBES=1\nYT_PLAYLIST_AUDIO_VIBE_MODEL=' + str(path) + '\n')
     monkeypatch.setattr(features, 'LOCAL_ENV', local)
     monkeypatch.delenv(model.ENVIRONMENT_KEY)
-    assert heuristic.predict(samples)['model']['trained_labels'] == ['energize']
+    prediction = heuristic.predict(samples)
+    assert prediction['model']['trained_labels'] == ['energize']
+    assert model.identity() == prediction['model']['sha256']
     monkeypatch.setenv(model.ENVIRONMENT_KEY, '')
+    assert model.identity() == 'heuristic'
     assert heuristic.predict(samples) == baseline
 
 
@@ -319,13 +323,13 @@ def test_cli_trains_while_pytest_holds_the_shared_machine_lock(store, tmp_path):
         store.audio_vibes.save_feedback(samples[0]['run_id'], [row['id'] for row in samples], [label],
                                         heuristic.TAXONOMY_VERSION, None, index + 1)
     database = tmp_path / 'training.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     before = database.read_bytes()
     output, report = tmp_path / 'model.json', tmp_path / 'report.json'
     # Pytest owns the shared machine lock for this entire test. The CLI must
     # finish independently, rather than waiting for its own parent to release it.
-    result = subprocess.run([sys.executable, '-m', 'experiments.audio_lab_tools.train_vibes',
+    result = subprocess.run([sys.executable, '-m', 'experiments.audio_lab_tools.training.train_vibes',
         '--db', str(database), '--output', str(output), '--report', str(report)],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
@@ -405,7 +409,7 @@ def test_exact_catalog_metadata_joins_readonly_training_and_runtime_and_freezes_
     store.audio_vibes.save_feedback(samples[0]['run_id'], [s['id'] for s in samples], ['energize'],
                                     heuristic.TAXONOMY_VERSION, None, 3)
     database = tmp_path / 'snapshot.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     before = database.read_bytes()
     rows, _ = trainer.examples_from_db(database)
@@ -421,22 +425,64 @@ def test_exact_catalog_metadata_joins_readonly_training_and_runtime_and_freezes_
     with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
         predicted = client.get('/audio-vibes/runs/' + samples[0]['run_id']).json()['prediction']
         assert next(row for row in predicted['ranking'] if row['vibe'] == 'energize')['score'] > .99
-        # Clear the fixture annotation so the API captures a fresh hypothesis.
-        with store.conn:
-            store.conn.execute('DELETE FROM audio_session_labels')
-        payload = {'run_id': samples[0]['run_id'], 'sample_ids': [s['id'] for s in samples],
+        # A new playback captures a fresh hypothesis while retaining the old judgment.
+        new_samples = excerpts(samples[0]['video_id'])
+        for row in new_samples:
+            store.audio_vibes.save_sample(row, 4)
+        payload = {'run_id': new_samples[0]['run_id'], 'sample_ids': [s['id'] for s in new_samples],
                    'vibes': ['energize'], 'taxonomy_version': heuristic.TAXONOMY_VERSION}
+        fresh_prediction = client.get('/audio-vibes/runs/' + new_samples[0]['run_id']).json()['prediction']
         saved = client.post('/audio-vibes/feedback', json=payload).json()['feedback']['prediction']
-        assert saved == predicted
+        assert saved == fresh_prediction
+        assert store.audio_vibes.feedback(samples[0]['run_id'])['prediction'] is None
         with store.conn:
             catalog.choose_field(store.conn, tid, 'bpm', 60.)
-            # Native aggression has no legacy catalog column/editor field. Its
-            # retained choice still blocks fallback in the shared input reader.
-            store.conn.execute("INSERT INTO entry_field_choices VALUES (?,'mood_aggressive','null','fixture')", (tid,))
-        updated = client.get('/audio-vibes/runs/' + samples[0]['run_id']).json()
+        updated = client.get('/audio-vibes/runs/' + new_samples[0]['run_id']).json()
         assert next(row for row in updated['prediction']['ranking'] if row['vibe'] == 'energize')['score'] < .1
         assert updated['feedback']['prediction'] == saved
-        assert store.audio_vibes.base_metadata(samples[0]['video_id'])['mood_aggressive'] is None
+        # Native classifiers have a separate evidence owner and cannot be
+        # written as catalog choices. Null catalog choices still block fallback.
+        with pytest.raises(ValueError, match='Unknown metadata field'):
+            catalog.choose_field(store.conn, tid, 'mood_aggressive', None)
+        with store.conn:
+            catalog.choose_field(store.conn, tid, 'bpm', None)
+        metadata = store.audio_vibes.base_metadata(samples[0]['video_id'])
+        assert metadata['bpm'] is None and metadata['mood_aggressive'] == .8
+        assert client.get('/audio-vibes/runs/' + new_samples[0]['run_id']).json()['feedback']['prediction'] == saved
+
+
+def test_predecessor_native_null_blocks_fallback_and_unsupported_cutover_preserves_it(tmp_path):
+    from yt_playlist.core.migrations import migrate, registry
+    from yt_playlist.core.migrations.runner import MigrationError
+    from yt_playlist.core.store import Store
+    from yt_playlist.providers.base import MetadataObservation
+
+    store = Store(tmp_path / 'native-null.db')
+    try:
+        migrate(store.conn, registry=registry.MIGRATIONS[:79])
+        store._bind_repositories()
+        with store.conn:
+            recording = store.conn.execute('INSERT INTO recordings(identity_key,title,artist,created_at) '
+                "VALUES ('native-null','Song','Artist',1)").lastrowid
+            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist) '
+                "VALUES ('native-null',?,'Song','Artist')", (recording,))
+            entry = store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) '
+                "VALUES (?,'native-null')", (recording,)).lastrowid
+        store.enrichment_state.record_metadata_observations(entry, 'acousticbrainz', [MetadataObservation(
+            'mood_aggressive', .8, 'recording', 'recording-mbid', 'prediction',
+            match_evidence={'method': 'supplied_recording_mbid'})], run_id='provider', now=1)
+        assert audio_vibe_metadata.read(store.conn, 'native-null')['mood_aggressive'] == .8
+        with store.conn:
+            store.conn.execute("INSERT INTO entry_field_choices VALUES (?,'mood_aggressive','null','fixture')", (entry,))
+        assert audio_vibe_metadata.read(store.conn, 'native-null')['mood_aggressive'] is None
+        before = list(store.conn.iterdump())
+        with pytest.raises(MigrationError, match='Unsupported active legacy metadata choice'):
+            migrate(store.conn, registry=registry.MIGRATIONS[:80])
+        assert list(store.conn.iterdump()) == before
+        assert audio_vibe_metadata.read(store.conn, 'native-null')['mood_aggressive'] is None
+        assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 79
+    finally:
+        store.conn.close()
 
 
 def test_enabled_legacy_artifact_keeps_working_while_metadata_candidate_is_evaluated(tmp_path, monkeypatch):

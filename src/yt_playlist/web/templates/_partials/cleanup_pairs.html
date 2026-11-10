@@ -8,7 +8,7 @@
       <th></th>
     </tr></thead>
     {% for o in pairs %}
-    {% set ay = o.playlist_a.scope_ref %}{% set by = o.playlist_b.scope_ref %}
+    {% set ay = o.playlist_a.playlist_scope_id %}{% set by = o.playlist_b.playlist_scope_id %}
     <tbody class="ov-row" data-a="{{ o.playlist_a.title|lower }}" data-b="{{ o.playlist_b.title|lower }}"
            data-shared="{{ o.shared_count }}" data-ay="{{ ay }}" data-by="{{ by }}"
            x-data="{ open: false, mx: 0, my: 0 }">

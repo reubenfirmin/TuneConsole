@@ -1,10 +1,12 @@
 """ChartsRepo: play-history statistics for the charts / artist / playlist UI pages
 (most-played songs and artists, per-playlist listen stats, and per-track detail views).
 """
-from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized, snapshot_read
+from contextlib import contextmanager
+
+from yt_playlist.library.rating_policy import LIKED_EXISTS
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 from yt_playlist.core import artists
 from yt_playlist.core.catalog_query import playable_tracks_sql
-from yt_playlist.util.matching import recording_title
 
 # Per-identity category expression for the non-playlist ticker dimensions. Each picks one
 # representative value per identity_key (dup uploads of the same song collapse to one), and
@@ -24,8 +26,13 @@ _CAT_EXPR = {
 _PL_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik, pt.playlist_id pid "
                   "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id")
 _ALBUM_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik,at.album_id aid "
-                     "FROM tracks t JOIN album_tracks at ON at.entry_id=t.id "
+                     "FROM tracks t JOIN {tracks} at ON at.entry_id=t.id "
                      "JOIN album_primary_provider_ids p ON p.album_id=at.album_id AND p.provider='youtube'")
+# The listening-day projection combines evidence sources. Evaluate it once,
+# giving its computed identity key the affinity needed for indexed lookups.
+_PLAY_COUNTS_CTE = ("play_counts AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key,"
+                    "COUNT(*) plays FROM listening_days GROUP BY identity_key)")
+_TRACK_PLAYS = "COALESCE((SELECT plays FROM play_counts hi WHERE hi.identity_key=t.identity_key),0)"
 
 
 class ChartsRepo(Repo):
@@ -39,7 +46,7 @@ class ChartsRepo(Repo):
         elif dimension == "album":
             rows = self.conn.execute(
                 "SELECT '@album:'||a.id cat,COALESCE(NULLIF(a.thumbnail,''),MIN(NULLIF(t.thumbnail,''))) thumbnail "
-                "FROM albums a JOIN album_tracks at ON at.album_id=a.id JOIN tracks t ON t.id=at.entry_id "
+                f"FROM albums a JOIN {self.album_tracks_table} at ON at.album_id=a.id JOIN tracks t ON t.id=at.entry_id "
                 "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
                 "GROUP BY a.id").fetchall()
         elif dimension == "playlist":
@@ -58,18 +65,18 @@ class ChartsRepo(Repo):
         rows = self.conn.execute(
             "SELECT '@album:'||a.id k,p.provider_id b FROM albums a JOIN album_primary_provider_ids p "
             "ON p.album_id=a.id AND p.provider='youtube' WHERE EXISTS "
-            "(SELECT 1 FROM album_tracks at JOIN tracks t ON t.id=at.entry_id WHERE at.album_id=a.id)").fetchall()
+            f"(SELECT 1 FROM {self.album_tracks_table} at JOIN tracks t ON t.id=at.entry_id WHERE at.album_id=a.id)").fetchall()
         return {r['k']:r['b'] for r in rows}
 
     @synchronized
     def album_labels(self):
-        return {f'@album:{r[0]}':r[1] or 'Album' for r in self.conn.execute(
+        return {f'@album:{r[0]}':r[1] for r in self.conn.execute(
             "SELECT a.id,a.title FROM albums a JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube'")}
 
     @synchronized
     def playlist_labels(self):
         """Playlist titles are presentation labels; local IDs retain account scope."""
-        return {f'@playlist:{r[0]}': r[1] or 'Playlist' for r in self.conn.execute(
+        return {f'@playlist:{r[0]}': r[1] for r in self.conn.execute(
             "SELECT id,title FROM playlists")}
 
     @snapshot_read
@@ -97,7 +104,7 @@ class ChartsRepo(Repo):
                 "FROM pl JOIN playlists p ON p.id=pl.pid GROUP BY p.id").fetchall()
         elif dimension == 'album':
             rows = self.conn.execute(
-                f"WITH membership AS ({_ALBUM_MEMBERSHIP}) "
+                f"WITH membership AS ({_ALBUM_MEMBERSHIP.format(tracks=self.album_tracks_table)}) "
                 "SELECT '@album:'||aid cat,COUNT(*) c FROM membership GROUP BY aid").fetchall()
         else:
             rows = self.conn.execute(
@@ -124,7 +131,7 @@ class ChartsRepo(Repo):
                 f"WHERE {bounds} GROUP BY p.id", args).fetchall()
         elif dimension == 'album':
             rows = self.conn.execute(
-                f"WITH membership AS ({_ALBUM_MEMBERSHIP}) "
+                f"WITH membership AS ({_ALBUM_MEMBERSHIP.format(tracks=self.album_tracks_table)}) "
                 "SELECT '@album:'||m.aid cat,COUNT(*) c FROM listening_days hi "
                 "JOIN membership m ON m.ik=hi.identity_key "
                 f"WHERE {bounds} GROUP BY m.aid",args).fetchall()
@@ -155,53 +162,40 @@ class ChartsRepo(Repo):
         return {r["pid"]: (r["last"], r["cnt"]) for r in rows}
 
     @snapshot_read
-    def get_playlist_playback_stats(self) -> dict:
+    def get_playlist_playback_stats(self, *, policy) -> dict:
         """Actual playlist listening: {pid: (last_observed_playback, sessions)}.
 
-        A session can be partial. It ends when playback changes context or no
-        playing observation arrives for thirty minutes. Track changes, duplicate
-        reports and player ticks within that session do not add more listens.
-        Only explicit, account-matched playback context qualifies, at or after
-        known creation. Undated member-song history cannot backfill a session.
+        The caller supplies observation, normalization and session rules. The
+        query resolves account-scoped playlist references and aggregates them.
         """
-        rows = self.conn.execute("""
+        rows = self.conn.execute(f"""
             WITH observations AS (
-                SELECT identity_id,played_at at,playlist_ytm_id context FROM play_events
-                UNION
-                SELECT identity_id,at,playlist_ytm_id FROM player_events
-                WHERE video_id IS NOT NULL
-                AND CASE WHEN json_valid(payload) THEN
-                    COALESCE(json_extract(payload,'$.muted'),0)=0
-                    AND COALESCE(json_extract(payload,'$.tabMuted'),0)=0
-                    AND COALESCE(json_extract(payload,'$.paused'),0)=0
-                    AND COALESCE(json_extract(payload,'$.volume'),1)>0
-                    ELSE 1 END
-                AND (
-                    (kind='tick' AND position>0) OR
-                    (kind='state' AND CASE WHEN json_valid(payload)
-                        THEN json_extract(payload,'$.state') END='playing'))
+                {policy.observations}
             ), normalized AS (
-                SELECT identity_id,at,CASE
-                    WHEN context LIKE 'RDAMPL%' THEN substr(context,7)
-                    WHEN context LIKE 'VL%' THEN substr(context,3)
-                    ELSE context END context FROM observations
+                SELECT account_id,at,{policy.context} context FROM observations
+            ), playlist_contexts AS MATERIALIZED (
+                -- Index the two accepted context keys once. An OR in the
+                -- join scans every playlist in the account per observation.
+                -- UNION also keeps a matching pair of keys from duplicating
+                -- the same playlist observation.
+                SELECT account_id,CAST(provider_playlist_id AS TEXT) context,id,created_at FROM playlists
+                UNION
+                SELECT account_id,CAST(playlist_scope_id AS TEXT),id,created_at FROM playlists
             ), attributed AS (
-                SELECT o.identity_id,o.at,p.id pid FROM normalized o
-                LEFT JOIN playlists p ON p.identity_id=o.identity_id
-                    AND (p.ytm_playlist_id=o.context OR p.scope_ref=o.context)
+                SELECT o.account_id,o.at,p.id pid FROM normalized o
+                LEFT JOIN playlist_contexts p ON p.account_id=o.account_id AND p.context=o.context
                     AND (p.created_at IS NULL OR o.at>=p.created_at)
             ), ordered AS (
                 SELECT *,LAG(pid) OVER sequence previous,
                     LAG(at) OVER sequence previous_at FROM attributed
-                WINDOW sequence AS (PARTITION BY identity_id ORDER BY at,pid)
+                WINDOW sequence AS (PARTITION BY account_id ORDER BY at,pid)
             )
-            SELECT pid,MAX(at) last,SUM(CASE WHEN previous IS NOT pid
-                OR at-previous_at>1800 THEN 1 ELSE 0 END) sessions
+            SELECT pid,MAX(at) last,SUM(CASE WHEN {policy.starts_session} THEN 1 ELSE 0 END) sessions
             FROM ordered WHERE pid IS NOT NULL GROUP BY pid
-        """).fetchall()
+        """, {'gap_seconds': policy.gap_seconds}).fetchall()
         return {r['pid']: (r['last'], r['sessions']) for r in rows}
 
-    @synchronized
+    @snapshot_read
     def get_playlist_track_recency(self, *, include_generated=False, playlist_id=None) -> dict:
         """Per-playlist {playlist_id: [per-track last-played ts | None, ...]}, one entry per distinct
         track, its newest snapshot (None = never played). Unlike get_playlist_listen_stats (which
@@ -211,7 +205,7 @@ class ChartsRepo(Repo):
         A target ID limits membership for fresh per-playlist deletion checks.
         """
         activity = ('SELECT identity_key,at FROM listening_activity UNION ALL '
-                    'SELECT identity_key,played_at at FROM play_events WHERE is_generated=1'
+                    'SELECT identity_key,played_at at FROM play_event_subjects WHERE is_generated=1'
                     if include_generated else 'SELECT identity_key,at FROM listening_activity')
         membership = _PL_MEMBERSHIP
         parameters = ()
@@ -219,9 +213,11 @@ class ChartsRepo(Repo):
             membership += " WHERE pt.playlist_id=?"
             parameters = (playlist_id,)
         rows = self.conn.execute(
-            f"WITH membership AS ({membership}) "
+            f"WITH membership AS ({membership}), "
+            "latest AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key,MAX(at) at "
+            f"FROM ({activity}) GROUP BY identity_key) "
             "SELECT m.pid,MAX(a.at) last FROM membership m "
-            f"LEFT JOIN ({activity}) a ON a.identity_key=m.ik GROUP BY m.pid,m.ik",
+            "LEFT JOIN latest a ON a.identity_key=m.ik GROUP BY m.pid,m.ik",
             parameters).fetchall()
         out: dict = {}
         for r in rows:
@@ -235,7 +231,7 @@ class ChartsRepo(Repo):
         `since` (unix ts) limits the calendar-day projection for a time-windowed chart.
         """
         rows = self.conn.execute(
-            "WITH plays AS (SELECT identity_key,COUNT(*) c FROM listening_days "
+            "WITH plays AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key,COUNT(*) c FROM listening_days "
             "  WHERE (:since IS NULL OR day_ts>=:since) GROUP BY identity_key), "
             "     names AS (SELECT identity_key,title,artist,video_id vid,thumbnail thumb FROM playable_library_tracks) "
             "SELECT n.title, n.artist, n.vid, n.thumb, p.c FROM plays p JOIN names n ON n.identity_key=p.identity_key "
@@ -251,9 +247,9 @@ class ChartsRepo(Repo):
             "WITH plays AS (SELECT identity_key,COUNT(*) c FROM listening_days "
             "  WHERE (:since IS NULL OR day_ts>=:since) GROUP BY identity_key), "
             "     names AS (SELECT DISTINCT t.identity_key,ta.artist_id FROM tracks t "
-            "               JOIN track_artists ta ON ta.entry_id=t.id) "
+            f"               JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id) "
             "SELECT a.name artist,a.id artist_id,ap.provider_id browse, SUM(p.c) total, "
-            "       (SELECT MIN(t2.thumbnail) FROM tracks t2 JOIN track_artists ta2 ON ta2.entry_id=t2.id "
+            f"       (SELECT MIN(t2.thumbnail) FROM tracks t2 JOIN {self.entry_artists_table} ta2 ON ta2.entry_id=t2.id "
             "        WHERE ta2.artist_id=a.id AND t2.thumbnail IS NOT NULL) thumb "
             "FROM plays p JOIN names n ON n.identity_key=p.identity_key "
             "JOIN artists a ON a.id=n.artist_id LEFT JOIN artist_provider_ids ap "
@@ -275,7 +271,7 @@ class ChartsRepo(Repo):
             "credits AS ("
             "  SELECT r.*,t.artist name,t.title,t.genre FROM recent r JOIN tracks t USING(identity_key) "
             "  UNION SELECT r.*,a.name,t.title,t.genre FROM recent r JOIN tracks t USING(identity_key) "
-            "    JOIN track_artists ta ON ta.entry_id=t.id JOIN artists a ON a.id=ta.artist_id) "
+            f"    JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id JOIN artists a ON a.id=ta.artist_id) "
             "SELECT * FROM credits ORDER BY last_played DESC,identity_key,name", (since,)).fetchall()
         result = {'artist': {}, 'genre': {}, 'recordings': {}}
         counted = set()
@@ -300,11 +296,11 @@ class ChartsRepo(Repo):
             return None
         aid = artists.lookup(self.conn,artist)
         row = self.conn.execute(
-            "SELECT t.thumbnail FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id "
+            f"SELECT t.thumbnail FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id "
             "WHERE ta.artist_id=? AND t.thumbnail IS NOT NULL AND t.thumbnail<>'' LIMIT 1", (aid,)).fetchone()
         return row["thumbnail"] if row else None
 
-    @synchronized
+    @snapshot_read
     def genre_representative(self, genres) -> dict | None:
         """The most-played artist (with a thumbnail) among library tracks tagged with any of `genres`,
         as {artist, thumbnail}. Used to seed/illustrate a genre's 'into recently' card. None if empty."""
@@ -313,56 +309,55 @@ class ChartsRepo(Repo):
             return None
         qs = ",".join("?" * len(genres))
         row = self.conn.execute(
-            "WITH plays AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key) "
+            "WITH plays AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, "
+            "COUNT(*) c FROM listening_days GROUP BY identity_key) "
             "SELECT t.artist artist, MIN(t.thumbnail) thumb, COALESCE(SUM(p.c),0) pl "
             "FROM tracks t LEFT JOIN plays p ON p.identity_key=t.identity_key "
             f"WHERE t.genre IN ({qs}) AND t.artist<>'' AND t.thumbnail IS NOT NULL AND t.thumbnail<>'' "
             "GROUP BY t.artist ORDER BY pl DESC, t.artist LIMIT 1", genres).fetchone()
         return {"artist": row["artist"], "thumbnail": row["thumb"]} if row else None
 
-    @synchronized
-    def story_tracks(self, *, since, artist=None, genres=(), limit=3) -> list[dict]:
-        """Playable examples for one story, favoring the listener's recent song choices.
+    @contextmanager
+    def story_track_rows(self, *, since, artist=None, genres=()):
+        """Stream ordered candidates for a controller-owned bounded read."""
+        if not (getattr(self._store, '_read_only', False)
+                or getattr(self._lock, 'held_by_current_thread', False)):
+            with self._store.read_view() as view:
+                with type(self)(view).story_track_rows(since=since, artist=artist, genres=genres) as rows:
+                    yield rows
+            return
+        with self._lock:
+            rows = self._story_track_rows(since=since, artist=artist, genres=genres)
+            try:
+                yield (dict(row) for row in rows) if rows is not None else iter(())
+            finally:
+                if rows is not None:
+                    rows.close()
 
-        The worker calls this on its private snapshot. Scope history reads to the
-        matching songs, and use the library projection to collapse upload aliases.
-        Identical displayed titles/credits appear once even when their catalog
-        identities are unresolved; that presentation rule does not merge evidence.
-        Artist credits include collaborations; genres are exact stored labels.
-        """
-        if limit <= 0:
-            return []
+    @synchronized
+    def _story_track_rows(self, *, since, artist, genres):
         if artist:
             aid = artists.lookup(self.conn, artist)
             if aid is None:
-                return []
-            selection = ('EXISTS (SELECT 1 FROM tracks credit JOIN track_artists ta ON ta.entry_id=credit.id '
+                return None
+            selection = (f'EXISTS (SELECT 1 FROM tracks credit JOIN {self.entry_artists_table} ta ON ta.entry_id=credit.id '
                          'WHERE credit.identity_key=t.identity_key AND ta.artist_id=?)')
             params = [aid]
         elif genres:
             selection = 't.genre IN (' + ','.join('?' for _ in genres) + ')'
             params = list(genres)
         else:
-            return []
-        rows = self.conn.execute(
+            return None
+        return self.conn.execute(
+            'WITH plays AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, '
+            'COUNT(*) FILTER (WHERE day_ts>=?) recent_plays,MAX(day_ts) last_played '
+            'FROM listening_days GROUP BY identity_key) '
             'SELECT t.identity_key key,t.title,t.artist,t.video_id,t.thumbnail,t.genre, '
-            '(SELECT COUNT(*) FROM listening_days hi '
-            ' WHERE hi.identity_key=t.identity_key AND hi.day_ts>=?) recent_plays, '
-            '(SELECT MAX(hi.day_ts) FROM listening_days hi '
-            ' WHERE hi.identity_key=t.identity_key) last_played '
-            f'FROM playable_library_tracks t WHERE {selection} AND t.title<>\'\' '
+            'COALESCE(hi.recent_plays,0) recent_plays,hi.last_played '
+            'FROM playable_library_tracks t LEFT JOIN plays hi ON hi.identity_key=t.identity_key '
+            f'WHERE {selection} AND t.title<>\'\' '
             'ORDER BY recent_plays DESC,last_played DESC,LOWER(t.title),t.identity_key',
             [since, *params])
-        songs, seen = [], set()
-        for row in rows:
-            display = recording_title(row['title']), recording_title(row['artist'])
-            if display in seen:
-                continue
-            seen.add(display)
-            songs.append(dict(row))
-            if len(songs) >= limit:
-                break
-        return songs
 
     @snapshot_read
     def playlist_tracks_detail(self, playlist_id) -> list[dict]:
@@ -371,7 +366,7 @@ class ChartsRepo(Repo):
             "JOIN playlist_tracks pt ON pt.track_id=t.id WHERE pt.playlist_id=? ORDER BY pt.position",
             (playlist_id,))
 
-    @synchronized
+    @snapshot_read
     def video_tracks_detail(self, video_ids) -> list[dict]:
         """Catalog detail in the requested order, independent of playlist membership."""
         if not video_ids:
@@ -383,9 +378,10 @@ class ChartsRepo(Repo):
 
     def _tracks_detail(self, selection, params, *, catalog=False):
         rows = self.conn.execute(
+            f"WITH {_PLAY_COUNTS_CTE} "
             "SELECT t.id tid, t.video_id vid, t.identity_key ikey, t.title, t.artist, t.orig_title otitle, t.orig_artist oartist, t.album, t.album_browse_id abrowse, "
             "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
-            "       COALESCE((SELECT plays FROM listening_day_counts hi WHERE hi.identity_key=t.identity_key),0) plays, "
+            f"       {_TRACK_PLAYS} plays, "
             f"      {LIKED_EXISTS} liked "
             f"FROM {'catalog_tracks' if catalog else 'tracks'} t " + selection, params).fetchall()
         return [{"track_id": r["tid"], "video_id": r["vid"], "identity_key": r["ikey"], "title": r["title"], "artist": r["artist"],
@@ -397,16 +393,53 @@ class ChartsRepo(Repo):
 
     @snapshot_read
     def album_tracks_detail(self, album_browse_id) -> list[dict]:
-        """Per-track detail for a saved album's folded-in tracks (same shape as playlist_tracks_detail,
-        so the row partial renders identically). Retain full-fetch order when known."""
-        rows = self.conn.execute(
-            "SELECT t.id tid,t.video_id vid,t.title,t.artist,a.title album,p.provider_id abrowse, "
-            "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
-            "       (SELECT COUNT(*) FROM listening_days hi WHERE hi.identity_key=t.identity_key) plays, "
-            f"      {LIKED_EXISTS} liked "
-            "FROM album_provider_ids p JOIN albums a ON a.id=p.album_id JOIN album_tracks at ON at.album_id=a.id "
-            "JOIN tracks t ON t.id=at.entry_id WHERE p.provider='youtube' AND p.provider_id=? "
-            "ORDER BY at.position IS NULL,at.position,at.id", (album_browse_id,)).fetchall()
+        """Published release occurrences, or incidental evidence before publication.
+
+        Keep one row per occurrence even when no catalog source is available.
+        Incidental observations remain evidence without extending a complete release.
+        """
+        from yt_playlist.core import album_tracklists
+        from yt_playlist.core.preparation import album_publication
+        published, order_key = None, 'o.id'
+        if album_tracklists.available(self.conn):
+            published = self.conn.execute(
+                "SELECT a.current_tracklist_id FROM album_provider_ids p JOIN albums a ON a.id=p.album_id "
+                "WHERE p.provider='youtube' AND p.provider_id=?", (album_browse_id,)).fetchone()
+            occurrence_join = "JOIN album_track_occurrences o ON o.tracklist_id=a.current_tracklist_id "
+            source = ("coalesce((SELECT min(s.entry_id) FROM album_occurrence_sources s JOIN catalog_entries e ON e.id=s.entry_id "
+                "WHERE s.occurrence_id=o.id AND (e.video_id=o.raw_source_ref OR e.source_ref=o.raw_source_ref)),"
+                "(SELECT min(s.entry_id) FROM album_occurrence_sources s WHERE s.occurrence_id=o.id))")
+        elif album_publication.selected(self.conn) is not None:
+            occurrence_join = ('JOIN '+album_publication.table('groups')+' g ON g.album_id=a.id JOIN '+album_publication.table('head')+
+                " h ON h.revision=g.stage AND h.active=1 AND g.status='complete' JOIN "+album_publication.table('tracks')+
+                ' o ON o.stage=g.stage AND o.album_id=a.id AND o.is_full=1 ')
+            published = self.conn.execute('SELECT 1 FROM album_provider_ids p JOIN albums a ON a.id=p.album_id '+occurrence_join+
+                "WHERE p.provider='youtube' AND p.provider_id=? LIMIT 1", (album_browse_id,)).fetchone()
+            source, order_key = 'o.entry_id', 'o.row_id'
+        if published and published[0] is not None:
+            rows = self.conn.execute(
+                f"WITH {_PLAY_COUNTS_CTE} "
+                "SELECT t.id tid,coalesce(t.video_id,'') vid, "
+                "coalesce(t.title,o.captured_title,CASE WHEN o.resolution_status='unavailable' "
+                "THEN 'Unavailable track' ELSE 'Unresolved track' END) title, "
+                "coalesce(t.artist,o.captured_credit,a.artist,'') artist,a.title album,p.provider_id abrowse, "
+                "t.duration_s dur,CASE WHEN o.resolution_status='unavailable' THEN 0 ELSE t.available END avail, "
+                "coalesce(t.thumbnail,a.thumbnail) thumb,t.genre,t.mb_year, "
+                f"{_TRACK_PLAYS} plays, "
+                f"{LIKED_EXISTS} liked FROM album_provider_ids p JOIN albums a ON a.id=p.album_id "
+                + occurrence_join + f"LEFT JOIN catalog_tracks t ON t.id={source} "
+                f"WHERE p.provider='youtube' AND p.provider_id=? ORDER BY o.position IS NULL,o.position,{order_key}",
+                (album_browse_id,)).fetchall()
+        else:
+            rows = self.conn.execute(
+                f"WITH {_PLAY_COUNTS_CTE} "
+                "SELECT t.id tid,t.video_id vid,t.title,t.artist,a.title album,p.provider_id abrowse, "
+                "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
+                f"       {_TRACK_PLAYS} plays, "
+                f"      {LIKED_EXISTS} liked "
+                f"FROM album_provider_ids p JOIN albums a ON a.id=p.album_id JOIN {self.album_tracks_table} at ON at.album_id=a.id "
+                "JOIN tracks t ON t.id=at.entry_id WHERE p.provider='youtube' AND p.provider_id=? "
+                "ORDER BY at.position IS NULL,at.position,at.id", (album_browse_id,)).fetchall()
         return [{"track_id": r["tid"], "video_id": r["vid"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "album_browse": r["abrowse"], "duration": r["dur"], "available": r["avail"],
                  "thumbnail": r["thumb"], "plays": r["plays"], "liked": bool(r["liked"]),
@@ -421,17 +454,18 @@ class ChartsRepo(Repo):
             ref = self.conn.execute("SELECT artist_id FROM artist_provider_ids WHERE provider='youtube' AND provider_id=?", (browse_id,)).fetchone()
             if ref:
                 aid = ref[0]
-        artist_filter = 'EXISTS (SELECT 1 FROM track_artists ta WHERE ta.entry_id=t.id AND ta.artist_id=?)'
+        artist_filter = f'EXISTS (SELECT 1 FROM {self.entry_artists_table} ta WHERE ta.entry_id=t.id AND ta.artist_id=?)'
         params = [aid]
         eligible = playable_tracks_sql(f'SELECT t.* FROM tracks t WHERE {artist_filter}')
         songs = self.conn.execute(
+            f"WITH {_PLAY_COUNTS_CTE} "
             "SELECT t.identity_key key,t.title,t.album,t.video_id vid, "
             "       t.duration_s dur,t.thumbnail thumb,t.album_browse_id abrowse, "
-            "       (SELECT COUNT(*) FROM listening_days hi WHERE hi.identity_key=t.identity_key) plays, "
+            f"       {_TRACK_PLAYS} plays, "
             f"      {LIKED_EXISTS} liked "
             f"FROM ({eligible}) t", params).fetchall()
         membership = self.conn.execute(
-            "SELECT DISTINCT t.identity_key key, pl.title title, pl.ytm_playlist_id ytm FROM tracks t "
+            "SELECT DISTINCT t.identity_key key, pl.title title, pl.provider_playlist_id ytm FROM tracks t "
             "JOIN playlist_tracks pt ON pt.track_id=t.id JOIN playlists pl ON pl.id=pt.playlist_id "
             f"WHERE {artist_filter}", params).fetchall()
         by_key = {}

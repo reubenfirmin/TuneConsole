@@ -5,14 +5,17 @@ recovering torn JSONL appends. Publication is exclusive and atomic across thread
 never see a half-written record. All paths are derived from hashes, never supplied filenames.
 """
 import hashlib
+from . import fao
 import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from contextlib import contextmanager, nullcontext
 from collections import Counter
 
 from yt_playlist.core.activity import check_cancellable_work
+from .evidence_contract import artifact_components as _components, canonical
 
 
 class EvidenceConflict(ValueError):
@@ -29,8 +32,15 @@ class EvidenceBudgetExceeded(ValueError):
         self.budget_bytes = budget_bytes
 
 
-def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+def root_for_database(path, memory_key):
+    from . import paths
+    return (Path(path).with_name(Path(path).name + '.evidence') if path else
+            paths.data_dir() / 'test-evidence' / str(memory_key))
+
+
+def directory(conn):
+    return root_for_database(conn.execute('PRAGMA database_list').fetchone()[2],
+                             getattr(conn, '_policy_memory_key', id(conn)))
 
 
 def library_byte_budget(recordings):
@@ -43,19 +53,9 @@ def library_byte_budget(recordings):
     return 32 * 1024 * 1024 + max(0, recordings) * 32 * 1024
 
 
-def _components(node):
-    if isinstance(node, dict):
-        if set(node) == {'$artifact'}:
-            yield node['$artifact']
-        else:
-            for item in node.values():
-                yield from _components(item)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _components(item)
-
-
 def _sync_directory(path):
+    # Whole-database replacement and the fixed coordination counters use this
+    # boundary. Managed document publication has no directory sync protocol.
     if hasattr(os, 'O_DIRECTORY'):
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -65,38 +65,31 @@ def _sync_directory(path):
 
 
 def _mkdir(path):
-    missing, current = [], path
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
     path.mkdir(parents=True, exist_ok=True)
-    # A durable file also needs durable links to each newly created ancestor.
-    for directory in reversed(missing):
-        _sync_directory(directory.parent)
 
 
 class EvidenceLedger:
     KINDS = {"opportunity", "response", "forecast", "artifact", "report", "checkpoint"}
 
-    def __init__(self, directory, byte_budget):
+    def __init__(self, directory, byte_budget, *, opportunity_projection=None):
         self.directory = Path(directory)
         self.byte_budget = byte_budget
+        self.opportunity_projection = opportunity_projection
+
+    def project_opportunity(self, value):
+        return self.opportunity_projection(value) if self.opportunity_projection else value
 
     @contextmanager
     def _budget(self):
         """Serialize reservations across processes; an interrupted reservation stays conservative."""
         _mkdir(self.directory)
         with (self.directory / ".budget").open("a+b") as stream:
-            if os.name == "nt":
-                import msvcrt
-                stream.seek(0)
-                if not stream.read(1):
-                    stream.write(b"0"); stream.flush()
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(stream, fcntl.LOCK_EX)
+            while True:
+                check_cancellable_work()
+                unlock = fao._try_file_lock(stream, exclusive=True)
+                if unlock is not None:
+                    break
+                time.sleep(.025)
             try:
                 stream.seek(0)
                 recovered = False
@@ -104,8 +97,8 @@ class EvidenceLedger:
                     used = int(stream.read())
                 except ValueError:
                     recovered = True
-                    used = sum(path.stat().st_size for path in self.directory.glob("*/*.json"))
-                    used += sum(path.stat().st_size for path in self.directory.glob("*/*/*.json"))
+                    used = sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*.json"))
+                    used += sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*/*.json"))
                 def save(value):
                     stream.seek(0)
                     stream.truncate()
@@ -116,9 +109,7 @@ class EvidenceLedger:
                     save(used)
                 yield used, save
             finally:
-                if os.name == "nt":
-                    stream.seek(0)
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                unlock()
 
     def _path(self, kind, identity):
         if kind not in self.KINDS:
@@ -128,9 +119,13 @@ class EvidenceLedger:
 
     def get(self, kind, identity):
         try:
-            return json.loads(self._path(kind, identity).read_bytes())
+            value = json.loads(fao.read(self._path(kind, identity)).bytes)
+            return self.project_opportunity(value) if kind == 'opportunity' else value
         except FileNotFoundError:
             return None
+
+    def contains(self, kind, identity):
+        return self._path(kind, identity).exists()
 
     def generation(self):
         """Constant-size event revision, read under the publication lock across processes."""
@@ -163,12 +158,12 @@ class EvidenceLedger:
                     and any(not self._path('artifact', component).is_file() for component in dependencies)):
                 raise ValueError('Listening context component is no longer retained')
             if existing:
-                if path.read_bytes() != encoded:
+                if fao.read(path).bytes != encoded:
                     raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}")
                 if kind == 'artifact':
                     # Reusing an old immutable manifest starts a fresh preparation
                     # lease for its graph before a proposal/menu can reference it.
-                    os.utime(path, None)
+                    fao.write(path, encoded)
                 return False
             artifact_data = canonical(artifact) if artifact is not None else None
             artifact_path = (self._path("artifact", hashlib.sha256(artifact_data).hexdigest())
@@ -190,28 +185,13 @@ class EvidenceLedger:
                      + (artifact_size if artifact_path is not None and artifact_path.exists() else 0))
                 raise
 
-    def _publish(self, path, encoded, kind, identity):
-        _mkdir(path.parent)
-        # A unique staging file lives on the destination filesystem. Hard-link publication does
-        # not overwrite a competing writer; process death leaves only an ignored staging file.
-        pending = None
+    def _publish(self, path, encoded, kind, identity, *, age=None):
+        existing = path.is_file()
         try:
-            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".pending-", delete=False) as stream:
-                pending = Path(stream.name)
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            try:
-                os.link(pending, path)
-            except FileExistsError:
-                if path.read_bytes() != encoded:
-                    raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}")
-                return False
-            _sync_directory(path.parent)
-            return True
-        finally:
-            if pending is not None:
-                pending.unlink(missing_ok=True)
+            fao.write(path, fao.Content(encoded, metadata=age))
+        except fao.CorruptFile as exc:
+            raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}") from exc
+        return not existing
 
     def artifact(self, value):
         identity = hashlib.sha256(canonical(value)).hexdigest()
@@ -227,15 +207,31 @@ class EvidenceLedger:
         for path in paths:
             check_cancellable_work()
             try:
-                records.append(json.loads(path.read_bytes()))
+                value = json.loads(fao.read(path).bytes)
+                value = self.project_opportunity(value) if kind == 'opportunity' else value
+                if value is not None:
+                    records.append(value)
             except FileNotFoundError:
                 # Another application's maintenance can retire an unanswered old menu.
                 continue
         return records
 
-    def maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None,
+    def maintain(self, *args, **kwargs):
+        """Do not retire files belonging to an analytics reader or backup."""
+        _mkdir(self.directory)
+        with (self.directory / '.readers.lock').open('a+b') as stream:
+            unlock = fao._try_file_lock(stream, exclusive=True)
+            if unlock is None:
+                return {'deferred': True}
+            try:
+                return self._maintain(*args, **kwargs)
+            finally:
+                unlock()
+
+    def _maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None,
                  protected_opportunities=(), pressure_before=None, compacted_contexts=(),
-                 context_before=None, context_byte_budget=0, required_bytes=0, pending_protection=None):
+                 context_before=None, context_byte_budget=0, required_bytes=0, pending_protection=None,
+                 retire_references=None, progress=None):
         """Retire old unanswered menus and orphan artifacts; preserve choice/correction inputs.
 
         At 90% capacity, retire the oldest unanswered menus until 30% is free.
@@ -244,20 +240,40 @@ class EvidenceLedger:
         before considering unanswered menus. Protected roots always survive.
         """
         with self._budget() as (_used, save):
-            offers = {row["id"]: row for row in self.records("opportunity")}
-            events = self.records("response")
+            from .evidence_inventory import Inventory
+            from .evidence_retirement import Retirements
+            retirements = Retirements(self.directory)
+            had_retirements = bool(retirements.offers or retirements.checkpoints)
+            inventory = Inventory(self, progress=progress).scan()
+            offers = {}
+            events = []
+            for path, entry in inventory.items():
+                if path.parts[-3] == 'opportunity':
+                    row = self.project_opportunity(entry['data'])
+                    if row is not None:
+                        offers[row['id']] = row
+                elif path.parts[-3] == 'response':
+                    events.append(entry['data'])
             durable = {event["opportunity_id"] for event in events
                        if event["kind"] not in {"visible", "open"}}
             protected = durable | set(protected_opportunities)
-            protected.update(event['opportunity_id'] for event in events if event['observed_at'] >= before)
+            resuming = retirements.offers - offers.keys()
+            # Capacity can admit menus newer than ordinary expiry. Once their
+            # offer is gone, leftover passive events cannot undo that admission.
+            # Durable responses and current capture pins still protect them.
+            protected.update(event['opportunity_id'] for event in events
+                             if event['observed_at'] >= before and event['opportunity_id'] not in resuming)
             protected.update(oid for oid, offer in offers.items()
                 if any((offer.get(field) or {}).get('run_id') in protected_runs for field in ('comparison', 'monitor')))
             retired = {oid for oid, offer in offers.items()
                        if offer["observed_at"] < before and oid not in protected}
+            # A preceding slice may have removed the offer before its events or
+            # SQL owners. Its durable intent supplies the missing association.
+            retired.update(resuming - protected)
             orphan_before = before if orphan_before is None else orphan_before
-            artifacts = list((self.directory / "artifact").glob("*/*.json"))
-            sizes = {path: path.stat().st_size for path in self.directory.glob('*/*/*.json')}
-            edges = {}
+            artifacts = [path for path in inventory if path.parts[-3] == 'artifact']
+            sizes = {path: entry['size'] for path, entry in inventory.items()}
+            edges = {path: entry['data'] for path, entry in inventory.items() if path.parts[-3] == 'artifact'}
 
             def closure(roots):
                 pending, seen = list(roots), set()
@@ -266,22 +282,24 @@ class EvidenceLedger:
                     if identity in seen:
                         continue
                     seen.add(identity)
-                    if identity not in edges:
-                        edges[identity] = tuple(_components(self.get('artifact', identity)))
-                    pending.extend(edges[identity])
+                    pending.extend(edges.get(self._path('artifact', identity), ()))
                 return {self._path('artifact', identity) for identity in seen}
 
             # Cache edges, not decoded model arrays. Shared components are read once.
             pinned = set(protected_artifacts)
             for path in artifacts:
-                if path.stat().st_mtime >= orphan_before:
-                    pinned.update(_components(json.loads(path.read_bytes())))
+                if inventory[path]['mtime'] >= orphan_before:
+                    pinned.update(edges[path])
             references = Counter(closure(pinned))
-            references.update(path for path in artifacts if path.stat().st_mtime >= orphan_before)
+            references.update(path for path in artifacts if inventory[path]['mtime'] >= orphan_before)
             # A caller acknowledges compact, correction-capable inputs only after
             # successful learning publication. Raw contexts then become optional
             # diagnostics, even while their opportunities belong to an active trial.
-            compacted_contexts = set(compacted_contexts)
+            compacted_contexts = (set(compacted_contexts) if compacted_contexts is not None else
+                {entry['data']['source_context'] for path, entry in inventory.items()
+                 if path.parts[-3] == 'checkpoint' and entry['data']['acknowledged']})
+            if progress is not None:
+                progress['checkpoints'] = len(compacted_contexts)
             mandatory = {offer['context'] for oid, offer in offers.items() if oid not in retired
                          and (offer['context'] not in compacted_contexts or oid in protected_opportunities)}
             mandatory_paths = closure(mandatory)
@@ -312,9 +330,8 @@ class EvidenceLedger:
 
             removed = {path for oid in retired for path in retired_paths(oid)}
             removed.update(path for path in artifacts if not references[path])
-            for path in (self.directory / "report").glob("*/*.json"):
-                value = json.loads(path.read_bytes())
-                if value["report"]["at"] < before:
+            for path, entry in inventory.items():
+                if path.parts[-3] == 'report' and entry['data'] < before:
                     removed.add(path)
             used = sum(size for path, size in sizes.items() if path not in removed)
             reclaimed_optional_paths = set()
@@ -369,44 +386,79 @@ class EvidenceLedger:
                     used -= sum(sizes.get(path, 0) for path in freed - removed)
                     removed.update(freed)
             surviving_contexts = {offer['context'] for oid, offer in offers.items() if oid not in retired}
-            for path in (self.directory / 'checkpoint').glob('*/*.json'):
-                value = json.loads(path.read_bytes())
-                if value.get('source_context') not in surviving_contexts:
+            retired_checkpoints = {}
+            for path, entry in inventory.items():
+                if path.parts[-3] == 'checkpoint' and entry['data']['source_context'] not in surviving_contexts:
                     removed.add(path)
+                    retired_checkpoints[path] = entry['data']['source_context']
+            for identity in retirements.checkpoints - surviving_contexts:
+                path = self._path('checkpoint', identity)
+                removed.add(path)
+                retired_checkpoints[path] = identity
             guard = pending_protection() if pending_protection is not None else nullcontext(((), ()))
             with guard as (pending_artifacts, pending_opportunities):
                 # Admissions can continue throughout inventory and planning. Take
                 # their current pins under the admission lock only for deletion.
                 # The budget lock already excludes durable writers throughout.
+                pending_opportunities = set(pending_opportunities)
                 pending_roots = set(pending_artifacts)
                 pending_paths = set()
                 for oid in pending_opportunities:
+                    pending_paths.update(retired_paths(oid))
+                    retired.discard(oid)
+                    pressure_retired.discard(oid)
                     if oid in offers:
                         identity = offers[oid]['context']
                         pending_roots.add(identity)
-                        pending_paths.update(retired_paths(oid))
                         pending_paths.add(self._path('checkpoint', identity))
-                        retired.discard(oid)
-                        pressure_retired.discard(oid)
                 pending_artifact_paths = closure(pending_roots)
                 pending_paths.update(pending_artifact_paths)
                 removed.difference_update(pending_paths)
+                # A stale pin to an absent offer cannot authorize deleting its
+                # remaining events or acknowledging reconciliation as complete.
+                unfinished_protected = (retirements.offers - offers.keys()) & (protected | pending_opportunities)
+                retirements.offers = retired | unfinished_protected
+                retirements.checkpoints = {identity for path, identity in retired_checkpoints.items()
+                                           if path in removed and isinstance(identity, str)}
+                # Publish intent before the first unlink. Existing evidence and
+                # current pins, rather than this journal, still decide eligibility.
+                if had_retirements or removed or retirements.offers or retirements.checkpoints:
+                    retirements.save()
                 if retired:
                     self._advance_generation()
-                for path in removed:
-                    path.unlink(missing_ok=True)
+                planned = removed
+                removed = set()
+                # Retire menus/events before their now-unreferenced context.
+                # Stable ordering also makes every unlink boundary reproducible.
+                paths = sorted(planned, key=lambda path:
+                               (path.parts[-3] not in {'opportunity', 'response'}, str(path)))
+                for path in paths:
+                    check_cancellable_work()
+                    if fao.delete(path, missing_ok=True):
+                        removed.add(path)
+                completed_offers = {oid for oid in retired
+                                    if all(not path.exists() for path in retired_paths(oid))}
+                completed_checkpoints = {identity for path, identity in retired_checkpoints.items()
+                                         if path in planned and not path.exists() and isinstance(identity, str)}
+                retirements.reconcile(completed_offers, completed_checkpoints, retire_references)
+                if retire_references is not None and not (completed_offers or completed_checkpoints):
+                    # Preserve ordinary dictionary orphan collection on idle turns.
+                    retire_references([], [])
+                deferred = bool(retirements.offers or retirements.checkpoints
+                                or any(path.exists() for path in planned))
             surviving_contexts = {offer['context'] for oid, offer in offers.items() if oid not in retired}
             # The lock excludes writers; only old abandoned staging files may be removed.
             for path in self.directory.glob("*/*/.pending-*"):
                 path.unlink(missing_ok=True)
-            used = sum(path.stat().st_size for path in self.directory.glob("*/*/*.json"))
+            used = sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*/*.json"))
             save(used)
-            return {"used_bytes": used, "budget_bytes": self.byte_budget,
+            return {"used_bytes": used, "budget_bytes": self.byte_budget, "deferred": deferred,
                     "required_bytes": required_bytes,
                     "available_bytes": max(0, self.byte_budget - used),
                     "shortfall_bytes": max(0, used + required_bytes - self.byte_budget),
                     "reclaimed_optional_bytes": sum(sizes.get(path, 0) for path in reclaimed_optional_paths & removed),
-                    "retired_unanswered": len(retired), "retired_for_capacity": len(pressure_retired),
+                    "retired_unanswered": len(completed_offers),
+                    "retired_for_capacity": len(pressure_retired & completed_offers),
                     "compacted_contexts": len(surviving_contexts & compacted_contexts),
                     "unacknowledged_contexts": len(surviving_contexts - compacted_contexts),
                     "optional_context_bytes": sum(sizes.get(path, 0) for path in optional_paths

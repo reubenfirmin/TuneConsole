@@ -120,6 +120,9 @@ def test_retained_sync_status_observes_completion_after_active_job_disappears(st
 @pytest.mark.parametrize("kind", ["fresh_pool", "library_pool"])
 @pytest.mark.parametrize("missing", ["evicted", "unknown", "wrong_kind"])
 def test_missing_pool_poll_returns_terminal_recovery_card(store, kind, missing):
+    from tests.home_fixture_support import returning_listener
+
+    returning_listener(store, 'mixes')
     app = create_app(store, lambda: {})
     jobs = app.state.ctx.jobs
     jobs._completed_limit = 0

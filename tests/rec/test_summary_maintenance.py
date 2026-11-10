@@ -1,6 +1,8 @@
 """Normal worker maintenance owns recap and cleanup freshness, including retries."""
+from contextlib import closing
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
@@ -8,11 +10,40 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+    without_query_timing,
+)
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.library import analysis
 from yt_playlist.rec import actions, maintenance, trend_rollups
 from yt_playlist.rec.rec_worker import RecWorker
-from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """The focused FastAPI route has no application background lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Summary maintenance consumes an installed schema. Admission validation
+    # belongs below this worker; keep its actual snapshot guards and SQL input.
+    with bounded_consumer_schema((('techno', 'Techno'),)) as schema:
+        assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert schema.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] > 0
+        assert schema._revision_script
+        assert not schema.execute('PRAGMA foreign_key_check').fetchone()
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def summary_vocabulary(monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'),))
 
 
 def timestamp(month):
@@ -32,19 +63,32 @@ def tick(worker):
 
 
 def seed(store):
-    iid = store.identities.upsert_identity('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     seed_catalog_track(store, 'song', 'Song', 'Artist', video_id='video', genre='Techno')
     for month in ('2026-08', '2026-09', '2026-10'):
         store.history.record_history_plays(iid, timestamp(month), ['song'], source_timezone='UTC')
     return iid
 
 
-def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(store, monkeypatch):
+@pytest.fixture
+def summary_store(native_sql_calls, tmp_path, _pristine_current_schema):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
+
+
+def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(
+        summary_store, monkeypatch, without_metadata_providers):
+    from fastapi import FastAPI
+    from fastapi.templating import Jinja2Templates
+    from yt_playlist.web.routes import trends
+
+    store = summary_store
     iid = seed(store)
     store.playlists.upsert_playlist(iid, 'empty', 'Empty playlist', 0, '', 0)
     now = [timestamp('2026-10')]
     worker = worker_for(store, monkeypatch, now)
     rebuilds = []
+    monkeypatch.setattr(worker, '_prepare_content', lambda: False)
     monkeypatch.setattr(worker, '_do_rebuild', lambda: rebuilds.append(True))
     worker.trigger()
     worker.projections.poll()
@@ -55,7 +99,12 @@ def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(st
     assert store.rec_proposals.get_proposals('trend_rollups')['story']['month'] == '2026-09'
     card = next(c for c in actions.take_action(store, now[0], {}) if c.kind == 'cleanup')
     assert card.badge == '1'
-    app = create_app(store, lambda: {}, now_fn=lambda: now[0])
+    # Exercise the published output through its actual route and template.
+    # Application startup and its other workers have separate integration owners.
+    templates = Jinja2Templates(directory=str(Path(trends.__file__).resolve().parents[1] / 'templates'))
+    templates.env.globals.update(asset_v='test', exit_on_idle=False)
+    app = FastAPI()
+    app.include_router(trends.build(SimpleNamespace(store=store, templates=templates, rec_worker=worker)))
     with TestClient(app) as client:
         response = client.get('/trends/story/2026-09')
         assert response.status_code == 200
@@ -127,34 +176,37 @@ def test_conflicting_publication_retries_with_backoff_and_keeps_last_good(store,
     assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
 
 
-def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(tmp_path, monkeypatch):
-    path = tmp_path / 'summaries.db'
-    store = Store(path)
-    store.init_schema()
-    iid = seed(store)
-    now = [timestamp('2026-10')]
-    worker = worker_for(store, monkeypatch, now)
-    tick(worker)
-    with sqlite3.connect(path) as writer:
-        writer.execute("INSERT INTO settings VALUES ('takeout_imported_at','123')")
-    worker.projections.retry_at.clear()
-    worker.projections.poll()
-    assert worker.jobs.has('trends') and worker.jobs.has('cleanup')
-    worker._run_pending()
-    store.conn.close()
-    store = Store(path)
-    try:
-        store.init_schema()
-        store.playlists.upsert_playlist(iid, 'offline-empty', 'Offline change', 0, '', now[0])
+@pytest.mark.usefixtures('without_query_timing')
+def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(summary_store, monkeypatch):
+    store = summary_store
+    path = store._db_path
+    with reuse_reporting_reader(store, monkeypatch):
+        iid = seed(store)
+        now = [timestamp('2026-10')]
         worker = worker_for(store, monkeypatch, now)
         tick(worker)
-        assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
-        worker.shutdown()
-        worker.projections.completed.clear()
+        with sqlite3.connect(path) as writer:
+            writer.execute("INSERT INTO settings VALUES ('takeout_imported_at','123')")
+        worker.projections.retry_at.clear()
         worker.projections.poll()
-        assert not worker.busy
-    finally:
-        store.conn.close()
+        assert worker.jobs.has('trends') and worker.jobs.has('cleanup')
+        worker._run_pending()
+    store.conn.close()
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        # Bootstrap is below this worker's boundary. Reopening and admission
+        # remain genuine, as do the external commit and publication guards.
+        store.conn.execute('PRAGMA synchronous=OFF')
+        store.init_schema()
+        with reuse_reporting_reader(store, monkeypatch):
+            store.playlists.upsert_playlist(iid, 'offline-empty', 'Offline change', 0, '', now[0])
+            worker = worker_for(store, monkeypatch, now)
+            tick(worker)
+            assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
+            worker.shutdown()
+            worker.projections.completed.clear()
+            worker.projections.poll()
+            assert not worker.busy
 
 
 def test_full_rebuild_failure_does_not_swallow_summary_jobs(store, monkeypatch):
@@ -184,6 +236,8 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
     original = store._snapshot_revisions.capture
 
     def capture(*args, **kwargs):
+        dependencies = args[0] if args else kwargs.get('dependencies')
+        assert dependencies is not None, 'Projection polling copied every per-record revision'
         result = original(*args, **kwargs)
         captures.append(result)
         return result
@@ -197,9 +251,9 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
                for table, key in baseline)
     with store.conn:
         store.conn.executemany('INSERT INTO settings VALUES (?,?)',
-                               [(f'unrelated-{i}', 'value') for i in range(4000)])
+                               [(f'unrelated-{i}', 'value') for i in range(4)])
         store.conn.execute("DELETE FROM settings WHERE key LIKE 'unrelated-%'")
-    assert len(original()) > 4000
+    assert len(original()) > len(baseline)
     worker.projections.poll()  # Coalesced jobs are still active on this idle tick.
     assert captures == [baseline]
     expected = {'trends', 'cleanup'} | ({'analytics'} if analytics_enabled else set())

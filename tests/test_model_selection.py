@@ -1,5 +1,7 @@
 import logging
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -8,6 +10,20 @@ from yt_playlist.rec import embedding_training as embed, model_selection as ms, 
 from tests import model_support
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.util.matching import identity_key
+from tests.repository_mock_support import no_database, repository_store
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Model selection tests drive their workers directly."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 def _result(now=1000, status="applied"):
@@ -15,11 +31,19 @@ def _result(now=1000, status="applied"):
             "selected": {"method": "svd", "dim": 64}, "reason": "Measured improvement", "grid": []}
 
 
+def _owned_vector(store, key, dimension=48, value=1):
+    with store.conn:
+        store.conn.execute('INSERT OR IGNORE INTO recordings(identity_key) VALUES (?)', (key,))
+    return key, np.full(dimension, value, dtype=np.float32).tobytes()
+
+
 def test_forecast_expiry_preserves_summary_and_active_exact_restore(store, monkeypatch):
-    store.rec_model.replace_rec_vectors([('old', b'exact incumbent')])
+    incumbent = _owned_vector(store, 'old')
+    challenger = _owned_vector(store, 'new', 64, 2)
+    store.rec_model.replace_rec_vectors([incumbent])
     result = {**_result(), 'followup': {'trials': 10, 'selected_hits': 3, 'updated_at': 2000}}
     run_id = store.model_selection.start_selection(1000, result)
-    store.model_selection.save_selection(run_id, result, rows=[('new', b'challenger')])
+    store.model_selection.save_selection(run_id, result, rows=[challenger])
     store.model_selection.save_model_forecast(run_id, 1000, {'eligible': ['song'], 'previous': [], 'selected': []})
     now = 1000 + 181 * ms.DAY
     store.model_selection.maintain_selection(now)
@@ -31,31 +55,39 @@ def test_forecast_expiry_preserves_summary_and_active_exact_restore(store, monke
     ms.update_followup(store, now + 1)
     assert store.model_selection.selection_run(run_id) == run
     assert store.model_selection.restore_model_selection(run_id, now + 2)
-    assert store.rec_model.get_rec_vectors() == [('old', b'exact incumbent')]
+    assert store.rec_model.get_rec_vectors() == [incumbent]
 
 
-def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(no_database):
+    store = repository_store(
+        values={'read_view': Mock()},
+        settings={'get_setting': None},
+        rec_evidence={'evaluation_history_bounds': (None, None)},
+        rec_model={'rec_vectors_count': 0},
+        model_selection={'latest_daily_selection': None, 'comparison_activity': {}},
+    )
+    store.read_view.return_value = nullcontext(store)
     assert ms.readiness(store, 1000)["state"] == "waiting"
-    store.rec_model.replace_rec_vectors([(str(i), np.ones(2, dtype=np.float32).tobytes()) for i in range(100)])
-    store.history.record_history_plays(iid, 0, ["context"], source_timezone="UTC")
-    store.history.record_history_plays(iid, 46 * ms.DAY, ["later"], source_timezone="UTC")
+    store.rec_model.rec_vectors_count.return_value = 100
+    store.rec_evidence.evaluation_history_bounds.return_value = (0, 46 * ms.DAY)
     now = 47 * ms.DAY
     assert ms.readiness(store, now)["state"] == "ready"
     result = _result(now, "retained")
     result.update(kind='daily', evidence_end=now)
-    store.model_selection.start_selection(now, result)
+    store.model_selection.latest_daily_selection.return_value = result
     assert "next_at" in ms.readiness(store, now)
     later = now + 2 * ms.DAY
     assert "freshly played" in ms.readiness(store, later)["reason"]
-    store.history.record_history_plays(iid, later - 1, [f"fresh{i}" for i in range(30)], source_timezone="UTC")
+    store.model_selection.comparison_activity.return_value = {
+        f'fresh{i}': later - 1 for i in range(30)}
     assert ms.readiness(store, later)["state"] == "ready"
-    store.settings.set_setting("rec_selection_paused", "1")
+    store.model_selection.comparison_activity.assert_called_with(now, later)
+    store.settings.get_setting.side_effect = lambda key: '1' if key == 'rec_selection_paused' else None
     assert ms.readiness(store, later)["state"] == "paused"
 
 
 def test_later_measurements_use_saved_forecasts_and_exact_future_play_times(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     run_id = store.model_selection.start_selection(1000, _result())
     store.model_selection.save_model_forecast(run_id, 1000, {"eligible": ["a", "b", "gen"], "previous": ["a"], "selected": ["b"]})
     store.model_selection.save_model_forecast(run_id, 1000 + ms.DAY, {"eligible": ["a", "b", "c"], "previous": ["a"], "selected": ["c"]})
@@ -82,16 +114,17 @@ def test_later_measurements_use_saved_forecasts_and_exact_future_play_times(stor
 
 
 def test_forecast_has_same_universe_and_does_not_replace_live_vectors(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks = [store.tracks.upsert_track(str(i), f"Song{i}", "Artist", None, None, created_at=0) for i in range(40)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PL", "Mix", 40, "h", 0), tracks)
     store.history.record_play_event(iid,'song0|artist','0',100)
-    store.rec_model.replace_rec_vectors([("unchanged", b"original")])
+    incumbent = _owned_vector(store, 'song1|artist', 2)
+    store.rec_model.replace_rec_vectors([incumbent])
     forecast = ms._forecast(store, {"method": "svd", "dim": 4}, {"method": "svd", "dim": 8}, 1000)
     assert "song0|artist" not in forecast["eligible"]
     assert len(forecast["previous"]) == len(forecast["selected"]) == 20
     assert set(forecast["previous"] + forecast["selected"]) <= set(forecast["eligible"])
-    assert store.rec_model.get_rec_vectors() == [("unchanged", b"original")]
+    assert store.rec_model.get_rec_vectors() == [incumbent]
 
 
 def test_startup_recovers_interrupted_comparison_and_unchanged_refresh_reuses_models(store, monkeypatch):
@@ -120,17 +153,26 @@ def test_startup_recovers_interrupted_comparison_and_unchanged_refresh_reuses_mo
         worker.shutdown()
 
 
-def test_real_history_drives_automatic_comparison_without_manual_action(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+def test_real_history_drives_automatic_comparison_without_manual_action(file_consumer_store, monkeypatch):
+    store = file_consumer_store
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     all_keys = []
+    # 104 real recordings exceed the 100-track readiness threshold. The first
+    # five per group are prior context; the other 64 give held-out first plays
+    # across eight active days, exceeding both comparison evidence thresholds.
+    subjects = [dict(key=identity_key(f'Song{group}_{i}', f'Artist{group}'),
+                     title=f'Song{group}_{i}', artist=f'Artist{group}',
+                     video_id=f'{group}-{i}', created_at=0)
+                for group in range(8) for i in range(13)]
+    seed_publication_subjects(store, subjects)
+    entries = {row['video_id']: row['id'] for row in store.conn.execute('SELECT id,video_id FROM catalog_entries')}
     for group in range(8):
-        tracks, keys = [], []
-        for i in range(20):
-            tracks.append(store.tracks.upsert_track(f"{group}-{i}", f"Song{group}_{i}", f"Artist{group}", None, None, created_at=0))
-            keys.append(identity_key(f"Song{group}_{i}", f"Artist{group}"))
+        rows = subjects[group * 13:(group + 1) * 13]
+        tracks = [entries[row['video_id']] for row in rows]
+        keys = [row['key'] for row in rows]
         all_keys.append(keys)
-        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PL{group}", "Mix", 20, str(group), 0), tracks)
-    for period in range(4):
+        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PL{group}", "Mix", 13, str(group), 0), tracks)
+    for period in range(3):
         batch = [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]]
         for offset in range(5):
             at = (-100 if period == 0 else period * 10 - 5) * ms.DAY + offset * ms.DAY
@@ -146,7 +188,7 @@ def test_real_history_drives_automatic_comparison_without_manual_action(store, m
     assert result['kind'] == 'daily' and result['phase'] == 'complete'
     assert result['holdout_days'] == 30 and len(result['grid']) == 1
     assert result['previous'] == {'method': 'svd', 'dim': 4}
-    assert store.rec_model.rec_vectors_count() == 160
+    assert store.rec_model.rec_vectors_count() == 104
     assert ms.maintain(store, now + 1) is None
     assert len(store.model_selection.selection_runs()) == 1
 
@@ -174,11 +216,13 @@ def test_idle_worker_polls_daily_selection_without_library_changes(store, monkey
 
 
 def test_measurement_and_restore_survive_later_checks_that_keep_the_selected_setup(store, monkeypatch):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    store.rec_model.replace_rec_vectors([("old", b"previous snapshot")])
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    incumbent = _owned_vector(store, 'old')
+    challenger = _owned_vector(store, 'new', 64, 2)
+    store.rec_model.replace_rec_vectors([incumbent])
     applied = _result()
     first = store.model_selection.start_selection(1000, applied)
-    store.model_selection.save_selection(first, applied, rows=[("new", b"selected snapshot")])
+    store.model_selection.save_selection(first, applied, rows=[challenger])
     store.model_selection.save_model_forecast(first, 1000, {"eligible": ["later"], "previous": [], "selected": ["later"]})
     latest = _result(2000, "retained")
     latest["previous"] = latest["selected"]
@@ -191,17 +235,25 @@ def test_measurement_and_restore_survive_later_checks_that_keep_the_selected_set
     assert view["last"]["id"] == first
     assert view["latest"]["id"] == second
     assert store.model_selection.restore_model_selection(first, 3500)
-    assert store.rec_model.get_rec_vectors() == [("old", b"previous snapshot")]
+    assert store.rec_model.get_rec_vectors() == [incumbent]
     assert ms.view(store, 4000)["last"]["status"] == "restored"
 
 
-def test_publication_failure_rolls_back_vectors_and_configuration(store):
+def test_vector_publication_failure_preserves_configuration_and_restore_point(store):
     import sqlite3
-    store.rec_model.replace_rec_vectors([("old", b"previous")])
+    incumbent = _owned_vector(store, 'old')
+    challenger = _owned_vector(store, 'new', 64, 2)
+    store.rec_model.replace_rec_vectors([incumbent])
     result = _result()
-    run_id = store.model_selection.start_selection(1000, result)
-    with pytest.raises(sqlite3.IntegrityError):
-        store.model_selection.save_selection(run_id, result, rows=[("duplicate", b"a"), ("duplicate", b"b")])
-    assert store.rec_model.get_rec_vectors() == [("old", b"previous")]
+    run_id = store.model_selection.start_selection(1000, _result(status='running'))
+    with store.conn:
+        store.conn.execute("CREATE TRIGGER fail_selected_vector BEFORE INSERT ON recording_embedding_files "
+            "WHEN NEW.space='collaborative' BEGIN SELECT RAISE(ABORT,'controlled publication failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='controlled publication failure'):
+        store.model_selection.save_selection(run_id, result, rows=[challenger])
+    assert store.rec_model.get_rec_vectors() == [incumbent]
     assert store.settings.get_setting("rec_dim") is None
     assert store.settings.get_setting("rec_selection_active_run") is None
+    assert store.model_selection.selection_run(run_id)['status'] == 'running'
+    assert [tuple(row) for row in store.conn.execute(
+        'SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?', (run_id,))] == [incumbent]

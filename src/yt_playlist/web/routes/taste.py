@@ -101,7 +101,7 @@ def build(ctx) -> APIRouter:
             return f"{100 * (number - spec.min) / (spec.max - spec.min):g}%" if spec.percentage else number
         param = {"name": spec.name, "label": spec.label, "help": spec.explanation,
                 "min": spec.min, "max": spec.max, "step": spec.step, "default": spec.default,
-                "boolean": spec.boolean, "value": value, "value_label": display(value),
+                "value": value, "value_label": display(value),
                 "default_label": display(spec.default), "percentage": spec.percentage,
                 "low": spec.low, "high": spec.high}
         if spec.name.startswith('album_menu_'):
@@ -159,7 +159,6 @@ def build(ctx) -> APIRouter:
                  ("Cards & variety", ("modes_menu_", "modes_artist_", "modes_album_", "fresh_")),
                  ("Track length", ("max_track_",)),
                  ("Comfort listening", ("comfort_",)),
-                 ("Getting started", ("onboard_",)),
              ]),
             ("styles", "Listening-style grouping", "violet",
              "Choose how tracks are grouped into listening styles and how those groups carry over when the model rebuilds.", [
@@ -524,10 +523,7 @@ def build(ctx) -> APIRouter:
         name, val = form.get("name"), form.get("value")
         if name in rec_params.PARAMS_BY_NAME:
             _save_starting_point()
-            spec = rec_params.PARAMS_BY_NAME[name]
-            if spec.boolean:
-                rec_params.set_param(store, name, val is not None)   # unchecked box sends no value
-            elif val not in (None, ""):
+            if val not in (None, ""):
                 rec_params.set_param(store, name, val)
         return _stale()
 

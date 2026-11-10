@@ -113,7 +113,6 @@ def test_mb_dependency_outage_keeps_known_mbid_and_other_providers_usable(store,
         calls.append(request.full_url)
         raise urllib.error.HTTPError(request.full_url, 503, 'busy', {'Retry-After': '120'}, None)
     install(monkeypatch, fetch, clock)
-    acousticbrainz.reset()
     def acoustic(url):
         acoustic_calls.append(url)
         return {'rhythm': {'bpm': 123}} if url.endswith('low-level') else {}
@@ -121,7 +120,6 @@ def test_mb_dependency_outage_keeps_known_mbid_and_other_providers_usable(store,
     class Healthy:
         name = 'deezer'
         def available(self, store): return True
-        def reset(self): pass
         def tripped(self): return False
         def probe(self, track, store):
             healthy_calls.append(track['title'])
@@ -161,6 +159,10 @@ def test_success_from_cache_does_not_clear_a_different_outage(store, monkeypatch
         with pytest.raises(IntegrationUnavailable):
             iao.get('recording', {'query': 'bad'})
         assert iao.get('recording', {'query': 'good'}) == {'recordings': []}
+    tid = store.tracks.upsert_track('cached', 'Cached', 'Artist', None, 200)
+    subject = store.tracks.catalog_subject(tid)
+    # Publishing a completed cached result is not a successful recovery request.
+    store.enrichment_state.record_enrichment_attempt(subject['identity_key'], 'musicbrainz', {}, now=1000)
     assert store.enrichment_state.integration_cooldown('musicbrainz')['retry_at'] == 1030
 
 

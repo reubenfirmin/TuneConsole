@@ -1,7 +1,6 @@
 """Persisted UI state for the background Spotify library import."""
 from __future__ import annotations
 
-import json
 import math
 import secrets
 import threading
@@ -44,20 +43,24 @@ class TransferPreviews:
 
 def load_job(store) -> dict | None:
     try:
-        value = json.loads(store.settings.get_setting(JOB_KEY) or "null")
+        value = store.settings.spotify_import_job()
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
 
 
 def save_job(store, job: dict) -> None:
+    original = job
     if job.get("report_schema", 0) >= 5 and job.get("report"):
         # Playlist names/counts and YouTube destinations are the lasting audit. Source song
         # metadata is available in the active preview only, including unmatched/ambiguous rows.
         report = job["report"]
         details = {**report["details"], "unmatched_tracks": []}
         job = {**job, "report": {**report, "details": details}}
-    store.settings.set_setting(JOB_KEY, json.dumps(job, sort_keys=True))
+    revision = store.settings.save_spotify_import_job(job)
+    if revision is not None:
+        from yt_playlist.core.spotify_job_state import TOKEN
+        original[TOKEN] = revision
 
 
 def current_job(ctx) -> dict | None:
@@ -75,7 +78,17 @@ def current_job(ctx) -> dict | None:
             job = {**job, "status": "error", "finished_at": ctx.now_fn(),
                    "error": "TuneConsole stopped before the import finished. Upload the same export "
                             "again to resume recorded transfers."}
-            save_job(ctx.store, job)
+            # Return the recovery projection during maintenance; persist it on
+            # the next ordinary read. Recheck under the lock so a cutover cannot
+            # start between the pause check and the settings write.
+            while not ctx.store.activity_paused:
+                if ctx.store._lock.acquire(timeout=.025):
+                    try:
+                        if not ctx.store.activity_paused:
+                            save_job(ctx.store, job)
+                    finally:
+                        ctx.store._lock.release()
+                    break
         return job
     finally:
         ctx.spotify_import_lock.release()

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from ytmusicapi.exceptions import YTMusicServerError
 
 from tests.conftest import FakeClient
+from yt_playlist.core import fao
 from yt_playlist.library import executor
 from yt_playlist.rec import actions
 from yt_playlist.rec.actions import CLEANUP_SURFACE
@@ -17,7 +18,7 @@ from yt_playlist.web.app import create_app
 def missing(store, monkeypatch, tmp_path):
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path))
     monkeypatch.setattr(executor, 'with_retry', lambda fn: fn())
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     pid = store.playlists.upsert_playlist(iid, 'MISSING', 'Gone from YouTube', 0, '', 1)
     client = FakeClient()
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 2)
@@ -62,7 +63,8 @@ def test_unreadable_remote_requires_explicit_local_removal(missing, store, monke
         raise failure
 
     monkeypatch.setattr(client, 'get_playlist', unreadable)
-    assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 422
+    response = http.post('/playlist/delete-empty', data={'playlist': pid})
+    assert response.status_code == 503 and response.content == b''
     assert store.playlists.get_playlist(pid) is not None and not store.actions.get_actions()
     assert http.post('/playlist/forget-empty', data={'playlist': pid}).status_code == 200
     assert store.playlists.get_playlist(pid) is None and not client.deleted
@@ -90,7 +92,7 @@ def test_local_removal_preserves_cached_content(missing, store, monkeypatch, cou
 
 def test_explicit_removal_cannot_drop_system_playlist(missing, store):
     _, client, http = missing
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     system = store.playlists.upsert_playlist(iid, 'LM', 'Liked Music', 0, '', 1)
     assert http.post('/playlist/forget-empty', data={'playlist': system}).status_code == 422
     assert store.playlists.get_playlist(system) is not None and not client.deleted
@@ -104,12 +106,19 @@ def test_disappearing_after_empty_read_keeps_the_verified_backup(missing, store,
 
     monkeypatch.setattr(client, 'delete_playlist', already_deleted)
     # A transport error retains durable intent until a complete read proves absence.
-    assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 422
+    response = http.post('/playlist/delete-empty', data={'playlist': pid})
+    assert response.status_code == 503 and response.content == b''
     assert store.playlists.get_playlist(pid) is not None
     backup, = tmp_path.glob('backups/*.json')
-    assert json.loads(backup.read_text())['tracks'] == []
+    saved = backup.read_bytes()
+    payload = json.loads(fao.read(backup).bytes.decode())
+    assert payload['tracks'] == []
+    assert payload['playlist_id'] == pid and payload['ytm_playlist_id'] == 'MISSING'
     action, = store.actions.get_actions()
     assert action.status == 'delete_pending'
+    retained_backup = json.loads(action.undo_json)['backup']
+    retained_contents = fao.read(retained_backup).bytes
+    assert json.loads(retained_contents) == payload
     monkeypatch.setattr(client, 'get_playlist', already_deleted)
     # A repeated request reconciles the saved attempt without issuing another deletion.
     def must_not_delete(*args, **kwargs):
@@ -118,4 +127,8 @@ def test_disappearing_after_empty_read_keeps_the_verified_backup(missing, store,
     assert http.post('/playlist/delete-empty', data={'playlist': pid}).status_code == 200
     assert store.playlists.get_playlist(pid) is None
     assert store.actions.get_action(action.id).status == 'executed'
+    assert json.loads(store.actions.get_action(action.id).undo_json)['backup'] == retained_backup
+    assert fao.read(retained_backup).bytes == retained_contents
+    assert [item.id for item in store.actions.get_actions()] == [action.id]
     assert list(tmp_path.glob('backups/*.json')) == [backup]
+    assert backup.read_bytes() == saved

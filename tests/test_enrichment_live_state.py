@@ -14,7 +14,7 @@ from yt_playlist.web.routes.songs import build as song_routes
 
 @pytest.mark.parametrize("scope", ["playlist", "album", "generated"])
 def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "", 0)
     store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "", 0)
     entry = store.tracks.upsert_track("video", "Old title", "Old artist", "Album", 200,
@@ -38,7 +38,8 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
 
     async def scenario():
         response = await endpoint(request, job.id)
-        assert "started" in await anext(response.body_iterator)
+        first = json.loads((await anext(response.body_iterator)).splitlines()[0][6:])
+        assert first == {"type": "info", "text": "Checking song details…"}
         # These succeed after the connection opens and before the enrichment event is delivered.
         store.tracks.set_track_title(entry, "Edited title")
         store.tracks.set_track_artist(entry, "Edited artist")
@@ -83,7 +84,7 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
 
 
 def test_replayed_event_for_removed_track_cannot_restore_a_row(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "", 0)
     entry = store.tracks.upsert_track("video", "Song", "Artist", None, 200)
     store.playlists.set_playlist_tracks(pid, [entry])

@@ -7,7 +7,6 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from yt_playlist.rec.choice_capture import CaptureQueue
-from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +21,7 @@ def test_listening_pages_do_not_scan_legacy_charts(store, monkeypatch,path):
     monkeypatch.setattr(store.charts, 'history_bounds', forbidden)
     monkeypatch.setattr(store.charts, 'top_tracks', forbidden)
     import json
-    ListeningAnalyticsRepo(store).publish(json.dumps({'available':True,'id':'edition','stories':[]}),1,'listening_edition')
+    store.listening_analytics.publish(json.dumps({'available':True,'id':'edition','stories':[]}),1,'listening_edition')
     with TestClient(create_app(store, lambda: {})) as client:
         response = client.get(path)
         assert response.status_code == 200
@@ -47,7 +46,7 @@ def test_editorial_exposure_is_queued_only_for_current_edition_stories(store):
     import json
     offered=[]
     store.choice_capture=CaptureQueue(lambda capture:offered.append(capture) or True)
-    ListeningAnalyticsRepo(store).publish(json.dumps({'id':'current','stories':[{'id':'lead'},{'id':'support'}]}),1,'listening_edition')
+    store.listening_analytics.publish(json.dumps({'id':'current','stories':[{'id':'lead'},{'id':'support'}]}),1,'listening_edition')
     with TestClient(create_app(store,lambda:{}),base_url='http://127.0.0.1') as client:
         assert client.post('/charts/listening-impressions',json={'edition':'old','stories':['lead']}).status_code==204
         assert client.post('/charts/listening-impressions',json={'edition':'current','stories':['unknown']}).status_code==204

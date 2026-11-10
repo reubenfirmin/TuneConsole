@@ -13,9 +13,10 @@ import numpy as np
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_stopping, work_budget
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core import embeddings
 from yt_playlist.rec import embedding_training as training, model_refresh, model_setup, progressive
 from yt_playlist.rec.vector_math import rank_by_context
-from yt_playlist.repos.rec_model import VectorChanges
+from yt_playlist.core.rec_model_policy import VectorChanges
 
 DAY = 86400
 HOLDOUT_DAYS = 30
@@ -31,11 +32,11 @@ def due(store, now):
     if (store.settings.get_setting('rec_selection_paused') == '1'
             or store.settings.get_setting('rec_selection_restore')):
         return False
-    return now >= (store.rec_proposals.get_proposals(SCHEDULE) or {}).get('next_at', 0)
+    return now >= store.model_selection.next_daily_at()
 
 
 def _schedule(store, now, delay):
-    store.rec_proposals.put_proposals(SCHEDULE, {'next_at': now + delay}, now)
+    store.model_selection.schedule_daily(now + delay, now)
 
 
 def readiness(store, now):
@@ -145,22 +146,7 @@ def _retire_product_trial(store, now):
     if current.get('phase') not in ('preparing', 'observing'):
         return
     reason = 'Replaced by daily prediction comparisons with a 30-day holdout.'
-    with store._lock, store.conn:
-        current = product_comparison.state(store)
-        if current.get('phase') not in ('preparing', 'observing'):
-            return
-        run = store.model_selection.selection_run(current['run_id'])
-        if run:
-            run.update(status='retained', phase='complete', reason=reason, ended_at=now)
-            store.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE id=?', (run['id'],))
-            store.model_selection.publish_selection(run['id'], json.dumps(run), None, run['previous'])
-        current.update(phase='retained', reason=reason, ended_at=now)
-        store.rec_proposals.publish_prepared_home(json.dumps(current), now, surface=product_comparison.SURFACE)
-        store.settings.publish_values({'rec_selection_live_run': ''})
-        monitor = store.rec_proposals.get_proposals(product_comparison.MONITOR)
-        if monitor:
-            store.rec_proposals.publish_prepared_home(json.dumps({**monitor, 'complete': True}),
-                                                     now, surface=product_comparison.MONITOR)
+    store.model_selection.retire_product_trial(now, reason)
 
 
 def _finish(store, run, now, *, status, reason):
@@ -180,6 +166,7 @@ def _publish_fit(store, snapshot, run, now):
     weights = (training.cooc_weights(reader.rec_query.play_counts())
                if reader.settings.get_setting('rec_cooc_weighting') == '1' else None)
     previous_rows = dict(reader.rec_model.get_rec_vectors())
+    previous_basis = reader.rec_model.collaborative_basis()
     snapshot.release_reader()
     model_refresh._check_fit_memory(baskets, selected['dim'], progressive.Budget().full_memory_bytes)
     keys, vectors = training.build_vectors_from_baskets(baskets, dim=selected['dim'],
@@ -189,9 +176,13 @@ def _publish_fit(store, snapshot, run, now):
         raise ValueError('The selected setup could not fit the current library')
     rows = [(key, vector.astype('float32').tobytes()) for key, vector in zip(keys, vectors)]
     fresh = dict(rows)
-    changes = {'rec_vectors': VectorChanges(tuple((key, blob) for key, blob in rows
-                if previous_rows.get(key) != blob), tuple(previous_rows.keys() - fresh.keys()))}
     fit_inputs = model_refresh._fingerprint(['canonical-baskets-1', selected['method'], selected['dim'], baskets, weights])
+    basis = embeddings.version('rec_vectors', {'rec_fit_inputs': fit_inputs,
+        'rec_embed_method': selected['method'], 'rec_dim': str(selected['dim'])})
+    changes = {'rec_vectors': (VectorChanges(tuple(rows), (), replace=True, model_version=basis)
+        if not previous_basis or previous_basis[0] != basis else
+        VectorChanges(tuple((key, blob) for key, blob in rows if previous_rows.get(key) != blob),
+                      tuple(previous_rows.keys() - fresh.keys())))}
     applied = selected != run['previous']
     result = {key: value for key, value in run.items() if key != '_evaluations'}
     result.update(status='applied' if applied else 'retained', phase='complete', completed_at=now,
@@ -203,10 +194,9 @@ def _publish_fit(store, snapshot, run, now):
         if not applied:
             store.rec_model.publish_training_generation(changes)
         store.settings.publish_values({'rec_fit_inputs': fit_inputs})
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-            "('home_prepared','home_tuned','home_choice','album_prepared','mode_bundles','fresh_pool')")
-        store.rec_proposals.publish_prepared_home(json.dumps({'next_at': run['ran_at'] + DAY}), now, surface=SCHEDULE)
-    if not snapshot.publish(publish):
+        store.model_selection.retire_model_display()
+        store.model_selection.schedule_daily(run['ran_at'] + DAY, now)
+    if not snapshot.publish_ordered(publish):
         raise ValueError('Model inputs changed before publication; the serving model was kept')
     return result
 
@@ -303,5 +293,10 @@ def maintain(store, now, *, checkpoint=None):
         _schedule(store, now, 60)
         return run
     except (ValueError, np.linalg.LinAlgError, model_refresh.MemoryBudgetExceeded) as exc:
+        durable = store.model_selection.selection_run(run['id'])
+        if durable and durable.get('phase') == 'complete':
+            store.model_selection.retire_model_display()
+            store.model_selection.schedule_daily(durable['ran_at'] + DAY, now)
+            return durable
         run['selected'] = run['previous']
         return _finish(store, run, now, status='failed', reason=f'Comparison deferred; current model kept: {exc}')

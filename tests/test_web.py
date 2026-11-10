@@ -5,30 +5,38 @@ from tests.conftest import FakeClient
 from tests.web_support import _client
 
 def test_home_renders_toast_from_query_param(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/?toast=You%E2%80%99re+authenticated+again.").text
     assert "toast-ok" in html and "authenticated again" in html
     assert "toast-ok" not in c.get("/").text          # absent without the param
 
-def test_auth_expired_shows_reauth_banner(store):
+def test_auth_expired_shows_reauth_banner(store, monkeypatch):
+    from yt_playlist.library import sync
+    from yt_playlist.util.retry import with_retry
+
+    # Keep the real failed requests, retry policy, sync job and rendered banner;
+    # elapsed retry delays are covered by the retry owner's clock checks.
+    monkeypatch.setattr(sync, "with_retry", lambda fn, **kwargs:
+                        with_retry(fn, sleep=lambda _: None, **kwargs))
     class Expired:   # a client whose session has lapsed
         def get_library_playlists(self, limit=None):
             raise RuntimeError("Server returned HTTP 401: Unauthorized")
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    app = create_app(store, lambda: {iid: Expired()}, now_fn=lambda: 1.0)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    assert app.state.ctx.auth_expired == {}          # nothing wrong before a sync
-    assert "authBanner([])" in c.get("/").text       # banner seeded empty (hidden)
-    jid = c.post("/sync").json()["job_id"]
-    with c.stream("GET", f"/sync/events/{jid}") as s:
-        "".join(s.iter_text())                        # drain to completion
-    assert app.state.ctx.auth_expired == {iid: "main"}        # flagged for re-auth
-    assert 'authBanner(["main"])' in c.get("/").text          # banner seeded with the label
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    app = create_app(store, lambda: {iid: Expired()}, now_fn=lambda: 1.0,
+                     background_work=False)
+    with TestClient(app, base_url="http://127.0.0.1") as c:
+        assert app.state.ctx.auth_expired == {}          # nothing wrong before a sync
+        assert "authBanner([])" in c.get("/").text       # banner seeded empty (hidden)
+        jid = c.post("/sync").json()["job_id"]
+        with c.stream("GET", f"/sync/events/{jid}") as s:
+            "".join(s.iter_text())                        # drain to completion
+        assert app.state.ctx.auth_expired == {iid: "main"}        # flagged for re-auth
+        assert 'authBanner(["main"])' in c.get("/").text          # banner seeded with the label
 
 def test_actions_route_renders(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     store.actions.record_action("merge", "{}", "[]", "executed", "{}", 1.0)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
@@ -41,13 +49,13 @@ def test_actions_route_renders(store):
 
 
 def test_post_with_foreign_host_rejected(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://evil.example")   # DNS-rebound attacker host
     assert c.post("/sync").status_code == 400
 
 def test_post_with_foreign_origin_rejected(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     # Host is local but the request was forged from another site -> blocked.
@@ -55,16 +63,18 @@ def test_post_with_foreign_origin_rejected(store):
     assert r.status_code == 403
 
 def test_post_with_local_origin_allowed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = FakeClient(playlists=[], tracks={})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/sync", headers={"origin": "http://127.0.0.1"}, follow_redirects=False)
     assert r.status_code == 200  # starts a sync job (JSON), no longer a redirect
+    with c.stream("GET", f"/sync/events/{r.json()['job_id']}") as events:
+        "".join(events.iter_text())
 
 def test_get_with_foreign_host_still_allowed(store):
     # Reads are exempt: the guard only protects state-changing methods.
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://evil.example")
     assert c.get("/").status_code == 200
@@ -78,7 +88,7 @@ def test_vendored_assets_served_locally(store):
         assert r.status_code == 200 and len(r.content) > 1000
 
 def test_no_external_cdn_in_pages(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
     body = c.get("/cleanup").text
@@ -87,13 +97,13 @@ def test_no_external_cdn_in_pages(store):
 
 
 def test_tools_menu_only_shows_move_for_multiple_identities(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
 
     assert '<a href="/move"' not in c.get("/").text
 
-    store.identities.upsert_identity("other", "cred-2", "brand-2", False)
+    store.accounts.upsert_account("other", "cred-2", "brand-2", False)
     assert '<a href="/move"' in c.get("/").text
 
 
@@ -111,7 +121,7 @@ def test_action_log_is_last_in_tools_menu(store):
 
 
 def test_playlists_tab_renders(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
     page = c.get("/playlists").text                                # Playlists moved off / to /playlists
@@ -122,7 +132,7 @@ def test_playlists_tab_renders(store):
 
 
 def test_liked_songs_get_a_heart(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     mix = store.playlists.upsert_playlist(iid, "PLM", "Mix", 2, "h", 1.0)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # the YouTube liked playlist
     loved = store.tracks.upsert_track("v1", "Loved", "A", "Al", 200, 1)
@@ -139,7 +149,7 @@ def test_liked_songs_get_a_heart(store):
 def test_remove_playlist_preserves_group(store):
     # Groups are user curation (not on YouTube). A removed/pruned playlist must keep its group so it
     # reattaches if the playlist comes back. Regression for the prune that wiped groups too.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 1.0)
     store.playlists.set_playlist_group("PLG", "Workout")
     store.playlists.remove_playlist(a)
@@ -149,7 +159,7 @@ def test_remove_playlist_preserves_group(store):
 
 
 def test_toasts_region_present_on_every_page(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     assert 'id="toasts"' in c.get("/").text
@@ -164,7 +174,7 @@ def test_error_toast_partial_renders(store):
 
 
 def _seed_search(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     r1 = store.tracks.upsert_track("r1", "Spektrum", "Ritmo", "Ritmo LP", None,
                             album_browse_id="MPREb_ritmolp")
     pl = store.playlists.upsert_playlist(iid, "PL1", "Late Night Drive", 1, "h", 0.0)

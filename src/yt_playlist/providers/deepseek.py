@@ -28,12 +28,25 @@ def api_key(store=None, config_path=None):
     return _iao.api_key(store, config_path)
 
 
-def settings(store, now):
-    return _iao.settings(store, now)
+def settings(store, now, *, paid=None):
+    return _iao.settings(store, now, paid=paid)
 
 
-def generate(store, identity, project, now, *, now_fn=None):
-    return _iao.complete(store, identity, project, now, now_fn=now_fn)
+def generate(store, identity, project, now, *, now_fn=None, policy=None):
+    return _iao.complete(store, identity, project, now, now_fn=now_fn, policy=policy)
+
+
+def _parameters():
+    return {'model': MODEL, 'thinking': {'type': 'disabled'}, 'temperature': 0.2,
+            'max_tokens': MAX_TOKENS, 'response_format': {'type': 'json_object'}}
+
+
+def description_policy():
+    """Freeze the public generation contract, without album data or credentials."""
+    return {'kind': 'album-description', 'prompt_version': PROMPT_VERSION,
+            'parameters': _parameters(), 'system_prompt': _SYSTEM,
+            'public_fields': ['artist', 'title', 'year'], 'max_field_characters': 500,
+            'validation_version': 1}
 
 
 def album_fields(album):
@@ -52,8 +65,7 @@ def _usage(data):
 def describe(album, send):
     """Build public album input and validate generated prose through an IAO admission."""
     check_cancellable_work()
-    payload = {'model': MODEL, 'thinking': {'type': 'disabled'}, 'temperature': 0.2,
-               'max_tokens': MAX_TOKENS, 'response_format': {'type': 'json_object'},
+    payload = {**_parameters(),
                'messages': [{'role': 'system', 'content': _SYSTEM},
                             {'role': 'user', 'content': json.dumps(album_fields(album), ensure_ascii=False)}]}
     data = send(payload)

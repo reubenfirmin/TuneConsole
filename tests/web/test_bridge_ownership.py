@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from anyio import CancelScope
 import pytest
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from yt_playlist.core.bridge import Bridge, BridgeError
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN, build
@@ -17,9 +17,10 @@ class Socket:
     def __init__(self):
         self.incoming = asyncio.Queue()
         self.waiting = asyncio.Event()
+        self.application_state = WebSocketState.CONNECTING
 
     async def accept(self):
-        pass
+        self.application_state = WebSocketState.CONNECTED
 
     async def send_json(self, frame):
         pass
@@ -133,6 +134,57 @@ def test_cancelled_socket_finishes_radio_suspension():
 
         with CancelScope() as scope:
             await endpoint(CancelledSocket())
+        assert not bridge.connected
+        assert suspensions == [True]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('replacement', [False, True])
+def test_failed_send_during_pairing_retires_only_its_socket(monkeypatch, replacement):
+    from yt_playlist.web.routes import bridge as routes
+
+    entered, release = threading.Event(), threading.Event()
+
+    def pairing(_ctx):
+        entered.set()
+        assert release.wait(2), 'Pairing was not released'
+
+    monkeypatch.setattr(routes, '_record_connection', pairing)
+
+    async def scenario():
+        bridge, suspensions = Bridge(), []
+        endpoint = handler(bridge, lambda: suspensions.append(True))
+        incoming = asyncio.Queue()
+        incoming.put_nowait({'type': 'websocket.connect'})
+
+        async def send(message):
+            if message['type'] == 'websocket.send':
+                raise OSError('The extension disconnected during pairing')
+
+        socket = WebSocket({'type': 'websocket', 'headers': [
+            (b'origin', EXTENSION_ORIGIN.encode())]}, incoming.get, send)
+        task = asyncio.create_task(endpoint(socket))
+        next_socket = next_task = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            with pytest.raises(WebSocketDisconnect):
+                await bridge._send({'ping': 1})
+            assert socket.application_state == WebSocketState.DISCONNECTED
+            if replacement:
+                monkeypatch.setattr(routes, '_record_connection', lambda _ctx: None)
+                next_socket, next_task = await connect(endpoint)
+                await deliver(next_socket, {'type': 'now-heartbeat', 'title': 'New song', 'videoId': 'new'})
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2)
+            if next_task is not None:
+                try:
+                    assert bridge.connected and bridge.now_playing['video_id'] == 'new'
+                    assert not suspensions
+                finally:
+                    next_socket.incoming.put_nowait(None)
+                    await asyncio.wait_for(next_task, 2)
         assert not bridge.connected
         assert suspensions == [True]
 

@@ -1,4 +1,4 @@
-"""#60: rendered offers -> saved mode playlists -> persisted listening -> real scoreboard."""
+"""Rendered offers, saved mode choices and account-scoped listening retain their provenance."""
 import json
 from html.parser import HTMLParser
 from types import SimpleNamespace
@@ -8,11 +8,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.test_mode_cards_route import prepare_home
-from yt_playlist.library import live_plays, player_events
+from tests.home_fixture_support import home_page_bytecode, home_routes_only, without_metadata_providers
+from tests.playlist_fixture_support import remote_catalog
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from yt_playlist.library import live_plays, player_events, playlist_generated
 from yt_playlist.library.listen_derive import classify_exit
-from yt_playlist.rec import mode_eval
+from yt_playlist.rec import home_cache, home_cards, home_prepared, mode_eval
 from yt_playlist.web.app import create_app
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only',
+                                    'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'))) as schema:
+        yield schema
 
 
 class _Cards(HTMLParser):
@@ -41,8 +53,8 @@ class _Cards(HTMLParser):
 
 
 @pytest.fixture
-def engagement(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+def engagement(store, monkeypatch, home_page_bytecode):
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.modes.replace_modes([
         {"mode_id": mid, "label": genre, "families": [[genre, 1]],
          "centroid": np.eye(2, dtype=np.float32)[mid - 1], "size": 40, "rep_keys": []}
@@ -55,12 +67,50 @@ def engagement(store):
              "title": f"Song {mid} {i}", "artist": f"Artist {mid} {i}", "album": "",
              "thumbnail": None, "plays": 0, "reason": "", "lane": lane, "genre": genre}
             for i in range(20)]}
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1)
     clock = [1_700_000_000.0]
-    prepare_home(store, clock[0])
-    fake = FakeClient()
-    client = TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0]),
-                        base_url="http://127.0.0.1")
+    # Provenance begins with completed offers. Keep both real mode populations,
+    # then publish their selected cards without running unrelated ranking.
+    seed_publication_subjects(store, [track for mid in (1, 2)
+        for tracks in payload[str(mid)].values() for track in tracks])
+    completed_tracks = {row['video_id']: dict(row) for row in store.conn.execute(
+        'SELECT id,video_id,identity_key,title,artist FROM tracks')}
+
+    def existing_track(video_id, title, artist, *args, **kwargs):
+        track = completed_tracks[video_id]
+        assert (title, artist) == (track['title'], track['artist'])
+        return track['id']
+
+    def observed_track(video_id, title, artist, **kwargs):
+        existing_track(video_id, title, artist, **kwargs)
+        return completed_tracks[video_id]['identity_key']
+
+    # Provider copying and metadata ingestion are completed lower inputs. The
+    # HTTP handler still associates each returned real playlist with its mode.
+    def materialize(owner, title, tracks, client, now, account_id, *, recipe):
+        remote_id = f'saved-mode-{recipe["mode_id"]}'
+        pid = owner.playlists.upsert_playlist(account_id, remote_id, title, len(tracks),
+                                             'completed-copy', now)
+        owner.playlists.set_playlist_tracks(pid, [existing_track(
+            track['video_id'], track['title'], track['artist']) for track in tracks])
+        return {'new_ytm': remote_id, 'pid': pid, 'added': len(tracks)}
+
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', materialize)
+    monkeypatch.setattr(store.tracks, 'observe_track', observed_track)
+    protos = []
+    for mid in (1, 2):
+        lane, tracks = next(iter(payload[str(mid)].items()))
+        proto = home_cards._proto(store, lane, f'Mode {mid}', tracks, clock[0])
+        proto.update(mode_id=mid, recipe={'model': 'mode', 'mode_id': mid, 'lane': lane})
+        protos.append(proto)
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, [], [], home_cards._epoch(store, 'cards'), None)
+    home_prepared.remember(store, None, result, clock[0])
+    home_cache.put(store, 'home_prepared', home_cache.read(store, 'home_tuned'), clock[0])
+    fake = FakeClient(catalog=remote_catalog(
+        track for mid in (1, 2) for tracks in payload[str(mid)].values() for track in tracks))
+    app = create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0])
+    app.state.ctx.templates.env.bytecode_cache = home_page_bytecode
+    client = TestClient(app, base_url="http://127.0.0.1")
     response = client.get("/home/cards")
     assert response.status_code == 200
     cards = {card["recipe"]["mode_id"]: card for card in _Cards(response.text).cards
@@ -74,7 +124,8 @@ def engagement(store):
             "name": card["name"], "tracks": json.dumps(card["tracks"]),
             "recipe": json.dumps(card["recipe"])})
         assert response.status_code == 200
-        pid = next(pid for pid, mode in store.modes.pick_rows() if mode == mid)
+        pid = store.conn.execute(
+            'SELECT membership_ref_id FROM rec_mode_picks WHERE mode_id=?', (mid,)).fetchone()[0]
         selected[mid] = next(playlist for playlist in store.playlists.get_playlists() if playlist.id == pid)
     # These are the production ingestion functions used by /bridge/ws; no listen-stat mock.
     ctx = SimpleNamespace(store=store)
@@ -83,11 +134,11 @@ def engagement(store):
         at = clock[0] + offset
         assert live_plays.handle_play_event(ctx, {
             "type": "play", "videoId": track["video_id"], "title": track["title"],
-            "artist": track["artist"], "playlist": selected[1].ytm_playlist_id}, at)
+            "artist": track["artist"], "playlist": selected[1].provider_playlist_id}, at)
         assert player_events.handle_player_event(ctx, {
             "type": "pevent", "kind": "track_exit", "videoId": track["video_id"],
-            "position": position, "duration": 200, "playlist": selected[1].ytm_playlist_id}, at + position)
-    yield SimpleNamespace(store=store, cards=cards, selected=selected, ctx=ctx, start=clock[0])
+            "position": position, "duration": 200, "playlist": selected[1].provider_playlist_id}, at + position)
+    yield SimpleNamespace(store=store, cards=cards, selected=selected, ctx=ctx, start=clock[0], account_id=iid)
     client.close()
 
 
@@ -95,38 +146,40 @@ def test_saved_mode_retains_attributed_plays_and_exit_depth_over_multiple_days(e
     data = engagement
     events = data.store.history.play_events_since(data.start)
     assert len(events) == 3
-    assert {event["playlist_ytm_id"] for event in events} == {data.selected[1].ytm_playlist_id}
+    assert {event["account_id"] for event in events} == {data.account_id}
+    assert {event["playlist_ytm_id"] for event in events} == {data.selected[1].provider_playlist_id}
     assert events[-1]["played_at"] - events[0]["played_at"] == 86400
     exits = data.store.player_events.player_events_since(data.start, kind="track_exit")
     assert [classify_exit(event["position"], event["duration"]) for event in exits] == ["completion", "skip", "completion"]
-    assert {event["playlist_ytm_id"] for event in exits} == {data.selected[1].ytm_playlist_id}
-    board = {row["mode_id"]: row for row in mode_eval.mode_scoreboard(data.store)}
-    assert (board[1]["offered"], board[1]["picked"], board[1]["plays"]) == (1, 1, 3)
-    assert (board[2]["offered"], board[2]["picked"], board[2]["plays"]) == (1, 1, 0)
-    assert (board[1]["completions"], board[1]["skips"]) == (2, 1)
-    assert (board[2]["completions"], board[2]["skips"]) == (0, 0)
-    assert board[1]["last_play"] == events[-1]["played_at"]
+    assert {event["playlist_ytm_id"] for event in exits} == {data.selected[1].provider_playlist_id}
+    assert {event["account_id"] for event in exits} == {data.account_id}
+    evidence = mode_eval.choice_evidence(data.store)
+    assert [(row["mode_id"], row["offered"], row["picked"]) for row in evidence["rows"]] == [
+        (1, 1, 1), (2, 1, 1)]
 
 
 def test_saved_mode_retains_the_link_needed_to_read_skip_and_completion_depth(engagement):
     store = engagement.store
-    picks = dict(store.modes.pick_rows())
-    playlist_ids = {playlist.ytm_playlist_id: playlist.id for playlist in store.playlists.get_playlists()}
+    picks = dict(store.conn.execute('SELECT membership_ref_id, mode_id FROM rec_mode_picks'))
+    playlist_ids = {playlist.provider_playlist_id: playlist.id for playlist in store.playlists.get_playlists()}
     exits = store.player_events.player_events_since(engagement.start, kind="track_exit")
-    # Part C requires a persistent trace of mode choice and engagement. Use the stored pick,
-    # playlist provenance and production exit classifier, without inventing a scoreboard API.
+    # The saved choice remains linked to its playlist and raw exit observations.
     depth = [(picks[playlist_ids[event["playlist_ytm_id"]]],
               classify_exit(event["position"], event["duration"])) for event in exits]
     assert depth == [(1, "completion"), (1, "skip"), (1, "completion")]
     assert exits[-1]["at"] - exits[0]["at"] == 86400
 
 
-def test_organic_play_does_not_count_as_engagement_with_a_saved_mode(engagement):
+def test_organic_play_retains_separate_provenance_without_changing_saved_choices(engagement):
     data = engagement
     track = data.cards[2]["tracks"][0]
+    before = mode_eval.choice_evidence(data.store)
+    saved_events = data.store.history.play_events_since(data.start)
     assert live_plays.handle_play_event(data.ctx, {
         "type": "play", "videoId": track["video_id"], "title": track["title"],
         "artist": track["artist"]}, data.start + 2 * 86400)
-    assert data.store.history.play_events_since(data.start)[-1]["playlist_ytm_id"] is None
-    board = {row["mode_id"]: row for row in mode_eval.mode_scoreboard(data.store)}
-    assert board[2]["plays"] == 0, "Playing the same song organically is not a mode-playlist selection"
+    events = data.store.history.play_events_since(data.start)
+    assert events[:-1] == saved_events
+    assert events[-1]["playlist_ytm_id"] is None
+    assert events[-1]["account_id"] == data.account_id
+    assert mode_eval.choice_evidence(data.store) == before

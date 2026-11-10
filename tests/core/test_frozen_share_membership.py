@@ -1,0 +1,148 @@
+"""Current and installed frozen captures reject appends, replacements and reordering."""
+from contextlib import closing, contextmanager
+import sqlite3
+
+import pytest
+
+from yt_playlist.core import albums, album_tracklists, schema_inspection
+from yt_playlist.core.migrations import current, migrate, registry, regular, Migration, MigrationError
+from yt_playlist.core.migrations import v105_frozen_share_membership as membership
+from yt_playlist.core.migrations import runner
+from yt_playlist.core.store import Store
+from tests.historical_support import upgrade_fixture
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input, native_sql_calls, without_query_timing
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+
+
+@pytest.fixture
+def admitted_startup(monkeypatch):
+    validate = runner.validate_version
+
+    def validated_upgrade(conn, version, **kwargs):
+        # Frozen upgrades retain their real full validation. Subsequent startup
+        # consumes that admitted layout; regular-owner checks remain real.
+        if kwargs.get('foreign_keys', True) or kwargs.get('data', True):
+            return validate(conn, version, **kwargs)
+
+    monkeypatch.setattr(runner, 'validate_version', validated_upgrade)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Frozen SQL ownership does not construct an HTTP application."""
+
+
+@pytest.fixture(scope='module')
+def membership_predecessor():
+    # The real v105 runner owns membership conversion. Earlier empty SQL and
+    # unrelated regular owners are completed inputs, shared read-only here.
+    with closing(sqlite3.connect(':memory:')) as conn, pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch)
+        install_numbered_input(conn, 104, regular_owners=regular.CHANGES)
+        conn.execute('PRAGMA query_only=ON')
+        yield conn
+
+
+@contextmanager
+def installed(path, predecessor):
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        predecessor.backup(store.conn)
+        yield store
+
+
+def capture(conn, *, legacy=False):
+    with conn:
+        aid = albums.observe(conn,'release',title='Release',artist='Artist',rank=1)
+        snapshot = album_tracklists.freeze(conn,aid,'release','Frozen',['one','missing','one'],now=10,legacy=legacy)
+        empty = album_tracklists.freeze(conn,aid,'release','Empty',[],now=11)
+    return aid,snapshot,empty
+
+
+def assert_frozen(conn, snapshot):
+    before = list(map(tuple,conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))
+    for operation in ('append','replace','update','delete'):
+        with pytest.raises(sqlite3.IntegrityError):
+            with conn:
+                if operation in ('append','replace'):
+                    conn.execute('INSERT OR REPLACE INTO album_share_items '
+                        'SELECT snapshot_id,?,tracklist_id,occurrence_id,entry_id,raw_source_ref '
+                        'FROM album_share_items WHERE snapshot_id=? AND position=0',
+                        (3 if operation=='append' else 0,snapshot))
+                elif operation=='update':
+                    conn.execute("UPDATE album_share_items SET raw_source_ref='changed' WHERE snapshot_id=?",(snapshot,))
+                else:
+                    conn.execute('DELETE FROM album_share_items WHERE snapshot_id=?',(snapshot,))
+        assert list(map(tuple,conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))==before
+    assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_fresh_share_constructor_and_rollback_leave_no_mutable_prefix(store):
+    _,snapshot,_ = capture(store.conn)
+    assert_frozen(store.conn,snapshot)
+    before = store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]
+    with pytest.raises(RuntimeError):
+        with store.conn:
+            album_tracklists.freeze(store.conn,albums.lookup(store.conn,'release'),'release','Rollback',['a','a'],now=12)
+            raise RuntimeError('abort capture')
+    assert store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]==before
+
+
+@pytest.mark.parametrize('legacy',[False,True])
+@pytest.mark.usefixtures('admitted_startup')
+def test_installed_shares_keep_exact_membership_across_upgrade_alias_and_restart(
+        tmp_path, membership_predecessor, legacy):
+    path = tmp_path/'shares.db'
+    with installed(path, membership_predecessor) as store:
+        aid,snapshot,empty = capture(store.conn,legacy=legacy)
+        before = list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))
+        upgrade_fixture(store)
+        assert list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))==before
+        assert_frozen(store.conn,snapshot)
+        with store.conn:
+            target = albums.observe(store.conn,'alias',title='Alias',artist='Artist',rank=1)
+            # Provider evidence moves with its verified release owner before capture ownership.
+            store.conn.execute('UPDATE album_provider_ids SET is_primary=0,equivalence_digest=?,verified_at=10 WHERE album_id=?',('verified',aid))
+            store.conn.execute('UPDATE album_provider_ids SET album_id=? WHERE album_id=?',(target,aid))
+            album_tracklists.merge(store.conn,target,aid)
+        assert_frozen(store.conn,snapshot)
+        assert store.conn.execute('SELECT count(*) FROM album_share_items WHERE snapshot_id=?',(empty,)).fetchone()[0]==0
+        current.validate(store.conn)
+    reopened = Store(path)
+    try:
+        reopened.conn.execute('PRAGMA synchronous=OFF')
+        reopened.init_schema()
+        assert_frozen(reopened.conn,snapshot)
+        assert list(map(tuple,reopened.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))==before
+    finally:
+        reopened.conn.close()
+
+
+def test_interrupted_guard_install_rolls_back_then_restarts(tmp_path, membership_predecessor, admitted_startup):
+    with installed(tmp_path/'restart.db', membership_predecessor) as store:
+        _,snapshot,_ = capture(store.conn)
+        before = list(store.conn.iterdump())
+        def interrupted(conn,context):
+            membership.apply(conn,context)
+            raise RuntimeError('interrupted share guard')
+        with pytest.raises(MigrationError,match='interrupted share guard'):
+            migrate(store.conn,registry=(*registry.MIGRATIONS[:104],Migration(105,'frozen_share_membership',interrupted)))
+        assert list(store.conn.iterdump())==before
+        upgrade_fixture(store)
+        assert_frozen(store.conn,snapshot)
+
+
+def test_preexisting_appended_share_stops_without_changing_original_rows(tmp_path, membership_predecessor):
+    with installed(tmp_path/'invalid.db', membership_predecessor) as store:
+        _,snapshot,_ = capture(store.conn)
+        with store.conn:
+            store.conn.execute('INSERT INTO album_share_items SELECT snapshot_id,3,tracklist_id,occurrence_id,entry_id,raw_source_ref '
+                               'FROM album_share_items WHERE snapshot_id=? AND position=0',(snapshot,))
+        before = list(store.conn.iterdump())
+        with pytest.raises(MigrationError,match='changed membership; original rows retained'):
+            migrate(store.conn, registry=registry.MIGRATIONS)
+        assert list(store.conn.iterdump())==before

@@ -10,12 +10,12 @@ import math
 import numpy as np
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.rec import artist_model, embedding_training as training, embedding_vectors as vector_reads
+from yt_playlist.rec import embedding_training as training, embedding_vectors as vector_reads
 from yt_playlist.util import genre_map
 
 
 def best_holdout(store, cap_days=30) -> int:
-    """Adaptive holdout window for temporal_recall: clamp(round(span_days/3), 1, cap_days).
+    """Adaptive rolling holdout window: clamp(round(span_days/3), 1, cap_days).
 
     A holdout bigger than a third of the span starves the context side of sufficient history
     to learn from, so we size the window proportionally to how much history exists."""
@@ -59,91 +59,12 @@ def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
             "lift": (recall / baseline) if recall and baseline else None}
 
 
-def artist_recall_at_k(store, k=10, min_size=3, seed=0) -> dict:
-    """#28 Leave-one-out recall@k over playlists at the ARTIST level: hold out one artist from a
-    playlist, rank all artists by collaborative-vector cosine to the centroid of the playlist's
-    remaining artists, and check whether the held-out artist lands in the top-k. Validates §A (and,
-    later, the blend weights); mirrors recall_at_k. recall=None when no artist vectors are built."""
-    artists, V, idx = artist_model.load_artist_vectors(store)
-    if V is None:
-        return {"recall_at_k": None, "trials": 0, "reason": "no artist vectors built"}
-    rng = np.random.default_rng(seed)
-    hits = trials = 0
-    n = len(artists)
-    refs = store.artists.track_keys(library=True)
-    for p in store.playlists.get_playlists():
-        pa = sorted({a for m in store.playlists.get_playlist_track_keys(p.id) for a in refs.get(m,())} & set(idx))
-        if len(pa) < min_size:
-            continue
-        held = pa[int(rng.integers(len(pa)))]
-        rest = [a for a in pa if a != held]
-        c = V[[idx[a] for a in rest]].mean(0)
-        c /= np.linalg.norm(c) + 1e-9
-        sims = V @ c
-        restset = set(rest)
-        ranked = [artists[j] for j in np.argsort(-sims) if artists[j] not in restset]
-        if ranked.index(held) < k:
-            hits += 1
-        trials += 1
-    recall = hits / trials if trials else None
-    baseline = k / n if n else None
-    return {"recall_at_k": recall, "k": k, "trials": trials, "baseline": baseline,
-            "lift": (recall / baseline) if recall and baseline else None}
-
-
-def temporal_recall(store, holdout_days=30, k=20) -> dict:
-    """The model's actual job: predict what you'll play next, not reconstruct existing playlists.
-
-    Using reconciled listening days, hold out the most recent `holdout_days` of plays, treat everything played
-    before the cutoff as context, and check whether each genuinely new held-out play (one not already
-    in the context) ranks in the top-k by cosine to the context centroid in the embedding space. This
-    rewards forward prediction, unlike the in-sample leave-one-out recall_at_k.
-
-    Held-out plays the app itself CAUSED are dropped first (#83's last circular path): a key whose
-    every play_events row in the holdout window carries generated-playlist provenance
-    (generated_only_keys_since) would otherwise count the model's own suggestion as a successful
-    prediction. The number dropped is reported as `generated_excluded`. Returns recall=None when
-    there are no vectors, no history, or the split has no usable context/held-out plays."""
-    keys, V, idx = vector_reads.load_vectors(store)
-    if V is None:
-        return {"recall": None, "trials": 0, "reason": "no vectors built"}
-    _, hi = store.rec_evidence.evaluation_history_bounds()
-    if hi is None:
-        return {"recall": None, "trials": 0, "reason": "no history"}
-    cutoff = hi - holdout_days * 86400
-    before = store.history.history_keys_before(cutoff)
-    after = store.history.get_recent_history_keys(cutoff)
-    context = [key for key in before if key in idx]
-    gen_only = store.rec_evidence.generated_only_keys_since(cutoff)
-    # The daily projection already suppresses known sync shadows. Include the excluded
-    # event keys for accounting, then remove them before calculating any score.
-    held = [key for key in after | gen_only if key in idx and key not in before]
-    generated_excluded = sum(1 for key in held if key in gen_only)
-    held = [key for key in held if key not in gen_only]
-    if not context or not held:
-        return {"recall": None, "trials": len(held), "holdout_days": holdout_days,
-                "generated_excluded": generated_excluded,
-                "reason": "insufficient temporal split"}
-    Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
-    c = Vn[[idx[key] for key in context]].mean(0)
-    c /= np.linalg.norm(c) + 1e-9
-    sims = Vn @ c
-    ctxset = set(context)
-    ranked = [keys[j] for j in np.argsort(-sims) if keys[j] not in ctxset]
-    pos = {key: i for i, key in enumerate(ranked)}
-    hits = sum(1 for h in held if pos.get(h, len(ranked)) < k)
-    recall = hits / len(held)
-    baseline = k / len(ranked) if ranked else None
-    return {"recall": recall, "k": k, "trials": len(held), "holdout_days": holdout_days,
-            "generated_excluded": generated_excluded,
-            "baseline": baseline, "lift": (recall / baseline) if recall and baseline else None}
-
-
 def _causal_window(store, cutoff, end, k, dim, method, memory_bytes=None) -> dict:
     """Fit at ``cutoff`` and score organic, previously-unplayed outcomes in [cutoff, end).
 
-    Unlike temporal_recall, this never loads the live vectors. The explicit as-of baskets are fitted
-    in memory, so neither persisted model state nor a later basket can leak into the representation.
+    The explicit as-of baskets are fitted in memory without loading live vectors, so neither
+    persisted model state nor a later basket can leak into the representation. Generated-only
+    outcomes are excluded while mixed and independently dated evidence remain eligible.
     """
     baskets, coverage = store.rec_evidence.rec_baskets_as_of(cutoff)
     check_cancellable_work()
@@ -325,32 +246,5 @@ def projection_recall(store, k=20, *, inputs=None, max_targets=None) -> dict:
     if not trials:
         result["reason"] = "Insufficient fitting evidence or no encodable held-out targets"
     return result
-
-
-def cold_rankable(store, now) -> dict:
-    """#50 measured criterion: how many out-of-corpus (cold) tracks the cold ranker can actually score,
-    vs the discovered-pool size. rankable > 0 means cold tracks are recommendable by taste + the
-    transient tilts (not just recency/radio order). Imported lazily to dodge a surfaces<->eval cycle."""
-    from yt_playlist.rec import surfaces
-    pool = len(store.discovery.get_discovered_tracks())
-    candidates = surfaces.cold_candidates(store, now)
-    rankable = sum(item.score is not None for item in candidates)
-    return {"rankable": rankable, "fallback": len(candidates) - rankable,
-            "eligible": len(candidates), "pool": pool}
-
-
-def content_rankable(store) -> dict:
-    """#38 §3 measured: how many OWNED tracks that lack a co-occurrence vector become rankable through
-    the content-space taste fit (a content vector present + content_taste built). Mirrors cold_rankable.
-    Lazy imports avoid a scoring<->eval cycle."""
-    from yt_playlist.rec.scoring import content_taste
-    _keys, _V, idx = vector_reads.load_vectors(store)
-    _ckeys, CV, cidx = vector_reads.load_content_vectors(store)
-    owned = set(store.rec_query.library_keys())
-    vectorless_owned = owned - set(idx)
-    if CV is None or not content_taste(store):
-        return {"rankable": 0, "vectorless_owned": len(vectorless_owned)}
-    rankable = sum(1 for k in vectorless_owned if k in cidx)
-    return {"rankable": rankable, "vectorless_owned": len(vectorless_owned)}
 
 

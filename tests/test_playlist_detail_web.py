@@ -7,10 +7,29 @@ route is converted.
 """
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls, without_query_timing
+from tests.recommendation_support import seed_publication_subjects
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('rock', 'Rock'),
+                                  ('techno', 'Techno'), ('house', 'House'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def playlist_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import actions, app_update, audio_preview, playlists, setup
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (actions, app_update, audio_preview, playlists, setup)])
 
 
 def _client(store, provider):
@@ -24,7 +43,7 @@ def _refreshes(r):
 # --- rename ---
 
 def test_rename_returns_head_fragment(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Old Name", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", "Al", 200, 1)])
     fc = FakeClient()
@@ -39,7 +58,7 @@ def test_rename_returns_head_fragment(store):
 
 
 def test_rename_empty_returns_toast(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Keep", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", "Al", 200, 1)])
     c = _client(store, lambda: {iid: FakeClient()})
@@ -54,7 +73,7 @@ def test_rename_empty_returns_toast(store):
 # --- track genre / year (shared track_row fragment) ---
 
 def _seed_one_track(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S0", "X", "Al", 200, 1)])
     return iid, a
@@ -149,7 +168,7 @@ def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
 # --- remove track / reorder ---
 
 def _seed_three(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", "Alb", 200, 1) for i in range(3)])
     fc = FakeClient(tracks={"PL1": [{"videoId": f"v{i}", "setVideoId": f"sv{i}"} for i in range(3)]})
@@ -168,7 +187,7 @@ def test_remove_track_returns_empty_and_drops_row(store):
 
 def test_remove_track_from_liked_music_unlikes(store):
     # On the Liked Music (LM) list "remove" has no playlist item to delete. It unlikes the song.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(lm, [store.tracks.upsert_track("v0", "S0", "X", "Alb", 200, 1)])
     fc = FakeClient(tracks={"LM": [{"videoId": "v0", "setVideoId": "sv0"}]})
@@ -206,7 +225,7 @@ def test_reorder_persists_and_returns_204(store):
 # --- alternate versions: search (fragment) + add (form) ---
 
 def test_alternates_renders_results_fragment(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     results = [
@@ -224,7 +243,7 @@ def test_alternates_renders_results_fragment(store):
 
 
 def test_add_tracks_appends_and_refreshes(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     fc = FakeClient()
@@ -242,7 +261,7 @@ def test_add_tracks_backfills_duration_for_known_trackless_time(store):
     # Regression for #26: an alternate that's already in the store with no duration (e.g. previously
     # seen via plays/history sync, which inserts duration_s=None) must get its time filled in when
     # added via "find alternate version". Otherwise the playlist row shows a blank time.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     store.tracks.upsert_track("v1", "Song A (Live)", "Artist X", "Alb", None, 1)   # known, but no duration yet
@@ -256,7 +275,7 @@ def test_add_tracks_backfills_duration_for_known_trackless_time(store):
 def test_add_tracks_fetches_missing_duration_for_fresh_track(store):
     # #26: a *new* alternate whose search result carried no time (YouTube's unfiltered search often
     # omits it) gets its real duration fetched at add-time, so the playlist row isn't left blank.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     fc = FakeClient(song_durations={"v1": 273})           # get_song knows v1's time
@@ -269,7 +288,7 @@ def test_add_tracks_fetches_missing_duration_for_fresh_track(store):
 
 
 def test_add_tracks_preserves_album_browse(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
     track = {"videoId": "v9", "title": "T", "artist": "A", "album": "The Album",
@@ -279,7 +298,7 @@ def test_add_tracks_preserves_album_browse(store):
 
 
 def test_add_tracks_inserts_below_anchor(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
                                   store.tracks.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
@@ -297,12 +316,34 @@ def test_add_tracks_inserts_below_anchor(store):
     assert fc.edited[-1] == ("PL1", {"moveItem": ("sv9", "sv1")})
 
 
-def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
+def test_add_tracks_inserts_below_anchor_despite_indexing_lag(
+        store, monkeypatch, native_sql_calls, without_query_timing):
+    from yt_playlist.library import playlist_positions
+
+    retry = playlist_positions.with_retry
+    monkeypatch.setattr(playlist_positions, 'with_retry',
+                        lambda fn, **kwargs: retry(fn, **kwargs, sleep=lambda delay: None))
     # #40: retain the requested order during readback lag, but expose the pending remote move.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
-    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
-                                  store.tracks.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
+    seed_publication_subjects(store, [
+        dict(key='song a|x', video_id='v0', title='Song A', artist='X', album='Alb', duration_s=200),
+        dict(key='song b|y', video_id='v1', title='Song B', artist='Y', album='Alb', duration_s=200),
+        dict(key='song a (live)|x', video_id='v9', title='Song A (Live)', artist='X', duration_s=250),
+    ], unowned={'song a (live)|x'})
+    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+    store.playlists.set_playlist_tracks(a, [entries['v0'], entries['v1']])
+
+    def known_track(video_id, *args, **kwargs):
+        entry = store.conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=?',
+                                   (video_id,)).fetchone()
+        assert entry is not None, video_id
+        with store.conn:
+            store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                               (entry['recording_id'],))
+        return entry['id']
+
+    monkeypatch.setattr(store.tracks, 'upsert_track', known_track)
     # the fake client knows only the pre-existing tracks; the freshly-added v9 has no catalog entry,
     # so add_playlist_items can't materialize it on the read-back, i.e. it stays invisible (lag).
     fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
@@ -328,7 +369,7 @@ def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
 
 
 def test_add_tracks_empty_returns_toast(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post(f"/playlist/{a}/add-tracks", data={})
@@ -340,7 +381,7 @@ def test_add_tracks_with_anchor_records_alt_version_event(store):
     # #95: picking an alternate version off the alternates modal is the user saying "these two are
     # the same song to me" - future dedupe/preference evidence. after_video_id is only ever set by
     # that modal's form (alternates_results.html), so it doubles as "this really is a swap".
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     c = _client(store, lambda: {iid: FakeClient()})
@@ -358,7 +399,7 @@ def test_add_tracks_with_anchor_records_alt_version_event(store):
 
 def test_add_tracks_with_anchor_records_one_event_per_chosen_version(store):
     # multiple versions checked in the modal at once still each get their own old/new row.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     c = _client(store, lambda: {iid: FakeClient()})
@@ -375,7 +416,7 @@ def test_add_tracks_with_anchor_records_one_event_per_chosen_version(store):
 
 def test_add_tracks_without_anchor_does_not_record_alt_version_event(store):
     # a plain "add from suggestions" (no after_video_id) is not an alternate-version swap.
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
@@ -390,21 +431,21 @@ def test_lastfm_key_saved_via_form(store, monkeypatch, tmp_path):
     import yt_playlist.providers.lastfm as lf
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", "Al", 200, 1)])
     c = _client(store, lambda: {iid: FakeClient()})
 
     assert lf.api_key(store) is None
-    assert "enrichPanel(%d, false," % a in c.get(f"/playlist/{a}").text
+    assert 'providerKey(false, "/settings/lastfm-key")' in c.get('/setup?tab=enrichment').text
     r = c.post("/settings/lastfm-key", data={"key": " abc123 "})
     assert r.status_code == 204
     assert store.settings.get_setting("lastfm_api_key") == "abc123" and lf.api_key(store) == "abc123"
-    assert "enrichPanel(%d, true," % a in c.get(f"/playlist/{a}").text       # page now reflects configured
+    assert 'providerKey(true, "/settings/lastfm-key")' in c.get('/setup?tab=enrichment').text
 
 
 def test_generated_playlist_shows_feedback_control_panel(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "A", "ArtA", None, None)
     store.tracks.set_track_genre(a, "Techno"); store.tracks.set_track_year(a, "1995")
     pid = store.playlists.upsert_playlist(iid, "PLG", "Gen", 1, "h", 0.0)
@@ -423,7 +464,7 @@ def test_generated_playlist_shows_feedback_control_panel(store):
 
 
 def test_non_generated_playlist_has_no_feedback_panel(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "A", "ArtA", None, None)
     pid = store.playlists.upsert_playlist(iid, "PLN", "Normal", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(pid, [a])
@@ -436,7 +477,7 @@ def test_non_generated_playlist_has_no_feedback_panel(store):
 def test_generated_playlist_unenriched_nudges_to_enrich(store):
     # A "Fresh songs" generated playlist with untagged tracks: Detailed feedback still shows, but
     # explains there are no genre/era levers until you enrich (the 531 confusion).
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "Fresh", "NewArtist", None, None)   # no genre, no year
     pid = store.playlists.upsert_playlist(iid, "PLF", "Fresh songs", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(pid, [a])
@@ -483,7 +524,7 @@ def test_feedback_fragment_requires_generated_playlist(store):
 
 def test_generated_playlist_shows_stored_recipe(store):
     # Even an un-tagged "Fresh songs" playlist surfaces HOW it was made (the 531 fix at the root).
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "Fresh", "NewArtist", None, None)   # no genre/year tags
     pid = store.playlists.upsert_playlist(iid, "PLF", "Fresh songs - June 21 2026 #1", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(pid, [a])

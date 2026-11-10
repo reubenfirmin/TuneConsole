@@ -1,3 +1,4 @@
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import transient
 from yt_playlist.util.matching import identity_key
 
@@ -13,6 +14,15 @@ def test_facets_for_maps_genre_era_artist(store):
     assert any(ax.startswith("genre:") and facets[ax] == [k] for ax in facets)
 
 
-def test_facets_for_empty_and_unknown(store):
+def test_facets_for_empty_and_unknown(no_database):
+    store = repository_store(
+        rec_query={'track_genres': {}, 'track_decades': {}, 'track_artists': {}},
+        genres={'feature_axes': {}}, values={'_read_only': True})
     assert transient.facets_for(store, []) == {}
+    store.rec_query.track_genres.assert_not_called()
+    store.rec_query.track_decades.assert_not_called()
+    store.rec_query.track_artists.assert_not_called()
     assert transient.facets_for(store, ["ghost|x"]) == {}
+    store.rec_query.track_genres.assert_called_once_with(['ghost|x'])
+    store.rec_query.track_decades.assert_called_once_with(['ghost|x'])
+    store.rec_query.track_artists.assert_called_once_with(['ghost|x'])

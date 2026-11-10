@@ -1,8 +1,49 @@
 from fastapi.testclient import TestClient
+import pytest
 
-from tests.group_support import publish, recordings
+from tests.group_support import publish as publish_groups, recordings
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+)
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import group_serving
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def preview_schema():
+    with bounded_consumer_schema((('house', 'House'), ('death-metal', 'Death Metal'),
+                                  ('pop', 'Pop'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, preview_schema, native_sql_calls, monkeypatch):
+    # These consumers own group calculation, publication and rendered output.
+    # Catalog ingestion, bootstrap and per-query diagnostics are lower inputs.
+    with _file_consumer_store(tmp_path, preview_schema) as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+def catalog_inputs(tracks, *, one_album=False):
+    return [{'key': track.key, 'title': f'Song {i}', 'video_id': f'v{i}',
+             'artist': f'Artist {i // 2}', 'genre': track.genre,
+             'album': 'One album' if one_album else f'Album {i // 2}'}
+            for i, track in enumerate(tracks)]
+
+
+def seed_missing(store, items):
+    owned = {row[0] for row in store.conn.execute('SELECT identity_key FROM recordings')}
+    missing = [item for item in items if item['key'] not in owned]
+    if missing:
+        seed_publication_subjects(store, missing)
+
+
+def publish(store, tracks, *args):
+    seed_missing(store, catalog_inputs(tracks))
+    return publish_groups(store, tracks, *args)
 
 
 def test_preview_wait_survives_missing_head_and_budget_then_clears_on_publication(store, monkeypatch):
@@ -56,7 +97,8 @@ def hidden_ancestor_preview(store):
         ('classic-rock', 'hidden-rock', 'Classic Rock', 55, True),
         ('orphan', 'missing', 'Jazz', 30, True),
     ]
-    preview = {'generation': 'collapsed-preview', 'counts': {'known': 1793, 'unknown': 0},
+    head = publish(store, recordings([('House', 12, .4)]))
+    preview = {'generation': head['generation'], 'counts': {'known': 1793, 'unknown': 0},
                'groups': [{'version': version, 'parent_version': parent, 'name': name,
                            'size': size, 'display': display, 'frames': {}}
                           for version, parent, name, size, display in rows]}
@@ -78,9 +120,12 @@ def test_view_preserves_visible_ancestry_through_hidden_names_without_mutating_p
 
 
 def pools(store, tracks, *, one_album=False):
-    pool = [{'key': r.key, 'title': f'Song {i}', 'video_id': f'v{i}', 'artist': f'Artist {i // 2}',
-             'album': 'One album' if one_album else f'Album {i // 2}'} for i, r in enumerate(tracks)]
-    store.rec_proposals.put_proposals('mode_bundles', {'all': {'wheelhouse': pool, 'fresh': pool}}, 1000)
+    pool = catalog_inputs(tracks, one_album=one_album)
+    seed_missing(store, pool)
+    with atomic_write(store):
+        store.conn.executemany('UPDATE youtube_items SET album=? WHERE video_id=?',
+                               [(item['album'], item['video_id']) for item in pool])
+    publish_bundles(store, {'all': {'wheelhouse': pool, 'fresh': pool}})
 
 
 def test_full_mix_requires_twelve_actual_diverse_eligible_members(store):
@@ -158,7 +203,8 @@ def test_progress_separates_recordings_from_source_jobs_and_explains_failures(st
     from yt_playlist.rec import group_preparation
     with store.conn:
         store.conn.execute("INSERT INTO rec_content_pending(identity_key) VALUES ('pending')")
-        store.conn.execute("INSERT INTO rec_musical_sources VALUES ('source','test','artist','artist','{}',1)")
+        store.conn.execute('INSERT INTO rec_musical_sources(source_key,provider,scope,entity_id,revision) '
+                           "VALUES ('source','test','artist','artist',1)")
     group_preparation.report(store, 'failed', 1000, reason='preparation-failed')
     app = create_app(store, lambda *a, **kw: None, now_fn=lambda: 1200)
     with TestClient(app, base_url='http://127.0.0.1') as client:

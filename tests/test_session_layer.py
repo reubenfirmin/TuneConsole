@@ -1,15 +1,41 @@
 """Tests for #88 session_tilt layer."""
+import sqlite3
+from unittest.mock import Mock
+
 import numpy as np
-from yt_playlist.rec import layers, rec_params
-from yt_playlist.util.matching import identity_key
+import pytest
+
+from yt_playlist.rec import layers
 
 
-def test_hour_old_play_dominates_12h_old_at_hl4h(store):
+@pytest.fixture(autouse=True)
+def no_database(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail('Session arithmetic consumes repository results without SQLite')
+    monkeypatch.setattr(sqlite3, 'connect', forbidden)
+
+
+def inputs(plays=(), *, min_events=2, radio=()):
+    store = Mock(spec_set=['settings', 'history', 'rec_eligibility', 'playlists',
+                           'transient_radio_playlists'])
+    store.settings = Mock(spec_set=['get_setting'])
+    store.settings.get_setting.side_effect = {
+        'rec_param:now_min_events': str(min_events), 'rec_param:session_halflife_h': '4'}.get
+    store.history = Mock(spec_set=['play_events_since'])
+    store.history.play_events_since.return_value = [
+        {'identity_key': key, 'played_at': at} for key, at in plays]
+    store.rec_eligibility = Mock(spec_set=['generated_only_keys'])
+    store.rec_eligibility.generated_only_keys.return_value = set()
+    store.playlists = Mock(spec_set=['radio_playlist_ids'])
+    store.playlists.radio_playlist_ids.return_value = list(radio)
+    store.transient_radio_playlists = set()
+    return store
+
+
+def test_hour_old_play_dominates_12h_old_at_hl4h():
     """At session_halflife=4h, an hour-old play should contribute more weight than a 12-hour-old one,
     so the tilt vector should be closer to the fresh play's direction. Weight ratio:
     decay_weight(3600, 4/24) / decay_weight(43200, 4/24) = 0.5**(1/4) / 0.5**(3) ≈ 6.73"""
-    iid = store.identities.upsert_identity("main", "test", None, True)
-
     # Create two distinct test vectors: one pointing along [1, 0] and another along [0, 1]
     # (will embed them in the full space by padding with zeros)
     v1_raw = np.array([1.0, 0.0], dtype=np.float64)
@@ -23,14 +49,10 @@ def test_hour_old_play_dominates_12h_old_at_hl4h(store):
 
     now = 1000000.0
     # Record two plays at different ages
-    store.history.import_play_events(iid, [
-        ("track1|artist1", "v1", now - 3600.0),    # 1 hour old
-        ("track2|artist2", "v2", now - 43200.0),   # 12 hours old
+    store = inputs([
+        ("track1|artist1", now - 3600.0),    # 1 hour old
+        ("track2|artist2", now - 43200.0),   # 12 hours old
     ])
-
-    # Set session_halflife to 4 hours
-    rec_params.set_param(store, "session_halflife_h", 4.0)
-    rec_params.set_param(store, "now_min_events", 2)
 
     tilt = layers.session_tilt(store, now, V, idx)
     assert tilt is not None, "tilt should not be None with 2 contributing plays"
@@ -49,59 +71,34 @@ def test_hour_old_play_dominates_12h_old_at_hl4h(store):
     ratio = w1 / w12
     expected_ratio = 0.5 ** (1.0 / 4.0) / 0.5 ** (12.0 / 4.0)
     assert abs(ratio - expected_ratio) < 0.001, f"Weight ratio {ratio} should match expected {expected_ratio}"
+    np.testing.assert_allclose(tilt, [0.5 ** .25 / 2, 0.5 ** 3 / 2])
 
 
-def test_quiet_store_returns_none(store):
+def test_quiet_store_returns_none():
     """When there are no play events in the last 24 hours, session_tilt returns None."""
-    V = np.random.randn(10, 5).astype(np.float64)
+    V = np.ones((10, 5), dtype=np.float64)
     idx = {f"track{i}|artist{i}": i for i in range(10)}
 
     now = 1000000.0
     # No plays recorded
-    rec_params.set_param(store, "now_min_events", 2)
+    store = inputs()
 
     tilt = layers.session_tilt(store, now, V, idx)
     assert tilt is None, "tilt should be None when no plays in the window"
 
 
-def test_below_gate_returns_none(store):
-    """When fewer than now_min_events keys contribute, session_tilt returns None."""
-    iid = store.identities.upsert_identity("main", "test", None, True)
-
-    V = np.random.randn(5, 3).astype(np.float64)
-    idx = {f"track{i}|artist{i}": i for i in range(5)}
-
-    now = 1000000.0
-    # Record only 1 play
-    store.history.import_play_events(iid, [
-        ("track0|artist0", "v0", now - 3600.0),
-    ])
-
-    # Gate requires 3 contributing plays
-    rec_params.set_param(store, "now_min_events", 3)
-
-    tilt = layers.session_tilt(store, now, V, idx)
-    assert tilt is None, "tilt should be None when fewer than now_min_events contributing keys"
-
-
-def test_keys_absent_from_idx_do_not_contribute(store):
+def test_keys_absent_from_idx_do_not_contribute():
     """Keys in play_events that are absent from idx should not contribute to tilt or count toward gate."""
-    iid = store.identities.upsert_identity("main", "test", None, True)
-
     V = np.eye(3, dtype=np.float64)
     idx = {"track0|artist0": 0, "track1|artist1": 1}  # Only 2 keys in idx
 
     now = 1000000.0
     # Record 3 plays: 2 in idx, 1 absent
-    store.history.import_play_events(iid, [
-        ("track0|artist0", "v0", now - 3600.0),
-        ("track1|artist1", "v1", now - 7200.0),
-        ("track2|artist2", "v2", now - 10800.0),  # This key is NOT in idx
+    store = inputs([
+        ("track0|artist0", now - 3600.0),
+        ("track1|artist1", now - 7200.0),
+        ("track2|artist2", now - 10800.0),  # This key is NOT in idx
     ])
-
-    # Gate requires 2 contributing plays (the 3rd play should not count)
-    rec_params.set_param(store, "now_min_events", 2)
-    rec_params.set_param(store, "session_halflife_h", 4.0)
 
     tilt = layers.session_tilt(store, now, V, idx)
     # With gate=2 and only 2 contributing keys, this should succeed
@@ -109,51 +106,39 @@ def test_keys_absent_from_idx_do_not_contribute(store):
 
     # Now test that the absent key doesn't contribute: if we raise the gate to 3,
     # it should fail because only 2 keys are in idx
-    rec_params.set_param(store, "now_min_events", 3)
+    store.settings.get_setting.side_effect = {
+        'rec_param:now_min_events': '3', 'rec_param:session_halflife_h': '4'}.get
     tilt = layers.session_tilt(store, now, V, idx)
     assert tilt is None, "tilt should be None when gate=3 but only 2 keys are in idx"
 
 
-def test_session_tilt_passes_radio_exclusion_to_play_events_since(store, monkeypatch):
+def test_session_tilt_passes_radio_exclusion_to_play_events_since():
     """#93v2 pin: session_tilt must resolve the radio playlist ids (layers._radio_list_ids) and pass
     them as exclude_list_ids to store.history.play_events_since, so radio's own machine-queued plays cannot
     feed this layer. Behavior is covered end-to-end by test_now_layer.py's equivalent test for the
     NOW layer (same underlying mechanism); this pins the parameter-passing contract for THIS call
     site specifically."""
-    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
-    store.settings.set_setting("radio_playlist_a_ytm", "PLRADIO_A")
-    captured = {}
-    orig = store.history.play_events_since
-
-    def fake(since_ts, exclude_list_ids=None, *, taste_only=False):
-        captured["exclude_list_ids"] = exclude_list_ids
-        captured["taste_only"] = taste_only
-        return orig(since_ts, exclude_list_ids=exclude_list_ids, taste_only=taste_only)
-    monkeypatch.setattr(store.history, "play_events_since", fake)
+    store = inputs(radio=['PLRADIO', 'PLRADIO_A'])
 
     layers.session_tilt(store, 1000.0, np.zeros((1, 1)), {})
 
-    assert captured["exclude_list_ids"] == ["PLRADIO", "PLRADIO_A"]
-    assert captured["taste_only"] is True
+    store.history.play_events_since.assert_called_once_with(
+        1000.0 - 24 * 3600, exclude_list_ids=['PLRADIO', 'PLRADIO_A'], taste_only=True)
 
 
-def test_zero_norm_contribution_returns_none(store):
+def test_zero_norm_contribution_returns_none():
     """When a key's vector has zero norm, it should be skipped. If all vectors are zero-norm,
     the result should be None."""
-    iid = store.identities.upsert_identity("main", "test", None, True)
-
     # Create vectors with zero norm
     V = np.zeros((3, 4), dtype=np.float64)
     idx = {f"track{i}|artist{i}": i for i in range(3)}
 
     now = 1000000.0
-    store.history.import_play_events(iid, [
-        ("track0|artist0", "v0", now - 3600.0),
-        ("track1|artist1", "v1", now - 7200.0),
-        ("track2|artist2", "v2", now - 10800.0),
+    store = inputs([
+        ("track0|artist0", now - 3600.0),
+        ("track1|artist1", now - 7200.0),
+        ("track2|artist2", now - 10800.0),
     ])
-
-    rec_params.set_param(store, "now_min_events", 2)
 
     tilt = layers.session_tilt(store, now, V, idx)
     # All vectors are zero-norm, so accumulation is zero -> None

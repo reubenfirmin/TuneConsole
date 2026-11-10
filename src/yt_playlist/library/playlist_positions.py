@@ -1,7 +1,9 @@
 """Durable placement of newly added alternates, retried independently of the add itself."""
 import json
 import logging
+from contextlib import ExitStack
 
+from yt_playlist.library.action_claim import claim_deletion_target
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.action_kinds import ADD_TRACKS
 from yt_playlist.util.retry import with_retry
@@ -11,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def pending_insertions(store, playlist_id):
     pending = []
-    for action in store.actions.get_pending_actions(ADD_TRACKS):
+    for action in store.actions.get_pending_placements(playlist_id):
         plan = json.loads(action.plan_json)
         if plan.get("playlist_id") == playlist_id:
             pending.append((action, plan))
@@ -72,11 +74,25 @@ def retry_insertions(store, playlist_id, client, now, *, attempts=3):
         def move_if_pending():
             current = store.actions.get_action(action.id)
             if current is not None and current.status == "pending":
-                _move(client, pl.ytm_playlist_id, plan)
+                _move(client, pl.provider_playlist_id, plan)
 
+        claims = []
         try:
-            with_retry(move_if_pending, attempts=attempts,
-                       base_delay=0.1, operation=f"place alternate versions in {pl.title!r}")
+            with ExitStack() as stack:
+                stack.enter_context(claim_deletion_target(store,pl.account_id,pl.provider_playlist_id))
+                store.actions.require_known_remote_outcome(pl.account_id,pl.provider_playlist_id)
+                if store.actions.has_durable_targets():
+                    claims = store.actions.claim_forward_targets(action.id,'placement',now)
+                    for claim in claims:
+                        stack.callback(store.actions.release_deletion,claim)
+                with_retry(move_if_pending, attempts=attempts,
+                           base_delay=0.1, operation=f"place alternate versions in {pl.title!r}")
+                with store._lock:
+                    current = store.actions.get_action(action.id)
+                    if current is None or current.status!='pending' or current.revision!=action.revision:
+                        continue
+                    store.actions.update_action(action.id,'executed',now,expected_revision=action.revision,target_claims=claims)
+                    _retain_local_order(store,playlist_id,plan,now)
         except Exception:  # noqa: BLE001 - the add succeeded; retain the unfinished placement
             with store._lock:
                 current = store.actions.get_action(action.id)
@@ -85,15 +101,6 @@ def retry_insertions(store, playlist_id, client, now, *, attempts=3):
                 remaining += 1
                 logger.warning("alternate placement remains pending for playlist %s (action %s)",
                                playlist_id, action.id, exc_info=True)
-                _retain_local_order(store, playlist_id, plan, now)
-        else:
-            with store._lock:
-                current = store.actions.get_action(action.id)
-                if current is None or current.status != "pending":
-                    continue
-                store.actions.update_action(action.id, "executed", now)
-                # Sync can omit newly added items during indexing lag. Only an intent
-                # still owned by this retry may restore those items to the local cache.
                 _retain_local_order(store, playlist_id, plan, now)
     return remaining
 

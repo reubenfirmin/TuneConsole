@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity, interrupt_query
-from yt_playlist.core.store import Store
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -25,9 +24,8 @@ from yt_playlist.rec.rec_worker import RecWorker
     lambda s: s.rec_evidence.rec_baskets_as_of(100),
 ], ids=["interest", "due", "track-view", "anchors", "seed-tracks", "spotify-stats", "library-artists",
         "embedding-baskets", "historical-baskets"])
-def test_discovery_read_does_not_block_ui_and_stops_on_shutdown(tmp_path, monkeypatch, query):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_discovery_read_does_not_block_ui_and_stops_on_shutdown(tmp_path, monkeypatch, query, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     work = Activity()
     worker = RecWorker(SimpleNamespace(store=store, work=work,
         logger=logging.getLogger(__name__), now_fn=lambda: 100), debounce_s=0)

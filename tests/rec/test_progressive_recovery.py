@@ -1,18 +1,71 @@
 """Recovery must work without a new sync and preserve exact model behavior."""
+from contextlib import closing
 from dataclasses import replace
 import json
 import logging
+import sqlite3
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from tests.rec.test_progressive import catalog, drain
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator,
+    native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.rec import content_model, embedding_vectors, progressive, taste_modes
 from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core import activity, content_preparation_state, schema_inspection, store as store_core
 from yt_playlist.core.store import Store
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.prepared_content import PreparedContentRepo
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Recovery checks do not construct the HTTP app or its sync daemon."""
+
+
+@pytest.fixture
+def audit_library(tmp_path, _pristine_current_schema, monkeypatch, native_sql_calls, without_query_timing):
+    # This audit owns content-input recovery and aged-evidence publication.
+    # Joint audio-model qualification is an independent preparation branch;
+    # keep actual content capture, fitting, queues and snapshot guards here.
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock')))
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'),
+                                 ('rock', 'Rock'), ('folk', 'Folk'),
+                                 ('classical', 'Classical'))) as source:
+        assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert source._revision_script
+        assert not source.execute('PRAGMA foreign_key_check').fetchone()
+        yield source
+
+
+@pytest.fixture
+def completed_vibe_input(monkeypatch):
+    # This workflow owns lost content-input queues and exact content refits.
+    # Vibe inference is an independent producer, as in the musical-profile
+    # tests. Keep real content/musical capture, snapshots and both publications.
+    def recording_steps(reader, rows, musical, **kwargs):
+        yield from ()
+        return musical, ({}, {}, [])
+
+    monkeypatch.setattr(progressive.vibe_preparation, 'due', lambda *args: False)
+    monkeypatch.setattr(progressive.vibe_preparation, 'step', lambda *args, **kwargs: False)
+    monkeypatch.setattr(progressive.vibe_preparation, 'recording_steps', recording_steps)
+    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
 
 
 def test_preallocated_encoding_preserves_exact_vectors_and_empty_rows():
@@ -58,40 +111,126 @@ def test_matrix_reuse_preserves_exact_modes_without_decoding_again(store, monkey
     assert serialized(actual) == serialized(expected)
 
 
-def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(store):
+def _repair_after_losing_a_queue_prefix(store):
     catalog(store, 19)
     with store.conn:
         store.conn.execute('DELETE FROM rec_content_pending')
     p = progressive.Preparation(store, budget=replace(progressive.Budget(), batch=3))
+    expected = [row[0] for row in store.conn.execute('SELECT identity_key FROM recordings ORDER BY identity_key')]
     assert p.due(1000)
-    assert p.repair(1000)
+    assert p.repair(1000), repair_diagnostics(p)
     assert len(store.prepared_content.pending(100)) == 3
     first = store.prepared_content.pending(100)
+    assert [row[0] for row in first] == expected[:3]
     # Existing queue revisions and positions survive subsequent repair slices.
     assert p.repair(1001)
     assert store.prepared_content.pending(100)[:3] == first
+    assert [row[0] for row in store.prepared_content.pending(100)] == expected[:6]
+    # Lose earlier work after the cursor has passed it. Completing this scan
+    # must not stop the next periodic audit finding that earlier identity.
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_content_pending WHERE identity_key=?', (expected[0],))
     for _ in range(10):
         if not p._repair_needed:
             break
         p.repair(1002)
     else:
         pytest.fail('Bounded queue repair did not finish')
-    assert len(store.prepared_content.pending(100)) == 19
-    drain(p)
-    assert p.fit(1060)
+    assert [row[0] for row in store.prepared_content.pending(100)] == expected[1:]
+    assert p._repair_after is None
+    assert not p.repair(1100)
+    assert p.repair(2000)
+    assert [row[0] for row in store.prepared_content.pending(100)] == expected[1:] + expected[:1]
+    return p
+
+
+def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(
+        audit_library, completed_vibe_input, tmp_path, monkeypatch, record_property):
+    # Real queue scans, fitting and publication continue on the same writer.
+    # Only the budget clock is controlled; deadline rejection has its own case.
+    store = audit_library
+    monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path / 'app-home'))
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+    record_property('work_budget_clock', 'controlled; production budget values unchanged')
+    p = _repair_after_losing_a_queue_prefix(store)
+    assert not store.conn.in_transaction
+    drain(p, 2000)
+    assert not store.prepared_content.pending(100)
+    assert store.conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 19
+    assert not store.conn.in_transaction
+    assert p.fit(2060)
     before = store.rec_model.content_generation()
+    assert len(before['library']) == 19
+    assert not store.prepared_content.pending(100)
+    assert not store.conn.in_transaction
     key = before['library'][0][0]
     with store.conn:
-        store.conn.execute('DELETE FROM rec_prepared_content WHERE identity_key=?', (key,))
-    assert not p.due(1100)
+        store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
+                           '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
+    assert not p.due(2100)
     # Nothing else is written to wake preparation. The periodic audit finds it.
-    assert p.due(2000)
-    assert p.repair(2000)
+    assert p.due(3000)
+    assert p.repair(3000)
     assert store.prepared_content.pending(1)[0][0] == key
     assert store.rec_model.content_generation() == before
-    drain(p, 2000)
-    assert p.fit(2060)
+    drain(p, 3000)
+    assert p.fit(3060)
     assert store.rec_model.content_generation()['library'] == before['library']
+
+
+def repair_diagnostics(preparation):
+    diagnostic = preparation.store.maintenance_diagnostics
+    return {'phases': dict(diagnostic.phases), 'reasons': dict(diagnostic.reasons),
+            'repair_needed': preparation._repair_needed,
+            'next_maintenance_at': preparation.next_maintenance_at}
+
+
+@pytest.mark.parametrize('expiration', ['audit', 'repair'])
+def test_lost_queue_deadline_defers_without_losing_work_and_retries(store, monkeypatch, expiration):
+    clock = [0.0]
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    catalog(store, 6)
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_content_pending')
+    p = progressive.Preparation(store, budget=replace(progressive.Budget(), batch=3))
+    assert p.budget.capture_seconds == 2  # Preserve the actual default allowance.
+    if expiration == 'repair':
+        assert p.due(1000)
+        assert p._repair_needed
+    original = PreparedContentRepo.missing_unqueued
+
+    def expired(repo, limit=32, *, after=None):
+        clock[0] += p.budget.capture_seconds + .01
+        # Let the real cooperative budget check reject the repository read.
+        return original(repo, limit, after=after)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PreparedContentRepo, 'missing_unqueued', expired)
+        assert not p.repair(1000)
+    reason = 'input-audit-budget' if expiration == 'audit' else 'input-repair-budget'
+    diagnostic = store.maintenance_diagnostics
+    assert diagnostic.reasons[progressive.INPUT_PHASE, reason] == 1
+    assert not store.conn.in_transaction
+    assert not store.prepared_content.pending(10)
+    assert activity._DEADLINE.get() is None
+    if expiration == 'audit':
+        assert p.next_maintenance_at == 1060 and not p._repair_needed
+        assert not p.repair(1059)
+        retry_at = 1060
+    else:
+        assert p._repair_needed
+        retry_at = 1001
+    assert p.repair(retry_at), repair_diagnostics(p)
+    first = store.prepared_content.pending(10)
+    expected = [row[0] for row in store.conn.execute('SELECT identity_key FROM recordings ORDER BY identity_key')]
+    assert [row[0] for row in first] == expected[:3]
+    assert p.repair(retry_at + 1)
+    assert store.prepared_content.pending(10)[:3] == first
+    assert [row[0] for row in store.prepared_content.pending(10)] == expected
 
 
 def test_audit_does_not_overwrite_a_newer_arrival(store, monkeypatch):
@@ -103,8 +242,8 @@ def test_audit_does_not_overwrite_a_newer_arrival(store, monkeypatch):
     original = PreparedContentRepo.missing_unqueued
     callbacks = []
 
-    def changed(repo, limit=32):
-        keys = original(repo, limit)
+    def changed(repo, limit=32, *, after=None):
+        keys = original(repo, limit, after=after)
         if limit > 1:
             store.tracks.set_track_genre(ids[0], 'Folk')
             callbacks.append(store.prepared_content.pending(10))
@@ -120,12 +259,12 @@ def test_audit_does_not_overwrite_a_newer_arrival(store, monkeypatch):
     assert len(store.prepared_content.pending(10)) == 6
 
 
-def test_repair_captures_only_its_five_table_counters_after_unrelated_key_churn(store, monkeypatch):
+def test_repair_captures_only_its_four_owner_counters_after_unrelated_key_churn(store, monkeypatch):
     catalog(store, 6)
     with store.conn:
         store.conn.execute('DELETE FROM rec_content_pending')
         store.conn.executemany('INSERT INTO settings VALUES (?,?)',
-                               [(f'unrelated-{i}', 'value') for i in range(1000)])
+                               [(f'unrelated-{i}', 'value') for i in range(4)])
         store.conn.execute("DELETE FROM settings WHERE key LIKE 'unrelated-%'")
     original, captured = store._snapshot_revisions.capture, []
 
@@ -138,33 +277,132 @@ def test_repair_captures_only_its_five_table_counters_after_unrelated_key_churn(
     preparation = progressive.Preparation(store)
     assert preparation.repair(1000)
     assert len(store.prepared_content.pending(10)) == 6
-    assert captured[0] == progressive.REPAIR_INPUTS
-    assert all(scope <= progressive.REPAIR_INPUTS for scope in captured)
+    expected = frozenset((table, '') for table in (
+        'recordings', 'recording_redirects', 'prepared_recording_inputs', 'rec_content_pending'))
+    assert progressive.REPAIR_INPUTS == expected
+    assert captured and all(scope == expected for scope in captured)
 
 
-def test_memory_deferral_survives_restart_and_recovers_without_new_activity(tmp_path):
+@pytest.mark.parametrize('owner,invalidates', [
+    ('recordings', True), ('recording_redirects', True),
+    ('prepared_recording_inputs', True), ('rec_content_pending', True),
+    ('settings', False), ('unresolved_preparation_inputs', False),
+    ('recording_embeddings', False), ('recording_embedding_files', False),
+])
+def test_repair_fences_each_read_owner_and_ignores_independent_owners(store, monkeypatch, owner, invalidates):
+    from yt_playlist.core import prepared_inputs
+    from yt_playlist.core.preparation import embeddings as embedding_preparation
+
+    catalog(store, 6)
+    subjects = list(store.conn.execute('SELECT id,identity_key FROM recordings ORDER BY id'))
+    vector = np.array([1, 0], dtype=np.float32).tobytes()
+    if owner == 'recording_embedding_files':
+        with store.conn:
+            store.conn.execute('INSERT INTO recording_embeddings VALUES (?,?,?,?,?,?)',
+                (subjects[0][0], 'collaborative', 'basis', 2, vector, 1))
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_content_pending')
+    missing, enqueue = PreparedContentRepo.missing_unqueued, PreparedContentRepo.enqueue_missing
+    mutations, publications, queue_after_mutation = [], [], []
+
+    def change_after_read(repo, limit=32, *, after=None):
+        keys = missing(repo, limit, after=after)
+        if limit == 1:
+            return keys  # The preliminary due check does not publish work.
+        if owner == 'recording_embedding_files':
+            assert embedding_preparation.prepare(store, limit=1) == 1
+        else:
+            with store.conn:
+                if owner == 'recordings':
+                    store.conn.execute('UPDATE recordings SET bpm=bpm+1 WHERE id=?', (subjects[0][0],))
+                elif owner == 'recording_redirects':
+                    store.conn.execute('INSERT INTO recording_redirects VALUES (?,?,?,?)',
+                        (subjects[0][0], subjects[1][0], 'test', '{}'))
+                elif owner == 'prepared_recording_inputs':
+                    prepared_inputs.upsert(store.conn, subjects[0][1],
+                        {'library': None, 'discovered': None}, '0'*64, 1000, 1)
+                elif owner == 'rec_content_pending':
+                    store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (subjects[0][1],))
+                elif owner == 'settings':
+                    store.conn.execute("INSERT INTO settings VALUES ('unrelated-during-repair','changed')")
+                elif owner == 'unresolved_preparation_inputs':
+                    prepared_inputs.upsert(store.conn, 'absent|artist',
+                        {'library': None, 'discovered': None}, '0'*64, 1000, 1)
+                else:
+                    store.conn.execute('INSERT INTO recording_embeddings VALUES (?,?,?,?,?,?)',
+                        (subjects[0][0], 'collaborative', 'basis', 2, vector, 1))
+        mutations.append(owner)
+        queue_after_mutation[:] = store.prepared_content.pending(10)
+        return keys
+
+    def publish(repo, keys):
+        publications.append(list(keys))
+        return enqueue(repo, keys)
+
+    preparation = progressive.Preparation(store)
+    with monkeypatch.context() as patch:
+        patch.setattr(PreparedContentRepo, 'missing_unqueued', change_after_read)
+        patch.setattr(PreparedContentRepo, 'enqueue_missing', publish)
+        assert preparation.repair(1000) is not invalidates
+    assert mutations == [owner]
+    if invalidates:
+        assert publications == []
+        assert store.prepared_content.pending(10) == queue_after_mutation
+        expected = missing(store.prepared_content.repository, 10)
+        assert preparation.repair(1001)
+        assert {key for key, _revision in store.prepared_content.pending(10)} == (
+            set(expected) | {key for key, _revision in queue_after_mutation})
+    else:
+        assert publications == [[key for _subject, key in subjects]]
+        assert len(store.prepared_content.pending(10)) == 6
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_memory_deferral_survives_restart_and_recovers_without_new_activity(
+        tmp_path, _pristine_current_schema, native_sql_calls, without_query_timing,
+        completed_vibe_input, monkeypatch):
     path = tmp_path / 'recovery.db'
+    monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path / 'app-home'))
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
     store = Store(path)
-    store.init_schema()
-    try:
-        catalog(store, 12)
-        p = progressive.Preparation(store, budget=replace(progressive.Budget(), memory_bytes=1))
-        drain(p)
-        assert not p.fit(1000)
-        warning = progressive.maintenance_view(store)
-        assert warning['blocked'] and warning['reason'] == 'matrix-memory-budget'
-        assert warning['next_attempt_at'] == 1900
-        assert set(warning['phase_bytes']) == {'encoding', 'clustering', 'publication'}
-        store.conn.close()
-        store = Store(path)
-        store.init_schema()
-        reopened = progressive.Preparation(store)
-        assert not reopened.due(1899) and not reopened.fit(1899)
-        assert reopened.due(1900) and reopened.fit(1900)
-        assert not progressive.maintenance_view(store)['blocked']
-        assert progressive.maintenance_view(store)['state'] == 'ready'
-    finally:
-        store.conn.close()
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, _pristine_current_schema)
+        with mock_snapshot_coordinator(store, monkeypatch):
+            catalog(store, 12)
+            # Admit all inputs, then reject the real encoder/clustering peak.
+            p = progressive.Preparation(store, budget=replace(progressive.Budget(), memory_bytes=128 * 1024))
+            drain(p)
+            assert not p.fit(1000)
+            warning = progressive.maintenance_view(store)
+    assert warning['blocked'] and warning['reason'] == 'matrix-memory-budget'
+    assert warning['next_attempt_at'] == 1900
+    assert set(warning['phase_bytes']) == {'encoding', 'clustering', 'publication'}
+    # Inspect the closed writer's durable state independently before reopening.
+    with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        raw = content_preparation_state.get(conn, progressive.FIT_STATE)
+        persisted = json.loads(raw)
+        assert persisted['reason'] == warning['reason']
+        assert persisted['next_attempt_at'] == 1900
+        assert conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 12
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        # Restart consumes unchanged SQL. Install the complete generated TEMP
+        # guards on this new connection; admission, repair and fitting remain
+        # real, including snapshot publication against these private guards.
+        with monkeypatch.context() as patch:
+            patch.setattr(store_core, 'Revisions', _pristine_current_schema.bind_revisions)
+            store.init_schema()
+        with mock_snapshot_coordinator(store, monkeypatch):
+            reopened = progressive.Preparation(store)
+            assert not reopened.due(1899) and not reopened.fit(1899)
+            assert reopened.due(1900) and reopened.fit(1900)
+            assert not progressive.maintenance_view(store)['blocked']
+            assert progressive.maintenance_view(store)['state'] == 'ready'
 
 
 def test_worker_polls_for_lost_input_work_without_a_catalog_write(store, monkeypatch):
@@ -174,7 +412,8 @@ def test_worker_polls_for_lost_input_work_without_a_catalog_write(store, monkeyp
     assert p.fit(1000)
     key = store.rec_model.content_generation()['library'][0][0]
     with store.conn:
-        store.conn.execute('DELETE FROM rec_prepared_content WHERE identity_key=?', (key,))
+        store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
+                           '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 2000,
                                       logger=logging.getLogger(__name__)), debounce_s=0)
     scheduled = []
@@ -235,7 +474,7 @@ def test_repeated_time_budget_failure_is_visible_and_retried(store, monkeypatch)
     catalog(store, 12)
     p = progressive.Preparation(store)
     drain(p)
-    def too_slow(_inputs):
+    def too_slow(_inputs, *, genre_axes=None):
         raise WorkBudgetExceeded()
     with monkeypatch.context() as patch:
         patch.setattr(content_model, 'build_library_content', too_slow)
@@ -250,7 +489,8 @@ def test_repeated_time_budget_failure_is_visible_and_retried(store, monkeypatch)
 
 
 @pytest.mark.parametrize('pool', ['library', 'discovered'])
-def test_audit_repairs_missing_inputs_for_previously_published_vectors(store, pool):
+def test_audit_repairs_missing_inputs_for_previously_published_vectors(audit_library, pool):
+    store = audit_library
     catalog(store, 12)
     if pool == 'discovered':
         store.discovery.upsert_discovered_track('guest|guest', 'guest', 'Guest', 'Guest', '', None,
@@ -261,7 +501,8 @@ def test_audit_repairs_missing_inputs_for_previously_published_vectors(store, po
     generation = store.rec_model.content_generation()
     key = generation[pool][0][0]
     with store.conn:
-        store.conn.execute('DELETE FROM rec_prepared_content WHERE identity_key=?', (key,))
+        store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
+                           '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
         store.conn.execute('DELETE FROM rec_content_pending WHERE identity_key=?', (key,))
     reopened = progressive.Preparation(store)
     assert reopened.due(1060)

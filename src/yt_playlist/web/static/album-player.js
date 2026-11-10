@@ -18,6 +18,9 @@ function albumPlayback(browse, playlist = '', fallback = '') {
       this.playing = same && song.paused === false;
     },
     play(button) {
+      if (!this.playing && button.dataset.onboardingAlbum === browse) {
+        button.dispatchEvent(new CustomEvent('onboarding-album-play', {bubbles: true}));
+      }
       if (this.active && window.playbackControls.command('toggle')) return;
       // Privately owned uploads have no audioPlaylistId. Preserve their existing
       // browser handoff instead of submitting an album queue that cannot exist.

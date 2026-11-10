@@ -1,12 +1,12 @@
-"""Serving assignments and outcome rules for the production model comparison.
+"""Serving assignments and outcome rules for retained menu comparisons.
 
 Whole menus and continuing Radio episodes retain their assignment. New windows
 share a randomized UTC-day assignment, so correlated tracks/branches cannot
 inflate the decision's sample size. Decisions happen once at a fixed horizon;
 successive attempts spend a summable error budget. Raw evidence remains in the
 shared RecLedgerRepo, with compact lifecycle state in rec_proposals.
-Worker preparation and lifecycle transitions live in comparison_preparation;
-serving and evidence capture never import that orchestration.
+Daily model selection retires these legacy trials while preserving saved
+assignments, projections and outcome evidence for continuing windows and history.
 """
 import hashlib
 import math
@@ -17,6 +17,7 @@ import numpy as np
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.rec import album_feedback_state
 
 DAY = 86400
 SURFACE = 'model_live_comparison'
@@ -34,13 +35,14 @@ def state(store):
 
 def constraints(store):
     """Standing intent is shared by both arms; a change ends the current epoch."""
-    with store._lock:
-        values = [(row[0], row[1]) for row in store.conn.execute(
-            "SELECT key,value FROM settings WHERE key LIKE 'rec_param:%' "
-            "OR key IN ('album_feedback','rec_cooc_weighting') ORDER BY key")]
-        standing = [tuple(row) for row in store.conn.execute(
-            'SELECT axis,value FROM rec_lean ORDER BY axis')]
-    return hashlib.sha256(canonical([values, standing])).hexdigest()
+    if (not getattr(store, '_read_only', False) and store._db_path is not None
+            and not getattr(store._lock, 'held_by_current_thread', False)):
+        # Serving only needs committed intent. Reuse a preparation snapshot or
+        # an owned transaction, but do not wait on the maintenance writer.
+        with store.read_view() as reader:
+            return constraints(reader)
+    values, standing = store.model_selection.comparison_constraints()
+    return hashlib.sha256(canonical([values, standing, album_feedback_state.state(store)])).hexdigest()
 
 
 def assignment(store, format, window, now, *, existing=None):

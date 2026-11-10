@@ -1,13 +1,6 @@
 """#28 artist-relationship model: §A collaborative embedding (Task 1)."""
 from yt_playlist.rec import artist_model
 from tests import model_support
-from yt_playlist.core.store import Store
-
-
-def _store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 def _playlist(s, iid, title, track_ids):
@@ -16,9 +9,9 @@ def _playlist(s, iid, title, track_ids):
     return pid
 
 
-def test_artist_baskets_reduce_to_distinct_artists():
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+def test_artist_baskets_reduce_to_distinct_artists(store):
+    s = store
+    iid = s.accounts.upsert_account("m", "c", None, True)
     a = s.tracks.upsert_track("v1", "S1", "Alpha", None, None)
     b = s.tracks.upsert_track("v2", "S2", "Beta", None, None)
     _playlist(s, iid, "P", [a, b])
@@ -28,65 +21,46 @@ def test_artist_baskets_reduce_to_distinct_artists():
     assert all(len(bk) >= 2 for bk in baskets)                   # single-artist baskets dropped (no self-relate)
 
 
-def test_collab_neighbors_relate_co_curated_artists():
-    """Two clean co-curation clusters: A0..A4 always together, B0..B4 always together, never crossed.
-    A0's nearest collaborative neighbours are its own cluster-mates."""
+def test_co_curated_ranking_and_seed_exclusion_work_without_content_vectors(store):
+    """One collaborative fit owns neighbor ranking, missing-content fallback and set scoring."""
     from yt_playlist.util.matching import normalize
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
-
-    def mk(name):
-        return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
-
-    clusterA = [mk(f"A{i}") for i in range(5)]
-    clusterB = [mk(f"B{i}") for i in range(5)]
-    for p in range(3):                      # repeated co-occurrence within each cluster
-        _playlist(s, iid, f"PA{p}", clusterA)
-        _playlist(s, iid, f"PB{p}", clusterB)
-
-    n = model_support.build_collaborative_artist_model(s, dim=4)
-    assert n >= 10
-    aset = {normalize(f"A{i}") for i in range(5)}
-    nbrs = [a for a, _ in artist_model.artist_neighbors(s, "A0", topn=4)]
-    assert nbrs
-    assert all(a in aset for a in nbrs)     # cluster-mates rank above the other cluster
-
-
-def test_neighbors_empty_when_unbuilt():
-    s = _store()
-    assert artist_model.artist_neighbors(s, "Anyone") == []
-
-
-def test_artist_recall_beats_baseline():
-    """#28 artist-level recall@k on two clean clusters: holding out one cluster artist, the rest's
-    centroid ranks it near the top, well above the random baseline."""
-    from yt_playlist.rec import eval_recs
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    s = store
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
 
     clusterA = [mk(f"A{i}") for i in range(6)]
     clusterB = [mk(f"B{i}") for i in range(6)]
-    for p in range(3):
+    for p in range(3):                      # repeated co-occurrence within each cluster
         _playlist(s, iid, f"PA{p}", clusterA)
         _playlist(s, iid, f"PB{p}", clusterB)
-    model_support.build_collaborative_artist_model(s, dim=4)
 
-    res = eval_recs.artist_recall_at_k(s, k=3, min_size=3)
-    assert res["recall_at_k"] is not None and res["trials"] > 0
-    assert res["recall_at_k"] > res["baseline"]      # the model beats random
-    assert res["lift"] and res["lift"] > 1.0
+    n = model_support.build_collaborative_artist_model(s, dim=4)
+    assert n >= 12
+    assert artist_model.load_artist_content_vectors(s)[1] is None
+    aset = {normalize(f"A{i}") for i in range(6)}
+    nbrs = [a for a, _ in artist_model.artist_neighbors(s, "A0", topn=4)]
+    assert nbrs
+    assert all(a in aset for a in nbrs)     # cluster-mates rank above the other cluster
+    rel = artist_model.related_artist_scores(s, ["A0", "A1"], topn=4, exclude_owned=False)
+    assert rel and all(a in {s.artists.key(f"A{i}") for i in range(6)} for a in rel)
+    assert s.artists.key("A0") not in rel and s.artists.key("A1") not in rel
+    assert artist_model.related_artist_scores(s, ["A0", "A1"], topn=4) == {}
 
 
-def test_content_places_out_of_corpus_artist():
+def test_neighbors_empty_when_unbuilt(store):
+    s = store
+    assert artist_model.artist_neighbors(s, "Anyone") == []
+
+
+def test_content_places_out_of_corpus_artist(store):
     """#28 §B: an out-of-corpus artist with only a genre still encodes into the shared artist-content
     space and has positive cosine to a same-genre library artist (graceful placement)."""
     import numpy as np
     from yt_playlist.util import genre_map
-    s = _store()
-    s.identities.upsert_identity("m", "c", None, True)
+    s = store
+    s.accounts.upsert_account("m", "c", None, True)
     t = s.tracks.upsert_track("v1", "S1", "Owned", None, None)
     s.tracks.set_track_genre(t, "Techno")
     profiles = artist_model.artist_content_profiles(s)
@@ -97,48 +71,10 @@ def test_content_places_out_of_corpus_artist():
     assert float(oop @ owned) > 0.0      # same family -> related in the content space
 
 
-def test_blend_falls_back_to_collab_when_no_content():
-    """With no content vectors built, artist_neighbors still works on §A alone (blend degrades)."""
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
-
-    def mk(name):
-        return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
-
-    clusterA = [mk(f"A{i}") for i in range(6)]
-    clusterB = [mk(f"B{i}") for i in range(6)]
-    for p in range(3):
-        _playlist(s, iid, f"PA{p}", clusterA)
-        _playlist(s, iid, f"PB{p}", clusterB)
-    model_support.build_collaborative_artist_model(s, dim=4)  # §A only, no content built
-    nbrs = [a for a, _ in artist_model.artist_neighbors(s, "A0", topn=4)]
-    from yt_playlist.util.matching import normalize
-    assert nbrs and all(a in {normalize(f"A{i}") for i in range(6)} for a in nbrs)
-
-
-def test_edges_connect_out_of_corpus_artist():
-    """#28 §C: a cached Last.fm edge to an artist with no §A/§B vector still surfaces it as related."""
-    from yt_playlist.util.matching import normalize
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
-
-    def mk(name):
-        return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
-
-    clusterA = [mk(f"A{i}") for i in range(6)]
-    for p in range(3):
-        _playlist(s, iid, f"PA{p}", clusterA)
-    model_support.build_collaborative_artist_model(s, dim=4)
-    # Gamma is out of corpus (no track, no vector) but Last.fm relates A0 -> Gamma strongly.
-    s.artist_similarity.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
-    nbrs = [a for a, _ in artist_model.artist_neighbors(s, "A0", topn=10)]
-    assert normalize("Gamma") in nbrs        # edge-only candidate is reachable
-
-
-def test_build_persists_and_loads():
+def test_build_persists_and_loads(store):
     """#28 Both collaborative and content artist fixtures use the persisted format."""
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    s = store
+    iid = s.accounts.upsert_account("m", "c", None, True)
     cl = []
     for i in range(12):
         t = s.tracks.upsert_track(f"v{i}", f"S{i}", f"A{i}", None, None)
@@ -151,49 +87,6 @@ def test_build_persists_and_loads():
     c_artists, CV, _ = artist_model.load_artist_content_vectors(s)
     assert AV is not None and len(a_artists) >= 12      # collaborative vectors persisted
     assert CV is not None and len(c_artists) >= 12      # content vectors persisted
-
-
-def test_related_artists_from_set():
-    """related_artists over a SET of seeds returns their co-curation cluster-mates (exclude_owned=False
-    keeps owned related artists, as 'complete this playlist' needs)."""
-    from yt_playlist.util.matching import normalize
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
-
-    def mk(name):
-        return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
-
-    clusterA = [mk(f"A{i}") for i in range(6)]
-    clusterB = [mk(f"B{i}") for i in range(6)]
-    for p in range(3):
-        _playlist(s, iid, f"PA{p}", clusterA)
-        _playlist(s, iid, f"PB{p}", clusterB)
-    model_support.build_collaborative_artist_model(s, dim=4)
-    rel = [a for a, _ in artist_model.related_artists(s, ["A0", "A1"], topn=4, exclude_owned=False)]
-    aset = {normalize(f"A{i}") for i in range(6)}
-    assert rel and all(a in aset for a in rel)
-    assert normalize("A0") not in rel and normalize("A1") not in rel   # seeds excluded
-
-
-def test_track_candidates_include_out_of_corpus():
-    """artist_track_candidates pulls an out-of-corpus discovered track by an edge-related artist."""
-    from yt_playlist.util.matching import normalize
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
-
-    def mk(name):
-        return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
-
-    clusterA = [mk(f"A{i}") for i in range(6)]
-    for p in range(3):
-        _playlist(s, iid, f"PA{p}", clusterA)
-    model_support.build_collaborative_artist_model(s, dim=4)
-    s.artist_similarity.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)        # A0 -> Gamma edge
-    s.discovery.upsert_discovered_track("song x|gamma", "vg", "Song X", "Gamma", "", None, "Techno", None, "src", 1.0)
-    cands = artist_model.artist_track_candidates(s, ["A0"], topn=10)
-    arts = {normalize(c["artist"]) for c in cands}
-    assert normalize("Gamma") in arts
-    assert any(c.get("out_of_corpus") for c in cands)
 
 
 def test_content_projection_grounds_on_artist_when_no_content():
@@ -210,13 +103,13 @@ def test_content_projection_grounds_on_artist_when_no_content():
     assert not np.any(f_unknown)
 
 
-def test_complete_playlist_pulls_out_of_corpus():
+def test_complete_playlist_pulls_out_of_corpus(store):
     """#24: 'Complete this playlist' includes out-of-corpus tracks by artists related to the playlist's
     artists, labeled, and never re-suggests the playlist's own tracks."""
     from yt_playlist.rec import surfaces
     from yt_playlist.util.matching import normalize
-    s = _store()
-    iid = s.identities.upsert_identity("m", "c", None, True)
+    s = store
+    iid = s.accounts.upsert_account("m", "c", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -229,7 +122,15 @@ def test_complete_playlist_pulls_out_of_corpus():
     s.tracks.set_track_genre(cluster[0], "Techno")
     model_support.build_collaborative_artist_model(s, dim=4)
     s.artist_similarity.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
+    # The provider edge must work before Gamma has any track or vector.
+    assert normalize("Gamma") not in artist_model.load_artist_vectors(s)[0]
+    assert artist_model.load_artist_content_vectors(s)[1] is None
+    nbrs = [a for a, _ in artist_model.artist_neighbors(s, "A0", topn=10)]
+    assert normalize("Gamma") in nbrs
     s.discovery.upsert_discovered_track("song x|gamma", "vg", "Song X", "Gamma", "", None, "Techno", None, "src", 1.0)
+    cands = artist_model.artist_track_candidates(s, ["A0"], topn=10)
+    assert normalize("Gamma") in {normalize(c["artist"]) for c in cands}
+    assert any(c.get("out_of_corpus") for c in cands)
 
     sugg = surfaces.complete_playlist(s, target, now=1.0)
     keys = {x.key for x in sugg}

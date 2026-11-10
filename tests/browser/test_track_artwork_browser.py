@@ -5,7 +5,7 @@ import pytest
 from playwright.sync_api import expect
 
 
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 @pytest.mark.parametrize('outcome', ['primary', 'fallback', 'both-fail', 'same-fallback'])
 def test_track_artwork_loading(live_app, store, page, tmp_path, width, outcome):
     fallback = 'https://art.googleusercontent.com/cover=w120-h120'

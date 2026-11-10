@@ -170,12 +170,26 @@ def candidates(data):
     action_tracks = {r['track'] for r in recent if any(r[k] for k in actions)}
     if sum(actions.values()) >= 10 and len(action_days) >= 3 and len(action_tracks) >= 5:
         add('rating_actions', 'ratings:changes', 'The choices you made.',
-            f'{actions["hearts"]:,} hearts, {actions["skulls"]:,} skulls and {actions["clears"]:,} clears '
-            'in the past two weeks. These are confirmed rating changes; a song can appear again after a reversal.',
+            f'{sum(actions.values()):,} confirmed rating changes across {len(action_tracks):,} songs '
+            'in the past two weeks. Only changes made in TuneConsole are counted; '
+            'ratings synced from YouTube Music have no known action date. '
+            'Changing a song’s rating again counts as another action.',
             visual='rating_actions', strength=.7)
         findings[-1]['rating_days'] = [{'day': d, **{kind: sum(r[kind] for r in recent if r['day'] == d)
             for kind in actions}} for d in sorted({r['day'] for r in recent if any(r[k] for k in actions)})]
         findings[-1]['rating_counts'] = actions
+        details = []
+        for key in action_tracks:
+            history = [r for r in tracks[key] if r['day'] >= shifted(today, -13) and any(r[k] for k in actions)]
+            meta = catalog.get(key, {})
+            details.append({'id': key, 'name': meta.get('title') or 'Untitled',
+                'artist': meta.get('artist') or 'Unknown artist', 'video_id': meta.get('video_id'),
+                'last_day': max(r['day'] for r in history),
+                **{kind: sum(r[kind] for r in history) for kind in actions}})
+        details.sort(key=lambda row: (row['last_day'], sum(row[k] for k in actions), row['id']), reverse=True)
+        findings[-1]['rating_tracks'] = details[:6]
+        findings[-1]['rating_track_count'] = len(details)
+        findings[-1]['rating_other_counts'] = {kind: sum(row[kind] for row in details[6:]) for kind in actions}
     retained = data.get('retained') or {}
     hearts, skulls = retained.get('hearts', 0), retained.get('skulls', 0)
     if hearts >= 6 and retained.get('hearted_genres', 0) >= 2 and retained.get('known_genre_hearts', 0)/hearts >= .7:
@@ -220,7 +234,8 @@ def candidates(data):
         add('discovery', 'discovery:recent', f'{new_tracks:,} additions to your listening history.',
             f'{new_tracks:,} of {plays:,} plays ({round(new_tracks/plays*100)}%) introduced a track '
             f'to your recorded history; {new_artists:,} introduced an artist among {artist_plays:,} '
-            f'plays with a known artist. Compared with {len(baseline_days):,} earlier listening days. '
+            'plays with a known artist. First appearances are based on your full recorded history, '
+            f'including {len(baseline_days):,} active days before this period. '
             'Listening outside this record is unknown.',
             visual='discovery', strength=min(1, len(active_days)/10), departure=new_tracks/plays,
             filters={'overlay': 'artist'})

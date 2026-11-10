@@ -3,18 +3,27 @@ from dataclasses import dataclass
 from pathlib import Path
 
 @dataclass
-class IdentityConfig:
+class AccountConfig:
     label: str
     credential_ref: str
     brand_account_id: str | None
     is_master: bool
-    identity_id: int | None = None
+    account_id: int | None = None
 
-def validate_identities(identities) -> None:
+
+def account_flag(value, field='is_master') -> int:
+    """Accept explicit booleans and stored integer flags without truthiness coercion."""
+    if type(value) not in (bool, int) or value not in (0, 1):
+        raise ValueError(f'{field} must be a boolean or integer 0 or 1')
+    return int(value)
+
+
+def validate_accounts(identities) -> None:
     """Validate the identity rows; raise ValueError on the first problem."""
     if not identities:
         raise ValueError("add at least one identity")
     for row in identities:
+        account_flag(row.get('is_master', False))
         for field in ("label", "credential_ref", "brand_account_id"):
             value = row.get(field)
             if value is not None and not isinstance(value, str):
@@ -36,17 +45,16 @@ def validate_identities(identities) -> None:
         raise ValueError(f"exactly one identity must be the master, found {masters}")
 
 
-def load_identities(path) -> list[IdentityConfig]:
+def load_accounts(path) -> list[AccountConfig]:
     data = tomllib.loads(Path(path).read_text())
     entries = data.get("identity", [])
-    out = [IdentityConfig(
+    out = [AccountConfig(
         label=e["label"], credential_ref=e["credential_ref"],
         brand_account_id=e.get("brand_account_id"),
-        is_master=bool(e.get("is_master", False)), identity_id=e.get("id")) for e in entries]
-    validate_identities([{"label": c.label, "credential_ref": c.credential_ref,
+        is_master=e.get("is_master", False), account_id=e.get("id")) for e in entries]
+    validate_accounts([{"label": c.label, "credential_ref": c.credential_ref,
                           "brand_account_id": c.brand_account_id, "is_master": c.is_master,
-                          "id": c.identity_id} for c in out])
-    masters = sum(i.is_master for i in out)
-    if masters != 1:
-        raise ValueError(f"exactly one identity must have is_master=true, found {masters}")
+                          "id": c.account_id} for c in out])
+    for config in out:
+        config.is_master = bool(config.is_master)
     return out

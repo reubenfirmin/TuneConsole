@@ -104,7 +104,7 @@ def test_quit_stops_disconnected_sync_and_closes_its_live_stream(store, monkeypa
             assert release.wait(5)
             raise BridgeError("no extension connected")
 
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     tid = store.tracks.upsert_track("kept", "Cached song", "Artist", "", 180)
     cached = store.playlists.upsert_playlist(iid, "OLD", "Cached playlist", 1, "cached", 1)
     store.playlists.set_playlist_tracks(cached, [tid])
@@ -153,8 +153,8 @@ def test_quit_stops_disconnected_sync_and_closes_its_live_stream(store, monkeypa
         assert remote.reads == ["NEXT-0"]
         assert app.state.ctx.work.wait(0)
         assert app.state.ctx.jobs.get(job_id).done
-        assert store.settings.get_setting("last_sync_at") == "1"
-        assert [p.ytm_playlist_id for p in store.playlists.get_playlists()] == ["OLD"]
+        assert float(store.settings.get_setting("last_sync_at")) == 1.0
+        assert [p.provider_playlist_id for p in store.playlists.get_playlists()] == ["OLD"]
         assert store.playlists.get_playlist_track_keys(cached) == {"cached song|artist"}
     finally:
         release.set()

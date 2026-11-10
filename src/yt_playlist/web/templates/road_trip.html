@@ -12,6 +12,8 @@
 
 {# Keep the selected accordion section outside the content replaced when the mix updates. #}
 <div class="rt-workspace" data-road-trip-screen x-data="roadTripScreen()"
+     @app-page-leaving.window="saveRecovery($event)"
+     @app-page-changed.window="restoreRecovery($event)"
      @road-trip-lookup="lookupChanged($event)"
      @road-trip-editor="editorChanged($event)"
      @htmx:before-request.camel.window="requestStarted($event)"

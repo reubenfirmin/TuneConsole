@@ -1,16 +1,16 @@
-"""Reporting reads one coherent history without excluding foreground writes."""
+"""Reporting reads current facts without transactions or long writer locks."""
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec import experiments, scorecard
-from yt_playlist.repos import scorecard_attribution
+from yt_playlist.rec import scorecard_attribution
+from yt_playlist.repos.scorecard_attribution import ScorecardFacts
 
 
 def seed(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     store.rec_ledger.record_served_impressions('shown', 'home', [{
         'key': 'song|artist', 'rank': 1, 'model_version': 'm',
@@ -22,19 +22,18 @@ def seed(store):
 
 
 @pytest.mark.parametrize('method', ['scorecard', 'trace', 'experiment'])
-def test_report_wrappers_leave_foreground_free_and_keep_a_pinned_view(tmp_path, monkeypatch, method):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_reports_allow_writes_between_queries(tmp_path, monkeypatch, method, consumer_store):
+    store = consumer_store(tmp_path / 'state.db')
     iid = seed(store)
     started, release = threading.Event(), threading.Event()
-    original = scorecard_attribution.Attribution.__init__
+    original = ScorecardFacts.outcomes
 
     def paused(self, *args):
         started.set()
         assert release.wait(5)
-        original(self, *args)
+        return original(self, *args)
 
-    monkeypatch.setattr(scorecard_attribution.Attribution, '__init__', paused)
+    monkeypatch.setattr(ScorecardFacts, 'outcomes', paused)
     reports = {
         'scorecard': lambda: scorecard.recommendation_scorecard(store, 90, 110),
         'trace': lambda: scorecard.served_recommendation(store, 1)['outcomes'],
@@ -49,17 +48,35 @@ def test_report_wrappers_leave_foreground_free_and_keep_a_pinned_view(tmp_path, 
                 assert not result.done()
             finally:
                 release.set()
-            assert result.result(5)['played'] == 0
+            assert result.result(5)['played'] == 1
         assert scorecard.recommendation_scorecard(store, 90, 110)['played'] == 1
     finally:
         release.set()
         store.conn.close()
 
 
+@pytest.mark.parametrize('method', ['scorecard', 'trace', 'experiment'])
+def test_reports_do_not_open_transactions(store, method):
+    seed(store)
+    reports = {
+        'scorecard': lambda: scorecard.recommendation_scorecard(store, 90, 110),
+        'trace': lambda: scorecard.served_recommendation(store, 1),
+        'experiment': lambda: scorecard.experiment_report(store, 90, 110, 100000),
+    }
+    sql = []
+    store.conn.set_trace_callback(sql.append)
+    try:
+        reports[method]()
+    finally:
+        store.conn.set_trace_callback(None)
+    assert not store.conn.in_transaction
+    assert not any(statement.lstrip().upper().startswith(
+        ('BEGIN', 'SAVEPOINT', 'COMMIT', 'ROLLBACK', 'RELEASE')) for statement in sql)
+
+
 @pytest.mark.parametrize('change', ['play', 'allocation'])
-def test_experiment_decision_checks_evidence_without_holding_report_lock(tmp_path, monkeypatch, change):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_experiment_decision_checks_evidence_without_holding_report_lock(tmp_path, monkeypatch, change, consumer_store):
+    store = consumer_store(tmp_path / 'state.db')
     iid = seed(store)
     started, release = threading.Event(), threading.Event()
     prepare = experiments._prepare_decision
@@ -93,10 +110,12 @@ def test_experiment_decision_checks_evidence_without_holding_report_lock(tmp_pat
 
 
 def test_empty_report_does_not_scan_events_or_catalog(store):
-    with store.read_snapshot() as snapshot:
-        sql = []
-        snapshot.store.conn.set_trace_callback(sql.append)
-        report = scorecard.recommendation_scorecard(snapshot.store, 0, 30 * 86400)
+    sql = []
+    store.conn.set_trace_callback(sql.append)
+    try:
+        report = scorecard.recommendation_scorecard(store, 0, 30 * 86400)
+    finally:
+        store.conn.set_trace_callback(None)
     assert report['impressions'] == 0
     assert not any(f'FROM {table}' in statement for statement in sql for table in
                    ('player_events', 'play_events', 'rec_response_events', 'tracks', 'discovered_tracks'))
@@ -105,17 +124,19 @@ def test_empty_report_does_not_scan_events_or_catalog(store):
 def test_repeated_exits_use_bulk_historical_lookup_and_index(store):
     iid = seed(store)
     store.conn.executemany(
-        'INSERT INTO player_events(identity_id,kind,video_id,position,duration,at) VALUES (?,?,?,?,?,?)',
+        'INSERT INTO player_events(account_id,kind,video_id,position,duration,at) VALUES (?,?,?,?,?,?)',
         [(iid, 'ended', 'video', 190, 200, at) for at in range(120, 320)])
     store.conn.commit()
-    with store.read_snapshot() as snapshot:
-        sql = []
-        snapshot.store.conn.set_trace_callback(sql.append)
-        report = scorecard.recommendation_scorecard(snapshot.store, 90, 110)
-        plan = snapshot.store.conn.execute(
+    sql = []
+    store.conn.set_trace_callback(sql.append)
+    try:
+        report = scorecard.recommendation_scorecard(store, 90, 110)
+        plan = store.conn.execute(
             'EXPLAIN QUERY PLAN SELECT identity_key FROM rec_served_impressions '
             f'WHERE {scorecard_attribution.VIDEO}=? AND {scorecard_attribution.LIVE} '
             'AND served_at>=? AND served_at<=?', ('video', 0, 1000)).fetchall()
+    finally:
+        store.conn.set_trace_callback(None)
     assert report['completion'] == 1
     lookups = [statement for statement in sql
                if 'FROM rec_served_impressions' in statement and not statement.startswith('EXPLAIN')]

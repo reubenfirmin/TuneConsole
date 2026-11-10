@@ -51,7 +51,7 @@ def _clamp01(x):
     return 0.0 if x < 0 else 1.0 if x > 1 else x
 
 
-def energy_axis(track_plays, audio, meta):
+def energy_axis(track_plays, audio, meta, *, genre_axes=None):
     """Calm(0)..Charged(1) for the month. Weighted by plays over tracks that HAVE acoustic energy; where
     coverage is thin, blends in genre-family priors so the axis is always defined. Returns
     (value, source) where source is 'acoustic' (mostly measured) or 'genre' (mostly inferred)."""
@@ -65,7 +65,7 @@ def energy_axis(track_plays, audio, meta):
             e_den += plays
             covered += plays
         genre = (meta.get(key) or ("", None))[1]
-        fam = genre_map.family(genre) if genre else None
+        fam = (genre_axes[genre][0] if genre_axes is not None else genre_map.family(genre)) if genre else None
         g_num += _FAMILY_ENERGY.get(fam, _DEFAULT_ENERGY) * plays
         g_den += plays
     acoustic = (e_num / e_den) if e_den else None
@@ -103,7 +103,8 @@ def personality(store, month, month_row, meta):
     track_plays = store.trends.ledger_track_plays(since, until, calendar=True)
     audio = store.trends.track_audio()
     hours = store.trends.play_hours(since, until, calendar=True)
-    energy, e_src = energy_axis(track_plays, audio, meta)
+    genre_axes = store.genres.feature_axes(row[1] for row in meta.values())
+    energy, e_src = energy_axis(track_plays, audio, meta,genre_axes=genre_axes)
     rhythm = rhythm_axis(hours)
     explore = exploration_axis(month_row or {})
     name, blurb = _ARCHETYPES[(energy >= 0.5, explore >= 0.5, rhythm >= 0.5)]
@@ -111,7 +112,7 @@ def personality(store, month, month_row, meta):
     fam_plays = {}
     for key, plays in track_plays.items():
         genre = (meta.get(key) or ("", None))[1]
-        fam = genre_map.family(genre) if genre else None
+        fam = genre_axes[genre][0] if genre else None
         if fam:
             fam_plays[fam] = fam_plays.get(fam, 0) + plays
     top_fam = max(fam_plays, key=fam_plays.get) if fam_plays else None

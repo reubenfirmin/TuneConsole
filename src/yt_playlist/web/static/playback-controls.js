@@ -1,34 +1,44 @@
 // Document-wide keyboard and browser media controls share the existing extension commands.
 (function () {
   if (window.playbackControls) return;
-  let nextPending = false;
+  let nextPending = false, controlPending = false;
 
   function command(action) {
     if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command(action);
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && (status.now_playing || status.resumable_player);
+    const playing = status?.connected && (status.now_playing || status.resumable_player || status.radio_resume);
     if (!playing?.video_id) return false;
     const resume = !status.now_playing;
     if (resume && action === 'next') return false;
     if ((action === 'play' && playing.paused === false) ||
         (action === 'pause' && playing.paused === true)) return true;
     const next = action === 'next';
-    if (next && nextPending) return true;
-    const options = {method: 'POST'};
+    if (next ? nextPending : controlPending) return true;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 12000);
+    const options = {method: 'POST', signal: controller.signal};
     if (next) {
       nextPending = true;
       options.headers = {'Content-Type': 'application/json'};
       options.body = JSON.stringify({videoId: playing.video_id});
     }
     let url = next ? '/now-playing/next' : '/now-playing/toggle';
-    if (!next && (resume || action !== 'toggle')) {
+    if (resume && !status.resumable_player) {
+      url = '/radio/resume';
+      options.headers = {'Content-Type': 'application/json'};
+      options.body = JSON.stringify({playlist_id: playing.playlist_ytm_id,
+        video_id: playing.video_id, episode_id: playing.radio_session_id});
+    } else if (!next && (resume || action !== 'toggle')) {
       url += '?action=' + encodeURIComponent(action);
       if (resume) url += '&resume=true&videoId=' + encodeURIComponent(playing.video_id);
     }
+    if (!next) controlPending = true;
     fetch(url, options)
       .catch(() => {})
       .finally(() => {
+        clearTimeout(deadline);
         if (next) nextPending = false;
+        else controlPending = false;
         window.playbackStatus.refresh();
       });
     return true;
@@ -61,7 +71,7 @@
       return;
     }
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && (status.now_playing || status.resumable_player);
+    const playing = status?.connected && (status.now_playing || status.resumable_player || status.radio_resume);
     const active = !!playing?.video_id;
     session.playbackState = active && typeof playing.paused === 'boolean' ?
       (playing.paused ? 'paused' : 'playing') : 'none';
@@ -83,22 +93,9 @@
 // Music tab (in the background, you stay on TuneConsole). A bridge failure must not create another
 // player that cannot stop the existing music. Ctrl/meta/middle-click still open a new tab.
 function tcPlaybackError(message) {
-  document.getElementById('playback-error')?.remove();
-  const toast = document.createElement('div');
-  toast.id = 'playback-error';
-  toast.className = 'toast toast-err';
-  toast.setAttribute('role', 'alert');
-  const text = document.createElement('span');
-  text.className = 'toast-body';
-  text.textContent = message;
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'toast-x';
-  dismiss.setAttribute('aria-label', 'Dismiss');
-  dismiss.textContent = '×';
-  dismiss.onclick = () => toast.remove();
-  toast.append(text, dismiss);
-  document.getElementById('toasts')?.prepend(toast);
+  console.debug('[Playback] operation not confirmed', message);
+  // Read the existing player state; never repeat an uncertain play/toggle.
+  window.playbackStatus?.refresh();
 }
 window.tcPlaybackError = tcPlaybackError;
 

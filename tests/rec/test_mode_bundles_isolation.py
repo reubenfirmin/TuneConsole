@@ -1,6 +1,9 @@
-"""Home preparation must not hold UI locks or publish results from superseded inputs."""
+"""Home preparation finishes its captured inputs without holding UI locks."""
 import asyncio
+from copy import copy
+from tests.derived_rating_support import seed_dislike
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, nullcontext
 import logging
 import sqlite3
 import threading
@@ -9,37 +12,156 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embedding_vectors as embed, measurement, mode_surfaces, surfaces
+from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer,
+    mock_snapshot_coordinator, native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.rec.rec_worker import RecWorker
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These worker and publication checks construct no HTTP application."""
+
+
+@pytest.fixture(scope="module")
+def isolation_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+@pytest.fixture
+def isolation_model_input(tmp_path, isolation_schema):
+    # The independent comparison needs a model and modes, not a second saved
+    # publication, exported files or a restored template.
+    directory = tmp_path / 'model-input'
+    directory.mkdir()
+    with _file_consumer_store(directory, isolation_schema, snapshot_guards=False) as store:
+        with pytest.MonkeyPatch.context() as patch, mock_snapshot_coordinator(store, patch):
+            _seed_model(store)
+        yield store
 
 
 @pytest.fixture(params=["memory", "file"])
-def database(request, tmp_path):
-    store = Store(":memory:" if request.param == "memory" else tmp_path / "state.db")
-    store.init_schema()
-    _seed(store)
-    yield store
-    store.conn.close()
+def database(request, tmp_path, isolation_schema, ranking_inputs, monkeypatch, native_sql_calls):
+    path = ":memory:" if request.param == "memory" else tmp_path / "state.db"
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        # Retain transactions, snapshots and files in this disposable input.
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, isolation_schema)
+        if request.param == 'file':
+            # Preserve actual WAL commits/readers without a passive checkpoint
+            # after every pool row. Checkpoint policy has independent owners.
+            store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        else:
+            # Reporting reads consume current rows; their reader admission is
+            # below these tests. Keep preparation's separate, real read_snapshot.
+            reader = copy(store)
+            reader._read_only = True
+            reader._bind_repositories()
+            monkeypatch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
+        reporting = reuse_reporting_reader(store, monkeypatch) if request.param == 'file' else nullcontext()
+        with reporting:
+            # Seed this private input directly. Capturing a template, exporting
+            # its files and restoring it repeated setup below the publication
+            # and concurrent-write behavior these cases exercise.
+            _seed(store)
+            _saved(store)
+            yield store
 
 
-def _seed(store):
-    tid = store.tracks.upsert_track("video", "Song", "Artist", None, None)
-    store.tracks.set_track_genre(tid, "House")
+@pytest.fixture
+def ranking_inputs(monkeypatch):
+    """Supply ranker output below real snapshot calculation and publication.
+
+    Scoring, vibe generation and PPR have independent owners. These cases keep
+    actual model vectors, bucketing, temporal membership, policy capture, typed
+    file staging and SQL heads while racing the captured work with UI writes.
+    """
+    from yt_playlist import rec
+
+    def pools(reader, now, limit):
+        library = surfaces.ForYouItem('Song', 'Artist', None, 'video', None, 0,
+            'Captured ranking', key='song|artist', genre='House')
+        fresh = surfaces.ForYouItem('Fresh', 'New artist', None, 'fresh', None, 0,
+            'Captured discovery', key='fresh|new artist', genre='House')
+        return {lane: [fresh if lane == 'fresh' else library]
+                for lane in ('wheelhouse', 'explore', 'comfort', 'fresh')}
+
+    monkeypatch.setattr(mode_surfaces, '_rank_pools', pools)
+    monkeypatch.setattr(mode_surfaces.vibe_pools, 'prepare', lambda *args, **kwargs: None)
+    monkeypatch.setattr(rec, 'ppr', SimpleNamespace(
+        mode_rankings=lambda *args, **kwargs: {1: ['song|artist']}), raising=False)
+
+
+@pytest.fixture
+def _worker_store(tmp_path, isolation_schema, monkeypatch):
+    # Startup is below this worker/UI race. Keep real SQL diagnostics, revision
+    # guards, WAL snapshots and cancellation throughout the actual interaction.
+    with _file_consumer_store(tmp_path, isolation_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store
+
+
+def _seed_model(store):
+    seed_publication_subjects(store, [{'key': 'song|artist', 'video_id': 'video',
+        'title': 'Song', 'artist': 'Artist', 'genre': 'House'}])
     model_support.build_content_model(store)
     keys, vectors, _ = embed.load_content_vectors(store)
     store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [["house", 1]],
         "centroid": vectors[0], "size": 1, "rep_keys": keys,
         "space": embed.content_space_id(store)}], retired_ids=[], now=1)
-    store.rec_proposals.put_proposals("mode_bundles", {"saved": True}, 1)
-    store.rec_proposals.put_proposals("fresh_pool", [{"saved": True}], 1)
+    return keys
 
 
-def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_path, monkeypatch):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
-    _seed(store)
+def _seed(store):
+    keys = _seed_model(store)
+    fresh = {'key': 'fresh|new artist', 'video_id': 'fresh', 'title': 'Fresh',
+             'artist': 'New artist', 'genre': 'House'}
+    seed_publication_subjects(store, [fresh], discoveries=[fresh['key']])
+    # The initial saved publication is a lower input to these replacement and
+    # rollback tests. Policy calculation under test runs after this fixture.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                      ('isolation-input', {'schema': 4, 'algorithm': 'isolation-input'}))
+        with schema_inspection.reuse_tables(store.conn):
+            publish_bundles(store, {'all': {'wheelhouse': [{'key': keys[0], 'video_id': 'video',
+                'title': 'Song', 'artist': 'Artist', 'genre': 'House'}]}}, 1, fresh=[fresh])
+    store._isolation_saved_heads = store.recommendations.heads()
+    return store._isolation_saved_heads
+
+
+def _assert_content_inputs(store, original):
+    assert embed.content_space_id(store) == embed.content_space_id(original)
+    assert store.rec_model.get_rec_content_vectors() == original.rec_model.get_rec_content_vectors()
+    assert list(map(tuple, store.conn.execute("SELECT * FROM taste_modes ORDER BY mode_id"))) == list(
+        map(tuple, original.conn.execute("SELECT * FROM taste_modes ORDER BY mode_id")))
+
+
+def _saved(store):
+    # One actual captured view owns this complete consistency assertion.
+    with store.read_view() as reader:
+        assert reader.recommendations.heads() == store._isolation_saved_heads
+        assert [row['video_id'] for row in reader.recommendations.candidate_page(
+            'home', 'all', 'wheelhouse', limit=4)['tracks']] == ['video']
+        assert [row['video_id'] for row in reader.recommendations.candidate_page(
+            'fresh', 'all', 'fresh', limit=4)['tracks']] == ['fresh']
+
+
+def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(
+        _worker_store, isolation_model_input, monkeypatch):
+    store = _worker_store
+    with monkeypatch.context() as patch, mock_snapshot_coordinator(store, patch):
+        _seed(store)
+    _assert_content_inputs(store, isolation_model_input)
     started = threading.Event()
     work = Activity()
     worker = RecWorker(SimpleNamespace(store=store, work=work,
@@ -57,7 +179,7 @@ def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_pat
     async def interact():
         release = store.priority.enter()
         try:
-            assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
+            _saved(store)
             store.settings.set_setting("ui-write", "saved")
             await asyncio.sleep(0)
             return store.settings.get_setting("ui-write")
@@ -74,8 +196,7 @@ def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_pat
             worker.shutdown()
             worker.join(3)
             assert work.wait(0)
-            assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
-            assert store.rec_proposals.get_proposals("fresh_pool") == [{"saved": True}]
+            _saved(store)
             assert not store.conn.in_transaction
         finally:
             work.close_admission()
@@ -84,36 +205,42 @@ def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_pat
             store.conn.close()
 
 
-def test_mutation_during_calculation_preserves_saved_bundles_and_retries(database, monkeypatch):
+def test_mutation_during_calculation_finishes_and_serving_applies_current_exclusions(database, monkeypatch):
     store = database
     calculate = mode_surfaces._calculate_bundles
 
     def mutate(reader, now, policies):
         result = calculate(reader, now, policies)
-        store.rec_model.record_dislike("song|artist", until=None, now=now)
+        seed_dislike(store, "song|artist", until=None, now=now)
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", mutate)
-    assert mode_surfaces.prepare_bundles(store, 100) is None
-    assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
-    assert store.rec_proposals.get_proposals("fresh_pool") == [{"saved": True}]
-    assert not store.conn.execute("SELECT 1 FROM rec_serving_policies").fetchone()
+    result = mode_surfaces.prepare_bundles(store, 100)
+    assert result is not None and result['all']['temporal']
+    assert store.recommendations.heads() != store._isolation_saved_heads
+    assert not mode_surfaces.assemble_cards(store, 100, 0)
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", calculate)
     assert mode_surfaces.prepare_bundles(store, 100) is not None
-    payload = store.rec_proposals.get_proposals("mode_bundles")
-    assert "song|artist" not in {item["key"] for item in payload["all"]["temporal"]}
+    assert "song|artist" not in {item['key'] for item in store.recommendations.candidate_page(
+        'home', 'all', 'temporal', limit=4)['tracks']}
 
 
 def test_bundle_failure_rolls_back_both_surfaces_and_their_policy_rows(database):
     store = database
+    policies = [tuple(row) for row in store.conn.execute(
+        'SELECT h.surface,g.policy_version FROM recommendation_heads h '
+        'JOIN recommendation_generations g ON g.id=h.generation_id ORDER BY h.surface')]
     with store.conn:
-        store.conn.execute("CREATE TRIGGER reject_fresh BEFORE INSERT ON rec_proposals "
-            "WHEN NEW.surface='fresh_pool' BEGIN SELECT RAISE(ABORT,'rejected bundles'); END")
+        store.conn.execute("CREATE TRIGGER reject_fresh BEFORE INSERT ON recommendation_heads "
+            "WHEN NEW.surface='fresh' BEGIN SELECT RAISE(ABORT,'rejected bundles'); END")
     with pytest.raises(sqlite3.IntegrityError, match="rejected bundles"):
         mode_surfaces.prepare_bundles(store, 100)
-    assert store.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
-    assert store.rec_proposals.get_proposals("fresh_pool") == [{"saved": True}]
-    assert not store.conn.execute("SELECT 1 FROM rec_serving_policies").fetchone()
+    _saved(store)
+    # Staged policies can belong to the failed, recoverable build. Neither
+    # surface may expose one until their common publication commits.
+    assert [tuple(row) for row in store.conn.execute(
+        'SELECT h.surface,g.policy_version FROM recommendation_heads h '
+        'JOIN recommendation_generations g ON g.id=h.generation_id ORDER BY h.surface')] == policies
     assert not store.conn.in_transaction
 
 
@@ -131,56 +258,75 @@ def test_build_fingerprints_models_once_and_stamps_each_pool_with_its_ranker(dat
     payload = mode_surfaces.prepare_bundles(store, 100)
     assert len(calls) == 1
     temporal = payload["all"]["temporal"][0]
-    configuration = store.conn.execute("SELECT configuration FROM rec_serving_policies "
-        "WHERE model_version=?", (temporal["pool_policy"],)).fetchone()[0]
-    assert '"ranker":"temporal"' in configuration
+    configuration = store.rec_ledger.policy_configuration(temporal['pool_policy'])
+    assert configuration['ranker'] == 'temporal'
 
 
-def test_bundle_publication_survives_unrelated_watermarks_and_policy_writes(database, monkeypatch):
+def test_bundle_publication_finishes_despite_home_views_during_calculation_and_staging(database, monkeypatch):
     calculate = mode_surfaces._calculate_bundles
 
     def write_unrelated(reader, now, policies):
         result = calculate(reader, now, policies)
         database.settings.set_setting("last-library-sync", str(now))
         database.rec_ledger.record_serving_policy("concurrent-offer", {}, now)
+        database.rec_ledger.bump_card_view('cards', now)
+        database.modes.log_impressions(1, [('wheelhouse', 1)], now)
         return result
 
+    stage = database.recommendations.stage
+    def view_while_staging(*args, **kwargs):
+        database.rec_ledger.bump_card_view('cards', 101)
+        database.modes.log_impressions(2, [('explore', 1)], 101)
+        return stage(*args, **kwargs)
+
+    monkeypatch.setattr(database.recommendations, 'stage', view_while_staging)
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", write_unrelated)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
-    assert database.rec_proposals.get_proposals("mode_bundles") != {"saved": True}
+    assert database.recommendations.heads() != database._isolation_saved_heads
+    policy = database.recommendations.head('home')['policy_version']
+    assert database.rec_ledger.policy_configuration(policy)['modes']['offered'] == {}
+    assert database.modes.impression_counts() == {1: 2}
+    assert candidate_refresh.due(database, 101)
 
 
 def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, monkeypatch):
+    account = database.accounts.upsert_account('Radio', 'credentials', None, True)
     calculate = mode_surfaces._calculate_bundles
 
     def update_playback(reader, now, policies):
         result = calculate(reader, now, policies)
-        database.settings.set_setting("radio_current_session", '{"position":2}')
+        from yt_playlist.core import radio_storage
+        with database.conn:
+            radio_storage.save(database.conn, {'episode_id': 'unrelated-radio',
+                'identity': account, 'phase': 'playing', 'position': 2, 'tracks': []},
+                expected=None, now=now)
         database.rec_proposals.put_proposals("trend_rollups", {"updated": now}, now)
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", update_playback)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
-    assert "1" in database.rec_proposals.get_proposals("mode_bundles")
+    assert database.recommendations.pool('home', '1', 'temporal') is not None
     assert database.rec_proposals.get_proposals("trend_rollups") == {"updated": 100}
 
 
-def test_changed_home_genres_still_discard_prepared_style_pools(database, monkeypatch):
+def test_changed_home_genres_leave_captured_style_pools_intact_and_next_round_due(database, monkeypatch):
     calculate = mode_surfaces._calculate_bundles
 
     def change_preferences(reader, now, policies):
         result = calculate(reader, now, policies)
-        database.rec_proposals.put_proposals("home_genre_request", {"include": ["jazz"]}, now)
+        database.rec_proposals.put_proposals('home_genre_request',
+            {'epoch': 1, 'include_genres': ['jazz']}, now)
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", change_preferences)
-    assert mode_surfaces.prepare_bundles(database, 100) is None
-    assert database.rec_proposals.get_proposals("mode_bundles") == {"saved": True}
+    assert mode_surfaces.prepare_bundles(database, 100) is not None
+    assert database.recommendations.heads() != database._isolation_saved_heads
+    assert candidate_refresh.due(database, 101)
 
 
 def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypatch):
     with database.conn:
-        database.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('mode_bundles','fresh_pool')")
+        database.conn.execute("DELETE FROM recommendation_heads WHERE surface IN ('home','fresh')")
     entry_id = database.conn.execute(
         "SELECT id FROM catalog_entries WHERE video_id='video'").fetchone()[0]
     calculate = mode_surfaces._calculate_bundles
@@ -196,22 +342,23 @@ def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypa
     result = mode_surfaces.prepare_bundles(database, 100)
     assert result is not None
     assert result['all']['temporal']
-    assert database.rec_proposals.get_proposals('mode_bundles') == result
+    assert [row['key'] for row in database.recommendations.candidate_page(
+        'home', 'all', 'temporal', limit=4)['tracks']] == [row['key'] for row in result['all']['temporal']]
     # Keep attribution to the model actually used, rather than refitting under a writer lock.
     policy = result['all']['temporal'][0]['pool_policy']
-    assert database.conn.execute('SELECT 1 FROM rec_serving_policies WHERE model_version=?',
-                                 (policy,)).fetchone()
+    assert database.rec_ledger.policy_configuration(policy)['ranker'] == 'temporal'
 
 
-def test_replacing_model_during_ranking_still_rejects_publication(database, monkeypatch):
+def test_replacing_model_during_ranking_keeps_the_captured_publication(database, monkeypatch):
     calculate = mode_surfaces._calculate_bundles
 
     def replace_model(reader, now, policies):
         result = calculate(reader, now, policies)
         with database.conn:
-            database.conn.execute('DELETE FROM rec_content_vectors')
+            database.conn.execute("DELETE FROM recording_embedding_files WHERE space='content_library'")
         return result
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', replace_model)
-    assert mode_surfaces.prepare_bundles(database, 100) is None
-    assert database.rec_proposals.get_proposals('mode_bundles') == {'saved': True}
+    assert mode_surfaces.prepare_bundles(database, 100) is not None
+    assert database.recommendations.heads() != database._isolation_saved_heads
+    assert database.recommendations.pool('home', '1', 'temporal')

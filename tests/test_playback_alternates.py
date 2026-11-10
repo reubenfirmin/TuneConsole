@@ -6,8 +6,8 @@ import pytest
 
 @pytest.mark.parametrize('difference', ['none', 'version', 'duration', 'artist', 'unknown_duration'])
 def test_only_same_song_alternatives_are_reused_and_accounts_remain_separate(store, difference):
-    first = store.identities.upsert_identity('Main', 'ref', None, True)
-    second = store.identities.upsert_identity('Other', 'other', None, False)
+    first = store.accounts.upsert_account('Main', 'ref', None, True)
+    second = store.accounts.upsert_account('Other', 'other', None, False)
     requested = {'video_id': 'original', 'title': 'Ride (Vince Clarke Remix)',
                  'artist': 'Dubfire & Miss Kittin', 'duration': 326}
     accepted = {**requested, 'video_id': 'playable', 'artist': 'Dubfire'}
