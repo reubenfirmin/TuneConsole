@@ -35,7 +35,8 @@ def store(store, request):
 
 
 @pytest.mark.parametrize('width', [1536])
-def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, page, monkeypatch, width, action_evidence):
+def test_festival_states_notices_home_choice_and_bonus_details(
+        live_app, store, page, monkeypatch, width, action_evidence, record_testsuite_property):
     growth_catalog(store)
     publish_personal_album(store)
     publish_personal_mix(store)
@@ -176,6 +177,13 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
         window.originalTv = {{...destination}};
         Object.assign(destination, {{unlocked: true, ready: false, usable: false, state: 'preparing', href: '/#tv'}});
     }}''')
+    page.wait_for_function(f'!{growth_model}.refreshing')
+    with page.expect_response('**/home/growth') as refreshed:
+        page.evaluate(f'async () => {{ await {growth_model}.refresh(); }}')
+    record_testsuite_property('tv-after-refresh', json.dumps({
+        'server': next(node for node in refreshed.value.json()['nodes'] if node['id'] == 'tv'),
+        'browser': page.evaluate(f'{growth_model}.node("tv")'),
+    }))
     page.get_by_role('button', name=re.compile('^TV,')).click()
     expect(popup.get_by_role('region', name='How to get here')).to_be_hidden()
     expect(popup.get_by_role('link', name='Open TV', exact=True)).to_be_visible()

@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import sys
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -103,7 +104,35 @@ def test_timed_out_downloader_is_reaped_and_summary_preserves_budget(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Checks descendant state through Linux procfs")
-def test_timeout_kills_sigterm_ignoring_descendant_after_leader_exits(tmp_path):
+def test_timeout_kills_sigterm_ignoring_descendant_after_leader_exits(tmp_path, monkeypatch):
+    def wait_for_exit(state):
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                status = state.read_text().rsplit(")", 1)[1].split()[0]
+            except (FileNotFoundError, ProcessLookupError):
+                return  # The child can disappear during either open or read.
+            if status in {"Z", "X"}:
+                return
+            assert time.monotonic() < deadline, "Timed-out descendant survived its process-group leader"
+            time.sleep(.01)
+
+    # Exercise the observation race deterministically without extra processes
+    # or waits, and prove that a live child still fails at the deadline.
+    state = Mock()
+    for error in (FileNotFoundError, ProcessLookupError):
+        state.read_text.side_effect = error
+        wait_for_exit(state)
+    state.read_text.side_effect = PermissionError
+    with pytest.raises(PermissionError):
+        wait_for_exit(state)
+    state.read_text.side_effect = None
+    state.read_text.return_value = '123 (private child) S'
+    with monkeypatch.context() as patch:
+        patch.setattr(time, 'monotonic', Mock(side_effect=[0, 3]))
+        with pytest.raises(AssertionError, match='Timed-out descendant survived'):
+            wait_for_exit(state)
+
     child_pid = tmp_path / "child.pid"
     child = ("import os,signal,sys,time; from pathlib import Path; "
              "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
@@ -116,11 +145,7 @@ def test_timeout_kills_sigterm_ignoring_descendant_after_leader_exits(tmp_path):
         assert ci_stage.execute("download", [sys.executable, "-c", parent, child, str(child_pid)],
                                 timeout=1, timings=tmp_path / "timings.json") == 124
         pid = int(child_pid.read_text())
-        state = Path(f"/proc/{pid}/stat")
-        deadline = time.monotonic() + 2
-        while state.exists() and state.read_text().rsplit(")", 1)[1].split()[0] not in {"Z", "X"}:
-            assert time.monotonic() < deadline, "Timed-out descendant survived its process-group leader"
-            time.sleep(.01)
+        wait_for_exit(Path(f"/proc/{pid}/stat"))
     finally:
         # Clean up only this test's child if the regression fails.
         if pid is None and child_pid.exists():
