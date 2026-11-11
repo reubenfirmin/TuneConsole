@@ -18,6 +18,8 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def home():
     repository = create_autospec(HomeCacheRepo, instance=True, spec_set=True)
     repository.native.return_value = True
+    repository.unchanged.return_value = False
+    repository.document.return_value = None, None
     references = create_autospec(GroupEvidence, instance=True, spec_set=True)
     references.prepare_references.return_value = ('prepared', 'home_prepared', (), ())
     files = create_autospec(RecommendationFiles, instance=True, spec_set=True)
@@ -41,6 +43,12 @@ def test_publication_resolves_references_and_writes_files_before_sql(home):
     assert policies == frozenset()
     assert supplied_roots == roots
     assert home.repository.publish.call_args.kwargs == {'input_revision': 42}
+    order.clear()
+    home.repository.unchanged.return_value = True
+    home.repository.document.return_value = '{"context":{"artifact":"retained"}}', None
+    home.put('home_prepared', '{"context":{"artifact":"retained"}}', 11, input_revision=43)
+    assert order == []
+    home.repository.publish.assert_called_once()
 
 
 def test_missing_context_is_rejected_before_file_or_sql_writes(home):
@@ -84,6 +92,9 @@ def test_legacy_writer_keeps_exact_installed_bytes_and_prepared_references(home)
     home.repository.publish_legacy.assert_called_once_with('home_prepared', raw, 10, ('prepared', 'home_prepared', (), ()))
     home.files.publish.assert_not_called()
     home.repository.publish.assert_not_called()
+    home.repository.document.return_value = raw, None
+    home.put('home_prepared', raw, 11, validate=False)
+    home.repository.publish_legacy.assert_called_once()
 
 
 def test_validated_legacy_preparation_creates_no_files(home):

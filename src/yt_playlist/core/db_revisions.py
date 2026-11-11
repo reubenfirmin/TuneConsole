@@ -43,7 +43,11 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "choice_group_opportunities": "publication_id", "choice_interest_contexts": "publication_id",
                 "choice_interest_features": "publication_id", "choice_interest_tracks": "publication_id",
                 "choice_album_interests": "publication_id", "choice_album_track_days": "publication_id",
-                "choice_interest_mix_descriptors": "publication_id"}
+                "choice_interest_mix_descriptors": "publication_id",
+                "group_generations": "id", "group_publications": "generation_id",
+                "generation_groups": "generation_id", "taste_groups": "id", "group_versions": "id",
+                "group_version_aliases": "external_version", "group_members": "group_version_id",
+                "recommendation_policies": "version", "recommendation_policy_bodies": "version"}
 # Keyed musical-link readers consume source/recording membership only. The
 # delivery token fences incoming alternatives; changing it alone must not
 # discard a model calculation. Unannotated reads still guard the complete row.
@@ -53,10 +57,13 @@ _KEY_COLUMN_EXCLUSIONS = {"rec_musical_links": {"delivery_id"}}
 # Excluding only these fields also guards newly added catalog columns.
 _COLUMN_GROUP_EXCLUSIONS = {
     "recordings": {"catalog": {"first_enriched_at", "last_enriched_at"}},
+    "rec_musical_profiles": {"definition": {"prepared_at"}},
 }
 _COLUMN_GROUP_INCLUSIONS = {
     "recordings": {"identity": {"id", "identity_key"}},
     "metadata_runtime_state": {"format": {"id", "active"}},
+    "prepared_recording_inputs": {"grouping": {
+        "recording_id", "library_present", "library_genre", "library_year"}},
 }
 
 
@@ -84,9 +91,10 @@ class Revisions:
         # Batch TEMP DDL, releasing only the transaction this constructor owns.
         # A cancelled refresh must leave an already-open Store ready to retry.
         owned = not conn.in_transaction
-        if owned:
-            conn.execute('BEGIN')
         try:
+            # SQLite may open BEGIN's transaction before execute is interrupted.
+            if owned:
+                conn.execute('BEGIN')
             self._bind()
             if owned:
                 conn.commit()

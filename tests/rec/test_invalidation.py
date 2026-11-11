@@ -187,6 +187,7 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     store.rec_proposals.put_proposals('listening_choices', usage, 1000)
     assert onboarding.prepared_mixes_ready(store, 1000)
     with store.conn.atomic():
+        store.rec_proposals.save_revisit_remaining(['rediscover_tracks'])
         if change == 'artist':
             invalidation.artist_reconciled(store.conn)
         else:
@@ -194,6 +195,7 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     assert {surface: store.rec_proposals.get_proposals(surface) for surface in serving} == serving
     assert store.rec_proposals.get_proposals('home_choice') is None
     assert store.rec_proposals.choice_usage()['episodes'] == {'mixes': 2}
+    assert store.rec_proposals.revisit_remaining() == ['rediscover_tracks']
     assert tv.cached(store) == previous_tv
     assert onboarding.prepared_mixes_ready(store, 1001)
     key = previous_mix['menus'][0]['protos'][0]['tracks'][0]['key']
@@ -204,6 +206,7 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
         invalidation.clear_display(store.conn)
         invalidation.clear_findings(store.conn)
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
+    assert store.rec_proposals.revisit_remaining() is None
     assert not onboarding.prepared_mixes_ready(store, 1002)
     assert not store.rec_proposals.choice_usage()
     assert tv.cached(store) is None

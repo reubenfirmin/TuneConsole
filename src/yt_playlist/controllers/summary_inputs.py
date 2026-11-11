@@ -22,6 +22,9 @@ SOURCES = {
 SURFACES = {'trends': 'trend_rollups', 'cleanup': 'cleanup', 'analytics': 'listening_analytics',
             'model_health': 'model_health'}
 DEPENDENCIES = {kind: {(table, '') for table in tables} for kind, tables in SOURCES.items()}
+for dependencies in DEPENDENCIES.values():
+    dependencies.remove(('recordings', ''))
+    dependencies.add(('recordings', 'group:catalog'))
 DEPENDENCIES['trends'].add(('settings', 'key:takeout_imported_at'))
 DEPENDENCIES['analytics'].update(('player_events', 'key:' + kind) for kind in PLAYER_KINDS)
 DEPENDENCIES['analytics'].add(('settings', 'key:radio_session_playlist_ids'))

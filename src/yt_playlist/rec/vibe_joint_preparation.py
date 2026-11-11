@@ -4,7 +4,7 @@ import json
 import time
 
 from yt_playlist.core import fao, vibe_model_files as files
-from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
+from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.rec import home_vibe, musical_preparation, musical_profiles, vibe_joint_model as model
 
@@ -147,18 +147,15 @@ def steps(store, *, seconds=10, input_seconds=2, memory_bytes=model.MEMORY_BYTES
                 revision = reader.settings.get_setting(files.REVISION) or '0'
                 # Guard competing model publishers, including no prior head.
                 reader.settings.get_setting(files.HEAD_PREFIX + vibe)
-                with work_budget(seconds):
-                    originals = reader.vibe_predictions.joint_inputs(vibe, model.MAX_ROWS)
+                originals = reader.vibe_predictions.joint_inputs(vibe, model.MAX_ROWS)
                 rows, input_started = [], time.monotonic()
                 for start in range(0, len(originals), 32):
-                    with work_budget(input_seconds):
-                        rows.extend(prior_inputs(reader, originals[start:start + 32], vibe))
+                    rows.extend(prior_inputs(reader, originals[start:start + 32], vibe))
                     yield
                 input_seconds_used = time.monotonic() - input_started
                 fit_started = time.monotonic()
-                with work_budget(seconds):
-                    value = model.fit(rows, vibe, memory_bytes=memory_bytes)
-                    generation, staged = reader.vibe_predictions.stage_joint_model(value) if value else ('', None)
+                value = model.fit(rows, vibe, memory_bytes=memory_bytes)
+                generation, staged = reader.vibe_predictions.stage_joint_model(value) if value else ('', None)
                 fit_seconds = time.monotonic() - fit_started
                 refresh = _refresh_ready(reader, vibe)
                 outcome = {'revision': revision, 'configuration': configuration,

@@ -41,6 +41,9 @@ def recommendations(tmp_path, recommendation_predecessor):
             store.conn.execute('BEGIN IMMEDIATE')
             migration.apply(store.conn, Context(4))
         migration.validate(store.conn)
+        from yt_playlist.core import group_preview_work
+        with store.conn:
+            group_preview_work.install(store.conn)
         # Individually applied real boundaries do not form a contiguous startup
         # history. Bind the same legacy name projections as installed readers.
         store._schema_compatibility = True

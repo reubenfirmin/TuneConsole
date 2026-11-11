@@ -150,7 +150,10 @@ def install(conn):
 
 
 def directory(conn):
-    path = Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve()
+    database = conn.execute('PRAGMA database_list').fetchone()[2]
+    if not database:
+        raise ValueError('Installed metadata preparation requires a file-backed database')
+    path = Path(database).resolve()
     return path.with_name(path.name+'.preparation')/'metadata-deliveries'
 
 

@@ -16,14 +16,22 @@ class CompactTasteGroups(TasteGroups):
 
     def head(self, *, members=False):
         with self.files.retained():
-            row = self.repository.head(members=members)
-            if row is None:
-                return None
-            payload = {**self.files.read(row, 'generation'), 'recording_inputs': row['recording_inputs']}
-            return {'generation': row['external_key'], 'policy': canonical(self.files.policy(row['policy'])).decode(),
-                    'fingerprint': row['input_fingerprint'], 'created_at': row['created_at'],
-                    'serial': row['input_serial'], 'payload': payload,
-                    'groups': [self._definition(group) for group in row['groups']]}
+            return self._head(self.repository.head(members=members))
+
+    def preview_head(self):
+        with self.files.retained():
+            return self._head(self.repository.preview_head())
+
+    def _head(self, row):
+        if row is None:
+            return None
+        payload = self.files.read(row, 'generation')
+        if 'recording_inputs' in row:
+            payload = {**payload, 'recording_inputs': row['recording_inputs']}
+        return {'generation': row['external_key'], 'policy': canonical(self.files.policy(row['policy'])).decode(),
+                'fingerprint': row['input_fingerprint'], 'created_at': row['created_at'],
+                'serial': row['input_serial'], 'payload': payload,
+                'groups': [self._definition(group) for group in row['groups']]}
 
     def head_checkpoint(self):
         with self.files.retained():

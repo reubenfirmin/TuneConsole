@@ -155,12 +155,33 @@ def _album(conn, browse):
     return row[0] if row else None
 
 
+def unchanged_group_report(previous, value, now):
+    """Retain the original cohort when only its valid capture time advances.
+
+    Estimates, policy, parameters, diagnostics and expiry must all agree. Keep
+    unknown clocks and future/rewound captures on the ordinary publication path.
+    """
+    if not isinstance(previous, dict) or not isinstance(value, dict):
+        return False
+    if previous == value:
+        return True
+    clocks = previous.get('at'), value.get('at'), now
+    if not all(type(clock) in (int, float) and math.isfinite(clock) for clock in clocks):
+        return False
+    return (clocks[0] <= clocks[1] <= clocks[2]
+            and {key: item for key, item in previous.items() if key != 'at'}
+                == {key: item for key, item in value.items() if key != 'at'})
+
+
 def write(conn, surface, value, at, *, historical=False):
     if not conn.in_transaction:
         raise ValueError('Choice learning publication requires the outer transaction')
     validate(surface, value)
     _number(at)
     previous = conn.execute('SELECT publication_id FROM choice_learning_heads WHERE surface=?', (surface,)).fetchone()
+    if (surface == 'group_choice_bandit' and not historical and previous is not None
+            and unchanged_group_report(_read(conn, surface, previous[0]), value, at)):
+        return previous[0]
     columns = ('surface', 'field_mask', 'built_at', *SCALARS)
     # Public schema is a field name, not the SQL schema keyword.
     sql_columns = tuple('schema_version' if field == 'schema' else field for field in columns)

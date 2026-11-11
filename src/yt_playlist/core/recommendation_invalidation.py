@@ -23,6 +23,8 @@ def clear_display(conn, *, retain_serving=False):
     if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='home_display_publications'").fetchone():
         surfaces = home_outputs.SURFACES - set(SERVING_SURFACES) if retain_serving else home_outputs.SURFACES
         home_outputs.clear(conn, surfaces)
+    if not retain_serving and conn.execute("SELECT 1 FROM sqlite_schema WHERE name='home_revisit_progress'").fetchone():
+        conn.execute('DELETE FROM home_revisit_progress')
     if not retain_serving and listening_outputs.available(conn):
         listening_outputs.clear(conn)
 

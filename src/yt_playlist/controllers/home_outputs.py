@@ -38,9 +38,18 @@ class HomeOutputs:
     def put(self, surface, raw, now, *, input_revision=None, validate=True):
         with self.files.retained():
             if not self.repository.native() and not validate:
+                if self.encoded(surface) == raw:
+                    return
                 roots = self.references.prepare_references(surface, json.loads(raw), now)
                 return self.repository.publish_legacy(surface, raw, now, roots)
-            publication = self.prepare(surface, raw, now)
+            prepared = home_outputs.prepare(surface, raw, now)
+            if self.repository.unchanged(prepared):
+                try:
+                    if self.encoded(surface) == raw:
+                        return
+                except (OSError, ValueError):
+                    pass  # Recreate missing/damaged files before acknowledging.
+            publication = self.prepare(surface, prepared, now)
             return self.publish(publication, input_revision=input_revision)
 
     def document(self, surface):

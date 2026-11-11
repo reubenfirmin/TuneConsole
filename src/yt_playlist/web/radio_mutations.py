@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from yt_playlist.library.playlist_catalog import fetch_song_duration
+from yt_playlist.rec import radio_rotation
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import identity_key, track_album, track_artist
 from yt_playlist.util.thumbnails import best_thumb
@@ -47,10 +48,11 @@ class MutationResult:
 
 
 class RadioMutations:
-    def __init__(self, playlists, persistence, catalog, now_fn, *, paused=lambda: False):
+    def __init__(self, playlists, persistence, catalog, now_fn, *, paused=lambda: False, rotation_facts=None):
         self.playlists, self.persistence = playlists, persistence
         self.catalog, self.now_fn = catalog, now_fn
         self.paused = paused
+        self.rotation_facts = rotation_facts
 
     def _journal(self, target: PlaylistTarget, operation: PlaylistOperation):
         self.persistence.record_edit(target.episode_id, operation)
@@ -100,6 +102,12 @@ class RadioMutations:
             tid = self.catalog.upsert_track(video, accepted['title'], accepted['artist'],
                 accepted['album'], accepted['duration'], thumbnail=accepted.get('thumbnail'))
             accepted['key'] = self.catalog.catalog_subject(tid)['identity_key']
+        # An older offer for this upload does not own the new allocation.
+        accepted['_radio_rotation_slot'] = (requested.get('_radio_rotation_slot')
+                                            if accepted['key'] == requested['key'] else None)
+        if accepted['key'] != requested['key'] and self.rotation_facts is not None:
+            accepted.update(radio_rotation.metadata(self.rotation_facts([accepted['key']]).get(accepted['key'])))
+            radio_rotation.issue(accepted)
         log.info('Radio accepted upload substitution: requested=%s actual=%s', requested['video_id'], video)
         if account_id is not None and not self.paused():
             self.catalog.remember_playback_alternate(account_id, requested, accepted,

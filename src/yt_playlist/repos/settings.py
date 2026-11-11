@@ -198,6 +198,14 @@ class SettingsRepo(Repo):
         native = keys(self.conn, prefix) if workflow_settings.available(self.conn) else []
         return values, documents, native
 
+    @snapshot_read
+    def gc_retry_deadlines(self):
+        if not workflow_settings.available(self.conn):
+            return None
+        return [tuple(row) for row in self.conn.execute(
+            'SELECT captured_account_id,provider_playlist_id_snapshot,next_retry_at '
+            'FROM playlist_gc_attempts')]
+
     @synchronized
     def set_values(self, values, *, outputs=None, model_references=None, import_job=None, controls=None, decisions=None, workflow_records=None):
         """Save related settings together, so workers cannot observe half a form."""

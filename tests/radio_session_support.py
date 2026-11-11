@@ -153,7 +153,10 @@ def poc(monkeypatch, store):
 def radio_controller(monkeypatch, store, pool):
     """Exercise the real controller with explicit catalog inputs and playlist I/O."""
     remote, frames, workers = Playlist(), [], []
-    identity = store.accounts.upsert_account("main", "ref", None, True)
+    try:
+        identity = store.accounts.get_master_account().id
+    except ValueError:
+        identity = store.accounts.upsert_account("main", "ref", None, True)
     from yt_playlist.core.bridge import Bridge
     ownership = Bridge()
 

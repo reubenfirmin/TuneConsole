@@ -20,9 +20,16 @@ def test_shadow_groups_run_after_home_and_do_not_show_a_model_refresh(scheduled,
     targets.pop()()
     assert calls == ['home', 'groups', 'preview']
     assert not worker.busy and not worker.jobs
+    calls.clear()
+    monkeypatch.setattr(group_serving, 'due', lambda *args: False)
+    worker.jobs.retry[Job.GROUPS].retry_at = 0
+    worker._schedule(full=False, groups=True)
+    targets.pop()()
+    assert calls == ['groups']
+    assert not worker.busy and not worker.jobs
 
 
-def test_arriving_home_work_interrupts_shadow_without_losing_the_retry(scheduled, monkeypatch):
+def test_arriving_home_work_waits_for_admitted_shadow_to_finish(scheduled, monkeypatch):
     worker, targets = scheduled
     calls = []
 
@@ -32,14 +39,15 @@ def test_arriving_home_work_interrupts_shadow_without_losing_the_retry(scheduled
         check_stopping()
 
     monkeypatch.setattr(worker.preparation.groups, 'step', grouping)
+    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head', lambda: {'generation': 'prepared'})
     monkeypatch.setattr(worker.tasks, 'home', lambda: calls.append('home') or False)
     monkeypatch.setattr(worker.tasks, 'stories', lambda: False)
     monkeypatch.setattr(worker, 'trigger_tv_refresh', lambda: False)
-    monkeypatch.setattr(group_serving, 'prepare', lambda *args: calls.append('preview'))
+    monkeypatch.setattr(group_serving, 'prepare', lambda *args: calls.append('preview') or {})
     worker._schedule(full=False, groups=True)
     targets.pop()()
-    assert calls == ['groups', 'home']
-    assert worker.jobs.retry[Job.GROUPS].dirty
+    assert calls == ['groups', 'preview', 'home']
+    assert not worker.jobs.retry[Job.GROUPS].dirty
     assert not worker.busy and not worker.jobs
 
 

@@ -14,6 +14,7 @@ from ytmusicapi.navigation import nav
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.core.album_snapshot import LibrarySnapshotError, _check_response
 from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core.provider_notice_diagnostics import notice_diagnostics
 
 
 class _YoutubeRead:
@@ -152,7 +153,8 @@ def _layout_probe(response, playlist_id, *, failed_item=None):
                               'tabRenderer', 'content', 'sectionListRenderer', 'contents'], True)
     result = {'header_id_present': isinstance(header, dict) and 'playlistId' in header,
               'header_id_matches': isinstance(header, dict) and header.get('playlistId') == playlist_id,
-              'sections': min(len(sections), 1000) if isinstance(sections, list) else None}
+              'sections': min(len(sections), 1000) if isinstance(sections, list) else None,
+              **notice_diagnostics(response)}
     rows = nav(sections, [0, 'itemSectionRenderer', 'contents'], True)
     if isinstance(rows, list):
         result['rows'] = min(len(rows), 1000)

@@ -44,7 +44,7 @@ def test_missing_wheel_cannot_export_a_stale_appstream_version(tmp_path):
         stamp(tmp_path / "metadata.xml", tmp_path)
 
 
-def test_real_signed_repository_reports_stamped_version_for_both_architectures(tmp_path):
+def test_real_signed_repository_reports_stamped_version_for_both_architectures(tmp_path, gpg_home):
     for command in ("flatpak", "gpg", "appstreamcli"):
         if not shutil.which(command):
             pytest.skip(f"{command} is required for the AppStream export check")
@@ -53,8 +53,7 @@ def test_real_signed_repository_reports_stamped_version_for_both_architectures(t
 
     environment = {**os.environ, "XDG_DATA_HOME": str(tmp_path / "data"),
                    "XDG_CACHE_HOME": str(tmp_path / "cache"), "XDG_CONFIG_HOME": str(tmp_path / "config")}
-    keys = tmp_path / "keys"
-    keys.mkdir(mode=0o700)
+    keys = gpg_home
 
     def run(*args):
         result = subprocess.run([str(arg) for arg in args], env=environment,
@@ -64,43 +63,39 @@ def test_real_signed_repository_reports_stamped_version_for_both_architectures(t
 
     gpg = ["gpg", "--homedir", keys, "--batch", "--pinentry-mode", "loopback", "--passphrase", ""]
     repo = tmp_path / "flatpak-repo"
-    try:
-        run(*gpg, "--quick-generate-key", "Metadata Test <metadata@example.invalid>", "rsa2048", "sign", "1d")
-        fingerprint = next(line.split(":")[9] for line in run(*gpg, "--with-colons", "--list-keys").decode().splitlines()
-                           if line.startswith("fpr:"))
-        for arch in ("x86_64", "aarch64"):
-            build = tmp_path / arch
-            files = build / "files"
-            metainfo = files / "share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml"
-            metainfo.parent.mkdir(parents=True)
-            shutil.copy2(ROOT / "packaging/flatpak" / metainfo.name, metainfo)
-            for source, destination in (
-                    ("com.tuneconsole.TuneConsole.desktop", "share/applications/com.tuneconsole.TuneConsole.desktop"),
-                    ("com.tuneconsole.TuneConsole.png", "share/icons/hicolor/256x256/apps/com.tuneconsole.TuneConsole.png")):
-                target = files / destination
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / "packaging/flatpak" / source, target)
-            with zipfile.ZipFile(build / "yt_playlist-1.2.3-py3-none-any.whl", "w") as wheel:
-                wheel.writestr("yt_playlist-1.2.3.dist-info/METADATA", "Name: yt-playlist\nVersion: 1.2.3\n")
-            stamp(metainfo, build)
-            run("appstreamcli", "compose", "--no-net", "--prefix=/",
-                "--origin=com.tuneconsole.TuneConsole", f"--result-root={files}",
-                f"--data-dir={files}/share/app-info/xmls",
-                f"--icons-dir={files}/share/app-info/icons/flatpak",
-                "--components=com.tuneconsole.TuneConsole", files)
-            (build / "metadata").write_text(
-                f"[Application]\nname=com.tuneconsole.TuneConsole\nruntime=org.freedesktop.Platform/{arch}/25.08\n")
-            run("flatpak", "build-finish", build)
-            run("flatpak", "build-export", f"--arch={arch}", f"--gpg-homedir={keys}",
-                f"--gpg-sign={fingerprint}", repo, build)
-        run("flatpak", "build-update-repo", "--no-summary-index",
-            f"--gpg-homedir={keys}", f"--gpg-sign={fingerprint}", repo)
-        public_key = base64.b64encode(run(*gpg, "--export", fingerprint)).decode()
-        repo_url = repo.as_uri() + "/"
-        (repo / "tuneconsole.flatpakrepo").write_text(
-            f"[Flatpak Repo]\nTitle=Metadata Test\nUrl={repo_url}\nGPGKey={public_key}\n")
-        checksums = {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in ("summary", "summary.sig")}
-        verify_flatpak(tmp_path, "1.2.3", checksums, environment, repo_url=repo_url)
-    finally:
-        subprocess.run(["gpgconf", "--homedir", str(keys), "--kill", "gpg-agent"],
-                       env=environment, capture_output=True, timeout=10)
+    run(*gpg, "--quick-generate-key", "Metadata Test <metadata@example.invalid>", "rsa2048", "sign", "1d")
+    fingerprint = next(line.split(":")[9] for line in run(*gpg, "--with-colons", "--list-keys").decode().splitlines()
+                       if line.startswith("fpr:"))
+    for arch in ("x86_64", "aarch64"):
+        build = tmp_path / arch
+        files = build / "files"
+        metainfo = files / "share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml"
+        metainfo.parent.mkdir(parents=True)
+        shutil.copy2(ROOT / "packaging/flatpak" / metainfo.name, metainfo)
+        for source, destination in (
+                ("com.tuneconsole.TuneConsole.desktop", "share/applications/com.tuneconsole.TuneConsole.desktop"),
+                ("com.tuneconsole.TuneConsole.png", "share/icons/hicolor/256x256/apps/com.tuneconsole.TuneConsole.png")):
+            target = files / destination
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / "packaging/flatpak" / source, target)
+        with zipfile.ZipFile(build / "yt_playlist-1.2.3-py3-none-any.whl", "w") as wheel:
+            wheel.writestr("yt_playlist-1.2.3.dist-info/METADATA", "Name: yt-playlist\nVersion: 1.2.3\n")
+        stamp(metainfo, build)
+        run("appstreamcli", "compose", "--no-net", "--prefix=/",
+            "--origin=com.tuneconsole.TuneConsole", f"--result-root={files}",
+            f"--data-dir={files}/share/app-info/xmls",
+            f"--icons-dir={files}/share/app-info/icons/flatpak",
+            "--components=com.tuneconsole.TuneConsole", files)
+        (build / "metadata").write_text(
+            f"[Application]\nname=com.tuneconsole.TuneConsole\nruntime=org.freedesktop.Platform/{arch}/25.08\n")
+        run("flatpak", "build-finish", build)
+        run("flatpak", "build-export", f"--arch={arch}", f"--gpg-homedir={keys}",
+            f"--gpg-sign={fingerprint}", repo, build)
+    run("flatpak", "build-update-repo", "--no-summary-index",
+        f"--gpg-homedir={keys}", f"--gpg-sign={fingerprint}", repo)
+    public_key = base64.b64encode(run(*gpg, "--export", fingerprint)).decode()
+    repo_url = repo.as_uri() + "/"
+    (repo / "tuneconsole.flatpakrepo").write_text(
+        f"[Flatpak Repo]\nTitle=Metadata Test\nUrl={repo_url}\nGPGKey={public_key}\n")
+    checksums = {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in ("summary", "summary.sig")}
+    verify_flatpak(tmp_path, "1.2.3", checksums, environment, repo_url=repo_url)

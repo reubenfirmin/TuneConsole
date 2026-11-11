@@ -11,6 +11,7 @@ from ytmusicapi.parsers.playlists import parse_playlist_items
 from yt_playlist.core.album_snapshot import LibrarySnapshotError, _check_response, response_shape
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core.provider_notice_diagnostics import notice_diagnostics
 
 
 class _PlaylistRead:
@@ -32,13 +33,14 @@ class _PlaylistRead:
         self.failed_page = None
         self.identity_rows = [] if collect_identities else None
 
-    def _page_error(self, reason, response):
+    def _page_error(self, reason, response, *, status_code=None):
         self.failed_page = {'page': self.pages + 1, 'stage': self.validation_stage,
                             'envelope': _page_envelope(response)}
         if self.item_index is not None:
             self.failed_page['item_index'] = min(self.item_index, 1000)
         details = json.dumps(self.failed_page, sort_keys=True, separators=(',', ':'))
-        return LibrarySnapshotError('playlist', f'{reason}; diagnostics={details}', response, self.pages + 1)
+        return LibrarySnapshotError('playlist', f'{reason}; diagnostics={details}', response,
+                                    self.pages + 1, status_code=status_code)
 
     def __getattr__(self, name):
         return getattr(self.client, name)
@@ -54,7 +56,14 @@ class _PlaylistRead:
             if token != self.pending or token in self.requested:
                 raise self._page_error('repeated or unexpected continuation', {})
             self.requested.add(token)
-        response = self.client._send_request(endpoint, body, additionalParams)
+        try:
+            response = self.client._send_request(endpoint, body, additionalParams)
+        except (BridgeError, YTMusicError, OSError):
+            if not self.pages:
+                raise
+            # A missing continuation cannot establish absence of the playlist
+            # whose initial page was already returned.
+            raise self._page_error('continuation request unavailable', {}) from None
         if not self.pages:
             self.first_shape = response_shape(response)
             self.message_paths = _message_paths(response)
@@ -62,7 +71,7 @@ class _PlaylistRead:
         try:
             _check_response(response, 'playlist', self.pages + 1)
         except LibrarySnapshotError as exc:
-            raise self._page_error(exc.reason, response) from None
+            raise self._page_error(exc.reason, response, status_code=exc.status_code) from None
         header_count = 'unknown'
         try:
             if not self.pages:
@@ -194,6 +203,7 @@ def _page_envelope(response):
                       'onResponseReceivedEndpoints')
     metadata_fields = ('responseContext', 'trackingParams')
     fields = (*metadata_fields, *content_fields, 'frameworkUpdates', 'responseCommands', 'error')
+    notice_fields = ('alerts', 'header', 'topbar', 'background', 'microformat', 'messages', 'redirect')
     result['classification'] = (
         'empty_object' if not response else
         'provider_error' if 'error' in response else
@@ -202,9 +212,11 @@ def _page_envelope(response):
         'unrecognized_envelope')
     # Count unknown fields without traversing or exposing their names. Even a
     # context-only response cannot certify the advertised continuation's end.
-    result['other_fields'] = min(len(response) - sum(name in response for name in fields), 1000)
+    result['other_fields'] = min(len(response) - sum(name in response for name in (*fields, *notice_fields)), 1000)
     for name in fields:
         result[name] = kind(response[name]) if name in response else 'missing'
+    result.update({name: kind(response[name]) for name in notice_fields if name in response})
+    result.update(notice_diagnostics(response))
     for name in ('onResponseReceivedActions', 'onResponseReceivedEndpoints'):
         actions = response.get(name)
         if not isinstance(actions, list):
@@ -349,6 +361,7 @@ def playlist_read_report(client, playlist_id):
         reports['production'] = {
             'advertised': production.get('trackCount'), 'returned': len(production['tracks']),
             'playlist_id_matches': production.get('id') == playlist_id,
+            'provider_owned': production.get('owned') is True,
             'playlist_id_kind': ('missing' if not production.get('id') else
                                  'liked-music' if production['id'].startswith('LM') else
                                  'liked-videos' if production['id'].startswith('LL') else

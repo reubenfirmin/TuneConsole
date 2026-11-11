@@ -4,11 +4,12 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from itertools import zip_longest
+import hashlib
 import math
 import weakref
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.rec import group_roots, musical_character, radio_intensity
+from yt_playlist.rec import group_roots, musical_character, radio_intensity, radio_rotation
 
 PAGE_SIZE = 128
 LOOKAHEAD = 96
@@ -49,6 +50,9 @@ class PreparedRadio:
     def __init__(self, store, at, *, generation=None, surface_prefix=''):
         self.store = store
         self.surface_prefix = surface_prefix
+        self.rotation_seed = str(at)
+        self.comfort = .5
+        self.rotation_cursors = {}
         if not getattr(store, '_read_only', False) and store.activity_paused:
             # Maintenance keeps the current publication immutable. Select it
             # without writing a lease; the live session retains it through the
@@ -153,9 +157,32 @@ class PreparedRadio:
             raise ValueError('Invalid Radio lookahead limit')
         if self.generation is None:
             return []
-        result, after = [], -1
+        rotate = surface == 'radio' and purpose == 'membership' and limit > 1
+        # Inspect at most 384 eligible rows for rotation, then adopt only the
+        # requested lookahead. Quotas never trigger a full-membership search.
+        budget = 3 * PAGE_SIZE if rotate else limit
+        result, after, start, wrapped, seen = [], -1, -1, False, set(used)
         with (nullcontext(reader) if reader is not None else self._reader()) as current:
-            while len(result) < limit:
+            def finish():
+                if not rotate:
+                    return result
+                keys = [track['key'] for track in result]
+                facts = self.track_facts('rotation', keys, current.radio_catalog.rotation_facts)
+                for track in result:
+                    track.update(radio_rotation.metadata(facts.get(track['key'])))
+                return radio_rotation.reserve(result, limit, self.comfort)
+
+            if surface == 'radio' and purpose == 'membership':
+                pool = self._cached_read('headings', ('rotation', mode), lambda: current.recommendations.pool(
+                    self.surface(surface), mode, purpose, generation=self.generation), 128)
+                count = pool['eligible_count'] if pool else 0
+                if count > LOOKAHEAD:
+                    token = repr((self.rotation_seed, mode, band, genres)).encode()
+                    start = after = int.from_bytes(hashlib.sha256(token).digest()[:8]) % count - 1
+                    if rotate:
+                        start = after = self.rotation_cursors.get((mode, band, tuple(genres or ())), start)
+            inspected = 0
+            while len(result) < budget:
                 check_cancellable_work()
                 key = (surface, mode, purpose, after, band, tuple(genres) if genres is not None else None,
                        include_display)
@@ -163,8 +190,13 @@ class PreparedRadio:
                     self.surface(surface), mode, purpose, generation=self.generation, after=after,
                     limit=PAGE_SIZE, band=band, genres=genres, include_display=include_display), 256)
                 after = page['after']
+                if rotate:
+                    self.rotation_cursors[mode, band, tuple(genres or ())] = -1 if page['exhausted'] else after
+                inspected += len(page['tracks'])
                 for track in page['tracks']:
-                    if track['key'] in used or track['video_id'] in excluded or not allowed(track):
+                    if wrapped and track['pool_rank'] > start:
+                        return finish()
+                    if track['key'] in seen or track['video_id'] in excluded or not allowed(track):
                         continue
                     # Issued choices gain mode/profile metadata. Never let that
                     # mutate a cached catalog page used by another branch.
@@ -172,14 +204,20 @@ class PreparedRadio:
                     if surface == 'radio' and purpose == 'membership':
                         track['_radio_catalog_score'] = track.get('score') or 0
                     result.append(track)
-                    if len(result) == limit:
+                    seen.add(track['key'])
+                    if len(result) == budget:
                         break
-                if page['exhausted']:
+                if rotate and inspected >= 3 * PAGE_SIZE and len(result) >= limit:
                     break
-        return result
+                if page['exhausted']:
+                    if wrapped or start < 0:
+                        break
+                    after, wrapped = -1, True
+            return finish()
 
     def capture_inputs(self, reader, modes, space, model_generation, blocked, muted, comfort):
         """Capture the live lookahead and file owners from one pinned SQL view."""
+        self.comfort = comfort
         if self.generation is None:
             return {}, [], []
         repo = reader.recommendations

@@ -1,7 +1,7 @@
 """Small slices on the existing preparation worker, with last-good publication."""
 import json
 
-from yt_playlist.core.activity import work_budget, WorkBudgetExceeded, check_stopping
+from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
 from yt_playlist.rec import musical_profiles as profiles
 
 
@@ -16,7 +16,7 @@ def source_step(store, now, *, batch=32, seconds=2):
         return False
     dependencies, observation_ids = store.musical_profiles.source_dependencies(key)
     try:
-        with work_budget(seconds), store.read_snapshot(dependencies=dependencies) as snapshot:
+        with store.read_snapshot(dependencies=dependencies) as snapshot:
             item = snapshot.store.musical_profiles.source_input(key, batch, observation_ids=observation_ids)
             if item is None:
                 return False

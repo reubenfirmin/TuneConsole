@@ -7,7 +7,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from yt_playlist.core.accounts import client_for
-from yt_playlist.core.playlist_snapshot import playlist_read_report
 
 from yt_playlist.util.action_kinds import (
     ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
@@ -159,9 +158,12 @@ def build(ctx) -> APIRouter:
             account_id, client = client_for(store, ctx.client_provider(), account_id=entry["identity"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
+        owner = next((account for account in store.accounts.get_accounts() if account.id == account_id), None)
+        if owner is None:
+            raise HTTPException(409, "Saved account unavailable")
         return JSONResponse({"account_id": account_id, "action_id": action_id,
                              "entry_index": entry_index,
-                             "reads": playlist_read_report(client, entry["ytm"])},
+                             "reads": client.deletion_read_report(entry["ytm"], owner.brand_account_id)},
                             headers={"Cache-Control": "no-store"})
 
     @router.post("/actions/{action_id}/recheck-deletion")

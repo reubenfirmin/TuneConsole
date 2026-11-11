@@ -3,12 +3,42 @@
 The snapshot publisher owns the transaction for publish_prepared_* methods. Policy
 rows belong to rec_ledger and must participate in that same outer transaction.
 """
-from yt_playlist.core import choice_learning_state, home_outputs, json_cache
+from yt_playlist.core import choice_learning_state, group_preview_work, home_outputs, home_revisit_progress, json_cache
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.repos import proposal_cache, proposal_storage
 
 
 class RecProposalsRepo(Repo):
+    @snapshot_read
+    def preview_work(self):
+        return group_preview_work.read(self.conn)
+
+    def save_preview_page(self, snapshot, header, expected_token, page, dependencies):
+        from yt_playlist.core.db_checkpoint import deferred_autocheckpoint
+        from yt_playlist.core.db_writes import atomic_write
+
+        # A completed page's short durable receipt drains even when shutdown
+        # has just been requested. The next page observes cancellation normally.
+        from contextvars import Context
+
+        def save():
+            with atomic_write(self._store), deferred_autocheckpoint(self.conn, self._store._db_path is not None):
+                if not snapshot.is_current(allow_stale_tables=group_preview_work.TABLES):
+                    return False
+                return group_preview_work.save(self.conn, header, expected_token, page, dependencies)
+
+        return Context().run(save)
+
+    @lookup_read
+    def revisit_remaining(self):
+        return home_revisit_progress.read(self.conn)
+
+    @synchronized
+    def save_revisit_remaining(self, remaining):
+        """Join the guarded summary publication when one is active."""
+        with self.conn.atomic(join=True):
+            home_revisit_progress.save(self.conn, remaining)
+
     @snapshot_read
     def cache_rows(self):
         return proposal_cache.logical_rows(self.conn, store=self._store)

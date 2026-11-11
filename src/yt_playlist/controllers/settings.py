@@ -192,6 +192,10 @@ class Settings:
             values.update((key, self.workflows.get(key)) for key in native)
             return values
 
+    def gc_retry_deadlines(self):
+        """Admission facts need no recovery-file reads; due attempts still read their evidence."""
+        return self.repository.gc_retry_deadlines()
+
     def replace_keys(self, keys, values):
         return self.repository.replace_keys(keys, values)
 

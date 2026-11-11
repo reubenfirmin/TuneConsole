@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """Prepare once and run local actual-library checks in private CoW snapshots."""
 import argparse
 import hashlib

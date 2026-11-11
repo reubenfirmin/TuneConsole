@@ -1,5 +1,6 @@
 """Genre endpoints must escape style clusters and remain reversible during playback."""
 from copy import deepcopy
+from collections import Counter
 from contextlib import closing
 
 import numpy as np
@@ -12,6 +13,7 @@ from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls, without_query_timing,
 )
 from yt_playlist.core import genre_identity, schema_inspection
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.controllers.genres import Genres
 from yt_playlist.rec import embedding_vectors as embed, measurement, musical_character, radio_tuning
@@ -191,13 +193,58 @@ def test_eclectic_actively_changes_genre_beyond_nearest_clusters(
     assert len({t["video_id"] for t in history}) == len(history)
 
 
-def test_middle_keeps_embedding_style_continuity(store, genre_pools):
+@pytest.mark.parametrize('mixed', [False, True])
+def test_middle_keeps_embedding_style_continuity(store, genre_pools, mixed):
+    expected = {t['key']: 'unplayed' for rows in genre_pools.values() for t in rows}
+    if mixed:
+        account = store.accounts.upsert_account('rotation', 'credential', None, True)
+        local = [rows for rows in genre_pools.values() if rows[0]['genre'] == 'Electronic']
+        familiar = [t for rows in local for t in rows[:4]]
+        discoveries = [t for rows in local for t in rows[8:]]
+        with atomic_write(store):
+            store.conn.executemany('INSERT INTO play_events(account_id,recording_id,video_id,played_at,is_generated) '
+                'SELECT ?,id,?,1,0 FROM recordings WHERE identity_key=?',
+                [(account, t['video_id'], t['key']) for t in familiar])
+            store.conn.executemany('DELETE FROM library_memberships WHERE entry_id IN '
+                '(SELECT id FROM catalog_entries WHERE video_id=?)', [(t['video_id'],) for t in discoveries])
+            store.conn.executemany('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) '
+                'SELECT recording_id,id,1 FROM catalog_entries WHERE video_id=?',
+                [(t['video_id'],) for t in discoveries])
+        expected.update((t['key'], 'familiar') for t in familiar)
+        expected.update((t['key'], 'new') for t in discoveries)
     c = candidates(store, .5)
     seed = genre_pools["1"][0]
     history = [seed]
-    for _ in range(6):
-        history.append(c.next_track(history, target=seed))
-    assert all(t["genre"] == "Electronic" for t in history)
+    share = Counter({'familiar': 2, 'unplayed': 2, 'new': 2} if mixed else {'unplayed': 6})
+    try:
+        for _ in range(6):
+            pick = c.next_track(history, target=seed)
+            assert pick and pick['genre'] == 'Electronic'
+            history.append(pick)
+        plan = RadioDirections(c, seed)
+        assert plan.update([seed], [], 0)
+        for tracks in [history[1:], *(branch['tracks'] for branch in plan.slots)]:
+            assert len({t['video_id'] for t in tracks}) == 6
+            assert all(t['genre'] == 'Electronic' for t in tracks)
+            assert Counter(expected[t['key']] for t in tracks) == share
+            assert all(t['_radio_rotation_slot'] == expected[t['key']] for t in tracks)
+        # Midpoint still permits a nearby different genre when the requested
+        # style has no same-genre candidates left.
+        excluded = {t['video_id'] for rows in genre_pools.values() for t in rows if t['genre'] == 'Electronic'}
+        assert c.next_track([seed], target=genre_pools['6'][0], excluded=excluded)['genre'] == 'Synthwave'
+        neighbours = c.neighbours['1']
+        assert len(neighbours) == GENRE_POOL_LIMIT
+        played = [t for mid in neighbours for t in genre_pools[mid]] + [seed]
+        played_ids = {t['video_id'] for t in played}
+        plan = RadioDirections(c, seed)
+        assert plan.update(played, [], 0)
+        for branch in plan.slots:
+            videos = {t['video_id'] for t in branch['tracks']}
+            assert len(branch['tracks']) == len(videos) == 6
+            assert not videos & played_ids
+            assert all(c.cluster_for(t) == '1' for t in branch['tracks'])
+    finally:
+        c.close()
 
 
 def test_themed_uses_observed_genre_even_with_an_old_seed_and_unheard_prefix(store, genre_pools):

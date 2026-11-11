@@ -177,7 +177,8 @@ class SnapshotBridge:
         response = next(self.responses)
         if isinstance(response, Exception):
             raise response
-        return 200, json.dumps(response)
+        status, response = response if isinstance(response, tuple) else (200, response)
+        return status, json.dumps(response)
 
 
 def _production_client(responses):

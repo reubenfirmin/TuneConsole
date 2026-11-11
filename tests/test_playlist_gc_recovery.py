@@ -85,11 +85,17 @@ def reopen(case):
 
 @pytest.mark.parametrize("response", [
     YTMusicServerError("Server returned HTTP 404: Not Found."), {"error": {"code": 404}},
+    (404, {"error": {"code": 404, "message": "Missing playlist"}}),
+    (200, {"error": {"code": 404, "message": "Missing playlist"}}),
 ])
 def test_saved_failure_confirmed_absent_completes_original_without_another_delete(case, response):
     aid, backup, original = failed_attempt(case)
     reopen(case)
-    case.client.read_failure = response
+    original_client, bridge = case.client, None
+    if isinstance(response, tuple):
+        case.client, bridge = _production_client([response])
+    else:
+        case.client.read_failure = response
 
     result = collect(case)
 
@@ -99,7 +105,11 @@ def test_saved_failure_confirmed_absent_completes_original_without_another_delet
     assert case.store.actions.get_action(aid).status == "executed"
     assert case.store.playlists.get_playlist(case.pid) is None
     assert len(case.store.actions.get_actions()) == 1
-    assert case.client.writes == []
+    assert original_client.writes == []
+    if bridge:
+        assert len(bridge.calls) == 1
+        url, body = bridge.calls[0]
+        assert '/browse?' in url and body['browseId'] == 'VLSOURCE'
     assert backup.read_bytes() == original
     assert playlist_gc_retry.states(case.store) == {}
 
@@ -150,8 +160,15 @@ def test_unknown_remote_state_preserves_local_row_backup_and_saved_action(case, 
 
 @pytest.mark.parametrize("raw", [
     {"responseContext": {}, "trackingParams": "private", "frameworkUpdates": {}},
+    {"responseContext": {"mainAppWebResponseContext": {"loggedOut": False}},
+     "alerts": [{"alertRenderer": {"type": "ERROR", "text": {"simpleText": "This playlist does not exist."}}}]},
     {"responseContext": {"mainAppWebResponseContext": {"loggedOut": True}}},
     {"error": {"code": 403, "message": "Denied"}},
+    {"error": {"code": 401}}, {"error": {"code": 503}},
+    {"error": {"code": "404"}}, {"error": {"code": 404.0}},
+    {"responseContext": {"mainAppWebResponseContext": {"loggedOut": True}},
+     "error": {"code": 404}},
+    {"contents": {"signInEndpoint": {}}, "error": {"code": 404}},
 ])
 def test_production_strict_reader_rejects_realistic_incomplete_and_denied_envelopes(case, raw):
     aid, backup, original = failed_attempt(case)
@@ -212,7 +229,15 @@ def test_production_complete_pages_back_up_new_members_before_fresh_delete(case,
     assert case.store.actions.get_actions()[0].id != old_aid
 
 
-def test_backoff_survives_reopen_and_repeated_failure_has_only_one_trace(case, caplog):
+def test_backoff_survives_reopen_and_repeated_failure_has_only_one_trace(case, caplog, monkeypatch):
+    def unexpected_scan(*args, **kwargs):
+        pytest.fail('Idle retry must not enumerate playlists or listening history')
+
+    with monkeypatch.context() as idle:
+        idle.setattr(case.store.charts, 'get_playlist_track_recency', unexpected_scan)
+        idle.setattr(case.store.playlists, 'get_playlists', unexpected_scan)
+        idle.setattr(case.store.settings, 'get_settings_with_prefix', unexpected_scan)
+        assert collect(case, retry_only=True) == []
     failed_attempt(case)
     case.client.read_failure = TimeoutError("Temporarily unavailable")
     caplog.set_level(logging.WARNING, logger=playlist_gc_retry.__name__)
@@ -226,7 +251,11 @@ def test_backoff_survives_reopen_and_repeated_failure_has_only_one_trace(case, c
     case.client.reads.clear()
     caplog.clear()
 
-    assert collect(case, deadline - 1, retry_only=True) == []
+    with monkeypatch.context() as idle:
+        idle.setattr(case.store.charts, 'get_playlist_track_recency', unexpected_scan)
+        idle.setattr(case.store.playlists, 'get_playlists', unexpected_scan)
+        idle.setattr(case.store.settings, 'get_settings_with_prefix', unexpected_scan)
+        assert collect(case, deadline - 1, retry_only=True) == []
     assert case.client.reads == [] and caplog.records == []
     assert collect(case, deadline, retry_only=True) == []
     repeated, = [r for r in caplog.records if r.name == playlist_gc_retry.__name__]
@@ -255,21 +284,32 @@ def test_backoff_reaches_but_never_exceeds_one_day(case):
     assert case.client.writes == []
 
 
-def test_unknown_retry_survives_sync_removal_then_resolves_read_only(case):
+@pytest.mark.parametrize('production', [False, True])
+def test_unknown_retry_survives_sync_removal_then_resolves_read_only(case, production):
     aid, backup, original = failed_attempt(case)
     case.client.read_failure = TimeoutError("Unavailable")
     collect(case)
     case.store.playlists.remove_playlist(case.pid)
     reopen(case)
+    original_client, bridge = case.client, None
+    if production:
+        case.client, bridge = _production_client([
+            {'responseContext': {}, 'trackingParams': 'private', 'unknown': {}},
+            {'error': {'code': 404}},
+        ])
 
     assert collect(case, NOW + 3600, retry_only=True) == []
     assert case.store.actions.get_action(aid).status == "delete_pending"
     assert playlist_gc_retry.states(case.store)
-    case.client.read_failure = {"error": {"code": 404}}
+    if not production:
+        case.client.read_failure = {"error": {"code": 404}}
     assert len(collect(case, NOW + 3600 + 7200, retry_only=True)) == 1
     assert case.store.actions.get_action(aid).status == "executed"
     assert playlist_gc_retry.states(case.store) == {}
-    assert case.client.writes == [] and backup.read_bytes() == original
+    assert original_client.writes == [] and backup.read_bytes() == original
+    if bridge:
+        assert len(bridge.calls) == 2
+        assert all('/browse?' in url and body['browseId'] == 'VLSOURCE' for url, body in bridge.calls)
 
 
 def test_missing_local_row_confirmed_present_never_authorizes_a_fresh_delete(case):

@@ -190,7 +190,7 @@ def repair_diagnostics(preparation):
 
 
 @pytest.mark.parametrize('expiration', ['audit', 'repair'])
-def test_lost_queue_deadline_defers_without_losing_work_and_retries(store, monkeypatch, expiration):
+def test_slow_lost_queue_audit_and_repair_finish_their_admitted_batch(store, monkeypatch, expiration):
     clock = [0.0]
     monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     catalog(store, 6)
@@ -205,30 +205,18 @@ def test_lost_queue_deadline_defers_without_losing_work_and_retries(store, monke
 
     def expired(repo, limit=32, *, after=None):
         clock[0] += p.budget.capture_seconds + .01
-        # Let the real cooperative budget check reject the repository read.
+        # Cross the former cutoff during the real bounded repository read.
         return original(repo, limit, after=after)
 
     with monkeypatch.context() as patch:
         patch.setattr(PreparedContentRepo, 'missing_unqueued', expired)
-        assert not p.repair(1000)
-    reason = 'input-audit-budget' if expiration == 'audit' else 'input-repair-budget'
-    diagnostic = store.maintenance_diagnostics
-    assert diagnostic.reasons[progressive.INPUT_PHASE, reason] == 1
+        assert p.repair(1000)
     assert not store.conn.in_transaction
-    assert not store.prepared_content.pending(10)
     assert activity._DEADLINE.get() is None
-    if expiration == 'audit':
-        assert p.next_maintenance_at == 1060 and not p._repair_needed
-        assert not p.repair(1059)
-        retry_at = 1060
-    else:
-        assert p._repair_needed
-        retry_at = 1001
-    assert p.repair(retry_at), repair_diagnostics(p)
     first = store.prepared_content.pending(10)
     expected = [row[0] for row in store.conn.execute('SELECT identity_key FROM recordings ORDER BY identity_key')]
     assert [row[0] for row in first] == expected[:3]
-    assert p.repair(retry_at + 1)
+    assert p.repair(1001)
     assert store.prepared_content.pending(10)[:3] == first
     assert [row[0] for row in store.prepared_content.pending(10)] == expected
 
@@ -470,21 +458,24 @@ def test_input_publication_does_not_clear_a_blocked_basis_wait(store):
     assert progressive.maintenance_view(store)['blocked']
 
 
-def test_repeated_time_budget_failure_is_visible_and_retried(store, monkeypatch):
+def test_slow_fit_finishes_once_instead_of_repeating_after_deadline(store, monkeypatch):
+    from types import SimpleNamespace
+    from yt_playlist.core import activity
     catalog(store, 12)
     p = progressive.Preparation(store)
     drain(p)
-    def too_slow(_inputs, *, genre_axes=None):
-        raise WorkBudgetExceeded()
-    with monkeypatch.context() as patch:
-        patch.setattr(content_model, 'build_library_content', too_slow)
-        for now in (1000, 1060, 1120):
-            assert not p.fit(now)
-    status = progressive.maintenance_view(store)
-    assert status['blocked'] and status['attempts'] == 3
-    assert status['next_attempt_at'] == 2020
-    assert not p.due(2019)
-    assert p.due(2020) and p.fit(2020)
+    original, calls, clock = content_model.build_library_content, [], [100.]
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def slow(*args, **kwargs):
+        calls.append(True)
+        clock[0] += p.budget.fit_seconds + 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(content_model, 'build_library_content', slow)
+    assert p.fit(1000)
+    assert not p.fit(1060) and not p.fit(1120)
+    assert calls == [True]
     assert not progressive.maintenance_view(store)['blocked']
 
 

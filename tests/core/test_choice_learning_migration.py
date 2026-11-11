@@ -191,6 +191,28 @@ def test_historical_group_estimates_keep_values_without_pinning_snapshots(upgrad
     head, group, value = (upgraded_learning_template.result[name] for name in ('head', 'group', 'group_estimates'))
     assert store.rec_proposals.get_proposals('group_choice_bandit') == value
     assert not store.conn.execute('SELECT 1 FROM choice_learning_group_roots').fetchone()
+    with store.read_snapshot() as snapshot:
+        assert snapshot.store.rec_proposals.get_proposals('group_choice_bandit') == value
+        snapshot.release_reader()
+    for at in (11, 12, 13):
+        changes = store.conn.total_changes
+        store.rec_proposals.put_proposals('group_choice_bandit', {**value, 'at': at}, at)
+        assert store.conn.total_changes == changes, 'Equivalent capture replaced the native learning cohort'
+        assert store.rec_proposals.get_proposals('group_choice_bandit') == value
+        assert snapshot.is_current()
+    # Full report comparison still protects changed estimates and guards.
+    for replacement in (
+        {**value, 'rows': [{**row, 'estimate': .9} for row in value['rows']]},
+        {**value, 'expires_at': 20}, {**value, 'parameters': {'choice': .75}},
+        {**value, 'policy': 'new-policy'}, {**value, 'schema': 2},
+        {**value, 'at': 99}, {**value, 'at': 1},
+    ):
+        with store.read_snapshot() as changed:
+            assert changed.store.rec_proposals.get_proposals('group_choice_bandit') is not None
+            changed.release_reader()
+        store.rec_proposals.put_proposals('group_choice_bandit', replacement, 14)
+        assert store.rec_proposals.get_proposals('group_choice_bandit') == replacement
+        assert not changed.is_current(), 'A genuine learning change retained a stale calculation'
     # #688 retains the historical numerical result without requiring its group
     # tree. It cannot become a new snapshot owner when the projection changes.
     replacement = {**value, 'generation': 'missing'}

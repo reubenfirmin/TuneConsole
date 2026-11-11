@@ -440,15 +440,20 @@ def mock_snapshot_coordinator(store, monkeypatch):
     Conflict detection and source-change races use actual guarded snapshots in
     their own tests. This helper supplies uncontended publication only.
     """
+    from yt_playlist.core.db_revisions import Reads
+
     def publish(target, **kwargs):
         target()
         return True
 
     with reuse_reporting_reader(store, monkeypatch) as reader:
+        reader._snapshot_reads = Reads()
         def snapshot(**kwargs):
+            changes = store.conn.total_changes
             return nullcontext(SimpleNamespace(
                 store=reader, release_reader=lambda: None, publish=publish,
-                publish_ordered=publish, is_current=lambda: True, _changes=store.conn.total_changes))
+                publish_ordered=publish, is_current=lambda: store.conn.total_changes == changes,
+                _changes=changes))
 
         monkeypatch.setattr(store, 'read_snapshot', snapshot)
         yield

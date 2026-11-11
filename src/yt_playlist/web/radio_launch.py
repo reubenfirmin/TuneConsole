@@ -13,6 +13,7 @@ from yt_playlist.library import playlist_generated
 from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_candidates import eligible_seeds
+from yt_playlist.rec import radio_rotation
 from yt_playlist.rec.radio_restored import RestoredCandidates
 from yt_playlist.web.radio_persistence import PREPARATION_TIMEOUT, restore
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, readback_durations
@@ -89,6 +90,8 @@ class RadioLaunch:
             seed = next(iter(eligible_seeds(self.store, candidates.seed_offer(1), self.now_fn())), None)
         if seed is None:
             return None
+        for track in seeds or [seed]:
+            radio_rotation.issue(track)
         s = Session(client, candidates, identity,
                     versioned_title(self.store, f"Radio Session · {day.isoformat()}"))
         s.started_at, s.selected = self.now_fn(), list(seeds or [seed])
@@ -117,7 +120,12 @@ class RadioLaunch:
         if s.stop.is_set():
             return False
         alternates = self.store.tracks.playback_alternates(s.identity, [t['video_id'] for t in seeds])
-        seeds = [{**track, **alternates.get(track['video_id'], {})} for track in seeds]
+        resolved = [{**track, **alternates.get(track['video_id'], {})} for track in seeds]
+        changed = [actual for requested, actual in zip(seeds, resolved) if actual['key'] != requested['key']]
+        s.candidates.retain(changed)
+        for track in changed:
+            radio_rotation.issue(track)
+        seeds = resolved
         result = playlist_generated.create_generated_playlist(
             self.store, s.title, seeds, s.client, self.now_fn(), s.identity)
         with self.lock:
@@ -130,12 +138,21 @@ class RadioLaunch:
                 self.retain_provenance()
         logger.info("Radio initial write: playlist=%s requested=%s acknowledged=%s",
                     s.playlist, [t['video_id'] for t in seeds], s.initial_handles)
+        allocations = {track['key']: track.get('_radio_rotation_slot') for track in seeds}
         seeds = ([{**track, "key": track["identity_key"]}
                   for track in self.store.charts.playlist_tracks_detail(s.local_id)]
                  if s.local_id is not None else result['tracks'])
         if not seeds:
             raise ValueError("No playable songs could be added to radio. Choose another playlist or song.")
         s.candidates.retain(seeds)
+        for track in seeds:
+            # The SQL display projection omits session metadata. Match recording
+            # identity, not row position or upload ID, before restoring allocation.
+            slot = allocations.get(track['key'])
+            if slot in radio_rotation.KINDS:
+                track['_radio_rotation_slot'] = slot
+            else:
+                radio_rotation.issue(track)
         s.selected = list(seeds)
         choice = s.choices.pop(seed["video_id"])
         s.choices[seeds[0]["video_id"]] = choice
@@ -189,7 +206,8 @@ class RadioLaunch:
             raise PlaylistChanged("YouTube Music did not save any playable songs. Choose another song.")
         confirmed = []
         substitutions = RadioMutations(self.playlists, self.persistence, self.store.tracks, self.now_fn,
-                                       paused=lambda: getattr(self.store, 'activity_paused', False))
+                                       paused=lambda: getattr(self.store, 'activity_paused', False),
+                                       rotation_facts=self.store.radio_catalog.rotation_facts)
         for track, row in zip(matched, remote):
             if row.get('isAvailable') is False:
                 accepted.discard(track['video_id'])
@@ -198,6 +216,8 @@ class RadioLaunch:
                                                        account_id=s.identity, playlist=s.playlist)
                 actual = substitution.accepted
                 s.candidates.retain([actual])
+                if actual['key'] != track['key']:
+                    radio_rotation.issue(actual)
                 choice = s.choices.pop(track['video_id'], None)
                 if choice:
                     s.choices[actual['video_id']] = choice

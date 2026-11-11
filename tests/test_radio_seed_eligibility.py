@@ -124,6 +124,52 @@ def test_cached_radio_offer_applies_current_exclusions_and_requires_source_ident
         assert tracks == original
 
 
+@pytest.mark.parametrize('evidence', ['radio_start', 'generated_play', 'calendar', 'adopted', 'unknown'])
+def test_cached_offer_refreshes_novelty_without_replacing_issued_choices(store, evidence):
+    tracks = seeds(store)
+    account = store.accounts.upsert_account('listener', 'credential', None, True)
+    with store.conn:
+        store.conn.execute('DELETE FROM library_memberships')
+    candidates = RadioCandidates(store, 1000, comparison=None)
+    offered = [{**track, '_radio_fresh': True, '_radio_rotation': 'new'} for track in tracks]
+    candidates.retain(offered)
+    assert all(track['_radio_fresh'] for track in offered)
+    entry = store.conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=?',
+                               (tracks[0]['video_id'],)).fetchone()
+    if evidence == 'radio_start':
+        store.rec_ledger.record_recommendation_outcomes('radio-start', 'start', [tracks[0]['key']], 1001, generated=True)
+    elif evidence == 'generated_play':
+        with store.conn:
+            store.conn.execute('INSERT INTO play_events(account_id,recording_id,video_id,played_at,is_generated) '
+                               'VALUES (?,?,?,?,1)', (account, entry['recording_id'], tracks[0]['video_id'], 1001))
+    elif evidence == 'calendar':
+        with store.conn:
+            store.conn.execute('INSERT INTO listening_observations(account_id,raw_identity_key,recording_id,'
+                'source_day,day,source,timezone,precision,first_observed_at,last_observed_at) '
+                "VALUES (?,?,?,'2026-11-10','2026-11-10','fixture','UTC','calendar_day',1001,1001)",
+                (account, tracks[0]['key'], entry['recording_id']))
+    elif evidence == 'adopted':
+        with store.conn:
+            store.conn.execute("INSERT INTO library_memberships VALUES (?,'adopted',1001)", (entry['id'],))
+    else:
+        offered[0]['key'] = 'missing-current-identity'
+    try:
+        if evidence == 'unknown':
+            candidates.retain(offered)
+            assert not offered[0]['_radio_fresh']
+        else:
+            assert candidates.refresh_metadata(offered)
+            current = eligible_seeds(store, offered, 1002)
+            assert [t['option_id'] for t in current] == [t['option_id'] for t in offered]
+            assert [t['video_id'] for t in current] == [t['video_id'] for t in offered]
+            expected = 'unplayed' if evidence == 'adopted' else 'familiar'
+            assert offered[0]['_radio_rotation'] == current[0]['_radio_rotation'] == expected
+            assert not offered[0]['_radio_fresh'] and not current[0]['_radio_fresh']
+            assert all(t['_radio_fresh'] for t in current[1:])
+    finally:
+        candidates.close()
+
+
 @pytest.mark.parametrize('condition', ['eligible', 'unavailable', 'overlong'])
 @pytest.mark.parametrize('cached', [False, True])
 def test_requested_seed_rechecks_current_eligibility_even_when_already_loaded(store, condition, cached):

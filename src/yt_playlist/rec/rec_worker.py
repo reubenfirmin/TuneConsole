@@ -12,18 +12,13 @@ import traceback
 
 from yt_playlist.rec import model_selection, measurement
 from yt_playlist.core.activity import (activity_for, cancellable_work, check_stopping, WorkClosing,
-                                       work_budget, WorkBudgetExceeded)
+                                       WorkBudgetExceeded)
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.evidence_ledger import EvidenceBudgetExceeded
 from yt_playlist.core.policy_config import PolicyCapacityFull
 from yt_playlist.rec.worker_queue import Job, PendingJobs
 from yt_playlist.rec.worker_tasks import ServingTasks
-
-# A continuing metadata backlog must not cancel every graph attempt. User-facing
-# choices still preempt its bounded background slice.
-GROUP_PREEMPT = frozenset({Job.HOME, Job.MODES, Job.RATINGS, Job.CLEANUP})
-
 
 class RecWorker:
     def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60,
@@ -44,7 +39,6 @@ class RecWorker:
         self._ticker_started = False
         self.enabled = enabled
         self._stop = threading.Event()
-        self._group_yield = threading.Event()
         self._threads = []
         self.work = activity_for(ctx)
         limit_native_threads()
@@ -102,7 +96,10 @@ class RecWorker:
                 self._retry_measurements()
                 self._poll_tv()
             except WorkClosing:
-                return
+                # Idle and cancelled restart admission can reopen while this
+                # rejection unwinds. Keep the periodic worker alive to resume.
+                if self._stop.is_set() or self.work.closing_reason == 'shutdown':
+                    return
             except Exception:
                 self.ctx.logger.warning('recommendation change polling failed', exc_info=True)
 
@@ -151,7 +148,8 @@ class RecWorker:
             if not due and (generation := self.ctx.store.taste_groups.head_generation()):
                 from yt_playlist.rec import group_serving
                 preview = self.ctx.store.rec_proposals.get_proposals(group_serving.SURFACE)
-                due = not preview or preview['generation'] != generation or preview.get('schema') != group_serving.SCHEMA
+                due = (not preview or preview['generation'] != generation or preview.get('schema') != group_serving.SCHEMA
+                       or group_serving.due(self.ctx.store, self.ctx.now_fn()))
             if due:
                 self._schedule(full=False, groups=True)
         state = self.jobs.retry[Job.FULL]
@@ -182,10 +180,7 @@ class RecWorker:
         state = self.jobs.retry[Job.TV]
         if self.jobs.has(Job.TV) or time.monotonic() < state.retry_at:
             return
-        pool = tv.cached(self.ctx.store)
-        now = self.ctx.now_fn()
-        retry_due = pool and now >= pool.get('retry_at', pool['at'] + tv.SEARCH_RETRY_S)
-        if state.dirty or not pool or retry_due or not 0 <= now - pool['at'] < tv.MAX_AGE:
+        if state.dirty or tv.due(self.ctx.store, self.ctx.now_fn()):
             self._schedule(full=False, tv=True)
 
     def _poll_evidence_storage(self):
@@ -279,7 +274,9 @@ class RecWorker:
                 continue
             full_sweep = time.monotonic() >= next_sweep
             try:
-                clients = self.ctx.client_provider() or {}
+                retry_at = playlist_gc_retry.next_retry_at(self.ctx.store)
+                due = full_sweep or (retry_at is not None and retry_at <= self.ctx.now_fn())
+                clients = (self.ctx.client_provider() or {}) if due else {}
                 if clients:        # no clients configured (e.g. pre-setup) -> nothing to delete remotely
                     kwargs = {} if full_sweep else {"retry_only": True}
                     collected = self.work.wrap("generated-playlist collection",
@@ -358,7 +355,6 @@ class RecWorker:
                 self.ctx.logger.warning("recommendation measurement backlog full; offer omitted: surface=%s",
                                         offer.surface)
                 return False
-            self._group_yield.set()
             start = (not self._running
                      and time.monotonic() >= self.jobs.retry[Job.MEASUREMENT].retry_at)
             if start:
@@ -521,6 +517,8 @@ class RecWorker:
         return self.projections.failed('model_health')
 
     def trigger_tv_refresh(self):
+        from yt_playlist.rec import tv
+        tv.refresh(self.ctx.store)
         with self._lock:
             state = self.jobs.retry[Job.TV]
             state.dirty = True
@@ -548,8 +546,6 @@ class RecWorker:
             for job, payload in requested.items():
                 if payload:
                     self.jobs.merge(job, payload)
-                    if job in GROUP_PREEMPT:
-                        self._group_yield.set()
             if any(requested.values()) and self.ctx.logger.isEnabledFor(logging.DEBUG):
                 caller = traceback.extract_stack(limit=3)[0]
                 self.ctx.logger.debug("rec scheduled: kind=%s changed_tracks=%d running=%s source=%s:%d in %s",
@@ -746,7 +742,7 @@ class RecWorker:
                         dirty = self.tasks.home()
                     with self._lock:
                         state.dirty |= dirty
-                    self.trigger_tv_refresh()
+                    self._poll_tv()
                 except WorkClosing:
                     raise
                 except Exception:
@@ -878,16 +874,9 @@ class RecWorker:
             return
         state.started(time.monotonic())
 
-        with self._lock:
-            if GROUP_PREEMPT.intersection(self.jobs.pending):
-                state.deferred(time.monotonic())
-                return
-            self._group_yield.clear()
         def should_stop():
-            # SQL cancellation callbacks can run under the database lock. They
-            # must not acquire the scheduler lock in the opposite lock order.
-            if self._group_yield.is_set():
-                raise WorkBudgetExceeded('Shadow grouping yielded to serving work')
+            # New requests coalesce behind the admitted batch. Cancelling its
+            # capture/calculation here discards progress and can starve it.
             return self._stop.is_set()
 
         def report_waiting(phase, reason):
@@ -914,7 +903,8 @@ class RecWorker:
                         self.ctx.store.maintenance_diagnostics.record(
                             'deferred', phase=group_serving.PHASE, reasons=('group-head',))
                         return None
-                    return group_serving.prepare(self.ctx.store, self.ctx.now_fn())
+                    now = self.ctx.now_fn()
+                    return group_serving.prepare(self.ctx.store, now) if group_serving.due(self.ctx.store, now) else {}
 
             with self.model_lock:
                 preview = self._stage('adaptive grouping shadow', prepare)
@@ -1027,7 +1017,7 @@ class RecWorker:
         checkpoint = self.preparation.full_checkpoint(self.ctx.now_fn())
         def fit():
             try:
-                with work_budget(20):
+                with cancellable_work(self._stop.is_set):
                     return model_refresh.rebuild(store, self.ctx.now_fn(), keep_collaborative=restored,
                                                 memory_bytes=self.preparation.budget.full_memory_bytes,
                                                 fit_cache=self._fit_cache)

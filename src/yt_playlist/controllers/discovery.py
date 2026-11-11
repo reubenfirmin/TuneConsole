@@ -7,7 +7,7 @@ from yt_playlist.core import discovery_cache_policy
 from yt_playlist.core import artist_reconciliation
 from yt_playlist.core import discovery_origin_policy
 from yt_playlist.core.discovery_sources import source_identity
-from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
+from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.db_diagnostics import database_operation
 
 
@@ -299,7 +299,7 @@ class Discovery:
         self.repository.delete_pool_entries((), (), gone)
 
     def gc_discovery_pool(self, now, gc_days, held_track_keys):
-        with (database_operation('Discovery.gc_discovery_pool'), work_budget(20),
+        with (database_operation('Discovery.gc_discovery_pool'),
               self.repository.cleanup_snapshot() as snapshot):
             reader = snapshot.store
             repository = reader.discovery.repository

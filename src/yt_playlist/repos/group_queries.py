@@ -31,12 +31,13 @@ def head_checkpoint(conn):
     return {'generation': row[0], 'serial': row[1], 'policy': _policy(conn, row[2])} if row else None
 
 
-def head(conn, *, members=False):
+def head(conn, *, members=False, inputs=True):
     row = conn.execute('SELECT g.* FROM group_head h JOIN group_generations g ON g.id=h.generation_id '
                        'JOIN group_publications p ON p.generation_id=g.id WHERE h.id=1').fetchone()
     if row is None:
         return None
-    return {**_generation(conn, row), 'groups': definitions(conn, row['external_key'], members=members)}
+    generation = _generation(conn, row) if inputs else {**dict(row), 'policy': _policy(conn, row['policy_version'])}
+    return {**generation, 'groups': definitions(conn, row['external_key'], members=members)}
 
 
 def _definition(conn, row):

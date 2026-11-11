@@ -96,6 +96,42 @@ def load_report(path):
     return report
 
 
+def calibrate_unit_timings(current, previous):
+    """Compare crossed source cohorts before using one runner's time as a file cost."""
+    current_sources = {row.get('source_shard') for row in current.values()}
+    previous_sources = {row.get('source_shard') for row in previous.values()}
+    if (min(len(current_sources), len(previous_sources)) < 2
+            or any(type(source) is not int or source < 1 for source in current_sources | previous_sources)):
+        return current, {}
+    ratios = defaultdict(list)
+    for name, row in current.items():
+        before = previous.get(name)
+        if before is None or row['cases'] != before['cases']:
+            continue
+        earlier, later = before['seconds'], row['seconds']
+        if not all(math.isfinite(value) and value >= .2 for value in (earlier, later)):
+            continue  # Very short files mostly measure timer and fixture noise.
+        ratios[before['source_shard'], row['source_shard']].append(math.log(later) - math.log(earlier))
+    cells = {pair: statistics.median(values) for pair, values in ratios.items() if len(values) >= 4}
+    residuals = defaultdict(list)
+    for source in sorted(previous_sources):
+        row = {new: ratio for (old, new), ratio in cells.items() if old == source}
+        if len(row) < max(2, (len(current_sources) + 1) // 2):
+            return current, {}  # No reliable same-source comparison for this prior runner.
+        middle = statistics.median(row.values())
+        for new, ratio in row.items():
+            residuals[new].append(ratio - middle)
+    if any(len(residuals[new]) < max(2, (len(previous_sources) + 1) // 2) for new in current_sources):
+        return current, {}
+    offsets = {new: statistics.median(residuals[new]) for new in sorted(current_sources)}
+    center = statistics.median(offsets.values())
+    if any(abs(offset - center) > math.log(2) for offset in offsets.values()):
+        return current, {}  # Incompatible measurements are not a timing calibration.
+    scales = {source: math.exp(offset - center) for source, offset in offsets.items()}
+    return {name: {**row, 'seconds': row['seconds'] / scales[row['source_shard']]}
+            for name, row in current.items()}, scales
+
+
 def partition(nodeids, durations, count=2):
     """Keep files together and spread each timing source across the new shards."""
     if count < 1 or len(nodeids) != len(set(nodeids)):
@@ -172,19 +208,37 @@ def pytest_configure(config):
         raise pytest.UsageError("--ci-shard requires --ci-shard-report so coverage can be verified")
     baseline_path = config.getoption("ci_duration_baseline")
     suite = config.getoption("ci_suite")
+    source_scales = {}
     if baseline_path.is_dir():
         measured = json.loads((baseline_path / f"{suite}-timings.json").read_text())
         if measured.get("suite") != suite or not measured.get("files"):
             raise pytest.UsageError("Shard timing artifact is missing this suite's measured file durations")
         durations = measured["files"]
+        if suite == 'unit':
+            reference = json.loads(BASELINE.read_text())
+            if reference.get('failed_cases') == [] and measured.get('revision') != reference.get('revision'):
+                durations, source_scales = calibrate_unit_timings(durations, reference.get('unit', {}))
     else:
         durations = json.loads(baseline_path.read_text()).get(suite, {})
-    config.pluginmanager.register(Shard(config, index, total, path, suite, durations,
+    config.pluginmanager.register(Shard(config, index, total, path, suite, durations, source_scales=source_scales,
                                       source_path=config.getoption('ci_source_report')), "isolated-ci-shard")
 
 
+def _cpu_model():
+    if platform.system() == 'Linux':
+        try:
+            with open('/proc/cpuinfo') as info:
+                for line in info.read(8192).splitlines():
+                    key, _, value = line.partition(':')
+                    if key.strip() == 'model name':
+                        return value.strip()[:128]
+        except OSError:
+            pass
+    return platform.processor()
+
+
 class Shard:
-    def __init__(self, config, index, total, path, suite, durations, *, source_path=None):
+    def __init__(self, config, index, total, path, suite, durations, *, source_path=None, source_scales=None):
         self.config, self.path, self.durations = config, path.resolve(), durations
         self.source_path = source_path.resolve() if source_path is not None else None
         if self.source_path is not None:
@@ -201,10 +255,13 @@ class Shard:
         self.report = {"schema": 2, "suite": suite, "index": index, "total": total,
                        "revision": os.environ.get("GITHUB_SHA", "local"),
                        'runtime': {'python': platform.python_version(), 'platform': platform.platform(),
-                                   'processor': platform.processor(), 'cpu_count': os.cpu_count()},
+                                   'processor': platform.processor(), 'cpu_count': os.cpu_count(),
+                                   'cpu_model': _cpu_model(), 'image_version': os.environ.get('ImageVersion')},
                        "started_at": datetime.now(timezone.utc).isoformat(), "tests": {},
                        "executions": [], "repeated_phases": [], 'journal_id': uuid.uuid4().hex,
                        'active': None}
+        if source_scales:
+            self.report['planning_source_scales'] = {str(source): scale for source, scale in source_scales.items()}
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_collection_modifyitems(self, config, items):
@@ -319,6 +376,8 @@ def _measure(reports, suite, total, *, diagnostic=False):
         if (report.get("schema"), report["suite"], report["total"], report["revision"], report["expected"], report["file_owners"]) != (
                 2, suite, total, reports[0]["revision"], original, reports[0]["file_owners"]):
             raise ValueError(f"{suite}: shard normal collections, file plans or source revisions differ")
+        if report.get('planning_source_scales') != reports[0].get('planning_source_scales'):
+            raise ValueError(f'{suite}: shard timing calibrations differ')
         if report.get("exitstatus") not in ((0, 1) if diagnostic else (0,)):
             raise ValueError(f"{suite}: shard {report['index']} did not pass")
         if report.get('active') or report.get('journal_incomplete'):
@@ -350,6 +409,8 @@ def _measure(reports, suite, total, *, diagnostic=False):
     return {"suite": suite, "revision": reports[0]["revision"], "shards": total, "cases": len(original),
             "case_digest": hashlib.sha256(json.dumps(sorted(original)).encode()).hexdigest(),
             "estimated_seconds": reports[0]["estimated_seconds"],
+            **({'planning_source_scales': reports[0]['planning_source_scales']}
+               if 'planning_source_scales' in reports[0] else {}),
             "shard_seconds": [report["elapsed_seconds"] for report in reports],
             "test_runner_minutes": elapsed_seconds / 60,
             "phase_seconds": {name: sum(phases.get(name, {}).get("seconds", 0)

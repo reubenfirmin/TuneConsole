@@ -11,7 +11,8 @@ import pytest
 from tests.prepared_fixture_support import capture_template, coordinates, historical_template, prepared_template, roots
 from tests.rec.test_home_prepared import service
 from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
-from yt_playlist.core import profile_files
+from yt_playlist.core import evidence_ledger, file_collection, profile_files
+from yt_playlist.core.preparation import metadata_destinations
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_prepared, musical_profiles
 
@@ -44,6 +45,8 @@ def private_clone_sql(native_sql_calls, without_query_timing):
 
 def test_file_coordinates_keep_physical_owners_quoted_names_and_logical_paths():
     with closing(sqlite3.connect(':memory:')) as conn:
+        with pytest.raises(ValueError, match='file-backed database'):
+            metadata_destinations.directory(conn)
         conn.execute('CREATE TABLE "owner""one" (filename TEXT, cache_filename TEXT, notfilename TEXT)')
         conn.executemany('INSERT INTO "owner""one" VALUES (?,?,?)', [
             ('/source/first', 'relative/one', '/ignored'),
@@ -108,17 +111,41 @@ def test_declared_external_backup_coordinates_are_private_after_source_removal(t
 @pytest.mark.parametrize('disk', [False, True])
 @pytest.mark.parametrize('source_disk', [False, True])
 def test_open_prepared_consumer_keeps_private_writes_and_real_snapshot_guards(
-        tmp_path, _pristine_current_schema, disk, source_disk):
+        tmp_path, _pristine_current_schema, disk, source_disk, monkeypatch):
     def seed(source):
         source.settings.set_setting('private_input', 'prepared')
+        source.rec_ledger.evidence().put('checkpoint', 'fixture', {'input': 'prepared'})
 
     source_directory = tmp_path / 'source'
     source_directory.mkdir()
     with prepared_template(_pristine_current_schema, seed,
                            database=source_directory / 'source.db' if source_disk else None) as template:
         with template.open(tmp_path / 'consumer.db' if disk else ':memory:') as target:
+            evidence = target.rec_ledger.evidence()
+            assert evidence.get('checkpoint', 'fixture') == {'input': 'prepared'}
+            assert evidence.directory != template.source.rec_ledger.evidence().directory
+            # Later function isolation must not change a higher-scope owner's
+            # file coordinates or leases. Copies remain independent as well.
+            with monkeypatch.context() as patch:
+                patch.setenv('YT_PLAYLIST_HOME', str(tmp_path / 'later-function-home'))
+                assert evidence_ledger.directory(target.conn) == evidence.directory
+                with template.open(':memory:') as other:
+                    other_root = other.rec_ledger.evidence().directory
+                    assert other_root != evidence.directory
+                    evidence.put('checkpoint', 'private', {'only': 'first consumer'})
+                    assert other.rec_ledger.evidence().get('checkpoint', 'private') is None
+                    assert other.rec_ledger.evidence().get('checkpoint', 'fixture') == {'input': 'prepared'}
+                assert not other_root.exists()
+            assert target.vibe_predictions.inputs([]) == {}
             if disk:
                 assert target.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+                prepared_root = metadata_destinations.directory(target.conn)
+                assert prepared_root == tmp_path / 'consumer.db.preparation/metadata-deliveries'
+                with target.vibe_predictions.metadata.retained():
+                    with file_collection.collector(prepared_root) as allowed:
+                        assert not allowed
+                with file_collection.collector(prepared_root) as allowed:
+                    assert allowed
             assert not target._schema_compatibility
             with target.read_snapshot() as snapshot:
                 assert snapshot.store.settings.get_setting('private_input') == 'prepared'
@@ -128,6 +155,8 @@ def test_open_prepared_consumer_keeps_private_writes_and_real_snapshot_guards(
                 assert snapshot.store.settings.get_setting('private_input') == 'private write'
                 assert snapshot.publish(lambda: None)
             assert template.source.settings.get_setting('private_input') == 'prepared'
+            assert template.source.rec_ledger.evidence().get('checkpoint', 'private') is None
+        assert evidence.directory.exists() == disk
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             target.conn.execute('SELECT 1')
 
@@ -278,10 +307,11 @@ def test_restored_schema_with_added_owner_gets_real_revision_guards(
         assert template.source.conn.execute('SELECT value FROM fixture_added_owner').fetchone()[0] == 'template value'
 
 
-@pytest.mark.parametrize('fail_build', [False, True])
+@pytest.mark.parametrize('failure', ['none', 'build', 'restore', 'use'])
 @pytest.mark.parametrize('historical', [False, True])
 def test_prepared_template_isolates_construction_and_restores_caller_settings(
-        _pristine_current_schema, tmp_path, monkeypatch, fail_build, historical):
+        _pristine_current_schema, tmp_path, monkeypatch, failure, historical):
+    from tests import prepared_fixture_support as fixtures
     from yt_playlist.rec import audio_vibe_model, vibe_preparation
 
     caller = {'YT_PLAYLIST_HOME': str(tmp_path / 'caller-home'),
@@ -294,7 +324,7 @@ def test_prepared_template_isolates_construction_and_restores_caller_settings(
     builder = historical_template if historical else prepared_template
     options = {'database': tmp_path / 'historical.db'} if historical else {}
 
-    def build(source):
+    def observe(source):
         sources.append(source)
         homes.append(Path(os.environ['YT_PLAYLIST_HOME']))
         assert homes[-1] != Path(caller['YT_PLAYLIST_HOME'])
@@ -305,12 +335,20 @@ def test_prepared_template_isolates_construction_and_restores_caller_settings(
         assert audio_vibe_model.identity() == 'heuristic'
         assert vibe_preparation.version().endswith('/heuristic')
         assert 'DEEPSEEK_API_KEY' not in os.environ
+
+    def build(source):
+        observe(source)
+        if historical:
+            # This lifecycle check opens admitted current-schema consumers;
+            # historical_template itself intentionally does not admit inputs.
+            source.init_schema()
         source.settings.set_setting('constructed', 'private template')
-        if fail_build:
+        source.rec_ledger.evidence().put('checkpoint', 'fixture', {'input': 'prepared'})
+        if failure == 'build':
             raise ValueError('Interrupted template construction')
         return 'prepared'
 
-    if fail_build:
+    if failure == 'build':
         with pytest.raises(ValueError, match='Interrupted template construction'):
             with builder(_pristine_current_schema, build, **options):
                 pytest.fail('A failed builder must not yield a template')
@@ -321,8 +359,41 @@ def test_prepared_template_isolates_construction_and_restores_caller_settings(
             assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
             assert {key: os.environ.get(key) for key in caller} == caller
             assert homes[0].is_dir()
+            def construct(database):
+                target = Store(database)
+                observe(target)
+                return target
+
+            restore = fixtures.PreparedTemplate.restore
+            def restore_consumer(self, target):
+                result = restore(self, target)
+                if failure == 'restore':
+                    raise ValueError('Interrupted consumer restore')
+                return result
+
+            with monkeypatch.context() as patch:
+                patch.setattr(fixtures, 'Store', construct)
+                patch.setattr(fixtures.PreparedTemplate, 'restore', restore_consumer)
+                if failure in {'restore', 'use'}:
+                    with pytest.raises(ValueError, match='Interrupted consumer'):
+                        with template.open(':memory:') as target:
+                            assert {key: os.environ.get(key) for key in caller} == caller
+                            assert homes[-1].is_dir()
+                            raise ValueError('Interrupted consumer use')
+                else:
+                    with template.open(':memory:') as target:
+                        assert {key: os.environ.get(key) for key in caller} == caller
+                        assert homes[-1].is_dir()
+                        assert target.rec_ledger.evidence().get('checkpoint', 'fixture') == {'input': 'prepared'}
+            assert len(set(homes)) == 2
+            assert not homes[-1].exists()
+            assert not evidence_ledger.root_for_database(None, sources[-1]._evidence_key).exists()
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                sources[-1].conn.execute('SELECT 1')
+            assert homes[0].is_dir()
     assert {key: os.environ.get(key) for key in caller} == caller
     assert not homes[0].exists()
+    assert not Path(caller['YT_PLAYLIST_HOME']).exists()
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
         sources[0].conn.execute('SELECT 1')
 

@@ -61,7 +61,10 @@ def intensity_inputs(monkeypatch):
             intensity_bands=lambda *args, **kwargs: [2, 48]),
         rec_query=SimpleNamespace(tracks_by_keys=lambda keys: {}),
         accounts=SimpleNamespace(get_accounts=list),
-        radio_catalog=SimpleNamespace(details=lambda keys: {key: all_tracks[key] for key in keys}))
+        radio_catalog=SimpleNamespace(details=lambda keys: {key: all_tracks[key] for key in keys},
+            rotation_facts=lambda keys: {key: {'owned': not all_tracks[key].get('_radio_fresh'),
+                'heard': bool(all_tracks[key].get('plays')), 'last_started': None, 'last_offered': None}
+                for key in keys if key in all_tracks}))
 
     def intensity_pool(bands, mode, energy, *, allowed, genre_allowed, excluded, used, limit=LOOKAHEAD):
         assert 1 <= limit <= LOOKAHEAD

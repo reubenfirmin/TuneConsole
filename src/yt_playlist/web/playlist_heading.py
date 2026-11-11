@@ -1,8 +1,8 @@
-"""Presentation of recognized generated titles; the stored title remains intact."""
+"""Separate recognized mixtape metadata without inventing a replacement name."""
 import re
 from datetime import datetime
-from yt_playlist.rec import home_vibe
 
+from yt_playlist.rec import home_vibe
 
 _TYPES = ('More in your wheelhouse', 'From your catalog', 'Comfort listening',
           'Fresh songs', 'Radio Session')
@@ -17,37 +17,31 @@ def build_vibe_label(recipe):
     return home_vibe.PRESETS.get(preset, {}).get('label') if isinstance(preset, str) else None
 
 
-def generated_heading(title, *, is_generated, recipe=None):
-    """Separate known type/date/version syntax, preserving custom names verbatim."""
-    match = _DATED.fullmatch(title or '') if is_generated else None
+def title_context(title, *, is_generated, recipe=None):
+    """Custom names stay plain; saved provenance supplies a recognized mix's Vibe."""
+    match = _DATED.fullmatch(title or '') if is_generated or recipe is not None else None
     if not match:
-        return None
-    body, raw_date = match['body'], match['date']
+        return {'generated_heading': None, 'build_vibe_label': None}
+    body = match['body']
     vibe = build_vibe_label(recipe)
-    if vibe and body.endswith(' - ' + vibe):
-        body = body[:-(len(vibe) + 3)]
-    kind = next((label for label in _TYPES if body == label or body.endswith(' - ' + label)), None)
-    if kind is None:
-        return None
+    identity = body
+    # Recognize historical title syntax without inferring missing provenance.
+    for label in (preset['label'] for preset in home_vibe.PRESETS.values()):
+        if identity.endswith(' - ' + label):
+            identity = identity[:-(len(label) + 3)]
+            break
+    kind = next((label for label in _TYPES if identity == label or identity.endswith(' - ' + label)), None)
     try:
-        day = datetime.strptime(raw_date, '%Y-%m-%d' if raw_date[:4].isdigit() else '%B %d %Y').date()
+        day = datetime.strptime(match['date'], '%Y-%m-%d' if match['date'][:4].isdigit() else '%B %d %Y').date()
     except ValueError:
-        return None
-    name = body[:-(len(kind) + 3)] if body != kind else kind
-    return {'name': name, 'kind': kind, 'date': day.isoformat(),
-            'date_label': f'{day:%B} {day.day}, {day.year}', 'version': match['version']}
-
-
-def generated_title_context(store, playlist, *, is_generated, recipe=None, tracks=None):
-    """Present the same current track facts before and after local import."""
-    heading = generated_heading(playlist.title, is_generated=is_generated, recipe=recipe)
-    if heading and heading['name'] == heading['kind']:
-        from yt_playlist.rec import recipes
-        lane = {'More in your wheelhouse': 'wheelhouse', 'From your catalog': 'explore',
-                'Comfort listening': 'comfort', 'Fresh songs': 'fresh'}.get(heading['kind'])
-        if lane:
-            if tracks is None:
-                tracks = store.charts.playlist_tracks_detail(playlist.id)
-            items = [{**track, 'key': track.get('identity_key', ''), 'year': None} for track in tracks]
-            heading.update(recipes.theme_heading(store, lane, items))
-    return {'generated_heading': heading, 'build_vibe_label': build_vibe_label(recipe)}
+        kind = None
+    if kind is None:
+        return {'generated_heading': None, 'build_vibe_label': None}
+    # All displayed text comes from the saved name. Date/version and a known
+    # recorded Vibe can move into metadata; unknown historical text stays intact.
+    name = body
+    if vibe and name.endswith(' - ' + vibe):
+        name = name[:-(len(vibe) + 3)]
+    return {'generated_heading': {'name': name, 'kind': kind, 'date': day.isoformat(),
+            'date_label': f'{day:%B} {day.day}, {day.year}', 'version': match['version']},
+            'build_vibe_label': vibe}

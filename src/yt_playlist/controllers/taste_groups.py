@@ -16,6 +16,9 @@ class TasteGroups:
     def head(self, *, members=False):
         return self.repository.head(members=members)
 
+    def preview_head(self):
+        return self.head(members=True)
+
     def head_checkpoint(self):
         return self.repository.head_checkpoint()
 

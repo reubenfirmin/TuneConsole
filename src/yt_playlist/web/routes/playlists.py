@@ -22,7 +22,7 @@ from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.web.context import refresh_playlist_view
 from yt_playlist.web.jobs import start_playlist_enrichment
-from yt_playlist.web.playlist_heading import generated_title_context
+from yt_playlist.web.playlist_heading import title_context
 
 
 def build(ctx) -> APIRouter:
@@ -66,11 +66,6 @@ def build(ctx) -> APIRouter:
     def _is_generated(pid):
         pl = store.playlists.get_playlist(pid)
         return pl is not None and store.playlists.is_quarantined_playlist(pl.playlist_scope_id)
-
-    def _title_context(pl, recipe, tracks=None):
-        origin = store.playlists.playlist_provenance(pl.playlist_scope_id)['origin']
-        return generated_title_context(store, pl, is_generated=origin == 'tuneconsole',
-                                       recipe=recipe, tracks=tracks)
 
     def _feedback_version(tracks):
         fields = sorted((t['identity_key'], t.get('genre') or '', t.get('year') or '') for t in tracks)
@@ -203,7 +198,7 @@ def build(ctx) -> APIRouter:
             "pl": pl, "tracks": tracks,
             "is_generated": is_generated,
             "show_playlist_radio": not is_generated or not onboarding.initial_setup_pending(store, now_fn()),
-            **_title_context(pl, build_recipe, tracks),
+            **title_context(pl.title, is_generated=is_generated, recipe=build_recipe),
             "facets": taste_analysis.playlist_facets(store, pid) if is_generated else None,
             "feedback_version": _feedback_version(tracks) if is_generated else None,
             "mood_state": taste_analysis.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
@@ -452,7 +447,9 @@ def build(ctx) -> APIRouter:
         _refresh_ytm_view(ctx, store, pid)
         pl = store.playlists.get_playlist(pid)
         return templates.TemplateResponse(request, "_partials/playlist_head.html",
-            {"pl": pl, **_title_context(pl, store.playlist_recipes.get_recipe(pl.playlist_scope_id))})
+            {"pl": pl, **title_context(pl.title,
+                is_generated=store.playlists.is_quarantined_playlist(pl.playlist_scope_id),
+                recipe=store.playlist_recipes.get_recipe(pl.playlist_scope_id))})
 
     @router.post("/settings/lastfm-key")
     async def set_lastfm_key(request: Request):

@@ -41,14 +41,20 @@ def _gc_eligible_now(store, playlist, now, grace_s):
     return _gc_eligible(store, playlist, recency, now, grace_s)
 
 
-def _gc_targets(store, recency, now, grace_s):
+def _gc_targets(store, now, grace_s, *, retry_only):
     """Keep saved attempts discoverable even after sync prunes their local rows."""
-    playlists = {(pl.account_id, pl.provider_playlist_id): pl for pl in store.playlists.get_playlists()}
-    targets = {target: pl for target, pl in playlists.items()
-               if _gc_eligible(store, pl, recency, now, grace_s)}
-    retries = playlist_gc_retry.states(store)
-    for state in retries.values():
-        target = (state["identity"], state["ytm"])
+    retries = playlist_gc_retry.deadlines(store)
+    playlists, targets = {}, {}
+    if not retry_only:
+        recency = store.charts.get_playlist_track_recency(include_generated=True)
+        playlists = {(pl.account_id, pl.provider_playlist_id): pl for pl in store.playlists.get_playlists()}
+        targets = {target: pl for target, pl in playlists.items()
+                   if _gc_eligible(store, pl, recency, now, grace_s)}
+    for account, remote, deadline in retries:
+        target = (account, remote)
+        if deadline > now:
+            targets.pop(target, None)
+            continue
         if target in targets:
             continue
         # Recheck eligibility and saved intent under the target claim. A missing
@@ -78,14 +84,16 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
         grace_days = rec_params.get_param(store, "generated_gc_days")
     grace_s = grace_days * 86400.0
     clients = clients or {}
-    recency = store.charts.get_playlist_track_recency(include_generated=True)
     collected = []
-    for pl in _gc_targets(store, recency, now, grace_s):
+    for pl in _gc_targets(store, now, grace_s, retry_only=retry_only):
         client = clients.get(pl.account_id)
         if client is None:                                # can't delete remotely without its client
             continue
         try:
             with claim_deletion_target(store, pl.account_id, pl.provider_playlist_id):
+                previous = playlist_gc_retry.read(store, pl)
+                if (retry_only and previous is None) or (previous and previous["next_retry_at"] > now):
+                    continue
                 current = store.playlists.get_playlist_for_account(pl.account_id, pl.provider_playlist_id)
                 if current is not None:
                     if not _gc_eligible_now(store, current, now, grace_s):
@@ -103,9 +111,6 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
                     pl = SimpleNamespace(id=None, account_id=pl.account_id,
                                          provider_playlist_id=pl.provider_playlist_id,
                                          title=entry.get("title", pl.provider_playlist_id))
-                previous = playlist_gc_retry.read(store, pl)
-                if (retry_only and previous is None) or (previous and previous["next_retry_at"] > now):
-                    continue
                 state = playlist_gc_retry.begin(store, pl, now, previous)
                 phase = "reconcile"
                 try:

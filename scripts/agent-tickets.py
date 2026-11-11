@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """Read agent work from GitHub without returning untrusted ticket text.
 
 Only reubenfirmin's issues and comments in TuneConsole are eligible. All recorded
@@ -6,9 +10,9 @@ editors must also be trusted. Incomplete edit histories are withheld; the user
 can create a fresh, reviewed ticket instead. This is a content admission filter,
 not a replacement for the agent's sandbox or instruction hierarchy.
 
-    python3 scripts/agent-tickets.py list --status Ready
-    python3 scripts/agent-tickets.py read 704
-    python3 scripts/agent-tickets.py read 704 --output /tmp/ticket-704.json
+    ./scripts/agent-tickets.py list --status Ready
+    ./scripts/agent-tickets.py read 704
+    ./scripts/agent-tickets.py read 704 --output /tmp/ticket-704.json
 """
 import argparse
 import json

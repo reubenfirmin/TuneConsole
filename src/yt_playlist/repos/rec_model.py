@@ -5,6 +5,13 @@ from yt_playlist.core import artists, catalog, genre_identity, taste_axes, taste
 
 class RecModelRepo(Repo):
     @lookup_read
+    def feedback_expiry(self, now):
+        row = self.conn.execute('SELECT min(until) FROM rec_feedback WHERE until>? '
+            "AND (kind IN ('dislike','mute') OR (surface='for_you' AND kind IN ('dismiss','not_now')))",
+            (now,)).fetchone()
+        return row[0]
+
+    @lookup_read
     def weight_records(self):
         return {row['axis']: dict(row) for row in self.conn.execute(
             taste_axes.projection(self.conn, 'rec_weights', 'axis,weight,updated_at'))}

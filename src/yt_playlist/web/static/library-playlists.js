@@ -250,8 +250,7 @@ function moveTab(fromId, toId, rows) {
   };
 }
 function titleEditor(pid) {
-  // Generated headings present a shorter name. Keep the exact escaped source
-  // title on the editor root so editing never drops its type/date/version.
+  // The heading and editor share the exact saved name, including any suffixes.
   return {
     pid: pid, editing: false, draft: '', status: '',
     saveRecovery(state) {

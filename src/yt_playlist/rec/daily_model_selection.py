@@ -11,7 +11,7 @@ import math
 
 import numpy as np
 
-from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_stopping, work_budget
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_stopping
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import embeddings
 from yt_playlist.rec import embedding_training as training, model_refresh, model_setup, progressive
@@ -219,7 +219,9 @@ def maintain(store, now, *, checkpoint=None):
     elif now - run['ran_at'] > DAY:
         return _finish(store, run, now, status='failed', reason='The comparison expired before completion; current model kept.')
     try:
-        with work_budget(STEP_SECONDS), store.read_snapshot() as snapshot:
+        # Each completed candidate is saved below. Finish the admitted candidate
+        # before yielding; a timeout inside _evaluate repeats its entire fit.
+        with store.read_snapshot() as snapshot:
             reader = snapshot.store
             if model_setup.current_setup(reader) != run['previous']:
                 return _finish(store, run, now, status='retained', reason='The serving setup changed during comparison.')

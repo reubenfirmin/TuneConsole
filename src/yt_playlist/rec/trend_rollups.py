@@ -4,6 +4,7 @@ Calculations use detached rows from a private read snapshot. Monthly statistics 
 assembly have separate owners; only this pipeline publishes their result.
 """
 import json
+from yt_playlist.core.db_revisions import column_group_reads
 
 from yt_playlist.rec import trend_payload, trend_statistics as stats
 
@@ -25,7 +26,7 @@ def build(store, now) -> dict | None:
     Return None when source changes require another worker pass. The previously published rollup
     and first-play index remain intact; stale work cannot undo source removal or a reset.
     """
-    with store.read_snapshot() as snapshot:
+    with store.read_snapshot() as snapshot, column_group_reads(snapshot.store, 'recordings', 'catalog'):
         reader = snapshot.store
         first_play = reader.trends.prepare_first_play()
         imported = reader.settings.get_setting("takeout_imported_at")

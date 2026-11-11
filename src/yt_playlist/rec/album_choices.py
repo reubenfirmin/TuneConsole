@@ -51,15 +51,16 @@ def load(store, now, schedule=lambda: None):
 
 
 def prepare_cached(store, now):
-    """Publish independently of the smaller Mix tapes preparation deadline.
+    """Complete the bounded album pool independently of Mix tapes preparation.
 
     Snapshot memoization reuses unchanged inputs while menus fill their batches;
     actual table/setting dependencies and the time window retire that reuse.
     """
-    from yt_playlist.core.activity import work_budget, WorkBudgetExceeded
-    from yt_playlist.rec import choice_evidence, discover, mode_surfaces, progressive, transient
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.core.read_memo import preparation_memo
+    from yt_playlist.rec import choice_evidence, discover, mode_surfaces, transient
     try:
-        with work_budget(progressive.Budget().fit_seconds), store.read_snapshot() as snapshot:
+        with store.read_snapshot(memo=preparation_memo(store, SURFACE)) as snapshot:
             reader = snapshot.store
 
             def calculate():

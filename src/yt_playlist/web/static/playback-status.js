@@ -35,11 +35,13 @@
     }
   }
 
-  function publish(data) {
+  function publish(data, requestedAt = null) {
     bridgeSnapshot = data;
     window.playbackStatus.audioSnapshot = data;
     const tv = window.tvPlaybackControls;
-    if (tv?.active()) data = {...data, connected: true, now_playing: tv.snapshot(), resumable_player: null};
+    if (requestedAt !== null) tv?.observeAudio?.(data, requestedAt);
+    if (tv?.active()) data = {...data, connected: true, now_playing: tv.snapshot(),
+      resumable_player: null, radio_resume: null, radio: false, radio_ready: false};
     if (frame !== null) cancelAnimationFrame(frame);
     if (expiry !== null) clearTimeout(expiry);
     frame = null;
@@ -49,7 +51,7 @@
       videoId: playing.video_id,
       position: number(playing.position) && playing.position >= 0 ? playing.position : null,
       duration: number(playing.duration) && playing.duration > 0 ? playing.duration : null,
-      paused: playing.paused !== false, receivedAt: clock(),
+      paused: playing.paused !== false || playing.advancing === false, receivedAt: clock(),
       age: number(playing.snapshot_age) ? Math.max(0, playing.snapshot_age) : 0,
     } : null;
     window.playbackStatus.snapshot = data;
@@ -73,7 +75,7 @@
 
   function refresh() {
     if (inFlight) return inFlight.promise;
-    const request = {controller: new AbortController(), promise: null};
+    const request = {controller: new AbortController(), promise: null, startedAt: clock()};
     const deadline = setTimeout(() => request.controller.abort(), 7000);
     inFlight = request;
     request.promise = fetch('/bridge/status', {signal: request.controller.signal})
@@ -83,7 +85,7 @@
       })
       .then(data => {
         if (!data || typeof data.connected !== 'boolean') throw new Error('Invalid playback status');
-        if (inFlight === request) publish(data);
+        if (inFlight === request) publish(data, request.startedAt);
       })
       .catch(() => {
         if (inFlight !== request) return;

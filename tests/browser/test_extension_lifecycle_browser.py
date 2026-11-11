@@ -38,8 +38,14 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     main = store.accounts.upsert_account("main", "bridge", None, True)
     brand = store.accounts.upsert_account("band", "bridge", "brand-A", False)
     ctx = SimpleNamespace(bridge=bridge, store=store, now_fn=time.time)
-    app = FastAPI()
-    app.include_router(build(ctx))
+    bootstrap = getattr(request, "param", "current")
+    if bootstrap == 'full_app':
+        from tests.conftest import FakeClient
+        from yt_playlist.web.app import create_app
+        app = create_app(store, lambda: {main: FakeClient()}, now_fn=lambda: 1, bridge=bridge)
+    else:
+        app = FastAPI()
+        app.include_router(build(ctx))
     owners = ExitStack()
     request.addfinalizer(owners.close)
     # Bind before starting the server so another test/process cannot take the chosen port.
@@ -55,8 +61,7 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     shutil.copytree(EXT, extension)
     config = extension / "worker" / "config.js"
     config.write_text(config.read_text().replace(":8765", f":{port}"))
-    bootstrap = getattr(request, "param", "current")
-    if bootstrap != "current":
+    if bootstrap not in ("current", "full_app"):
         background = extension / "background.js"
         source = background.read_text().replace("receiverRevision: TC_CONFIG.receiverRevision, ", "")
         if bootstrap == "legacy_bootstrap":
@@ -79,35 +84,41 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
                     "-subj", "/CN=music.youtube.com"],
                    check=True, capture_output=True, timeout=10)
 
-    @app.get("/fixture.wav")
+    music_app = FastAPI()
+
+    @music_app.get("/fixture.wav")
     def fixture_audio():
         return Response(audio.getvalue(), media_type="audio/wav")
 
-    @app.post("/youtubei/v1/{endpoint:path}")
+    @music_app.post("/youtubei/v1/{endpoint:path}")
     async def fixture_api(endpoint: str, request: Request):
         requests.append({"url": str(request.url), "body": await request.json()})
         return {"fixture": True}
 
-    @app.get("/{path:path}")
+    @music_app.get("/{path:path}")
     def fixture_page(path: str):
         return HTMLResponse(HTML.read_text())
 
     tls_listener = owners.enter_context(socket.socket())
     tls_listener.bind(("127.0.0.1", 0))
     tls_port = tls_listener.getsockname()[1]
-    tls_server = uvicorn.Server(uvicorn.Config(app, log_level="warning",
+    tls_server = uvicorn.Server(uvicorn.Config(music_app, log_level="warning",
                                               ssl_keyfile=str(key), ssl_certfile=str(certificate)))
     owners.enter_context(LiveServer(tls_server, sockets=[tls_listener], startup_timeout=5))
     context = None
     try:
-        context = playwright.chromium.launch_persistent_context(
-            tmp_path / "profile", **{**browser_type_launch_args, "channel": "chromium"},
-            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}",
-                  "--autoplay-policy=no-user-gesture-required", "--ignore-certificate-errors",
-                  "--no-proxy-server", f"--host-resolver-rules=MAP music.youtube.com 127.0.0.1:{tls_port}, "
-                  "MAP lh3.googleusercontent.com ~NOTFOUND"],
-        )
-        context.route("https://lh3.googleusercontent.com/**", lambda route: route.fulfill(status=204))
+        def launch():
+            browser_context = playwright.chromium.launch_persistent_context(
+                tmp_path / "profile", **{**browser_type_launch_args, "channel": "chromium"},
+                args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}",
+                      "--autoplay-policy=no-user-gesture-required", "--ignore-certificate-errors",
+                      "--no-proxy-server", f"--host-resolver-rules=MAP music.youtube.com 127.0.0.1:{tls_port}, "
+                      "MAP lh3.googleusercontent.com ~NOTFOUND"],
+            )
+            browser_context.route("https://lh3.googleusercontent.com/**", lambda route: route.fulfill(status=204))
+            return browser_context
+
+        context = launch()
         context.add_cookies([{"name": "SAPISID", "value": "fixture-cookie",
                              "url": "https://music.youtube.com"}])
         worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker")
@@ -132,6 +143,17 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
             assert predicate(), message() if callable(message) else message
 
         harness.eventually = eventually
+
+        def restart():
+            nonlocal context
+            context.close()
+            assert not bridge.connected, "closing the browser must disconnect its extension"
+            context = launch()
+            harness.context = context
+            harness.worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker")
+            eventually(lambda: bridge.connected, "restarted extension did not connect")
+
+        harness.restart = restart
         eventually(lambda: bridge.connected, "installed extension did not connect")
         yield harness
     finally:
@@ -157,6 +179,71 @@ def _sample(h, page):
 
 def _plays(h):
     return h.store.history.play_events_since(0)
+
+
+@pytest.mark.parametrize("installed_bridge", ["full_app"], indirect=True)
+def test_full_browser_restart_preserves_radio_resume_and_space_controls_native_media(installed_bridge):
+    from playwright.sync_api import expect
+
+    h = installed_bridge
+    h.store.tracks.observe_track_entry("saved-upload", "First song", "Recording artist", now=1)
+    track = h.store.radio_catalog.details(["saved-upload"])["saved-upload"]
+    local_id = h.store.playlists.upsert_playlist(h.brand, "PLRECOVERY", "Radio Session · Saved", 1, "", 1)
+    state = dict(version=2, phase="playing", playlist="PLRECOVERY", local_id=local_id,
+                 identity=h.brand, title="Radio Session · Saved", episode_id="recovery-episode", started_at=1,
+                 tracks=[track], heard=[track], position=0, furthest=0, transition=0, choices={},
+                 fingerprint="installed-browser-recovery", directions=None)
+    _, revision = h.store.radio_checkpoints.load()
+    h.store.radio_checkpoints.save(json.dumps(state), expected=revision)
+    origin = h.worker.evaluate("TC_CONFIG.appOrigin")
+    before = h.context.new_page()
+    before.goto(origin + "/artists")
+    expect(before.locator(".global-now-playing").get_by_role("button", name="Play", exact=True)).to_be_enabled()
+    old_connection = h.bridge._conn_id
+    old_worker = h.worker
+
+    # This closes the browser process, every document and its MV3 worker. Relaunch
+    # the same profile while retaining only the backend's durable checkpoint.
+    h.restart()
+    assert before.is_closed()
+    assert h.worker is not old_worker
+    assert h.bridge._conn_id != old_connection
+    assert h.worker.evaluate("chrome.runtime.getManifest().manifest_version") == 3
+    page = h.context.new_page()
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    page.goto(origin + "/artists")
+    card = page.locator(".global-now-playing")
+    expect(card).to_be_visible()
+    expect(card.locator(".hs-now-title")).to_have_text("First song")
+    expect(card.get_by_role("button", name="Play", exact=True)).to_be_enabled()
+    expect(card.get_by_role("button", name="Next / skip")).to_be_disabled()
+    assert len(h.worker.evaluate("tuneConsole.tabs.list()")) == 0
+
+    report = Path("build/test-reports/1153")
+    report.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(report / "1153-full-browser-restart-resume.png"))
+    with h.context.expect_page() as opened:
+        card.get_by_role("button", name="Play", exact=True).click()
+    music = opened.value
+    music.wait_for_url("**/watch?v=saved-upload&list=PLRECOVERY")
+    music.wait_for_function("window.fixture && window.__tcNowPoller")
+    music.wait_for_function("document.querySelector('video').paused")
+    _sample(h, music)
+    h.eventually(lambda: (h.bridge.now_playing or {}).get("video_id") == "saved-upload")
+    page.evaluate("window.playbackStatus.refresh()")
+    expect(card.get_by_role("button", name="Play", exact=True)).to_be_enabled()
+    expect(card.locator(".hs-eq")).to_be_hidden()
+
+    page.locator("body").click(position={"x": 8, "y": 8})
+    page.keyboard.press("Space")
+    music.wait_for_function("!document.querySelector('video').paused")
+    h.eventually(lambda: (h.bridge.now_playing or {}).get("paused") is False)
+    page.evaluate("window.playbackStatus.refresh()")
+    expect(card.get_by_role("button", name="Pause", exact=True)).to_be_enabled()
+    expect(card.locator(".hs-now-title")).to_have_text("First song")
+    assert page.evaluate("window.playbackStatus.progress().videoId") == "saved-upload"
+    assert h.bridge.now_playing["playlist_ytm_id"] == "PLRECOVERY"
+    page.screenshot(path=str(report / "1153-full-browser-restart-playing.png"))
 
 
 def test_worlds_delayed_metadata_and_ratings_keep_account_and_video_identity(installed_bridge):

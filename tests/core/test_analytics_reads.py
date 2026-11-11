@@ -186,8 +186,9 @@ def test_worker_snapshot_outlives_request_deadline_but_cancellation_releases_it(
     cancelled = [False]
     monkeypatch.setattr(activity.time, 'monotonic', lambda: clock[0])
     database._analytics_readers = threading.BoundedSemaphore(1)
-    with pytest.raises(activity.WorkClosing), activity.cancellable_work(lambda: cancelled[0]):
-        with database.read_view(seconds=None) as reader:
+    with (pytest.raises(activity.WorkClosing), activity.cancellable_work(lambda: cancelled[0]),
+          database.priority.background(activity.check_stopping)):
+        with database.read_view() as reader:
             clock[0] += db_reads.READ_SECONDS + 1
             assert reader.settings.get_setting('input') == 'old'
             cancelled[0] = True

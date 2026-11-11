@@ -9,7 +9,7 @@
           aria-pressed="{{ 'true' if liked else 'false' }}" :aria-pressed="liked"
           title="{{ 'Remove from your Liked Music' if liked else 'Add to your Liked Music' }}"
           :title="liked ? 'Remove from your Liked Music' : 'Add to your Liked Music'"
-          @click="liked = !liked; toggleTrackLike($el, '{{ video_id }}', liked)"
+          @click="liked = !liked; toggleTrackLike($el, '{{ video_id }}', liked); if ($event.detail > 0) $el.blur()"
           @htmx:after-request="if (!$event.detail.successful) liked = !liked">
     <svg viewBox="0 0 24 24" fill="{{ 'currentColor' if liked else 'none' }}" :fill="liked ? 'currentColor' : 'none'"
          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

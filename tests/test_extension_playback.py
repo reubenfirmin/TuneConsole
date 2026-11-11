@@ -13,6 +13,7 @@ import pytest
     "next_account", "next_account_legacy", "next_account_upgrade",
     "paused_resume", "paused_closed", "paused_legacy",
     "tv_pause", "tv_pause_failed", "tv_pause_legacy", "tv_pause_no_music",
+    "tv_delayed_play", "tv_delayed_heartbeat", "tv_delayed_state",
     "confirmed_pause", "confirmed_lost_reply", "confirmed_missing_receiver", "confirmed_legacy",
 ])
 def test_playlist_launch_reuses_and_controls_the_playing_tab(scenario):
@@ -91,7 +92,7 @@ const chrome = {
           return {ok:true,paused:true,videoId:'song'};
         }
       }
-      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:scenario==='paused_legacy'?8:scenario.startsWith('tv_pause') && scenario!=='tv_pause_legacy'?11:9,mainVersion:4,mainRevision:9,mainAgeMs:0};
+      if(msg.type==='sensor-ping')return {ok:true,receiverRevision:scenario==='paused_legacy'?8:scenario.startsWith('tv_') && scenario!=='tv_pause_legacy'?11:9,mainVersion:4,mainRevision:9,mainAgeMs:0};
       if(msg.type==='pause-for-tv')return {ok:true,paused:scenario!=='tv_pause_failed'};
       if(scenario==='rating_handoff' && msg.type==='rate')
         return {ok:msg.videoId===(id===2?'A':'B'),error:'The playing song changed'};
@@ -117,6 +118,30 @@ const report = async (id, msg) => {
 };
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
+  if (scenario.startsWith('tv_delayed_')) {
+    tabs = [app, old];
+    let release, queries = 0;
+    const list = musicTabs.list;
+    musicTabs.list = () => ++queries === 1 ? new Promise(resolve => {release = resolve;}) : list();
+    const msg = {type: scenario.endsWith('play') ? 'play' :
+      scenario.endsWith('heartbeat') ? 'now-heartbeat' : 'pevent', kind:'state',state:'playing',
+      videoId:'song',title:'Music song',paused:false,brandKnown:true,brandId:'main'};
+    playback.receive(msg,{tab:old});
+    await new Promise(setImmediate);
+    assert.equal(typeof release,'function');
+    assert.equal((await playback.pauseForTv()).ok,true);
+    // The native pause can itself be queued behind the held old observation.
+    playback.receive({type:'pevent',kind:'state',state:'paused',videoId:'song'},{tab:old});
+    release([old]);
+    await playback.drained;
+    assert.equal(frames.some(frame => frame.type==='play' || frame.type==='now-heartbeat' ||
+      frame.kind==='state' && frame.state==='playing'),false,'pre-pause samples cannot become fresh playback');
+    assert.equal(frames.at(-1).state,'paused');
+    await report(2,{...msg,type:'play',paused:false});
+    assert.equal(frames.at(-1).type,'play','a genuine later native Play still takes ownership');
+    assert.equal(frames.at(-1).paused,false);
+    return;
+  }
   if (scenario.startsWith('next_account')) {
     await sockets[0].onmessage({data:JSON.stringify({id:89,type:'next',videoId:'song',brandId:'main'})});
     const result = JSON.parse(frames.at(-1).body);

@@ -45,8 +45,12 @@ cleanup. A missing final timing receipt cannot establish passing coverage.
   pytest's cache. Multi-command experiments use `TemporaryDirectory` and clean
   up on success and failure.
 - After a killed run, preview abandoned work with
-  `./scripts/test-artifacts-cleanup.py PATH`, then repeat with `--delete`.
-  The command refuses live owners and preserves shared lock files.
+  `./scripts/test-artifacts-cleanup.py`, then repeat with `--delete`.
+  Discovery covers known temporary and fixture locations; optional `PATH...`
+  arguments restrict it to named workspaces, and `--verbose` lists each path.
+  Run from the host PID namespace. The command refuses live owners, unknown
+  unreadable processes and active legacy test jobs, and preserves shared roots,
+  reports, library baselines and lock files.
 - `live_server.LiveServer` drains admitted requests and background work before
   its Store and temporary directory close. Release deliberately held work
   before stopping it; a timed thread join is not a substitute for shutdown.
@@ -180,9 +184,9 @@ not reformat the host filesystem. Do not repeat setup on an already mounted
 volume. Build the local dependency image from `uv.lock`, then capture once:
 
 ```sh
-python3 scripts/test-library.py build-runtime
-python3 scripts/test-library.py prepare
-python3 scripts/test-library.py list
+./scripts/test-library.py build-runtime
+./scripts/test-library.py prepare
+./scripts/test-library.py list
 ```
 
 Preparation reads the source through a read-only connection and file-lifetime
@@ -198,8 +202,8 @@ container. The explicit plugin supplies a `managed_library` fixture. Existing
 actual-library helpers and benchmark adapters reuse that path in managed runs:
 
 ```sh
-python3 scripts/test-library.py run -- pytest tests/schema/check_radio_launch_actual.py --schema-source-db=/library/state.db -s
-python3 scripts/test-library.py run --readonly -- python3 -c 'import sqlite3; print(sqlite3.connect("file:/library/state.db?mode=ro", uri=True).execute("select count(*) from recordings").fetchone())'
+./scripts/test-library.py run -- pytest tests/schema/check_radio_launch_actual.py --schema-source-db=/library/state.db -s
+./scripts/test-library.py run --readonly -- -c 'import sqlite3; print(sqlite3.connect("file:/library/state.db?mode=ro", uri=True).execute("select count(*) from recordings").fetchone())'
 ```
 
 Python checks can import `tests.library_image.fixtures.managed_database()`.
@@ -219,11 +223,11 @@ stays available even if preparation fails. Preview and remove abandoned runs or
 older unpinned generations with:
 
 ```sh
-python3 scripts/test-library.py gc
-python3 scripts/test-library.py gc --delete
+./scripts/test-library.py gc
+./scripts/test-library.py gc --delete
 ```
 
-`python3 scripts/test-library.py verify` explicitly checks concurrent actual-library
+`./scripts/test-library.py verify` explicitly checks concurrent actual-library
 writes, extent sharing and interrupted-owner recovery. Add `--refresh` to check
 new-generation publication while old workspaces remain active. This is a focused
 local backend check, separate from ordinary pytest and CI.

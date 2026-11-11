@@ -15,7 +15,7 @@ from yt_playlist.core import migrations, schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_cards, home_vibe, onboarding
 from yt_playlist.web.app import create_app
-from yt_playlist.web.playlist_heading import build_vibe_label, generated_heading
+from yt_playlist.web.playlist_heading import build_vibe_label
 
 
 pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
@@ -42,14 +42,9 @@ def provenance_routes(monkeypatch, home_pages_only):
 
 
 @pytest.mark.parametrize('preset', home_vibe.PRESETS)
-def test_vibe_title_keeps_generated_type_date_and_version(preset):
+def test_build_vibe_uses_saved_recipe(preset):
     label = home_vibe.PRESETS[preset]['label']
-    title = f'More in your wheelhouse - {label} - November 3 2026 #2'
-    assert generated_heading(title, is_generated=True, recipe={'vibe': preset}) == {
-        'name': 'More in your wheelhouse', 'kind': 'More in your wheelhouse',
-        'date': '2026-11-03', 'date_label': 'November 3, 2026', 'version': '2'}
     assert build_vibe_label({'vibe': preset}) == label
-    assert generated_heading(title, is_generated=True) is None
 
 
 SAVED_VIBES = [*home_vibe.PRESETS, None, 'historical']
@@ -120,7 +115,8 @@ def test_created_mix_provenance_survives_restart_adoption_and_rename(
             reopened.playlists.adopt_generated_playlist(playlist.playlist_scope_id)
             renamed = client.post(url + '/rename', data={'title': 'My saved mix'})
             assert renamed.status_code == 200
-            assert 'Build-time Vibe: Focus' in renamed.text
-            assert 'Build-time Vibe: Focus' in client.get(url).text
+            assert 'Build-time Vibe: Focus' not in renamed.text
+            assert 'Build-time Vibe: Focus' not in client.get(url).text
+            assert reopened.playlist_recipes.get_recipe(playlist.playlist_scope_id)['vibe'] == 'concentrate'
     finally:
         reopened.conn.close()
