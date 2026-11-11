@@ -440,7 +440,7 @@ def mock_snapshot_coordinator(store, monkeypatch):
     Conflict detection and source-change races use actual guarded snapshots in
     their own tests. This helper supplies uncontended publication only.
     """
-    from yt_playlist.core.db_revisions import Reads
+    from yt_playlist.core.db_revisions import Reads, Revisions
 
     def publish(target, **kwargs):
         target()
@@ -449,11 +449,27 @@ def mock_snapshot_coordinator(store, monkeypatch):
     with reuse_reporting_reader(store, monkeypatch) as reader:
         reader._snapshot_reads = Reads()
         def snapshot(**kwargs):
+            if not hasattr(store, '_snapshot_revisions'):
+                store._snapshot_revisions = Revisions(store.conn)
+            store._snapshot_revisions.refresh()
             changes = store.conn.total_changes
+            schema = store.conn.execute('PRAGMA main.schema_version').fetchone()[0]
+            version = store.conn.execute('PRAGMA data_version').fetchone()[0]
+
+            def is_current(*, allow_stale_tables=frozenset()):
+                if (store.conn.execute('PRAGMA main.schema_version').fetchone()[0] != schema
+                        or store.conn.execute('PRAGMA data_version').fetchone()[0] != version):
+                    return False
+                if not allow_stale_tables:
+                    return store.conn.total_changes == changes
+                return not any(revision > changes for (table, _), revision
+                               in store._snapshot_revisions.capture().items()
+                               if table not in allow_stale_tables)
+
             return nullcontext(SimpleNamespace(
                 store=reader, release_reader=lambda: None, publish=publish,
-                publish_ordered=publish, is_current=lambda: store.conn.total_changes == changes,
-                _changes=changes))
+                publish_ordered=publish, is_current=is_current,
+                _changes=changes, _schema=schema))
 
         monkeypatch.setattr(store, 'read_snapshot', snapshot)
         yield

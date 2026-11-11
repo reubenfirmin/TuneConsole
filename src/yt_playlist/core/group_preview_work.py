@@ -44,9 +44,9 @@ def definitions(conn):
     yield from guards(conn)
 
 
-def guards(conn):
+def guards(conn, *, sources=SOURCES):
     tables = {row[0] for row in conn.execute("SELECT name FROM main.sqlite_schema WHERE type='table'")}
-    for table in sorted(SOURCES & tables):
+    for table in sorted(SOURCES & sources & tables):
         columns = [row[1] for row in conn.execute(f'PRAGMA main.table_info({_identifier(table)})')]
         groups = {group: [col for col in columns if col not in excluded]
                   for group, excluded in _COLUMN_GROUP_EXCLUSIONS.get(table, {}).items()}

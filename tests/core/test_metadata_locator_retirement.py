@@ -15,11 +15,12 @@ from tests.store_fixture_support import (
     initialize_consumer, native_sql_calls, without_query_timing,
 )
 from tests.metadata_provenance_support import metadata_provenance
-from yt_playlist.core import catalog, fao, metadata_runtime_files as files, schema_inspection
+from yt_playlist.core import catalog, fao, group_preview_work, metadata_runtime_files as files, schema_inspection
 from yt_playlist.core.db_rebuild import build
 from yt_playlist.core.metadata_deliveries import Delivery, record_many
 from yt_playlist.core.migrations import current
 from yt_playlist.core.preparation import metadata_locators as retirement, metadata_runtime as preparation
+from yt_playlist.core.schema_contract import MigrationError
 from yt_playlist.core.store import Store
 
 
@@ -124,23 +125,40 @@ def test_retirement_removes_physical_fields_and_preserves_reopen_writes_recovery
     decisions = metadata_provenance(target, entry)['decisions']
     detail = target.enrichment_reports.enrichment_conflict_detail(entry, 'genre')
     assert decisions and detail['options']
+    with target.conn:
+        assert group_preview_work.save(target.conn, {
+            'token': 'retirement-preview', 'schema_version': target.conn.execute(
+                'PRAGMA main.schema_version').fetchone()[0], 'at': 1000, 'expires_at': None},
+            None, ('group', 'comfort', 1, {'completed': True}),
+            {('metadata_deliveries', ''), ('metadata_runtime_recording_sources', '')})
+    preview = group_preview_work.read(target.conn)
     result = retirement.retire(target.conn, manifest)
     assert result['verified_recovery_members'] > 0
     assert not retirement.COLUMNS.intersection(row[1] for row in target.conn.execute('PRAGMA table_info(metadata_deliveries)'))
     assert not retirement.REMOVED.intersection(row[0] for row in target.conn.execute('SELECT name FROM sqlite_schema'))
     assert list(map(tuple, target.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
     assert schema(source.conn) == original
+    assert group_preview_work.read(target.conn) == preview
+    group_preview_work.validate(target.conn)
+    # Compile real DML against the reduced table: old UPDATE predicates must
+    # not retain references to any of the five removed locator columns.
+    for sql in ("INSERT INTO metadata_deliveries(provider) VALUES ('retired')",
+                "UPDATE metadata_deliveries SET provider='retired'", 'DELETE FROM metadata_deliveries'):
+        assert target.conn.execute('EXPLAIN ' + sql).fetchone()
     assert retirement.retire(target.conn, manifest)['already_retired']
     with pytest.raises(ValueError, match='writes are retired'):
         with target.conn:
             target.conn.execute('BEGIN')
             record_many(target.conn, [Delivery('a', 'bad', 'lookup', None, time.time())])
     target.init_schema()
+    group_preview_work.validate(target.conn)
+    assert not group_preview_work.read(target.conn)['invalid']
     assert metadata_provenance(target, entry)['decisions'] == decisions
     assert target.enrichment_reports.enrichment_conflict_detail(entry, 'genre') == detail
     fields = {'bpm': 145}
     captured, _ = target.enrichment_state.capture_provider_result(entry, 'continued', fields, run_id='new')
     target.enrichment.apply_provider_fields(entry, 'continued', fields, providers=('continued',), delivery_id=captured)
+    assert group_preview_work.read(target.conn)['invalid'], 'Continuing metadata must invalidate consumed preview inputs'
     target.enrichment_state.record_enrichment_attempt('song|artist', 'continued', fields,
         video_id='video', run_id='new', delivery_id=captured)
     with target.conn:
@@ -159,6 +177,14 @@ def test_retirement_removes_physical_fields_and_preserves_reopen_writes_recovery
         assert not restored.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         restored.conn.close()
+    # The retired schema validator must still reject a forged known guard;
+    # recognizing its name must never waive verification of its definition.
+    with target.conn:
+        target.conn.execute('DROP TRIGGER group_preview_changed_metadata_deliveries_update')
+        target.conn.execute('CREATE TRIGGER group_preview_changed_metadata_deliveries_update '
+                            'AFTER UPDATE ON metadata_deliveries BEGIN SELECT 1; END')
+    with pytest.raises(MigrationError, match='Incompatible current trigger'):
+        retirement.retire(target.conn, manifest)
 
 
 @pytest.mark.parametrize('retired', [False, True])
@@ -219,6 +245,18 @@ def test_unreviewed_dependencies_keep_exact_installed_schema(candidate, definiti
     assert schema(target.conn) == before
     assert not retirement.retired(target.conn)
     assert not target.conn.in_transaction
+    if definition.startswith('CREATE TRIGGER'):
+        with target.conn:
+            target.conn.execute('DROP TRIGGER additional_delivery_guard')
+            target.conn.execute('DROP TRIGGER group_preview_changed_metadata_deliveries_update')
+            target.conn.execute('CREATE TRIGGER group_preview_changed_metadata_deliveries_update '
+                                'AFTER UPDATE ON metadata_deliveries BEGIN SELECT 1; END')
+        before = schema(target.conn)
+        with pytest.raises(MigrationError, match='Incompatible current trigger'):
+            retirement.retire(target.conn, manifest)
+        assert schema(target.conn) == before
+        assert not retirement.retired(target.conn)
+        assert not target.conn.in_transaction
 
 
 @pytest.mark.parametrize('failure', ['missing-backup', 'changed-backup', 'ddl', 'concurrent-write'])
