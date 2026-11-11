@@ -449,7 +449,7 @@ def mock_snapshot_coordinator(store, monkeypatch):
     with reuse_reporting_reader(store, monkeypatch) as reader:
         reader._snapshot_reads = Reads()
         def snapshot(**kwargs):
-            if not hasattr(store, '_snapshot_revisions'):
+            if getattr(store, '_snapshot_revisions', None) is None:
                 store._snapshot_revisions = Revisions(store.conn)
             store._snapshot_revisions.refresh()
             changes = store.conn.total_changes

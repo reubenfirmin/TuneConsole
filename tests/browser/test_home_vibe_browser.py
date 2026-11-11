@@ -43,7 +43,7 @@ def finish_vibe_routes(page):
 
 
 @pytest.fixture
-def prepared_vibe_app(request, measured_browser_home_store):
+def prepared_vibe_app(request, measured_browser_home_store, home_pages_only):
     # Restore before live_app creates its account, playlist and application
     # settings. A later SQL restore would discard that live app's state.
     base = request.getfixturevalue('live_app')

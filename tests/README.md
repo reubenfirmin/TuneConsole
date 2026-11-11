@@ -29,6 +29,14 @@ desktop/TV behavior by measured cost, with no fixed test-count target.
 Shard timing includes final journal synchronization, report writing and pytest
 cleanup. A missing final timing receipt cannot establish passing coverage.
 
+Unit shards calibrate historical file costs, then weight ownership using a short
+SQLite/Python probe on each current runner. [ci_runner_capacity.py](../ci_runner_capacity.py)
+exchanges immutable manifests from the same run, attempt, revision and runtime
+before pytest starts; missing manifests fail after a bounded 180-second wait.
+All eight shards use the same measurements and retain them in their receipts.
+Whole files still execute once in serial shards. Predicted completion times are
+planning evidence; actual charged wall times establish measured balance.
+
 ## Fixtures
 
 - Calculation and policy tests use detached values or repository doubles.
@@ -94,6 +102,15 @@ Shared helpers live in `radio_session_support.py`, `browser/radio_ui_support.py`
 `conftest.py` owns Playwright for browser and packaged checks. Browser-only runs
 reuse the session driver; mixed runs close it after each module so subsequent
 unit tests can use `asyncio.run()`.
+
+The shared FakeClient `live_app` consumes prepared state with automatic workers
+disabled and omits metadata tag-matcher configuration. Provider and startup
+configuration tests construct their own app; the browser genre editor retains
+its real configuration. Shared browser apps reuse source-checked Jinja bytecode
+while keeping each app's environment, globals and rendered responses private.
+Prepared Home and mocked Radio consumers use `home_pages_only`; dialog layout
+consumers construct their real page/action routers. Cross-page integration
+journeys retain the full application.
 
 ## Diagnostics
 

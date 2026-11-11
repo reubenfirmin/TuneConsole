@@ -235,6 +235,7 @@ def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
         assert "--ci-shard=${{ matrix.shard }}/$SHARD_TOTAL" in commands
         assert "--junitxml=evidence/junit.xml" in commands
         assert " -n " not in commands
+        assert ('--ci-runner-capacities=runner-capacity/all' in commands) == (name == 'unit')
         artifact = job["steps"][-1]
         assert artifact["if"] == "always()"
         assert "matrix.shard" in artifact["with"]["name"]
@@ -246,6 +247,20 @@ def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
     assert jobs["unit"]["env"]["UV_PYTHON"] == "3.12"
     verification = next(step for step in jobs["unit"]["steps"] if step.get("name") == "Verify packaged resolutions")
     assert verification["if"] == "matrix.shard == 1"
+    steps = jobs['unit']['steps']
+    probe = next(step for step in steps if 'ci_runner_capacity.py probe' in step.get('run', ''))
+    upload = next(step for step in steps if step.get('with', {}).get('name', '').startswith('unit-capacity-'))
+    wait = next(step for step in steps if step.get('id') == 'capacity')
+    download = next(step for step in steps if step.get('with', {}).get('path') == 'runner-capacity/all')
+    execution = next(step for step in steps if step.get('name') == 'Run the unit / route suite')
+    assert [steps.index(step) for step in (probe, upload, wait, download, execution)] == sorted(
+        steps.index(step) for step in (probe, upload, wait, download, execution))
+    assert '--index=${{ matrix.shard }} --total=$SHARD_TOTAL' in probe['run']
+    assert upload['with']['name'] == 'unit-capacity-${{ matrix.shard }}-${{ github.run_attempt }}'
+    assert upload['with']['if-no-files-found'] == 'error'
+    assert 'ci_runner_capacity.py wait --total=$SHARD_TOTAL --output="$GITHUB_OUTPUT"' in wait['run']
+    assert download['with']['artifact-ids'] == '${{ steps.capacity.outputs.artifacts }}'
+    assert download['with']['merge-multiple'] == 'true'
     assert any(step.get("uses", "").startswith("actions/setup-node") for step in jobs["unit"]["steps"])
     assert "--tracing=retain-on-failure" in "\n".join(step.get("run", "") for step in jobs["browser"]["steps"])
 

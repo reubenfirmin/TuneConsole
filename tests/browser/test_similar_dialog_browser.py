@@ -4,32 +4,60 @@ import pytest
 from playwright.sync_api import expect
 
 from yt_playlist.util.matching import identity_key
+from tests.prepared_fixture_support import prepared_template
+
+
+@pytest.fixture(scope='module')
+def similar_catalog_template(_pristine_current_schema):
+    def seed(store):
+        store.collection.add_saved_album({
+            'browse': 'MPRE_layout', 'title': 'Layout release', 'artist': 'Layout artist'})
+        tids, vectors = [], []
+        for i in range(40):
+            title = f'Song {i:02d} ' + 'A long release title with additional details ' * 3 + 'x' * 80
+            artist = f'Artist {i:02d} with a long artist credit'
+            tids.append(store.tracks.upsert_track(f'layout{i}', title, artist, 'Layout release', 200,
+                album_browse_id='MPRE_layout', thumbnail='/static/nag/intro.png'))
+            vectors.append((identity_key(title, artist), np.array([1, i / 100], dtype=np.float32).tobytes()))
+        store.rec_model.replace_rec_vectors(vectors)
+        store.settings.set_setting('rec_dim', '2')
+        return tids
+
+    # Ingestion and vector publication are input to this layout consumer. Keep
+    # all forty long rows and retained files, with a private restore per case.
+    with prepared_template(_pristine_current_schema, seed) as template:
+        yield template
+
+
+@pytest.fixture
+def similar_app(request, store, similar_catalog_template, monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import album, app_update, audio_preview, home, playlists, songs, suggest
+
+    # Keep the real pages, menus and similarity endpoint; unrelated application
+    # routers have full-app owners such as the TV navigation journey.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (album, app_update, audio_preview, home, playlists, songs, suggest)])
+    similar_catalog_template.restore(store)
+    return request.getfixturevalue('live_app')
 
 
 @pytest.fixture(params=[(kind, width, artwork) for kind in ("playlist", "album")
                        for width in (1280,) for artwork in (False, True)],
                 ids=lambda value: f"{value[0]}-{value[1]}-{'artwork' if value[2] else 'no-artwork'}")
-def similar_dialog(live_app, store, page, request):
+def similar_dialog(similar_app, store, page, request, similar_catalog_template):
     kind, width, artwork = request.param
     playlist = store.playlists.get_playlists()[0]
     browse = "MPRE_layout"
-    store.collection.add_saved_album({"browse": browse, "title": "Layout release", "artist": "Layout artist"})
-    tids, vectors = [], []
-    for i in range(40):
-        title = f"Song {i:02d} " + "A long release title with additional details " * 3 + "x" * 80
-        artist = f"Artist {i:02d} with a long artist credit"
-        tids.append(store.tracks.upsert_track(f"layout{i}", title, artist, "Layout release", 200,
-                                       album_browse_id=browse,
-                                       thumbnail="/static/nag/intro.png" if artwork else None))
-        vectors.append((identity_key(title, artist), np.array([1, i / 100], dtype=np.float32).tobytes()))
-    store.playlists.set_playlist_tracks(playlist.id, tids)
-    store.rec_model.replace_rec_vectors(vectors)
-    store.settings.set_setting("rec_dim", "2")
+    store.playlists.set_playlist_tracks(playlist.id, similar_catalog_template.result)
+    if not artwork:
+        with store.conn:
+            store.conn.execute('UPDATE youtube_items SET thumbnail=NULL')
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.set_viewport_size({"width": width, "height": 600})
     path = f"/playlist/{playlist.id}" if kind == "playlist" else f"/album?browse={browse}"
-    page.goto(live_app + path)
+    page.goto(similar_app + path)
     # Album and playlist order can differ. Exercise the actual last rendered row.
     trigger = page.get_by_role("button", name="More actions for", exact=False).last
     trigger.scroll_into_view_if_needed()

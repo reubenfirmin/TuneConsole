@@ -26,7 +26,7 @@ def genre_home_template(_pristine_current_schema):
 
 
 @pytest.fixture
-def prepared_genre_app(request, store, genre_home_template):
+def prepared_genre_app(request, store, genre_home_template, home_pages_only):
     # Restore before the live app creates its own account, playlist and jobs.
     genre_home_template.restore(store)
     return request.getfixturevalue('live_app')
@@ -50,7 +50,7 @@ def mixtape_home_template(_pristine_current_schema):
 
 
 @pytest.fixture
-def prepared_mixtape_app(request, store, mixtape_home_template):
+def prepared_mixtape_app(request, store, mixtape_home_template, home_pages_only):
     mixtape_home_template.restore(store)
     assert not store.accounts.get_accounts()
     # The live app owns its account, playlist and jobs after the private restore.
