@@ -6,6 +6,18 @@ from threading import Lock
 from yt_playlist.core.db_revisions import DERIVED_TABLES
 
 
+def preparation_memo(store, owner):
+    """Keep an owner's completed inputs outside the shared, evictable read cache.
+
+    Owners use fixed names and include time-dependent inputs in their keys.
+    Ordinary input/schema/database guards still invalidate these calculations.
+    """
+    with store._lock:
+        if not hasattr(store, '_preparation_memos'):
+            store._preparation_memos = {}
+        return store._preparation_memos.setdefault(owner, ReadMemo())
+
+
 class ReadMemo:
     def __init__(self, limit=32):
         self._entries = OrderedDict()

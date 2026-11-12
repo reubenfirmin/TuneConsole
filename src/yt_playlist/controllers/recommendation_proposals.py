@@ -110,6 +110,18 @@ class RecommendationProposals:
         payload = self._proposal_json(surface)
         return json_cache.decode(payload) if payload is not None else None
 
+    def revisit_remaining(self):
+        return self.repository.revisit_remaining()
+
+    def preview_work(self):
+        return self.repository.preview_work()
+
+    def save_preview_page(self, snapshot, header, expected_token, page, dependencies):
+        return self.repository.save_preview_page(snapshot, header, expected_token, page, dependencies)
+
+    def save_revisit_remaining(self, remaining):
+        return self.repository.save_revisit_remaining(remaining)
+
     def proposal_fields(self, surface, fields):
         payload = self._proposal_json(surface)
         return json_cache.decode(payload, keys=set(fields)) if payload is not None else None

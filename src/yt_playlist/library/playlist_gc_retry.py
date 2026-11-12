@@ -21,6 +21,12 @@ def states(store):
             for name, value in store.settings.get_settings_with_prefix(PREFIX).items()}
 
 
+def deadlines(store):
+    rows = store.settings.gc_retry_deadlines()
+    return rows if rows is not None else [
+        (state['identity'], state['ytm'], state['next_retry_at']) for state in states(store).values()]
+
+
 def read(store, playlist):
     value = store.settings.get_setting(key(playlist.account_id, playlist.provider_playlist_id))
     return json.loads(value) if value else None
@@ -59,4 +65,4 @@ def clear(store, account_id, ytm):
 
 
 def next_retry_at(store):
-    return min((state["next_retry_at"] for state in states(store).values()), default=None)
+    return min((deadline for _account, _remote, deadline in deadlines(store)), default=None)

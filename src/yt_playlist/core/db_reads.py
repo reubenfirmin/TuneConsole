@@ -78,7 +78,8 @@ def read_view(source, make_reader, *, tracked=False, seconds=...):
     # Explicit worker computations may retain a snapshot while doing substantial
     # CPU work. Their cancellation owner, rather than an HTTP read deadline,
     # governs that lifetime. Ordinary request readers retain the default bound.
-    seconds = READ_SECONDS if seconds is ... else seconds
+    if seconds is ...:
+        seconds = None if source.priority.is_background else READ_SECONDS
     with (work_budget(seconds) if seconds is not None else nullcontext()), _admission(source):
         reader = None
         try:

@@ -98,7 +98,7 @@ class LastFmIAO:
                     'artist.getsimilar': ('artist',), 'tag.gettopartists': ('tag',)}.get(method)
         return (str(data.get('error')) == '6' and required
                 and all(str(params.get(field) or '').strip() for field in required)
-                and bool(re.search(r'\b(?:not found|could not find)\b',
+                and bool(re.search(r'\b(?:not found|could not find|could not be found)\b',
                                    str(data.get('message', '')), re.I)))
 
     @staticmethod

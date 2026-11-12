@@ -124,3 +124,93 @@ def test_failed_page_navigation_leaves_tv_running_and_can_be_retried(page, live_
     expect(page.locator('main h1')).to_have_text('Playlists', timeout=10000)
     expect(page.locator('#navigation-error')).to_have_count(0)
     assert_same_player(page)
+
+
+@pytest.mark.parametrize('other_tab', ['absent', 'paused', 'playing'])
+def test_tv_mix_navigation_native_audio_and_explicit_handoff(page, live_app, tv_ui, store, other_tab):
+    """Real navigation/card/controls; external player observations are controlled."""
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    iid = store.accounts.get_accounts()[0].id
+    pid = store.playlists.upsert_playlist(iid, 'PLMIX', 'More of what you love', 1, 'mix', 1)
+    track = store.tracks.upsert_track('mix-song', 'Mix song', 'Mix artist', 'Album', 200, 1)
+    store.playlists.set_playlist_tracks(pid, [track])
+    audio = {'video_id': 'other-song', 'title': 'Other song', 'artist': 'Other artist',
+             'paused': other_tab != 'playing', 'snapshot_age': 0, 'position': 12, 'duration': 180,
+             'source': None}
+    status = {'connected': True, 'now_playing': None if other_tab == 'absent' else audio}
+    page.route('**/bridge/status', lambda route: route.fulfill(json=status))
+
+    def takeover(route):
+        audio['paused'] = True
+        if status['now_playing']:
+            status['now_playing']['paused'] = True
+        route.fulfill(json={'ok': True})
+
+    page.route('**/home/tv/takeover', takeover)
+    start_tv(page, live_app, store)
+    card = page.locator('.global-now-playing')
+    expect(card.locator('.hs-now-title')).to_have_text('Video 0')
+    page.evaluate('url => location.assign(url)', f'{live_app}/playlist/{pid}')
+    expect(page.get_by_role('heading', name='More of what you love', exact=True)).to_be_visible()
+    assert_same_player(page)
+    expect(card.locator('.hs-source')).to_have_text('Back to TV')
+    expect(card.get_by_role('button', name='Pause', exact=True)).to_be_visible()
+    # Native buffering is neither a pause nor permission to advance its clock.
+    page.evaluate('''window.tvPlayer.state = 3;
+        window.tvPlayer.options.events.onStateChange({data:3,target:window.tvPlayer})''')
+    expect(card.get_by_role('button', name='Pause', exact=True)).to_be_visible()
+    position = page.evaluate('window.playbackStatus.progress().position')
+    page.wait_for_timeout(200)
+    assert page.evaluate('window.playbackStatus.progress().position') == position
+    page.evaluate('''window.tvPlayer.state = 1;
+        window.tvPlayer.options.events.onStateChange({data:1,target:window.tvPlayer})''')
+    card.locator('.hs-source').click()
+    expect(page.locator('.tv-player iframe')).to_be_visible()
+    assert_same_player(page)
+    page.evaluate('url => location.assign(url)', f'{live_app}/playlist/{pid}')
+    expect(page.get_by_role('heading', name='More of what you love', exact=True)).to_be_visible()
+    # A later native Play in a different Music tab supersedes retained TV.
+    status['now_playing'] = {**audio, 'paused': False}
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(card.locator('.hs-now-title')).to_have_text('Other song')
+    expect(card.locator('.hs-source')).to_have_count(0)
+    expect(card.get_by_role('button', name='Pause', exact=True)).to_be_visible()
+    assert page.evaluate('window.tvPlayer.state') == 2
+    assert not page.evaluate('window.tvPlaybackControls.active()')
+    assert page.evaluate('window.playbackStatus.progress().videoId') == 'other-song'
+    commands = []
+    page.route('**/now-playing/toggle?*', lambda route: (commands.append(route.request.url),
+               route.fulfill(json={'ok': True, 'paused': True})))
+    card.get_by_role('button', name='Pause', exact=True).click()
+    page.wait_for_function('!Alpine.$data(document.querySelector(".global-now-playing")).toggling')
+    assert len(commands) == 1 and 'videoId=other-song' in commands[0]
+    # Returning to TV is navigation only. Explicit selection reacquires it.
+    page.evaluate('url => location.assign(url)', live_app + '/#tv')
+    expect(page.locator('.tv-player iframe')).to_be_visible()
+    assert not page.evaluate('window.tvPlaybackControls.active()')
+    page.get_by_role('button', name='Now playing: Video 0', exact=True).click()
+    page.wait_for_function('window.tvPlaybackControls.active() && window.tvPlayer.state === 1')
+    status['now_playing']['paused'] = True
+    page.evaluate('url => location.assign(url)', f'{live_app}/playlist/{pid}')
+    expect(page.get_by_role('heading', name='More of what you love', exact=True)).to_be_visible()
+    plays = []
+
+    def play_mix(route):
+        plays.append(route.request.post_data_json)
+        assert page.evaluate('window.tvPlayer.state') == 2
+        status['now_playing'] = {**audio, 'video_id': 'mix-song', 'title': 'Mix song',
+                                 'artist': 'Mix artist', 'paused': False, 'playlist_ytm_id': 'PLMIX',
+                                 'source': {'kind': 'playlist', 'url': f'/playlist/{pid}',
+                                            'title': 'More of what you love', 'external': False}}
+        route.fulfill(json={'ok': True})
+
+    page.route('**/play', play_mix)
+    page.get_by_role('button', name='Play on YouTube Music', exact=True).click()
+    expect(card.locator('.hs-now-title')).to_have_text('Mix song')
+    expect(card.locator('.hs-now-artist')).to_have_text('Mix artist')
+    expect(card.locator('.hs-source')).to_have_count(0)
+    expect(page.get_by_role('button', name='Pause on YouTube Music', exact=True)).to_be_visible()
+    assert plays == [{'url': 'https://music.youtube.com/playlist?list=PLMIX'}]
+    assert not page.evaluate('window.tvPlaybackControls.active()')
+    expect(page.locator('#toasts [role="alert"], #playback-error')).to_have_count(0)
+    page.screenshot(path=f'/tmp/tuneconsole-1153-mix-handoff-{other_tab}.png')

@@ -8,7 +8,7 @@ from playwright.sync_api import expect
 
 
 @pytest.fixture
-def radio_ui(live_app, store, page):
+def radio_ui(home_pages_only, live_app, store, page):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     # The Store fixture privately restores the genuine prepared mix before the

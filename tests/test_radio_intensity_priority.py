@@ -9,7 +9,7 @@ from tests.radio_session_support import controlled_radio_checkpoints, radio_cont
 from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
 from yt_playlist.core import catalog
 from yt_playlist.rec import embedding_vectors, musical_character, radio_tuning
-from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
+from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, GENRE_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_policy import RadioPolicy
 from yt_playlist.web import radio_session
@@ -149,6 +149,15 @@ def test_equally_suitable_current_style_is_kept_and_midpoint_still_pins(intensit
     neutral = candidate(store, energy=.5)
     request.addfinalizer(neutral.close)
     assert neutral.cluster_for(neutral.next_track([seed])) == '1'
+    neutral.configure({**neutral.tuning, 'theme': .5})
+    assert neutral.cluster_members and len(neutral.neighbours['1']) == GENRE_POOL_LIMIT
+    played = [t for mid in neutral.neighbours['1'] for t in pools[mid]] + [seed]
+    for draw in (1, 0):  # Current first, then neighbours first.
+        neutral.rng.seed(draw)
+        neutral.prepared.tracks.reset_mock()
+        pick = neutral.next_track(played, target=seed)
+        assert pick and pick['key'] in {t['key'] for t in pools['1'][1:]}
+        assert len({call.args[1] for call in neutral.prepared.tracks.call_args_list}) <= GENRE_POOL_LIMIT
     local = pools['1'][1]
     intensity_inputs.profiles[local['key']]['dimensions']['intensity']['value'] = .04
     c = candidate(store, theme=.5)

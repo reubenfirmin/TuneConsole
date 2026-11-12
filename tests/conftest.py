@@ -1,6 +1,10 @@
 import importlib.util
 import inspect
 import sqlite3
+from pathlib import Path
+import shutil
+import subprocess
+from tempfile import TemporaryDirectory
 import time
 from contextlib import ExitStack, closing
 
@@ -9,6 +13,19 @@ from tests.compaction_fixture_support import compaction_inputs
 from tests.genre_catalog_support import use_shipped_catalog
 from tests.store_fixture_support import consumer_schema, initialize_consumer, native_sql_calls
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture
+def gpg_home():
+    # Unix agent sockets must fit sun_path even when pytest's fixture root is
+    # beneath a long checkout/report path. Own only this unique agent and home.
+    with TemporaryDirectory(prefix='tc-gpg-', dir='/tmp') as directory:
+        try:
+            yield Path(directory)
+        finally:
+            if shutil.which('gpgconf'):
+                subprocess.run(['gpgconf', '--homedir', directory, '--kill', 'gpg-agent'],
+                               capture_output=True, timeout=10)
 
 
 # A sync Playwright driver owns a running asyncio loop until its fixture ends.

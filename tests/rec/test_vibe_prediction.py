@@ -1130,11 +1130,12 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(
     assert not store.vibe_predictions.has_joint_scores([head for head in heads.values() if head])
 
 
-@pytest.mark.parametrize('interruption', ['close', 'stale', 'deadline', 'pause'])
-def test_joint_input_batches_release_readers_and_preserve_heads(
+@pytest.mark.parametrize('interruption', ['complete', 'stale', 'shutdown'])
+def test_joint_input_batch_finishes_without_deadline_restarts_and_releases_readers(
         file_backed_store, monkeypatch, interruption):
     from yt_playlist.core import file_collection, vibe_model_files
-    from yt_playlist.rec import progressive
+    from yt_playlist.core import activity
+    from types import SimpleNamespace
     from yt_playlist.core import vibe_models
 
     store = file_backed_store
@@ -1153,42 +1154,48 @@ def test_joint_input_batches_release_readers_and_preserve_heads(
     revision = int(store.settings.get_setting(vibe_model_files.REVISION) or 0)
     store.settings.set_setting(vibe_model_files.REVISION, str(revision + 1))
     worker = Preparation(store)
-    original_fit = joint.fit
-    monkeypatch.setattr(joint, 'fit', lambda *args, **kwargs: pytest.fail('Fitted before input batch completed'))
-    assert worker._joint_step()
-    assert worker._capturing_kind == 'joint' and worker.due(1000)
-    assert worker._capturing_pending is None
-    assert not worker.fit(1000)
-    with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
-        assert not admitted
-    if interruption == 'stale':
-        with store.conn:
-            catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
-        # Restore fitting only after proving the first turn yielded input.
-        monkeypatch.setattr(joint, 'fit', original_fit)
-        assert not worker.capture(1000)
-    elif interruption == 'deadline':
-        with monkeypatch.context() as expired:
-            expired.setattr(progressive.time, 'monotonic', lambda: worker._capturing_expires_at + 1)
-            assert not worker.capture(1000)
-    elif interruption == 'pause':
-        worker.expire_capture(paused=True)
+    original = vibe_joint_preparation.prior_inputs
+    clock, stopping, batches = [100.], [False], []
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def inputs(reader, rows, vibe):
+        batches.append([row['recording'] for row in rows])
+        result = original(reader, rows, vibe)
+        clock[0] += worker.budget.capture_seconds + worker.budget.fit_seconds + 1
+        if interruption == 'stale':
+            with store.conn:
+                catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
+        stopping[0] = interruption == 'shutdown'
+        return result
+
+    monkeypatch.setattr(vibe_joint_preparation, 'prior_inputs', inputs)
+    if interruption == 'shutdown':
+        with pytest.raises(activity.WorkClosing), activity.cancellable_work(lambda: stopping[0]):
+            worker._joint_step()
     else:
-        worker.close()
+        assert worker._joint_step() is (interruption == 'complete')
+    assert batches and len([key for batch in batches for key in batch]) == len(
+        {key for batch in batches for key in batch})
     assert worker._capturing is None and worker._capturing_kind is None
-    assert heads == {vibe: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
-                     for vibe in vibe_joint_preparation.VIBES}
+    current = {vibe: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
+               for vibe in vibe_joint_preparation.VIBES}
+    if interruption == 'complete':
+        outcome = vibe_joint_preparation.state(store, vibe_joint_preparation.VIBES[0])
+        assert outcome['revision'] == str(revision + 1) and outcome['outcome'] == 'ready'
+    else:
+        assert heads == current
     with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
         assert admitted
     assert vibe_joint_preparation.due(store)
 
 
-@pytest.mark.parametrize('interruption', ['close', 'stale', 'deadline', 'idle-pause', 'idle-deadline'])
-def test_joint_score_turns_release_posteriors_and_retry_unpublished_work(
+@pytest.mark.parametrize('interruption', ['complete', 'stale', 'shutdown'])
+def test_joint_score_batch_finishes_channels_once_and_preserves_publication_guards(
         file_backed_store, qualified_candidate, monkeypatch, interruption):
     import weakref
     from yt_playlist.core import file_collection
-    from yt_playlist.rec import progressive
+    from yt_playlist.core import activity
+    from types import SimpleNamespace
     from yt_playlist.core import vibe_models
 
     store = file_backed_store
@@ -1202,96 +1209,58 @@ def test_joint_score_turns_release_posteriors_and_retry_unpublished_work(
     with store.conn:
         store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
     worker = Preparation(store)
-    posteriors, original = [], vibe_joint_preparation.posterior
+    posteriors, channels, original = [], [], vibe_joint_preparation.posterior
+    clock, stopping = [100.], [False]
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
 
     def load(reader, vibe):
         assert not any(reference() is not None for reference in posteriors)
         prepared = original(reader, vibe)
         if prepared:
             posteriors.append(weakref.ref(prepared[1]))
+        channels.append(vibe)
+        clock[0] += worker.budget.fit_seconds + 1
+        if len(channels) == 1 and interruption == 'stale':
+            with store.conn:
+                catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
+        stopping[0] = interruption == 'shutdown'
         return prepared
 
     monkeypatch.setattr(vibe_joint_preparation, 'posterior', load)
-    for _ in range(5):
-        worker.capture(1000)
-        if posteriors:
-            break
-    assert len(posteriors) == 1
-    assert worker._capturing is not None and worker.due(1000)
-    assert all(reference() is None for reference in posteriors)
-    assert not worker.fit(1000)
-    assert store.prepared_content.has_pending()
-    with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
-        assert not admitted
-    if interruption == 'close':
-        worker.close()
-    elif interruption == 'deadline':
-        with monkeypatch.context() as expired:
-            expired.setattr(progressive.time, 'monotonic', lambda: worker._capturing_expires_at + 1)
-            assert not worker.capture(1000)
-        assert worker._capturing is None
-    elif interruption.startswith('idle-'):
-        import threading
-        from types import SimpleNamespace
-        from yt_playlist.rec.rec_worker import RecWorker
-
-        runtime = SimpleNamespace(model_lock=threading.RLock(), preparation=worker,
-                                  _accepting=lambda: not store.activity_paused)
-        held, release = threading.Event(), threading.Event()
-
-        def in_flight():
-            with runtime.model_lock:
-                held.set()
-                assert release.wait(5)
-
-        running = threading.Thread(target=in_flight)
-        running.start()
-        try:
-            assert held.wait(5)
-            with monkeypatch.context() as idle:
-                if interruption == 'idle-pause':
-                    store.activity_paused = True
-                else:
-                    idle.setattr(progressive.time, 'monotonic', lambda: worker._capturing_expires_at + 1)
-                # Polling never closes a concurrently advancing generator.
-                RecWorker._release_idle_preparation(runtime)
-                assert worker._capturing is not None
-                release.set()
-                running.join(5)
-                assert not running.is_alive()
-                # No capture is resumed: the maintenance poll releases leases.
-                RecWorker._release_idle_preparation(runtime)
-                assert worker._capturing is None
-        finally:
-            release.set()
-            running.join(5)
-            store.activity_paused = False
-    else:
-        with store.conn:
-            catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
-        for _ in range(len(vibe_joint_preparation.VIBES)):
-            count = len(posteriors)
-            assert not worker.capture(1000)
-            assert len(posteriors) - count <= 1
-            if worker._capturing is None:
+    def complete_batch():
+        for _ in range(5):
+            worker.capture(1000)
+            if posteriors:
                 break
-        assert worker._capturing is None
-    assert store.prepared_content.has_pending()
-    assert before == [tuple(row) for row in store.conn.execute(
+
+    if interruption == 'shutdown':
+        with pytest.raises(activity.WorkClosing), activity.cancellable_work(lambda: stopping[0]):
+            complete_batch()
+    else:
+        complete_batch()
+    assert channels and len(channels) == len(set(channels))
+    if interruption == 'complete':
+        assert channels == list(vibe_joint_preparation.VIBES)
+    assert all(reference() is None for reference in posteriors)
+    assert worker._capturing is None
+    after = [tuple(row) for row in store.conn.execute(
         'SELECT * FROM recording_vibes WHERE recording_id='
         '(SELECT id FROM recordings WHERE identity_key=?) ORDER BY vibe', (target,))]
+    if interruption != 'complete':
+        assert before == after
+    assert store.prepared_content.has_pending() is (interruption != 'complete')
     with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
         assert admitted
-    # A new worker starts again from the durable queue, never a partial score
-    # set or a retained dense posterior. Every admission loads at most one.
+    stopping[0] = False
+    monkeypatch.setattr(vibe_joint_preparation, 'posterior', original)
+    # Changed inputs and shutdown retain the durable queue and the last-good
+    # score set. A new admission can publish without retaining dense posteriors.
     worker = Preparation(store)
     for _ in range(100):
         if (not store.prepared_content.has_pending() and not musical_preparation.due(store)
                 and not vibe_preparation.due(store)):
             break
-        count = len(posteriors)
         worker.capture(1000)
-        assert len(posteriors) - count <= 1
     else:
         pytest.fail('Interrupted score preparation did not converge')
     assert not store.prepared_content.has_pending()

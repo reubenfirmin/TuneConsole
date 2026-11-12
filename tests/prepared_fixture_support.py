@@ -137,21 +137,29 @@ class PreparedTemplate:
     def open(self, database):
         """Open a private admitted consumer without first cloning an empty DB."""
         assert self.revision_guards, 'Consumer cloning requires an admitted source'
-        target = Store(database)
-        try:
-            # Private consumers require real commit visibility and rollback;
-            # host power-loss durability is outside this fixture's contract.
-            target.conn.execute('PRAGMA synchronous=OFF')
-            self.restore(target)
-            for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
-                setattr(target, name, getattr(self.source, name))
-            target._bind_repositories()
-            if target._db_path is not None:
-                mode = target.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
-                assert mode.lower() == 'wal'
+        with ExitStack() as resources:
+            home = resources.enter_context(TemporaryDirectory(prefix='tuneconsole-consumer-home-'))
+            # Like template construction, cloning can precede function-scoped
+            # isolation. Restore caller settings before yielding; retained roots
+            # must remain bound to this consumer when those settings change.
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setenv('YT_PLAYLIST_HOME', home)
+                patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+                patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+                patch.delenv('DEEPSEEK_API_KEY', raising=False)
+                target = Store(database)
+                resources.callback(target.conn.close)
+                # Private consumers require real commit visibility and rollback;
+                # host power-loss durability is outside this fixture's contract.
+                target.conn.execute('PRAGMA synchronous=OFF')
+                self.restore(target)
+                for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
+                    setattr(target, name, getattr(self.source, name))
+                target._bind_repositories()
+                if target._db_path is not None:
+                    mode = target.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
+                    assert mode.lower() == 'wal'
             yield target
-        finally:
-            target.conn.close()
 
     def restore(self, target, *, ignore=None, external_files=()):
         external_files = (*self.external_files, *external_files)

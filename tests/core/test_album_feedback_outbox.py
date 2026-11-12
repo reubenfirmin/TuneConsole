@@ -271,6 +271,60 @@ def test_shutdown_during_feedback_sql_keeps_intent_for_restart(pair, monkeypatch
             resumed.shutdown()
 
 
+@pytest.mark.parametrize('reason', ['idle', 'restart'])
+@pytest.mark.parametrize('resume_before_handler', [False, True])
+def test_temporary_admission_pause_resumes_feedback_maintenance(
+        pair, monkeypatch, caplog, reason, resume_before_handler):
+    store, other = pair
+    with group_roots.admission(store):
+        album_feedback.set_feedback(other, 'first-release', 'more', 3, 'first-release')
+    retained = pending(other)
+    worker = RecWorker(SimpleNamespace(store=other, work=Activity(),
+        logger=logging.getLogger(__name__), now_fn=lambda: 10))
+    waits, rejections, continued = [], [], []
+    admit = worker.work.admit
+    resume = getattr(worker.work, 'resume_' + reason)
+
+    def admission_race(name):
+        if name != 'album feedback responses' or rejections:
+            return admit(name)
+        worker.work.close_admission(reason)
+        try:
+            return admit(name)
+        finally:
+            rejections.append(reason)
+            if resume_before_handler:
+                resume()
+
+    def bounded_wait(timeout):
+        waits.append(timeout)
+        if len(waits) == 2:
+            resume()
+        return len(waits) > 2
+
+    def stop_after_feedback():
+        continued.append(responses(other))
+        worker.shutdown()
+        raise WorkClosing('Worker stopped after resumed feedback drain')
+
+    try:
+        monkeypatch.setattr(worker.work, 'admit', admission_race)
+        monkeypatch.setattr(worker._stop, 'wait', bounded_wait)
+        monkeypatch.setattr(worker, '_poll_evidence_storage', stop_after_feedback)
+        with caplog.at_level(logging.WARNING):
+            worker._maintenance_loop()
+        assert rejections == [reason] and waits == [0.5, 0.5]
+        assert worker.work.accepting and worker.work.wait(0)
+        published, = continued
+        assert not pending(other) and responses(other) == published
+        response, = published
+        assert response['id'] == retained[0]['action_id']
+        assert album_feedback.drain(other) == 0 and responses(other) == published
+        assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    finally:
+        worker.shutdown()
+
+
 @pytest.mark.parametrize('failure', ['interrupted', 'missing-table-during-shutdown'])
 def test_unexpected_feedback_sql_failure_keeps_warning(pair, monkeypatch, caplog, failure):
     _, other = pair

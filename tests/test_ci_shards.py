@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ci_test_shards import BASELINE, DIAGNOSTIC_BYTES, _diagnostic, load_report, partition, pytest_configure as configure_shard, refresh_baseline, verify
+from ci_test_shards import (BASELINE, DIAGNOSTIC_BYTES, _diagnostic, calibrate_unit_timings, load_report, partition,
+                            pytest_configure as configure_shard, refresh_baseline, verify)
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from ci_plan import timing_source
@@ -80,7 +81,7 @@ def test_invalid_source_identity_is_rejected(source):
         partition(['one.py::test_case'], {'one.py': {'seconds': 1, 'cases': 1, 'source_shard': source}})
 
 
-def test_source_balance_keeps_new_files_and_legacy_measurements():
+def test_source_balance_keeps_new_files_and_legacy_measurements(tmp_path, monkeypatch):
     timings = {'a.py': {'seconds': 8, 'cases': 2, 'source_shard': 1},
                'b.py': {'seconds': 4, 'cases': 2, 'source_shard': 2},
                'legacy.py': {'seconds': 2, 'cases': 1}}
@@ -90,6 +91,44 @@ def test_source_balance_keeps_new_files_and_legacy_measurements():
     assert set(owners) == {'a.py', 'b.py', 'legacy.py', 'new.py'}
     assert sum(loads) == 18  # The two new cases retain the measured 2s median estimate.
     assert owners == partition(list(reversed(nodes)), timings, 4)[0]
+
+    # The same files crossed differently paced runners in two clean passes.
+    # Shared fixture drift in one file must not become a runner-wide weight.
+    earlier, measured, costs = {}, {}, {}
+    for old in (1, 2):
+        for new in (1, 2):
+            for i in range(5):
+                name = f'{old}-{new}-{i}.py'
+                cost = i + 1
+                earlier[name] = {'seconds': cost * (1.5 if old == 1 else 1), 'cases': 2, 'source_shard': old}
+                drift = 4 if (old, new, i) == (1, 2, 4) else 1
+                costs[name] = cost * drift
+                measured[name] = {'seconds': costs[name] * new, 'cases': 2, 'source_shard': new}
+    measured['new.py'] = {'seconds': 6, 'cases': 1, 'source_shard': 2}
+    earlier['changed.py'] = {'seconds': 100, 'cases': 1, 'source_shard': 1}
+    measured['changed.py'] = {'seconds': 4, 'cases': 2, 'source_shard': 1}
+    original = deepcopy(measured)
+    adjusted, scales = calibrate_unit_timings(measured, earlier)
+    assert scales == pytest.approx({1: 2 ** -.5, 2: 2 ** .5})
+    assert measured == original
+    assert adjusted['new.py']['seconds'] == pytest.approx(3 * 2 ** .5)
+    assert adjusted['changed.py']['seconds'] == pytest.approx(4 * 2 ** .5)
+    assert all(adjusted[name]['seconds'] == pytest.approx(cost * 2 ** .5) for name, cost in costs.items())
+    assert calibrate_unit_timings(measured, {name: row for name, row in earlier.items()
+                                            if row['source_shard'] == 1}) == (measured, {})
+    committed = tmp_path / 'baseline.json'
+    committed.write_text(json.dumps({'revision': 'earlier', 'failed_cases': [], 'unit': earlier}))
+    monkeypatch.setattr('ci_test_shards.BASELINE', committed)
+    artifact = tmp_path / 'timings'
+    artifact.mkdir()
+    (artifact / 'unit-timings.json').write_text(json.dumps({'revision': 'current', 'suite': 'unit', 'files': measured}))
+    options = {'ci_shard': '1/8', 'ci_shard_report': tmp_path / 'shard.json', 'ci_suite': 'unit',
+               'ci_duration_baseline': artifact, 'ci_source_report': None}
+    registered = []
+    configure_shard(SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
+        register=lambda plugin, name: registered.append(plugin))))
+    assert registered[0].durations == adjusted
+    assert registered[0].report['planning_source_scales'] == pytest.approx({str(k): v for k, v in scales.items()})
 
 
 @pytest.mark.parametrize("suite,total", [("unit", 8), ("browser", 4)])
@@ -155,6 +194,8 @@ def test_runner_configuration_accepts_supported_splits_and_rejects_invalid_indic
 
 def test_every_parameter_case_executes_once_and_all_phases_feed_timings():
     rows = reports()
+    for row in rows:
+        row['planning_source_scales'] = {'1': .8, '2': 1.2}
     result = verify(rows, "unit")
     assert result["cases"] == 3
     assert result["files"]["one.py"]["cases"] == 2
@@ -162,6 +203,27 @@ def test_every_parameter_case_executes_once_and_all_phases_feed_timings():
     assert result["test_runner_minutes"] == pytest.approx(20 / 60)
     assert result["phase_seconds"] == pytest.approx({"setup": .3, "call": .3, "teardown": .3})
     assert {name: row['source_shard'] for name, row in result['files'].items()} == rows[0]['file_owners']
+    assert result['planning_source_scales'] == {'1': .8, '2': 1.2}
+    rows[-1]['planning_source_scales'] = {'1': 1, '2': 1}
+    with pytest.raises(ValueError, match='timing calibrations differ'):
+        verify(rows, 'unit')
+    rows[-1]['planning_source_scales'] = rows[0]['planning_source_scales'].copy()
+    for row in rows:
+        row.update(runner_capacities=[1, 2], capacity_probes=[{'index': 1}, {'index': 2}],
+                   estimated_runner_seconds=[row['estimated_seconds'][0], row['estimated_seconds'][1] / 2])
+    result = verify(rows, 'unit')
+    assert result['runner_capacities'] == [1, 2]
+    assert result['capacity_probes'] == rows[0]['capacity_probes']
+    assert result['estimated_runner_seconds'] == [2, .5]
+    for key, value in (('runner_capacities', [2, 1]), ('capacity_probes', [{'index': 1}])):
+        before = rows[-1][key]
+        rows[-1][key] = value
+        with pytest.raises(ValueError, match='current runner capacities differ'):
+            verify(rows, 'unit')
+        rows[-1][key] = before
+    rows[0]['runner_capacities'] = [0, 2]
+    with pytest.raises(ValueError, match='invalid current runner capacity plan'):
+        verify(rows, 'unit')
 
 
 def test_browser_measurements_keep_the_existing_allocation_input():

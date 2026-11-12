@@ -7,13 +7,20 @@ The source database and historical file custody stay with the copy/rebuild job.
 import argparse
 from pathlib import Path
 
-from .. import metadata_retention, metadata_runtime, metadata_runtime_files, policy_documents
+from .. import group_preview_work, metadata_retention, metadata_runtime, metadata_runtime_files, policy_documents
 from ..activity import check_cancellable_work
 from ..metadata_locator_contract import GUARDS, REMOVED, TABLE, retired
 from ..schema_contract import tokens
 
 COLUMNS = frozenset(('contract_digest', 'raw_filename', 'raw_digest', 'raw_byte_size', 'raw_offset'))
 DEPENDENCIES = REMOVED | {'metadata_deliveries', 'immutable_metadata_delivery', 'owned_metadata_legacy_record'}
+
+
+def _preview_guards(conn):
+    # These guards only invalidate consumed preview inputs. Their UPDATE
+    # predicates name every installed column, so retirement must regenerate
+    # them against the smaller table rather than replaying the old SQL.
+    return dict(group_preview_work.guards(conn, sources={'metadata_deliveries'}))
 
 
 def _eligible(conn):
@@ -29,12 +36,18 @@ def _eligible(conn):
         check_cancellable_work()
         if conn.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone():
             raise ValueError('Retain populated installed metadata until verified compaction: '+table)
+    preview_guards = _preview_guards(conn)
+    installed_guards = set()
     for name, kind, owner, sql in conn.execute(
             "SELECT name,type,tbl_name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL"):
+        if name in preview_guards and tokens(sql) == tokens(preview_guards[name]):
+            installed_guards.add(name)
+            continue
         unknown_trigger = (kind == 'trigger' and owner == 'metadata_deliveries'
                            and name != 'immutable_metadata_delivery')
         if unknown_trigger or COLUMNS.intersection(tokens(sql)) and name not in DEPENDENCIES:
             raise ValueError('Locator retirement requires a new dependency audit: '+name)
+    return installed_guards
 
 
 def retire(conn, manifest):
@@ -59,7 +72,7 @@ def retire(conn, manifest):
     with policy_documents.retained_reader(metadata_runtime_files.directory(conn)):
         with conn:
             conn.execute('BEGIN')
-            _eligible(conn)
+            preview_guards = _eligible(conn)
             members = metadata_runtime_files.verify_backup(conn, manifest)
         with conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -75,6 +88,9 @@ def retire(conn, manifest):
                 conn.execute(sql)
             for sql in GUARDS.values():
                 conn.execute(sql)
+            for name, sql in _preview_guards(conn).items():
+                if name in preview_guards:
+                    conn.execute(sql)
             if sequence:
                 conn.execute("INSERT INTO sqlite_sequence(name,seq) VALUES ('metadata_deliveries',?)", (sequence[0],))
             check_cancellable_work()

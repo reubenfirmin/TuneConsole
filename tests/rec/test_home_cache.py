@@ -98,6 +98,13 @@ def test_legacy_written_home_files_remain_readable_and_can_be_replaced(store):
     home_cache.put(store, 'home_prepared', {'menu': 'replacement'}, 2)
     # Other installed consumers can also read the simple writer's format.
     assert store.rec_proposals.get_proposals('home_prepared') == {'menu': 'replacement'}
+    store.rec_proposals.put_proposals('home_prepared', {'menu': 'replacement'}, 3)
+    previous = store.conn.execute('SELECT publication_id FROM home_display_heads '
+                                  "WHERE surface='home_prepared'").fetchone()[0]
+    store.rec_proposals.put_proposals('home_prepared', {'menu': 'replacement'}, 4)
+    assert store.conn.execute('SELECT publication_id FROM home_display_heads '
+                             "WHERE surface='home_prepared'").fetchone()[0] == previous
+    assert home_cache.read(store, 'home_prepared') == {'menu': 'replacement'}
 
 
 @pytest.mark.parametrize('damage', ['missing', 'corrupt'])
@@ -111,6 +118,11 @@ def test_unavailable_cache_is_a_miss_and_can_be_rewritten(store, damage):
         path.write_bytes(b'damaged')
     assert home_cache.read(store, 'home_tuned') is None
     home_cache.put(store, 'home_tuned', {'menu': 'useful'}, 2)
+    assert home_cache.read(store, 'home_tuned') == {'menu': 'useful'}
+    # The general proposal producer also coalesces identical publications. It
+    # must still repair damaged content-addressed files before doing so.
+    path.unlink()
+    store.rec_proposals.put_proposals('home_tuned', {'menu': 'useful'}, 3)
     assert home_cache.read(store, 'home_tuned') == {'menu': 'useful'}
 
 

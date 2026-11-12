@@ -121,7 +121,7 @@ def test_group_preparation_never_loads_or_reimports_retired_mode_definitions(sto
     assert worker.due(1100) and worker.step(1100)
 
 
-def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(store, monkeypatch):
+def test_stale_work_preserves_last_good_and_short_allowance_finishes_admitted_plan(store, monkeypatch):
     tracks = recordings([('Pop', 12, .2)])
     seed(store, tracks)
     worker = group_preparation.Preparation(store)
@@ -133,7 +133,7 @@ def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(s
     def race(*args, **kwargs):
         result = original(*args, **kwargs)
         with store.conn:
-            store.conn.execute('UPDATE rec_musical_profiles SET prepared_at=prepared_at+1')
+            store.conn.execute("UPDATE rec_musical_profiles SET payload='{}'")
         return result
 
     monkeypatch.setattr(group_discovery, 'discover', race)
@@ -141,8 +141,8 @@ def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(s
     assert store.taste_groups.head()['generation'] == first['generation']
     monkeypatch.setattr(group_discovery, 'discover', original)
     deferred = group_preparation.Preparation(store, budget=group_preparation.Budget(seconds=0))
-    assert deferred.due(1200) and not deferred.step(1200)
-    assert store.taste_groups.head()['generation'] == first['generation']
+    assert deferred.due(1200) and deferred.step(1200)
+    assert store.taste_groups.head()['generation'] != first['generation']
 
 
 def test_cancellation_propagates_without_publishing_a_partial_generation(store, monkeypatch):

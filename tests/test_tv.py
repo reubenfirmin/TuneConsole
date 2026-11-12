@@ -343,7 +343,11 @@ def prepare_pool(store, client, now=1, *, seeds=None):
 def test_preparation_publishes_in_bounded_slices_and_recovers_after_failure(store, monkeypatch):
     seeds = [{'key': f'key-{i}', 'title': f'Prepared {i}', 'artist': 'Artist', 'video_id': str(i), 'group': tv.GROUPS[i % 3]}
              for i in range(15)]
-    monkeypatch.setattr(tv, 'seed_tracks', lambda *_: seeds)
+    reads = []
+    def seed_tracks(*args):
+        reads.append(True)
+        return seeds
+    monkeypatch.setattr(tv, 'seed_tracks', seed_tracks)
     client = Videos([row(i, title=f'Prepared {i} Visualizer') for i in range(15)])
     assert tv.prepare(store, client, 1000)
     first = tv.cached(store)
@@ -360,8 +364,25 @@ def test_preparation_publishes_in_bounded_slices_and_recovers_after_failure(stor
     assert len(tv.cached(store)['attempted']) == 15
     assert not store.rec_proposals.get_proposals('tv_preparation')['failed']
     count = len(client.searches)
+    completed_reads = len(reads)
     assert not tv.prepare(store, client, 1004)
-    assert len(client.searches) == count
+    assert len(client.searches) == count and len(reads) == completed_reads
+    # An explicit request arriving during a search survives that completion.
+    seeds.append({'key': 'new-source', 'title': 'New candidate', 'artist': 'Artist', 'group': 'liked'})
+    tv.refresh(store)
+    def refreshing(*args, **kwargs):
+        tv.refresh(store)
+        return search(*args, **kwargs)
+    client.search = refreshing
+    assert tv.prepare(store, client, 1005)
+    searched = len(client.searches)
+    client.search = search
+    assert not tv.prepare(store, client, 1006)
+    assert len(client.searches) == searched
+    assert not tv.due(store, 1006)
+    # Losing the output admits recovery even though candidate inputs are equal.
+    store.rec_proposals.put_proposals(tv.SURFACE, {}, 1007)
+    assert tv.due(store, 1007)
 
 
 def test_empty_home_refresh_keeps_available_prepared_videos_but_respects_feedback(store, monkeypatch):
@@ -372,9 +393,11 @@ def test_empty_home_refresh_keeps_available_prepared_videos_but_respects_feedbac
     assert tv.cached(store)['items'] == previous['items']
     assert tv.queue(store, 2)
     for item in previous['items']:
-        seed_dislike(store, item['source_key'], until=None, now=3)
+        seed_dislike(store, item['source_key'], until=5, now=3)
     assert not tv.prepare(store, client, 3)
     assert not tv.queue(store, 3)
+    assert not tv.due(store, 4)
+    assert tv.due(store, 5), 'Feedback expiry must admit preparation before the search deadline'
 
 
 def test_search_cannot_publish_after_source_removal(store, monkeypatch):

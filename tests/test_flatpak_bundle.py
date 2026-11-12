@@ -58,7 +58,7 @@ def test_workflow_candidate_command_installs_an_unsigned_bundle(tmp_path):
 
 
 @pytest.mark.parametrize("initial_runtime", ["25.08", "24.08"])
-def test_signed_bundle_configures_origin_and_updates_from_it(tmp_path, initial_runtime):
+def test_signed_bundle_configures_origin_and_updates_from_it(tmp_path, initial_runtime, gpg_home):
     for tool in ("flatpak", "gpg"):
         if not shutil.which(tool):
             pytest.skip(f"{tool} is required for the bundle integration check")
@@ -75,8 +75,7 @@ def test_signed_bundle_configures_origin_and_updates_from_it(tmp_path, initial_r
         pytest.skip(f"{sdk} is required for the bundle integration check")
     if subprocess.run(["flatpak", "info", f"org.freedesktop.Sdk//{initial_runtime}"], capture_output=True).returncode:
         pytest.skip(f"SDK {initial_runtime} is required for the upgrade check")
-    keys = tmp_path / "keys"
-    keys.mkdir(mode=0o700)
+    keys = gpg_home
     gpg = ["gpg", "--homedir", str(keys), "--batch", "--pinentry-mode", "loopback",
            "--passphrase", ""]
     run(*gpg, "--quick-generate-key", "Bundle Test <bundle@example.invalid>", "rsa2048", "sign", "1d")

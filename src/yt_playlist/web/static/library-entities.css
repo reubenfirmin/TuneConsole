@@ -227,10 +227,16 @@
   flex-wrap: wrap;
   align-items: center;
   gap: .45rem .65rem;
-  margin-block-end: 1.2rem;
+  margin-block-end: .85rem;
   color: var(--light-source);
   font-size: var(--type-sm);
   line-height: 1.4;
+}
+.page-playlist .release-hero {
+  align-items: stretch;
+}
+.page-playlist .release-hero .pl-headmain {
+  justify-content: flex-start;
 }
 .page-playlist .release-hero h1 {
   max-width: 28ch;
@@ -239,14 +245,6 @@
   letter-spacing: -.035em;
   overflow-wrap: anywhere;
   text-wrap: balance;
-}
-.page-playlist .release-hero .pl-title-context {
-  max-width: 60ch;
-  margin-block: .65rem 0;
-  color: color-mix(in srgb, var(--light-source) 84%, transparent);
-  font-size: var(--type-body);
-  line-height: 1.45;
-  text-shadow: 0 1px 8px var(--shadow-ink);
 }
 .page-playlist .release-hero :is(.pl-type-badge, .pl-version, .pl-vibe-badge) {
   display: inline-block;
@@ -258,21 +256,12 @@
   background: color-mix(in srgb, var(--shadow-ink) 80%, transparent);
   overflow-wrap: anywhere;
 }
-.page-playlist .release-hero .pl-type-badge {
-  background: color-mix(in srgb, var(--accent) 40%, var(--shadow-ink));
-  font-weight: 650;
-}
-.page-playlist .release-hero .pl-vibe-badge {
+.page-playlist .release-hero :is(.pl-type-badge, .pl-vibe-badge) {
   border-color: var(--accent);
   font-weight: 650;
 }
-.page-playlist .release-hero .pl-version {
-  font-variant-numeric: tabular-nums;
-}
-.page-playlist .release-hero .pl-generated-date {
-  color: color-mix(in srgb, var(--light-source) 84%, transparent);
-  font-size: var(--type-body);
-}
+.page-playlist .release-hero .pl-version { font-variant-numeric: tabular-nums; }
+.page-playlist .release-hero .pl-generated-date { color: var(--light-source); }
 :is(.page-playlist, .page-album) .pl-actions {
   display: flex;
   flex-wrap: wrap;

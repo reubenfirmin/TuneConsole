@@ -6,6 +6,7 @@ conservative root, never a recorded offer whose group history was collected.
 """
 from contextlib import contextmanager, nullcontext
 import threading
+import time
 import uuid
 import sqlite3
 
@@ -209,7 +210,15 @@ def maintain_retention(store):
                   output_files=0, output_bytes=0, checked_files=0, group_steps=0)
     if not enabled(store):
         return result
-    from yt_playlist.core.activity import work_budget
+    deadline = 0
+
+    def exhausted():
+        # Yield only after the owner has committed/advanced its prefix. The
+        # elapsed-time boundary cannot interrupt SQL and roll that prefix back.
+        if time.monotonic() >= deadline:
+            result['pending'] = True
+            return True
+        return False
 
     def sql_turn(callback):
         try:
@@ -219,18 +228,26 @@ def maintain_retention(store):
                 result['recommendation_rows'] += progress.rows
                 result['generations'] += progress.generations
                 result['pools'] += progress.pools
+                if exhausted():
+                    return
         finally:
             store.recommendations.checkpoint_retirement()
 
     def group_cleanup():
         store.group_evidence.collect_unpublished_mixes()
         reap_pending(store)
+        # Admission/reaping must not consume the whole turn before a build
+        # prefix advances. Finish at least one prefix even on a slow disk.
         while store.taste_groups.cleanup_builds():
             result['group_steps'] += 1
+            if exhausted():
+                return
 
     def group_walk():
         while store.taste_groups.retire_history():
             result['group_steps'] += 1
+            if exhausted():
+                return
 
     def files(*, groups=False):
         attribute = '_group_output_collector' if groups else '_recommendation_output_collector'
@@ -250,6 +267,8 @@ def maintain_retention(store):
             if not progress.pending:
                 delattr(store, attribute)
                 return
+            if exhausted():
+                return
 
     # Opening a private reader includes schema/repository admission. Leave time
     # for that fixed cost as well as one bounded durable traversal prefix.
@@ -265,9 +284,9 @@ def maintain_retention(store):
         return result
     try:
         for callback, seconds in turns:
+            deadline = time.monotonic() + seconds
             try:
-                with work_budget(seconds):
-                    callback()
+                callback()
             except WorkBudgetExceeded:
                 result['pending'] = True
     finally:

@@ -513,11 +513,19 @@ def test_legacy_cache_pruning_preserves_all_other_fields_and_compression(encoded
         assert len(raw.encode()) < retained_text_bytes
 
 
-def test_stale_discovery_retry_does_not_repeat_the_daily_generated_playlist_sweep(database, monkeypatch, caplog):
-    from yt_playlist.library import playlist_generated
+@pytest.mark.parametrize('playlist_retry', [False, True])
+def test_stale_discovery_retry_does_not_repeat_the_daily_generated_playlist_sweep(
+        database, monkeypatch, caplog, playlist_retry):
+    from yt_playlist.library import playlist_generated, playlist_gc_retry
     from yt_playlist.rec import discover, rec_worker
 
-    clock, waits, collections, discoveries = [0], [], [], []
+    clock, waits, collections, discoveries, client_discoveries = [0], [], [], [], []
+    account = database.accounts.upsert_account('cleanup', 'ref', None, True)
+    if playlist_retry:
+        database.settings.set_setting(playlist_gc_retry.key(account, 'DUE'), json.dumps({
+            'identity': account, 'ytm': 'DUE', 'attempts': 1,
+            'last_attempt_at': 0, 'next_retry_at': 60}))
+        assert playlist_gc_retry.next_retry_at(database) == 60
 
     class Stop:
         def wait(self, seconds):
@@ -529,8 +537,16 @@ def test_stale_discovery_retry_does_not_repeat_the_daily_generated_playlist_swee
             return False
 
     def collect(store, clients, now, *, retry_only=False):
+        assert clients.keys() == {account}
         collections.append((now, retry_only))
+        if retry_only:
+            assert playlist_gc_retry.next_retry_at(store) <= now
+            playlist_gc_retry.clear(store, account, 'DUE')
         return []
+
+    def clients():
+        client_discoveries.append(clock[0])
+        return {account: object()}
 
     def sweep(ctx, now):
         discoveries.append(now)
@@ -543,13 +559,22 @@ def test_stale_discovery_retry_does_not_repeat_the_daily_generated_playlist_swee
     monkeypatch.setattr(playlist_generated, 'gc_generated_playlists', collect)
     monkeypatch.setattr(discover, 'gc_discovery', sweep)
     worker = rec_worker.RecWorker.__new__(rec_worker.RecWorker)
-    worker.ctx = SimpleNamespace(store=database, client_provider=lambda: {'configured': object()},
+    worker.ctx = SimpleNamespace(store=database, client_provider=clients,
                                  now_fn=lambda: clock[0], logger=logging.getLogger(__name__))
     worker.work, worker._stop = Activity(), Stop()
     worker.gc_initial_s, worker.gc_tick_s = 0, DAY
     worker._gc_loop()
     assert discoveries == [0, 60, DAY + 60]
-    assert collections == [(0, False), (60, True), (DAY, False), (DAY + 60, True)]
-    assert waits == [0, 60, DAY - 60, 60, DAY - 60]
+    expected = [(0, False), (60, True), (DAY, False)] if playlist_retry else [(0, False), (DAY, False)]
+    assert collections == expected
+    assert client_discoveries == [now for now, _retry_only in expected]
+    assert playlist_gc_retry.next_retry_at(database) is None
+    if playlist_retry:
+        # Publishing/clearing the durable retry can leave recovery work. Its
+        # minute wakeups must also avoid unrelated collection/provider calls.
+        assert waits[:2] == [0, 60]
+        assert all(60 <= delay <= DAY for delay in waits[1:])
+    else:
+        assert waits == [0, 60, DAY - 60, 60, DAY - 60]
     deferred = [record for record in caplog.records if 'discovery pool deferred' in record.message]
     assert len(deferred) == 1 and deferred[0].exc_info is None

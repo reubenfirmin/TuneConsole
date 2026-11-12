@@ -110,6 +110,37 @@ tr.rowdel td { text-decoration: line-through; }
 /* free-text columns wrap to as many lines as needed (never cropped); fixed layout keeps the
    column widths bounded so the table still fits the card. break long unspaced tokens too. */
 .track-table td.t-wrap { white-space: normal; overflow-wrap: anywhere; }
+.playlist-track-card { container: playlist-tracks / inline-size; }
+/* Reserve readable identity columns in the available desktop content area.
+   Secondary metadata uses another line; headers, sorting and menus stay live. */
+@container playlist-tracks (max-width: 52rem) {
+  .playlist-track-card .track-table,
+  .playlist-track-card .track-table :is(thead, tbody) { display: block; }
+  .playlist-track-card .track-table tr {
+    display: grid;
+    grid-template-columns: 1.5rem 2rem 2rem minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) 2.5rem;
+    gap: .35rem .5rem;
+    padding-block: .65rem;
+    border-block-end: 1px solid var(--border-subtle);
+  }
+  .playlist-track-card .track-table :is(th, td) {
+    display: block; width: auto; min-width: 0; padding: 0; border: 0;
+  }
+  .playlist-track-card .track-table :is(th, td):nth-child(1) { grid-column: 1; grid-row: 1; }
+  .playlist-track-card .track-table :is(th, td):nth-child(2) { grid-column: 2; grid-row: 1; }
+  .playlist-track-card .track-table :is(th, td):nth-child(3) { grid-column: 3; grid-row: 1; }
+  .playlist-track-card .track-table :is(th, td):nth-child(4) { grid-column: 4; grid-row: 1; }
+  .playlist-track-card .track-table :is(th, td):nth-child(5) { grid-column: 5; grid-row: 1; }
+  .playlist-track-card .track-table :is(th, td):nth-child(6) { grid-column: 6; grid-row: 1; }
+  .playlist-track-card .track-table :is(th, td):nth-child(7) { grid-column: 4; grid-row: 2; }
+  .playlist-track-card .track-table :is(th, td):nth-child(8) { grid-column: 5; grid-row: 2; }
+  .playlist-track-card .track-table :is(th, td):nth-child(9) { grid-column: 6; grid-row: 2; }
+  .playlist-track-card .track-table :is(th, td):nth-child(10) { grid-column: 7; grid-row: 2; }
+  .playlist-track-card .track-table :is(th, td):nth-child(11) { grid-column: 7; grid-row: 1; }
+  .playlist-track-card .track-table :is(.col-year, .mb-year, .col-count) { text-align: start; }
+  .playlist-track-card .track-table :is(.mb-year, .col-count) > .track-cell { justify-content: flex-start; }
+  .playlist-track-card .track-table td.empty { grid-column: 1 / -1; grid-row: 1; }
+}
 /* Natural mobile column widths keep a title and its external-link icon readable together. */
 @media (max-width: 720px) { .track-table { table-layout: auto; } }
 @media (max-width: 720px) {

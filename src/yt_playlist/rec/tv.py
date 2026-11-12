@@ -9,9 +9,10 @@ import hashlib
 import json
 import math
 import re
+import threading
 
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
-from yt_playlist.rec import fresh_pool, home_prepared, tv_visual
+from yt_playlist.rec import fresh_pool, home_prepared, mix_tuning, tv_visual
 from yt_playlist.rec.eligibility import home_exclusions
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import identity_key, normalize, search_squash, track_artist
@@ -226,23 +227,90 @@ def queue(store, now, *, exclude=(), recent=(), current=None, limit=QUEUE_SIZE):
 
 def prepare(store, client, now):
     """One small network slice. Publish progressively and keep the last good pool."""
-    # Search outside the serving connection. If inputs change during network
-    # work, the same publication guard used by Mix tapes rejects this slice.
-    try:
-        with store.read_snapshot() as snapshot:
-            more = _prepare(store, snapshot, client, now)
-    except (WorkBudgetExceeded, WorkClosing):
-        raise
-    except Exception:
-        store.tv_preparation.record(True, now)
-        raise
-    store.tv_preparation.record(False, now)
-    return more
+    return _preparation(store).step(client, now)
 
 
-def _prepare(store, snapshot, client, now):
-    reader = snapshot.store
-    previous = cached(reader) or {}
+def _preparation(store):
+    with store._lock:
+        if not hasattr(store, '_tv_preparation'):
+            store._tv_preparation = Preparation(store)
+        return store._tv_preparation
+
+
+def due(store, now):
+    return _preparation(store).due(now)
+
+
+def refresh(store):
+    """Explicit refresh requests survive an already running preparation."""
+    with store._lock:
+        store._tv_refresh_requested = getattr(store, '_tv_refresh_requested', 0) + 1
+
+
+class Preparation:
+    def __init__(self, store):
+        self.store, self.complete = store, None
+        self.lock = threading.RLock()
+
+    def due(self, now):
+        completed = self.complete
+        if completed is None:
+            return True
+        guard, pool, at, expires, requested = completed
+        return (not at <= now < expires
+                or not 0 <= now - pool['at'] < MAX_AGE
+                or requested != getattr(self.store, '_tv_refresh_requested', 0)
+                or cached(self.store) != pool or not guard.is_current())
+
+    def step(self, client, now):
+        store = self.store
+        with self.lock:
+            check_cancellable_work()
+            if not self.due(now):
+                return False
+            self.complete = None
+            requested = getattr(store, '_tv_refresh_requested', 0)
+            previous = cached(store)
+            pool = previous
+            try:
+                # Keep output reads separate from candidate inputs. Publishing
+                # this pool must not invalidate its own completed seed work.
+                with store.read_snapshot() as snapshot:
+                    expiry = snapshot.store.rec_model.next_suppression_change(now)
+                    tuning_left = mix_tuning.remaining(snapshot.store, now)
+
+                    def publish(payload):
+                        nonlocal pool
+                        encoded = json.dumps(payload, separators=(',', ':'))
+
+                        def write():
+                            if cached(store) != previous:
+                                raise WorkBudgetExceeded('TV output changed during preparation')
+                            store.rec_proposals.publish_prepared_home(encoded, now, surface=SURFACE)
+
+                        published = snapshot.publish(write)
+                        if published:
+                            pool = payload
+                        return published
+
+                    more = _prepare(snapshot.store, client, now, previous or {}, publish)
+                if not more and pool is not None:
+                    expires = min(pool.get('retry_at', pool['at'] + SEARCH_RETRY_S), pool['at'] + MAX_AGE)
+                    if expiry is not None:
+                        expires = min(expires, expiry)
+                    if tuning_left:
+                        expires = min(expires, now + tuning_left)
+                    self.complete = snapshot, pool, now, expires, requested
+            except (WorkBudgetExceeded, WorkClosing):
+                raise
+            except Exception:
+                store.tv_preparation.record(True, now)
+                raise
+            store.tv_preparation.record(False, now)
+            return more or requested != getattr(store, '_tv_refresh_requested', 0)
+
+
+def _prepare(reader, client, now, previous, publish):
     recovering = not previous.get('items')
     if recovering:
         previous = {**previous, 'items': _saved_videos(reader, now)}
@@ -258,8 +326,7 @@ def _prepare(store, snapshot, client, now):
         items = [t for t in items if t['source_key'] in available]
         payload = {'schema': SCHEMA, 'key': 'no-sources', 'at': now, 'items': items,
                    'attempted': [], 'state': 'no_sources', 'retry_at': now + SEARCH_RETRY_S}
-        snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(json.dumps(payload), now, surface=SURFACE))
-        return False
+        return not publish(payload)
     current_keys = {t['key'] for t in seeds}
     reusable = 0 <= now - previous.get('at', -MAX_AGE) < MAX_AGE
     # Home ranks can change between network slices. Continue by recording key
@@ -286,7 +353,8 @@ def _prepare(store, snapshot, client, now):
         attempted = set()
         pending = seeds
         if not pending:
-            return False
+            return not publish({**previous, 'items': items, 'attempted': [], 'offset': offset,
+                                'state': 'no_sources', 'retry_at': now + SEARCH_RETRY_S})
     key = hashlib.sha256(json.dumps(sorted([t['key'], t['group'], t['title'], t['artist']]
                                            for t in seeds)).encode()).hexdigest()[:24]
     batch = pending[:MAX_SEEDS]
@@ -301,8 +369,7 @@ def _prepare(store, snapshot, client, now):
             fallback = {'schema': SCHEMA, 'key': key, 'at': now,
                 'items': items[-MAX_POOL:], 'attempted': sorted(attempted),
                 'offset': offset, 'state': 'searching', 'retry_at': 0}
-            snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
-                json.dumps(fallback, separators=(',', ':')), now, surface=SURFACE))
+            publish(fallback)
         raise
     check_cancellable_work()
     seen = {t['video_id'] for t in items}
@@ -313,8 +380,7 @@ def _prepare(store, snapshot, client, now):
         'attempted': sorted(attempted), 'offset': offset,
         'state': 'searching' if len(pending) > len(batch) else 'exhausted',
         'retry_at': 0 if len(pending) > len(batch) else now + SEARCH_RETRY_S}
-    encoded = json.dumps(payload, separators=(',', ':'))
-    published = snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(encoded, now, surface=SURFACE))
+    published = publish(payload)
     return not published or len(pending) > len(batch)
 
 

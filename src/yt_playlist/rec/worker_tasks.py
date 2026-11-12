@@ -27,7 +27,9 @@ class ServingTasks:
         prepare_mixes = (requested != self._home_prepared
                          or not home_prepared.has_prepared_batch(self.ctx.store, now))
         self.stage('recommendation policy storage', measurement.maintain_storage, self.ctx.store, now)
-        self.stage("listening context", choice_evidence.prepare_context, self.ctx.store, now)
+        # Each producer captures/finalizes its context on its own snapshot.
+        # A standalone prewarm is discarded by unchanged cached producers and
+        # repeats the model read on every Home admission.
         albums = self.stage("Album choices", album_choices.prepare_cached, self.ctx.store, now)
         result = (self.stage("Home collections", home_prepared.prepare_mixes, self.ctx.store, now)
                   if prepare_mixes else None)

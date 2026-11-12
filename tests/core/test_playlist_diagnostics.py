@@ -65,7 +65,9 @@ def test_page_two_explains_validation_stage_without_returning_payloads(response,
 
 def test_diagnostics_are_bounded_even_for_a_large_private_envelope():
     items = [{'PRIVATE_RENDERER': 'PRIVATE_TOKEN'} for _ in range(2000)]
-    response = {'PRIVATE_KEY': 'PRIVATE_VALUE', 'onResponseReceivedActions': [
+    response = {'PRIVATE_KEY': 'PRIVATE_VALUE', 'alerts': [{'alertRenderer': {
+        'type': 'PRIVATE_SEVERITY', 'text': {'runs': [{'text': 'PRIVATE_MESSAGE'}]}}}] * 2000,
+        'onResponseReceivedActions': [
         {'appendContinuationItemsAction': {'continuationItems': items}}] * 2000}
     safe = _page_envelope(response)
     encoded = json.dumps(safe)
@@ -73,6 +75,9 @@ def test_diagnostics_are_bounded_even_for_a_large_private_envelope():
     assert safe['onResponseReceivedActions'] == 'list[1000]'
     assert len(safe['onResponseReceivedActions.sample']) == 8
     assert safe['onResponseReceivedActions.sample'][0]['items'] == 'list[1000]'
+    assert safe['alerts'] == 'list[1000]'
+    assert safe['alert_sample'] == [{'renderer': 'alertRenderer', 'type': 'unknown',
+                                    'message_class': 'unclassified'}] * 4
 
 
 @pytest.mark.parametrize('response,classification,other_fields', [

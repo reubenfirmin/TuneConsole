@@ -235,6 +235,10 @@ def test_settling_never_accepts_incomplete_or_unowned_initial_contents(poc, monk
 @pytest.mark.parametrize('replace_seed', [False, True])
 def test_launch_adopts_proven_playback_upload_and_skips_an_omitted_song(poc, monkeypatch, proof, replace_seed):
     c, remote, frames, _, pool = poc
+    for track in pool:
+        track.update(_radio_rotation='unplayed', _radio_rotation_slot='unplayed')
+    pool[30].update(_radio_rotation='familiar', _radio_rotation_slot='new')
+    c.ctx.store.rec_ledger.record_recommendation_outcomes('prior-listen', 'start', [pool[30]['key']], 1)
     requested = pool[0 if replace_seed else 2]
     requested.update(title='Ride (Vince Clarke Remix)', artist='Dubfire & Miss Kittin', duration=326)
     c.ctx.store.tracks.upsert_track(requested['video_id'], requested['title'], requested['artist'], '', 326)
@@ -260,6 +264,8 @@ def test_launch_adopts_proven_playback_upload_and_skips_an_omitted_song(poc, mon
     c._complete_start(s)
     ids = [row['videoId'] for row in rows]
     assert [t['video_id'] for t in s.tracks] == ids
+    actual = next(t for t in s.tracks if t['video_id'] == 'v31')
+    assert actual['_radio_rotation_slot'] == 'familiar'
     assert s.directions.seed['video_id'] == ids[0]
     assert set(s.choices) == {ids[0]}
     assert s.rejected == {requested['video_id'], 'v2'}

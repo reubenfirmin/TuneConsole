@@ -1,5 +1,8 @@
 """Small committed heads, bounded rank pages and directly owned opaque chunks."""
+from contextlib import ExitStack
+
 from yt_playlist.core import recommendation_outputs, recommendation_pools, recommendation_revalidations
+from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core import listening_subject_reads
 from yt_playlist.core.preparation import listening_views
@@ -221,8 +224,14 @@ class RecommendationPublicationsRepo(Repo):
         pool = self.pool(surface, mode_key, purpose, generation=generation)
         if pool is None:
             return []
-        rows = recommendation_pools.page(self.conn, pool['id'], after=after, limit=limit, band=band, genres=genres,
-                                         group_version=group_version)
+        with ExitStack() as scopes:
+            if group_version is not None:
+                scopes.enter_context(keyed_reads(self._store, 'group_version_aliases', (group_version,)))
+                version = self.conn.execute('SELECT group_version_id FROM group_version_aliases '
+                                             'WHERE external_version=?', (group_version,)).fetchone()
+                scopes.enter_context(keyed_reads(self._store, 'group_members', (version[0],) if version else ()))
+            rows = recommendation_pools.page(self.conn, pool['id'], after=after, limit=limit, band=band, genres=genres,
+                                             group_version=group_version)
         if rows:
             marks = ','.join('?' for _ in rows)
             keys = dict(self.conn.execute(f'SELECT id,identity_key FROM recordings WHERE id IN ({marks})',

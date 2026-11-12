@@ -34,6 +34,9 @@ def _now_playing_snapshot(msg, previous=None):
                 # exact tri-state available for diagnostics without treating it as a play.
                 "metadata_verified": msg.get("metadataVerified")
                 if type(msg.get("metadataVerified")) is bool else None}
+    for field, key in (("muted", "muted"), ("tabMuted", "tab_muted")):
+        if field in msg:
+            snapshot[key] = bool(msg[field])
     position = msg.get('position')
     snapshot['position'] = position if (type(position) in (int, float) and math.isfinite(position)
                                         and position >= 0) else None

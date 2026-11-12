@@ -1,4 +1,6 @@
 from ytmusicapi import YTMusic
+from ytmusicapi.exceptions import YTMusicError
+from yt_playlist.core.bridge import BridgeError
 from yt_playlist.core.config import AccountConfig
 from yt_playlist.core.bridge_session import BridgeSession
 
@@ -20,6 +22,32 @@ STUB_AUTH = {
 
 
 class BridgeClient(YTMusic):
+    def deletion_read_report(self, playlist_id, expected_brand):
+        """Report request scope and provider authentication without returning an account profile."""
+        from yt_playlist.core.playlist_snapshot import playlist_read_report
+
+        bridge = self._session._bridge
+        connection = getattr(bridge, 'connection_id', None)
+        delegated = self.context['context']['user'].get('onBehalfOfUser') or None
+        scope = {'request_account': 'delegated' if delegated else 'browser_default',
+                 'configured_account_matches': delegated == (expected_brand or None),
+                 'account_menu': 'not_checked'}
+        if not scope['configured_account_matches']:
+            return {'scope': scope}
+        try:
+            account = self.get_account_info()
+        except (BridgeError, YTMusicError, KeyError, IndexError, TypeError, ValueError, OSError):
+            scope['account_menu'] = 'unverified'
+        else:
+            scope['account_menu'] = ('authenticated' if isinstance(account, dict) and account.get('accountName')
+                                     else 'unverified')
+        reads = playlist_read_report(self, playlist_id)
+        scope['bridge_connection_unchanged'] = (connection is not None
+                                                and connection == getattr(bridge, 'connection_id', None))
+        # A valid menu proves authentication for the request context. It does
+        # not prove ownership of a target that returned no matching header.
+        return {'scope': scope, **reads}
+
     def get_video_storyboard(self, video_id):
         # get_song intentionally strips storyboards from the player response.
         # Keep this metadata-only read on the same authenticated browser bridge.

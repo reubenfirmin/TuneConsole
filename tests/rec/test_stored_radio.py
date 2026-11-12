@@ -238,7 +238,10 @@ def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(ra
                 allowed=lambda track: True, include_display=False)
             assert [track['key'] for track in overlap] == ['fresh-258', 'fresh-259']
             assert facts == ['fresh-258', 'fresh-259']
-            assert len(reads) == 2
+            # A rotated rank window may wrap once to the beginning. Each page
+            # still hydrates only once in this planning snapshot.
+            count = len(reads)
+            assert count == len({repr(read) for read in reads}) <= 3
         assert prepared.current_reader is None
         with store.conn:
             store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='fresh-upload-258'")
@@ -247,7 +250,7 @@ def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(ra
             with prepared.planning_read():
                 current = pick()[0]
                 assert current['key'] == 'fresh-259' and current['title'] == 'new catalog title'
-                assert len(reads) == 3
+                assert len(reads) == count + 1
                 raise RuntimeError('cancel this plan')
         assert prepared.current_reader is None
     finally:

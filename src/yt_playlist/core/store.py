@@ -160,6 +160,8 @@ class Store:
             import shutil
             runtime_root = metadata_runtime_files.root_for_database(None, self._evidence_key)
             self.conn._close_callbacks.append(lambda: shutil.rmtree(runtime_root, ignore_errors=True))
+            evidence_root = evidence_ledger.root_for_database(None, self._evidence_key)
+            self.conn._close_callbacks.append(lambda: shutil.rmtree(evidence_root, ignore_errors=True))
             from . import fao
             for domain in file_owners.owners():
                 root = file_paths.root_for_database(None, self._evidence_key, domain)
@@ -219,10 +221,10 @@ class Store:
             yield
 
     @contextmanager
-    def read_snapshot(self, *, dependencies=None):
+    def read_snapshot(self, *, dependencies=None, memo=None):
         """Read-only background view, optionally restricted to declared revision keys."""
         with self._retained_readers():
-            with read_snapshot(self, self._make_reader, dependencies=dependencies) as snapshot:
+            with read_snapshot(self, self._make_reader, dependencies=dependencies, memo=memo) as snapshot:
                 yield snapshot
 
     @contextmanager
@@ -454,7 +456,7 @@ class Store:
         from yt_playlist.core.preparation import metadata_destinations
         metadata_files = AudioMetadataFiles(metadata_runtime_files.root_for_database(self._db_path, self._evidence_key),
             metadata_delivery_files.root_for_database(self._db_path, self._evidence_key),
-            metadata_destinations.directory(self.conn))
+            metadata_destinations.directory(self.conn) if self._db_path is not None else None)
         provenance_files = vibe_provenance.ProvenanceFiles(vibe_provenance.directory(self.conn))
         self.vibe_models = VibeModels(VibeModelsRepo(self), vibe_model_files.VibeModelFiles(
             file_paths.root_for_database(self._db_path, self._evidence_key, 'vibe-models')), provenance_files)

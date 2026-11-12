@@ -97,6 +97,10 @@ class RecommendationModel:
             blocked.update(key for key, genre in rows if muted.intersection(axes[genre]))
         return blocked
 
+    def next_suppression_change(self, now):
+        deadlines = [self.repository.feedback_expiry(now), *self.player_events.skip_blackouts(now).values()]
+        return min((at for at in deadlines if at is not None), default=None)
+
     def apply_rating_feedback(self, states, *, dislike_seconds):
         with self.guard():
             rows = self.repository.rating_rows(list(states))

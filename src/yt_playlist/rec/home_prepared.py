@@ -13,8 +13,9 @@ import math
 import random
 import time
 
-from yt_playlist.core.activity import check_cancellable_work, work_budget, WorkBudgetExceeded
-from yt_playlist.core import home_outputs, json_cache
+from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded
+from yt_playlist.core.read_memo import preparation_memo
+from yt_playlist.core import home_outputs, home_revisit_progress, json_cache
 from yt_playlist.core.work_diagnostics import maintenance_job
 from yt_playlist.rec import (album_choices, choice_evidence, discover, fresh_pool, home_cache, home_cards, home_themes, home_vibe,
                              mode_eval, mode_surfaces, rec_params, recipes, surfaces, taste_analysis,
@@ -122,17 +123,16 @@ def prepare(store, now):
 
 
 def prepare_mixes(store, now):
-    """Bound the complete mix calculation, including reader setup and cleanup."""
+    """Finish an admitted menu before yielding to the next worker batch."""
     result = None
     try:
-        # Complete one full menu on large accounts within the existing bounded
-        # ranking allowance. A two-second setup deadline can retry forever
-        # before reaching the first publish, even with unchanged prepared pools.
-        with work_budget(PREPARE_BUDGET_S):
-            result = _prepare(store, now)
+        # _prepare checks elapsed time between complete menus and publishes the
+        # accumulated batch. Interrupting its SQL/setup or a menu loses all of
+        # that work; elapsed time must never cancel those atomic units.
+        result = _prepare(store, now)
     except WorkBudgetExceeded:
-        # _prepare only returns a payload after successful publication. Reader
-        # cleanup can cross the deadline before work_budget's final check.
+        # Quota/admission failures retain the last published menu. Elapsed
+        # preparation time itself does not raise this exception anymore.
         if result is None:
             store.maintenance_diagnostics.record('deferred', reasons=('time_budget',), phase='rec: Home collections')
             _LOG.debug('Home preparation deferred: total time budget exhausted; keeping previous collections')
@@ -170,19 +170,23 @@ def prepare_discovery(store, now):
     """Publish discovery separately, without waiting for complete mix menus."""
     published = False
     try:
-        with work_budget(SUMMARY_BUDGET_S), store.read_snapshot() as snapshot:
+        with store.read_snapshot(memo=preparation_memo(store, DISCOVERY_SURFACE)) as snapshot:
             reader = snapshot.store
-            leans = transient.facet_leans(reader, now)
             previous = load_discovery(reader) or {}
-            tracks = fresh_pool.pick(reader, now, size=40, minimum=1)
-            if (not reader.rec_proposals.has_proposals('mode_bundles')
-                    and not reader.rec_proposals.has_proposals('fresh_pool')):
-                tracks = previous.get('discovery_tracks', [])
-            payload = {
-                'discovery_albums': discover.pick_discovered_albums(reader, 60, now, facet_leans=leans),
-                'discovery_artists': discover.pick_discovered_artists(reader, 40, now, facet_leans=leans),
-                'discovery_tracks': tracks,
-            }
+
+            def calculate():
+                leans = transient.facet_leans(reader, now)
+                tracks = fresh_pool.pick(reader, now, size=40, minimum=1)
+                if (not reader.rec_proposals.has_proposals('mode_bundles')
+                        and not reader.rec_proposals.has_proposals('fresh_pool')):
+                    tracks = previous.get('discovery_tracks', [])
+                return {
+                    'discovery_albums': discover.pick_discovered_albums(reader, 60, now, facet_leans=leans),
+                    'discovery_artists': discover.pick_discovered_artists(reader, 40, now, facet_leans=leans),
+                    'discovery_tracks': tracks,
+                }
+
+            payload = reader.memoized_read(('discovery', int(now // MAX_AGE_S)), calculate)
             encoded = json.dumps(payload, separators=(',', ':'))
             published = snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
                     encoded, now, surface=DISCOVERY_SURFACE, input_revision=snapshot._changes),
@@ -190,43 +194,54 @@ def prepare_discovery(store, now):
     except WorkBudgetExceeded:
         if not published:
             _LOG.debug('Discovery preparation deferred; keeping the last display pool')
-    # The off-lock checkpoint can exhaust the budget after durable publication.
     return payload if published else None
 
 
 def prepare_revisit(store, now):
     """Checkpoint independent history summaries without spending the mix-menu budget.
 
-    Persist the next component after each publication. A slow component or a
+    Persist the next component after each completion. A slow component or a
     changing minute cannot make every retry repeat the same completed setup.
     """
+    fields = home_revisit_progress.FIELDS
     previous = store.rec_proposals.get_proposals(REVISIT_SURFACE) or {}
-    fields = ('rediscover', 'rediscover_albums', 'rediscover_tracks')
+    remaining = store.rec_proposals.revisit_remaining()
+    if remaining is None:
+        remaining = previous.get('remaining')
+    remaining = remaining or list(fields)
     targets = (lambda reader: surfaces.rediscover_playlists(reader, now, count=8, pool=8),
                lambda reader: surfaces.rediscover_albums(reader, now, count=9, pool=9),
                lambda reader: surfaces.rediscover_tracks(reader, now))
     try:
         completed = True
-        with maintenance_job(REVISIT_PHASE), work_budget(SUMMARY_BUDGET_S):
-            for index in range(3):
-                offset = (previous.get('next', 0) + index) % 3
-                with store.read_snapshot() as snapshot:
-                    value = snapshot.store.memoized_read(('home-revisit', fields[offset], int(now // 60)),
+        with maintenance_job(REVISIT_PHASE):
+            for field in list(remaining):
+                offset = fields.index(field)
+                with store.read_snapshot(memo=preparation_memo(store, ('home-revisit', field))) as snapshot:
+                    value = snapshot.store.memoized_read(('home-revisit', field, int(now // MAX_AGE_S)),
                         lambda: targets[offset](snapshot.store))
 
                     def publish():
                         latest = store.rec_proposals.get_proposals(REVISIT_SURFACE) or {}
-                        store.rec_proposals.put_proposals(REVISIT_SURFACE,
-                            {**latest, fields[offset]: value, 'next': (offset + 1) % 3}, now)
+                        next_remaining = [pending for pending in remaining if pending != field]
+                        # Retain the cursor across shutdown/restart as well as
+                        # worker turns. A completed sibling is never re-admitted
+                        # merely because a later component has unfinished work.
+                        # Progress is independent of display content: an unchanged
+                        # result still completes its unit without replacing a head.
+                        if latest.get(field) != value:
+                            payload = {key: item for key, item in latest.items() if key != 'remaining'}
+                            store.rec_proposals.put_proposals(REVISIT_SURFACE, {**payload, field: value}, now)
+                        store.rec_proposals.save_revisit_remaining(next_remaining)
+                        remaining[:] = next_remaining
 
                     if not snapshot.publish(publish, allow_stale_tables=_PREPARATION_CHURN_TABLES):
                         completed = False
         if completed:
             store.maintenance_diagnostics.record('completed', phase=REVISIT_PHASE)
     except WorkBudgetExceeded:
-        latest = store.rec_proposals.get_proposals(REVISIT_SURFACE) or {}
-        store.rec_proposals.put_proposals(REVISIT_SURFACE,
-            {**latest, 'next': (offset + 1) % 3}, now)
+        # The failed component has not completed. Its predecessor's durable
+        # cursor already points here; never skip it or reset completed work.
         store.maintenance_diagnostics.record('deferred', reasons=('time_budget',),
                                              phase=REVISIT_PHASE)
         return False

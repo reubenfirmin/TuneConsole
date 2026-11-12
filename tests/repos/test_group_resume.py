@@ -294,7 +294,7 @@ def test_unpublished_legacy_collision_waits_then_cleans_expired_owner(database, 
     assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-@pytest.mark.parametrize('change', ['input', 'unrelated-setting', 'external-writer'])
+@pytest.mark.parametrize('change', ['input', 'unrelated-setting', 'fit-checkpoint', 'external-writer'])
 def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypatch, change):
     tracks = recordings([('House', 5, .3)])
     seed(database, tracks)
@@ -328,12 +328,21 @@ def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypa
         seed(database, [replace(tracks[0], values=(.95,) * len(tracks[0].values))])
     elif change == 'unrelated-setting':
         database.settings.set_setting('foreground-setting', 'new')
+    elif change == 'fit-checkpoint':
+        checkpoint = 'SELECT generation_id,unresolved_generation,input_serial,checkpoint_at '
+        checkpoint += 'FROM group_preparation_state WHERE singleton=1'
+        before = tuple(database.conn.execute(checkpoint).fetchone())
+        database.settings.set_setting('rec_mode_fit_inputs', 'unrelated-content-fit')
+        assert tuple(database.conn.execute(checkpoint).fetchone()) == before
     else:
         with closing(sqlite3.connect(database._db_path)) as other, other:
             other.execute("INSERT INTO settings VALUES ('external-setting','new')")
     assert worker.step(2060)
-    assert checks == [change == 'unrelated-setting']
-    assert results == ([True] if change == 'unrelated-setting' else [])
+    unchanged = change in ('unrelated-setting', 'fit-checkpoint')
+    assert checks == [unchanged]
+    assert results == ([True] if unchanged else [])
+    if unchanged:
+        assert database.taste_groups.head_generation() == plan['generation']
     if change == 'input':
         assert database.taste_groups.head_generation() != plan['generation']
     assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']

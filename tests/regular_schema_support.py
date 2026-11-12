@@ -1,8 +1,11 @@
 """Exact regular-admission oracle for the installed v103/v107 fixtures."""
+from contextlib import closing
+import sqlite3
+
 from yt_playlist.core import (
     album_feedback_outbox, association_work,
     collection_recovery_epoch, credit_retention, embedding_files, group_checkpoint_retention, group_progress, group_retention_progress,
-    legacy_journals, metadata_native, metadata_runtime, mix_choices,
+    group_preview_work, home_revisit_progress, legacy_journals, metadata_native, metadata_runtime, mix_choices,
     mode_retention, policy_history, profile_files, recommendation_revalidations, served_facts, vibe_provenance,
     vibe_versions, tv_launch_state,
 )
@@ -35,6 +38,8 @@ CHANGE_NAMES = (
     'durable_initial_tv_launches',
     'masked_vibe_metadata_guards',
     'resumable_recording_associations',
+    'durable_home_revisit_progress',
+    'durable_adaptive_preview_pages',
 )
 
 
@@ -84,13 +89,14 @@ def regular_expectation(conn, *, clock=1234):
     before = captured(conn)
     assert 'schema_changes' not in before
     assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES
-    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 36))
+    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 38))
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (103, 107)
     definitions = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
     allowed = {'schema_changes': regular.HISTORY_SQL,
                'metadata_native_delivery_heads': metadata_native.RUNTIME_HEAD_SQL,
                'prediction_provenance': vibe_provenance.SQL,
                'recording_association_work': association_work.SQL,
+               'home_revisit_progress': home_revisit_progress.SQL,
                'album_feedback_response_outbox': album_feedback_outbox.SQL,
                'ix_album_feedback_response_pending': album_feedback_outbox.INDEX}
     for declarations in (
@@ -114,6 +120,15 @@ def regular_expectation(conn, *, clock=1234):
     for sql in (*credit_retention.statements(), *mode_retention.statements(),
                 *vibe_provenance.allocation_sql(), legacy_journals.SQL, legacy_journals.CUTOVER_SQL):
         allowed[sql.split()[2]] = sql
+
+    # Preview guards cover consumed owners created by earlier pending changes
+    # too. Project their declared empty tables without running apply callbacks
+    # or copying any installed data into this independent oracle.
+    with closing(sqlite3.connect(':memory:')) as projected:
+        for name, sql in {**definitions, **allowed}.items():
+            if not name.startswith('sqlite_') and sql.startswith('CREATE TABLE'):
+                projected.execute(sql)
+        allowed.update(group_preview_work.definitions(projected))
 
     # New owners, including changes 29-31, start empty. Existing owners retain
     # their complete captured contents; joint-vibe guards do not seed settings.

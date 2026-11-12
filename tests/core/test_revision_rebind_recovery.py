@@ -16,7 +16,7 @@ def disable_periodic_library_sync():
 
 @pytest.mark.parametrize('database', ['store', 'file_backed_store'])
 @pytest.mark.parametrize('entrypoint', ['snapshot', 'tracked-view'])
-@pytest.mark.parametrize('failure', ['cancel', 'timeout', 'schema-denied', 'trigger-denied'])
+@pytest.mark.parametrize('failure', ['begin-cancel', 'cancel', 'timeout', 'schema-denied', 'trigger-denied'])
 def test_failed_revision_refresh_retries_without_writes_or_restart(
         request, monkeypatch, database, entrypoint, failure):
     store = request.getfixturevalue(database)
@@ -46,6 +46,8 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
                     clock[0] = 2.0
 
         def stop():
+            if failure == 'begin-cancel' and state['statement'] == 'BEGIN' and store.conn.in_transaction:
+                state['armed'] = True
             if state['armed']:
                 if not state['interrupted_at']:
                     state['interrupted_at'] = state['statement']
@@ -62,7 +64,7 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
                     return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
 
-        if failure == 'cancel':
+        if failure in ('begin-cancel', 'cancel'):
             scope = activity.cancellable_work(stop, stop_on_shutdown=False)
             error = activity.WorkClosing
         elif failure == 'timeout':
@@ -74,6 +76,8 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
 
         store.conn.set_trace_callback(trace)
         store.conn.set_authorizer(authorize)
+        if failure == 'begin-cancel':
+            store.conn.set_progress_handler(activity.interrupt_query, 1)
         try:
             with pytest.raises(error), scope:
                 reader = (store.read_snapshot() if entrypoint == 'snapshot' else
@@ -83,6 +87,9 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
         finally:
             store.conn.set_trace_callback(None)
             store.conn.set_authorizer(None)
+            store.conn.set_progress_handler(activity.interrupt_query, 1000)
+        if failure == 'begin-cancel':
+            assert state['interrupted_at'] == 'BEGIN'
         if failure == 'cancel':
             assert "SELECT name FROM main.sqlite_schema WHERE type='view'" == state['interrupted_at']
         if failure == 'trigger-denied':

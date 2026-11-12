@@ -13,6 +13,9 @@ from contextlib import contextmanager
 import pytest
 
 from tests.live_server import LiveServer
+from tests.home_fixture_support import (  # noqa: F401 - shared fixtures
+    home_page_bytecode, home_pages_only, without_metadata_providers,
+)
 
 _BROWSER_DIR = pathlib.Path(__file__).parent / 'browser'
 
@@ -107,10 +110,26 @@ def _free_port():
 
 
 @pytest.fixture
-def live_app(store):
+def live_app(store, monkeypatch, browser_template_bytecode, without_metadata_providers):
     import uvicorn
     from yt_playlist.web.app import create_app
     from tests.conftest import FakeClient
+    from yt_playlist.web import app as webapp
+
+    # This FakeClient app consumes prepared state with automatic workers off.
+    # Metadata tag matching has separate provider/startup owners; rebuilding its
+    # full global matcher per app is unrelated to these rendered interactions.
+    # The genre-editor browser module owns its own app and real configuration.
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = browser_template_bytecode
+        return result
+
+    # Share source-checked compiled code, never an app's environment or rendered
+    # responses. The first real request still pays for each cold compilation.
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
@@ -119,3 +138,10 @@ def live_app(store):
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     with LiveServer(server):
         yield f"http://127.0.0.1:{port}"
+
+
+@pytest.fixture(scope='session')
+def browser_template_bytecode(tmp_path_factory):
+    from jinja2 import FileSystemBytecodeCache
+
+    return FileSystemBytecodeCache(str(tmp_path_factory.mktemp('browser-template-bytecode')))

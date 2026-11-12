@@ -1,5 +1,6 @@
 """Shared controls, bounded NOW evidence and staggered radio alternatives."""
 from types import SimpleNamespace
+from collections import Counter
 from tests.enrichment_support import seed_enrichment
 
 import numpy as np
@@ -31,7 +32,10 @@ def prepare_tuning(store):
             (fresh if i >= 6 else familiar).append(track)
             tracks.append(track)
         bundles[str(mid)] = dict(wheelhouse=familiar, fresh=fresh)
-    seed_publication_subjects(store, [{**track, 'duration_s': 200, 'year': '2001'} for track in tracks])
+    seed_publication_subjects(store, [{**track, 'duration_s': 200, 'year': '2001'} for track in tracks],
+                              discoveries=[track['key'] for track in tracks if int(track['video_id'].split('-')[1]) >= 6])
+    store.rec_ledger.record_recommendation_outcomes('heard', 'start',
+        [track['key'] for track in tracks if int(track['video_id'].split('-')[1]) < 6], 1)
     with atomic_write(store):
         for tid, track in enumerate(tracks, 1):
             catalog.choose_field(store.conn, tid, 'energy', .02 if track['genre'] == 'Ambient' else .98)
@@ -96,15 +100,133 @@ def test_controls_reject_invalid_input(bad):
         radio_tuning.controls(bad)
 
 
-def test_discovery_and_comfort_share_prepared_fresh_source(store, prepared):
+def prepare_rotation(store):
+    tracks = [dict(key=f'{kind}-{i}', video_id=f'{kind}-{i}', title=f'{kind}-{i}',
+        artist=f'Artist {kind}-{i}', genre='Ambient', duration_s=200)
+        for kind in ('familiar', 'unplayed', 'new') for i in range(128)]
+    seed_publication_subjects(store, tracks, discoveries=[t['key'] for t in tracks[256:]])
+    for track in tracks:
+        track.pop('duration_s')
+    account = store.accounts.upsert_account('rotation', 'credential', None, True)
+    with atomic_write(store):
+        store.conn.executemany('INSERT INTO play_events(account_id,recording_id,video_id,played_at,is_generated) '
+            'SELECT ?,r.id,?, ?,0 FROM recordings r WHERE r.identity_key=?',
+            [(account, track['video_id'], 1 + day * 86400, track['key'])
+             for track in tracks[:128] for day in range(10)])
+        store.conn.executemany("INSERT INTO rec_feedback(surface,item_key,kind,scope,created_at) "
+            "VALUES ('like',?,'like','',1)", [(track['key'],) for track in tracks[:128]])
+    store.modes.replace_modes([dict(mode_id=1, label='Ambient', families=[['ambient', 384]],
+        centroid=np.array([1., 0.], dtype=np.float32), size=384, rep_keys=[])], [], 1)
+    publish_bundles(store, {'1': {'wheelhouse': tracks[:48], 'comfort': tracks[:48],
+        'explore': tracks[128:224], 'fresh': tracks[256:]},
+        '_radio': {'generation': None, 'space': '', 'members': {'1': [t['key'] for t in tracks]}}})
+    return tracks
+
+
+@pytest.fixture(scope='module')
+def radio_rotation_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, prepare_rotation) as template:
+        yield template
+
+
+@pytest.mark.parametrize('comfort,launch', [(0, None), (.5, None), (1, None),
+    (.5, 'direct'), (.5, 'playlist'), (.5, 'legacy-checkpoint')])
+def test_discovery_and_comfort_use_current_listening_and_ownership(
+        store, radio_rotation_template, comfort, launch, record_property, monkeypatch):
+    prepared = radio_rotation_template.restore(store)
+    if launch:
+        from tests.radio_session_support import radio_controller, play
+        from yt_playlist.library import playlist_generated
+        from yt_playlist.web import radio_session
+        from yt_playlist.web.radio_session import PlaylistRadio
+
+        create = playlist_generated.create_generated_playlist
+        with radio_controller(monkeypatch, store, prepared) as (c, remote, _, _, _):
+            # Only provider I/O is controlled. Keep real initial creation, SQL
+            # readback, listening evidence, planning and checkpoint restoration.
+            monkeypatch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
+            monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create)
+            remote.create_playlist = lambda *args: 'PLSESSION'
+            remote.get_song = lambda video: {'videoDetails': {'lengthSeconds': '200'}}
+            c.ctx.now_fn = lambda: 1_000_000.
+            if launch == 'playlist':
+                account = store.accounts.get_master_account().id
+                pid = store.playlists.upsert_playlist(account, 'PLSOURCE', 'Source', 3, '', 1)
+                videos = ['unplayed-0', 'new-0', 'familiar-0']
+                ids = store.tracks.track_ids_for_videos(videos)
+                store.playlists.set_playlist_tracks(pid, [ids[video] for video in videos])
+                result = c.start(playlist_id=pid)
+            else:
+                result = c.start(seed_video_id='unplayed-0')
+            assert result['ok'], result
+            initial = list(c.session.tracks)
+            assert len(initial) == 3
+            assert {t['_radio_rotation_slot'] for t in initial} == {'familiar', 'unplayed', 'new'}
+
+            def listen(video):
+                key = store.tracks.identity_key_for_video(video)
+                store.rec_ledger.record_recommendation_outcomes(f'launch:{video}', 'start', [key],
+                    c.ctx.now_fn(), generated=True)
+                play(c, video)
+
+            for track in initial:
+                assert track['_radio_rotation_slot'] == track['key'].split('-')[0]
+                listen(track['video_id'])
+            while len(c.session.heard) < 7:
+                listen(remote.ids[-1])
+            assert len(c.session.heard) == 7
+            saved = c.persistence.load()
+            assert all(t.get('_radio_rotation_slot') for t in saved['tracks'])
+            c.suspend()
+            restored = PlaylistRadio(c.ctx)
+            monkeypatch.setattr(restored.work, 'start_thread', lambda *args, **kwargs: None)
+            if launch == 'legacy-checkpoint':
+                # Reproduce the native checkpoint: initial allocations missing,
+                # and current facts now say familiar after generated starts.
+                for tracks in (saved['tracks'], saved['heard']):
+                    for track in tracks[:3]:
+                        track.pop('_radio_rotation_slot', None)
+                        track['_radio_rotation'] = 'familiar'
+                monkeypatch.setattr(restored.persistence, 'load', lambda: saved)
+            try:
+                restored.join()
+                assert restored.session
+                assert restored.tune({**radio_tuning.DEFAULTS, 'theme': .51})['ok']
+                for branch in restored.session.directions.slots:
+                    counts = Counter(t['key'].split('-')[0] for t in branch['tracks'])
+                    assert all(1 <= counts[kind] <= 3 for kind in ('familiar', 'unplayed', 'new')), counts
+                    assert counts['familiar'] == 2, counts
+                # Fresh facts change after listening; allocation stays as issued.
+                facts = store.radio_catalog.rotation_facts(t['key'] for t in initial)
+                assert all(facts[t['key']]['heard'] for t in initial)
+            finally:
+                restored.suspend()
+                restored.work.stop_executor()
+        return
+
     def sequence(comfort):
         c = candidate(store, comfort=comfort)
         history = [prepared[0]]
-        for _ in range(5):
-            history.append(c.next_track(history))
-        return sum(bool(t.get("_radio_fresh")) for t in history[1:])
-    assert sequence(0) >= 4
-    assert sequence(1) == 0
+        try:
+            for _ in range(120):
+                chosen = c.next_track(history)
+                assert chosen and chosen['key'] not in {t['key'] for t in history}
+                history.append(chosen)
+            return history[1:]
+        finally:
+            c.close()
+    chosen = sequence(comfort)
+    counts = Counter(t['key'].split('-')[0] for t in chosen)
+    record_property('rotation', dict(comfort=comfort, counts=dict(counts)))
+    if comfort == .5:
+        assert all(35 <= counts[kind] <= 45 for kind in ('familiar', 'unplayed', 'new')), counts
+        for start in range(0, 120, 24):
+            window = Counter(t['key'].split('-')[0] for t in chosen[start:start + 24])
+            assert all(window[kind] >= 6 for kind in ('familiar', 'unplayed', 'new')), window
+    elif comfort == 0:
+        assert counts['new'] >= 100 and counts['unplayed'] >= 15 and not counts['familiar'], counts
+    else:
+        assert counts == {'familiar': 120}
 
 
 def test_middle_uses_style_and_energy_while_themed_pins_the_playing_genre(store, prepared):

@@ -20,6 +20,8 @@ function tvHome(maximum = 15) {
   let reports = Promise.resolve(), reportedPlay = false, lastTick = 0;
   let refillTimer = null, refillSerial = 0, refillRequest = null, entry = 0;
   let ownsPlayback = false, playbackSerial = 0, loadedVideoId = null, releasePending = false, lastPlayerState = null;
+  let acquiredAt = null;
+  const clock = () => window.performance?.now() ?? Date.now();
   let startedSelection = null;
   let playbackRetries = 0, retryPending = null;
   let visualRequest = null, visualTimer = null, visualSerial = 0, visualTarget = null;
@@ -87,7 +89,17 @@ function tvHome(maximum = 15) {
           owner.publish();
         },
         release: () => owner.externalPlayback(),
+        observeAudio(data, requestedAt) {
+          const audio = data.connected && data.now_playing;
+          // A status read begun before takeover, or an older cached heartbeat,
+          // cannot undo the confirmed audio pause. A newer native Play can.
+          if (ownsPlayback && acquiredAt !== null && audio?.video_id && audio.paused === false
+              && !audio.muted && !audio.tab_muted && audio.volume !== 0
+              && Number.isFinite(audio.snapshot_age) && audio.snapshot_age >= 0
+              && audio.snapshot_age * 1000 < requestedAt - acquiredAt) owner.externalPlayback();
+        },
         snapshot: () => ({...owner.current, video_id: owner.current?.video_id, paused: !owner.playing,
+          advancing: (player?.getPlayerState?.() ?? lastPlayerState) === 1,
           position: player?.getCurrentTime?.() ?? null,
           duration: player?.getDuration?.() || owner.current?.duration,
           source: {kind: 'tv', title: owner.playlistTitle, url: '/#tv', external: false}})};
@@ -365,7 +377,7 @@ function tvHome(maximum = 15) {
       try {
         await this.acquire();
         if (intent !== playbackSerial || attempt !== playerSerial || selection !== selectionSerial || this.destroyed) return;
-        ownsPlayback = true; releasePending = false; this.error = ''; this.playerError = '';
+        ownsPlayback = true; acquiredAt = clock(); releasePending = false; this.error = ''; this.playerError = '';
         if (player && loadedVideoId !== this.current?.video_id) {
           loadedVideoId = this.current.video_id; player.loadVideoById(loadedVideoId);
         } else player?.playVideo();
@@ -403,7 +415,7 @@ function tvHome(maximum = 15) {
           const attempt = playerSerial;
           await this.acquire();
           if (intent !== playbackSerial || attempt !== playerSerial || selection !== selectionSerial || this.destroyed) return;
-          ownsPlayback = true; releasePending = false; loadedVideoId = this.current.video_id; player.loadVideoById(loadedVideoId);
+          ownsPlayback = true; acquiredAt = clock(); releasePending = false; loadedVideoId = this.current.video_id; player.loadVideoById(loadedVideoId);
         } catch (error) {
           console.debug('[TV] video selection not confirmed', error);
           if (intent === playbackSerial && selection === selectionSerial && !this.destroyed)
@@ -453,7 +465,9 @@ function tvHome(maximum = 15) {
                 return;
               }
               if (event.data === 2) releasePending = false;
-              this.playing = event.data === 1;
+              // Buffering preserves the current play intent; it is not Pause.
+              // The snapshot separately freezes the clock until frames resume.
+              this.playing = event.data === 1 || (event.data === 3 && this.playing);
               if (this.playing) startedSelection = selectionSerial;
               if (this.playing) this.sessionStarted = true;
               if (event.data === 1 || event.data === 2) this.connecting = false;

@@ -95,15 +95,20 @@ def compile(store, offers, responses, now, head):
                 POLICY, head['generation'], params, list(rows.values())])}
 
 
-def current_allocation(store, preview, now):
-    """The effective serving input, excluding report timestamps and diagnostics."""
+def current_state(store, preview, now):
+    """Validate the report before applying its current numerical estimates."""
     stats = store.rec_proposals.get_proposals('group_choice_bandit') or {}
     if (stats.get('policy') != POLICY or stats.get('generation') != preview['generation']
             or stats.get('parameters') != choice_bandit.parameters(store)
             or stats.get('at', now) > now
             or stats.get('expires_at') is not None and now >= stats['expires_at']):
         stats = {}
-    return allocation({'groups': preview['groups']}, stats)
+    return stats
+
+
+def current_allocation(store, preview, now):
+    """The effective serving input, excluding report timestamps and diagnostics."""
+    return allocation({'groups': preview['groups']}, current_state(store, preview, now))
 
 
 def allocation(head, stats=None):

@@ -473,8 +473,12 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
     from . import vibe_versions
     from . import metadata_locator_contract as metadata_locators
     if metadata_locators.retired(conn):
+        from . import group_preview_work
         metadata_locators.validate(conn)
-        expected_contract = {**expected_contract, **_retired_metadata_contract()}
+        preview_guards = {name: ('trigger', _tokens(sql)) for name, sql
+                          in group_preview_work.guards(conn, sources={'metadata_deliveries'})
+                          if name in expected_contract}
+        expected_contract = {**expected_contract, **_retired_metadata_contract(), **preview_guards}
         replaced = replaced | metadata_locators.REMOVED
     if vibe_versions.normalized(conn):
         expected_contract = {**expected_contract, **_normalized_vibe_contract()}

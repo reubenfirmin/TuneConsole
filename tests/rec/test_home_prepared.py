@@ -476,9 +476,11 @@ def test_reporting_failure_does_not_prevent_missing_mixes_from_preparing(
     assert payload and payload['menus'][0]['protos']
 
 
-def test_budget_retry_reuses_completed_genre_setup_and_publishes_a_menu(
+def test_slow_menu_finishes_once_without_repeating_completed_genre_setup(
         publication_inputs, monkeypatch, one_menu_per_attempt):
-    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.core import activity
+    clock = [100.]
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     store = publication_inputs.store
     original_options, original_cards = home_themes.genre_options, home_cards.HomeCards.cards
     options_calls, cards_calls = [], []
@@ -489,16 +491,14 @@ def test_budget_retry_reuses_completed_genre_setup_and_publishes_a_menu(
 
     def cards(self, request):
         cards_calls.append(True)
-        if len(cards_calls) == 1:
-            raise WorkBudgetExceeded('The first menu starts after this batch deadline')
+        clock[0] += home_prepared.PREPARE_BUDGET_S + 1
         return original_cards(self, request)
 
     monkeypatch.setattr(home_themes, 'genre_options', options)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
-    assert home_prepared.prepare(store, 1000) is None
-    result = home_prepared.prepare(store, 1001)
+    result = home_prepared.prepare(store, 1000)
     assert result and any(menu['protos'] for menu in result['menus'])
-    assert len(options_calls) == 1
+    assert len(options_calls) == len(cards_calls) == 1
 
 
 def test_slow_revisit_does_not_starve_first_mix_during_source_updates(
@@ -1143,13 +1143,17 @@ def test_generation_race_retains_previous_cache(store, publication_prepared, mon
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
-def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepared, monkeypatch):
+def test_slow_setup_finishes_without_discarding_and_repeating_sql(store, prepared, monkeypatch):
     import sqlite3
+    from yt_playlist.core import activity
+    clock = [100.]
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
 
     tid = store.tracks.track_ids_for_videos(['v-wheelhouse-0-0'])['v-wheelhouse-0-0']
     store.tracks.set_track_genre(tid, 'House')
     make_reader = store._make_reader
-    readers, interrupted = [], []
+    readers, setups = [], []
+    refresh = store._snapshot_revisions.refresh
 
     def reader():
         value = make_reader()
@@ -1157,27 +1161,19 @@ def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepar
         return value
 
     def slow_setup():
-        try:
-            store.conn.execute('WITH RECURSIVE slow(n) AS (VALUES(0) UNION ALL '
-                'SELECT n+1 FROM slow WHERE n<1000000000) SELECT sum(n) FROM slow').fetchone()
-        except sqlite3.OperationalError as exc:
-            assert str(exc) == 'interrupted'
-            interrupted.append(True)
-            raise
+        setups.append(True)
+        clock[0] += home_prepared.PREPARE_BUDGET_S + 1
+        refresh()
 
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 0.2)
     monkeypatch.setattr(store, '_make_reader', reader)
     monkeypatch.setattr(store._snapshot_revisions, 'refresh', slow_setup)
-    # Discovery and Revisit have their own summary budgets. Measure the mix
-    # stage, with real SQL during revision capture, so cold decoding
-    # cannot consume the deadline before this cancellation control is reached.
-    started = time.monotonic()
-    assert home_prepared.prepare_mixes(store, 1002) is None
-    assert time.monotonic() - started < 1.5
-    assert len(readers) == len(interrupted) == 1
+    result = home_prepared.prepare_mixes(store, 1002)
+    assert result and result['built_at'] == 1002
+    assert len(readers) == len(setups) == 1
     with pytest.raises(sqlite3.ProgrammingError, match='closed database'):
         readers[0].execute('SELECT 1')
-    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == result
 
 
 @pytest.mark.parametrize('boundary', ['before_commit', 'reader_cleanup'])
@@ -1227,7 +1223,7 @@ def test_publication_acknowledges_commit_across_cleanup_deadline(
     else:
         result = home_prepared.prepare(store, 1002)
     stored = store.rec_proposals.get_proposals(home_prepared.SURFACE)
-    if boundary == 'before_commit':
+    if boundary == 'before_commit' and reason == 'shutdown':
         assert stored == prepared
         assert result is None
     else:

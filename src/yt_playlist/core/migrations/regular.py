@@ -316,6 +316,9 @@ def after_owner_upgrade(conn):
     if conn.execute("SELECT 1 FROM schema_changes WHERE version=32 AND name='bounded_embedding_basis_guards'").fetchone():
         from .. import embedding_files
         embedding_files.install_basis_guards(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE name='durable_adaptive_preview_pages'").fetchone():
+        from .. import group_preview_work
+        group_preview_work.install_guards(conn)
 
 
 def _install_policy_history_capture(conn, context):
@@ -438,6 +441,26 @@ def _validate_association_work(conn):
     association_work.validate(conn)
 
 
+def _install_home_revisit_progress(conn, context):
+    from .. import home_revisit_progress
+    home_revisit_progress.install(conn, context)
+
+
+def _validate_home_revisit_progress(conn):
+    from .. import home_revisit_progress
+    home_revisit_progress.validate(conn)
+
+
+def _install_group_preview_work(conn, context):
+    from .. import group_preview_work
+    group_preview_work.install(conn, context)
+
+
+def _validate_group_preview_work(conn):
+    from .. import group_preview_work
+    group_preview_work.validate(conn)
+
+
 CHANGES = (
     Change(1, 'independent_playback_feedback_receipts', _install_receipts, validate_receipts),
     Change(2, 'group_preparation_failure_progress', _install_group_progress, _validate_group_progress),
@@ -474,6 +497,8 @@ CHANGES = (
     Change(33, 'durable_initial_tv_launches', _install_tv_launches, _validate_tv_launches),
     Change(34, 'masked_vibe_metadata_guards', _install_joint_metadata_guards, _validate_joint_metadata_guards),
     Change(35, 'resumable_recording_associations', _install_association_work, _validate_association_work),
+    Change(36, 'durable_home_revisit_progress', _install_home_revisit_progress, _validate_home_revisit_progress),
+    Change(37, 'durable_adaptive_preview_pages', _install_group_preview_work, _validate_group_preview_work),
 )
 
 

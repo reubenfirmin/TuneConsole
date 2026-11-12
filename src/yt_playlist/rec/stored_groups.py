@@ -1,6 +1,7 @@
 """Adaptive group choices over indexed immutable memberships and bounded pages."""
 from collections import Counter
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import group_roots, home_vibe, mode_surfaces, musical_character, rec_params
@@ -20,22 +21,66 @@ def pages(reader, generation, version, lane):
             break
 
 
-def preview_frame(reader, generation, version, lane, now, artist_cap, album_cap, muted):
-    artists, albums, count, tracks = Counter(), Counter(), 0, []
-    for page in pages(reader, generation, version, lane):
-        blocked = home_exclusions(reader, [track['key'] for track in page], now)
-        for track in page:
+@dataclass
+class PreviewFrame:
+    after: int = -1
+    artists: Counter = field(default_factory=Counter)
+    albums: Counter = field(default_factory=Counter)
+    count: int = 0
+    tracks: list = field(default_factory=list)
+    exhausted: bool = False
+
+
+def restore_preview_pages(pages):
+    frames = {}
+    for version, lane, delta in pages:
+        key = version, lane
+        if 'legacy' in delta:
+            frames[key] = delta['legacy']
+            continue
+        state = frames.setdefault(key, PreviewFrame())
+        state.after, state.exhausted = delta['after'], delta['exhausted']
+        state.artists.update(delta['artists'])
+        state.albums.update(delta['albums'])
+        state.count += delta['count']
+        state.tracks.extend(delta['tracks'])
+    return frames
+
+
+def preview_frame(reader, generation, version, lane, now, artist_cap, album_cap, muted, *, progress=None,
+                  checkpoint=None):
+    progress = progress if progress is not None else PreviewFrame()
+    while not progress.exhausted:
+        check_cancellable_work()
+        page = reader.recommendations.candidate_page('home', 'all', lane, generation=generation,
+            group_version=version, after=progress.after, limit=128)
+        # Finish all interruptible reads before advancing the page. A cancelled
+        # page is retried; completed pages retain counts, caps and ordered songs.
+        tracks = page['tracks']
+        blocked = home_exclusions(reader, [track['key'] for track in tracks], now)
+        after = progress.after
+        delta = {'artists': Counter(), 'albums': Counter(), 'count': 0, 'tracks': []}
+        for track in tracks:
             artist, album = track.get('artist') or '', track.get('album') or ''
-            if (track['key'] in blocked or artist in muted or artists[artist] >= artist_cap
-                    or album and albums[album] >= album_cap):
+            if (track['key'] in blocked or artist in muted or progress.artists[artist] >= artist_cap
+                    or album and progress.albums[album] >= album_cap):
                 continue
-            artists[artist] += 1
+            progress.artists[artist] += 1
+            delta['artists'][artist] += 1
             if album:
-                albums[album] += 1
-            count += 1
-            if len(tracks) < mode_surfaces.PROTO_SIZE:
-                tracks.append({field: track.get(field) for field in ('key', 'title', 'artist')})
-    return {'eligible': count, 'full_mix': count >= mode_surfaces.PROTO_SIZE, 'tracks': tracks}
+                progress.albums[album] += 1
+                delta['albums'][album] += 1
+            progress.count += 1
+            delta['count'] += 1
+            if len(progress.tracks) < mode_surfaces.PROTO_SIZE:
+                selected = {field: track.get(field) for field in ('key', 'title', 'artist')}
+                progress.tracks.append(selected)
+                delta['tracks'].append(selected)
+        progress.after, progress.exhausted = page['after'], page['exhausted']
+        if checkpoint is not None:
+            checkpoint(version, lane, after, {**delta, 'after': progress.after, 'exhausted': progress.exhausted})
+    return {'eligible': progress.count, 'full_mix': progress.count >= mode_surfaces.PROTO_SIZE,
+            'tracks': progress.tracks}
 
 
 @contextmanager

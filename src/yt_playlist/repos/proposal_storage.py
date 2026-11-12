@@ -120,6 +120,17 @@ def _legacy(store, surface):
         return _exists(conn, 'rec_proposals', "surface=? AND payload NOT IN ('null','{}')", (surface,))
     def prepare(raw, now, revision):
         def write():
+            if surface == 'group_choice_bandit':
+                # Installed JSON owners obey the same cohort rule as native
+                # learning tables. Leave malformed historical input to its
+                # preparation owner's validation.
+                try:
+                    same = choice_learning_state.unchanged_group_report(
+                        json.loads(encoded() or 'null'), json.loads(raw), now)
+                except (TypeError, ValueError):
+                    same = False
+                if same:
+                    return
             conn.execute('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
                 'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
                 (surface, raw, now))

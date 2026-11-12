@@ -56,16 +56,16 @@ def test_preview_wait_survives_missing_head_and_budget_then_clears_on_publicatio
     tracks = recordings([('House', 20, .4)])
     publish(store, tracks)
     pools(store, tracks)
-    calculate = group_serving.calculate
+    prepare_candidates = group_serving.prepare_candidates
 
-    def exhausted(*args):
+    def exhausted(*args, **kwargs):
         raise WorkBudgetExceeded('preview unfinished')
 
-    monkeypatch.setattr(group_serving, 'calculate', exhausted)
+    monkeypatch.setattr(group_serving, 'prepare_candidates', exhausted)
     clock[0] = 20.
     assert group_serving.prepare(store, 1100) is None
     assert store.maintenance_diagnostics.waiting == {group_serving.PHASE: 0.}
-    monkeypatch.setattr(group_serving, 'calculate', calculate)
+    monkeypatch.setattr(group_serving, 'prepare_candidates', prepare_candidates)
     with work_span('rec: adaptive grouping shadow'):
         assert group_serving.prepare(store, 1200)
     assert not store.maintenance_diagnostics.waiting

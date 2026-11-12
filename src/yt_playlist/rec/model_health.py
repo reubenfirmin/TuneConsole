@@ -2,7 +2,7 @@
 import hashlib
 from uuid import uuid4
 
-from yt_playlist.core.activity import check_cancellable_work, work_budget
+from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import embedding_vectors, eval_recs, summary_inputs
 
 SURFACE = 'model_health'
@@ -21,7 +21,7 @@ def input_key(store, now):
 
 
 def prepare(store, now):
-    with work_budget(SECONDS), store.read_snapshot() as snapshot:
+    with store.read_snapshot() as snapshot:
         reader = snapshot.store
         stamp = input_key(store, now)
         holdout = eval_recs.best_holdout(reader)

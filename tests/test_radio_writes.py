@@ -77,7 +77,10 @@ def test_unconfirmed_append_has_a_bounded_wait_then_skips_without_repeating_the_
 
 @pytest.mark.parametrize("lost_read", [False, True])
 def test_acknowledged_upload_substitution_is_confirmed_without_merging_recordings(poc, lost_read):
-    c, remote, *_ = poc
+    c, remote, _, _, pool = poc
+    pool[3].update(_radio_rotation='new', _radio_rotation_slot='new')
+    pool[30].update(_radio_rotation='familiar', _radio_rotation_slot='unplayed')
+    c.ctx.store.rec_ledger.record_recommendation_outcomes('prior-listen', 'start', [pool[30]['key']], 1)
     c.start()
     original_key = c.session.candidates.by_video["v4"]["key"]
     def substitute(playlist, ids):
@@ -100,6 +103,7 @@ def test_acknowledged_upload_substitution_is_confirmed_without_merging_recording
     assert remote.adds == [["v4"]]
     assert c.status()["tracks"][-1]["video_id"] == "v31"
     assert c.status()["tracks"][-1]["key"] != original_key
+    assert c.session.tracks[-1]['_radio_rotation_slot'] == 'familiar'
     assert c.session.pending is None and c.status()["ahead"] == 1
     assert "v4" in c.session.rejected
     assert c.status()["error"] is None

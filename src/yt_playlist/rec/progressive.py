@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 
-from yt_playlist.core.activity import check_stopping, work_budget, WorkBudgetExceeded
+from yt_playlist.core.activity import check_stopping, WorkBudgetExceeded
 from yt_playlist.core import embeddings
 from yt_playlist.rec import content_model, group_preparation, musical_preparation, rec_params, taste_modes
 from yt_playlist.rec import vibe_preparation, vibe_joint_preparation
@@ -200,7 +200,7 @@ class Preparation:
         if now >= self.next_maintenance_at and not self._repair_needed:
             self.next_maintenance_at = now + MAINTENANCE_INTERVAL
             try:
-                with work_budget(self.budget.capture_seconds), self.store.read_view() as reader:
+                with self.store.read_view() as reader:
                     self._repair_needed = bool(reader.prepared_content.missing_unqueued(1))
             except WorkBudgetExceeded:
                 self.next_maintenance_at = now + self.budget.fit_interval
@@ -212,7 +212,7 @@ class Preparation:
         if not self._maintenance_due(now):
             return False
         try:
-            with work_budget(self.budget.capture_seconds), self.store.read_snapshot(
+            with self.store.read_snapshot(
                     dependencies=REPAIR_INPUTS) as snapshot:
                 keys = snapshot.store.prepared_content.missing_unqueued(
                     self.budget.batch, after=self._repair_after)
@@ -321,15 +321,13 @@ class Preparation:
         return published or self._capturing is not None
 
     def _advance_capture(self):
-        # The first turn captures inputs; each subsequent turn reconstructs at
-        # most one posterior. Model work has the existing ten-second admission
-        # instead of forcing all eight channels into a two-second source slice.
-        seconds = (self.budget.fit_seconds if vibe_joint_preparation.qualified()
-                   else self.budget.capture_seconds)
         try:
-            with work_budget(min(seconds, self._capturing_expires_at - time.monotonic())):
+            # The generator's units are memory/row bounded. Complete the
+            # admitted recording/channel batch rather than expiring a pinned
+            # generator and repeating every already calculated channel.
+            while True:
+                check_stopping()
                 next(self._capturing)
-            return False  # A yielded channel has not published a recording yet.
         except StopIteration as completed:
             published = bool(completed.value)
         except WorkBudgetExceeded:
@@ -390,7 +388,7 @@ class Preparation:
             return False
         self.retry_fit_at = now + self.budget.fit_interval
         try:
-            with work_budget(self.budget.fit_seconds), self.store.read_snapshot() as snapshot:
+            with self.store.read_snapshot() as snapshot:
                 reader = snapshot.store
                 raw_model = reader.settings.get_setting('rec_content_model')
                 if raw_model and reader.prepared_content.missing_previous_inputs():

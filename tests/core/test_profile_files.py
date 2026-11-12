@@ -21,8 +21,8 @@ def payload(value):
     return raw, hashlib.sha256(raw.encode()).hexdigest()
 
 
-def seed(store):
-    for name in ('one', 'two'):
+def seed(store, names=('one', 'two')):
+    for name in names:
         store.tracks.upsert_track(name, name, 'Artist', '', 100)
     keys = [r[0] for r in store.conn.execute('SELECT identity_key FROM recordings ORDER BY id')]
     bodies = {}
@@ -60,17 +60,19 @@ def test_profile_page_batches_heads_and_validates_mixed_publications(store, monk
 
 
 def test_profile_page_reuses_a_chunk_for_interleaved_identity_order(store, monkeypatch):
-    keys, bodies = seed(store)
-    profiles.prepare(store)
+    keys, bodies = seed(store, ('one', 'two', 'three', 'four', 'five', 'six'))
+    for _ in range(3):
+        assert profiles.prepare(store, limit=2) == 2
     opened = []
     read = original_bytes
     def counted(path, **options):
         opened.append(path)
         return read(path, **options)
     patch_byte_reads(monkeypatch, counted)
-    assert owner.read_page(store.conn, 'recording', list(reversed(keys))) == {
+    interleaved = [keys[i] for i in (0, 2, 4, 1, 3, 5)]
+    assert owner.read_page(store.conn, 'recording', interleaved) == {
         key: json.loads(raw) for key, raw in bodies.items()}
-    assert len(opened) == 1
+    assert len(opened) == len(set(opened)) == 3
 
 
 def test_exact_partial_conversion_budgets_and_failed_file_publication(store, monkeypatch):

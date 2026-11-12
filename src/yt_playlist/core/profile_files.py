@@ -123,7 +123,10 @@ class ProfileFiles:
         if sum(sizes) > max_bytes:
             raise WorkBudgetExceeded('Musical profile page exceeds byte budget')
         cache, result = Cache(), {}
-        for key, raw, version, digest, identity, publication, byte_size in rows:
+        # Corpus order interleaves profiles from many publications. Decode each
+        # chunk once per page while retaining the same two-chunk/byte bounds.
+        for key, raw, version, digest, identity, publication, byte_size in sorted(
+                rows, key=lambda row: row[5] or b''):
             if not raw:
                 value = _chunk_at(self.root, kind, publication, cache).get(str(identity))
                 if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}

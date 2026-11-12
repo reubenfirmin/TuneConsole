@@ -3,9 +3,13 @@ import re
 
 from ytmusicapi.exceptions import YTMusicServerError
 
+from yt_playlist.core.album_snapshot import LibrarySnapshotError, _check_response
+
 
 def http_status(exc):
     """Read a structured HTTP status or ytmusicapi's fixed HTTP error prefix."""
+    if isinstance(exc, LibrarySnapshotError):
+        return exc.status_code if exc.resource == 'playlist' and exc.page == 1 else None
     status = getattr(getattr(exc, 'response', None), 'status_code', None)
     if status is None and isinstance(exc, YTMusicServerError):
         match = re.match(r'Server returned HTTP (\d{3}):', str(exc))
@@ -17,13 +21,12 @@ def playlist_if_present(client, playlist_id):
     """Only an explicit 404 proves absence; every present playlist must be complete."""
     try:
         detail = client.get_playlist(playlist_id, limit=None)
+        if isinstance(detail, dict) and 'error' in detail:
+            _check_response(detail, 'playlist', 1)
     except Exception as exc:
         if http_status(exc) == 404:
             return None
         raise
-    error = detail.get('error') if isinstance(detail, dict) else None
-    if isinstance(error, dict) and error.get('code') == 404:
-        return None
     return validate_playlist(detail)
 
 

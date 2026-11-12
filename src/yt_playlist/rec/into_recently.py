@@ -423,6 +423,12 @@ def _publish_pool(store, now):
                    "appearances": {s['subject']: appearances[s['subject']] for s in ranked
                                    if s['subject'] in appearances},
                    "cards": cards, "pending": pending}
+        # Filling another owner's batch must not manufacture a new story
+        # edition/publication solely by changing its preparation timestamp.
+        if (0 <= now - previous.get('built_at', 0) < MAX_AGE_S
+                and {key: value for key, value in previous.items() if key != 'built_at'}
+                == {key: value for key, value in payload.items() if key != 'built_at'}):
+            payload['built_at'] = previous['built_at']
         encoded = json.dumps(payload, separators=(",", ":"))
         if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
                 encoded, now, surface=SURFACE, input_revision=snapshot._changes)):

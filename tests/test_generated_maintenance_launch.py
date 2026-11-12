@@ -69,8 +69,9 @@ def test_mix_launch_during_storage_maintenance_preserves_readonly_local_state(st
             assert client.get('/storage-maintenance/status').json()['active']
             assert client.post('/sync').status_code == 503
             response = client.post('/home/generate', headers={'HX-Request': 'true'} if htmx else {}, data={
-                'name': 'Maintenance mix', 'launch_id': 'maintenance-check',
-                'recipe': json.dumps({'lane': 'fresh', 'mode_id': 1}),
+                'name': 'More in your wheelhouse - January 1 1970' if htmx else 'Maintenance mix',
+                'launch_id': 'maintenance-check',
+                'recipe': json.dumps({'lane': 'wheelhouse', 'mode_id': 1}),
                 'tracks': json.dumps([{'video_id': 'song', 'title': 'Song', 'artist': 'Artist'}])})
             assert response.status_code == 200, response.text
             if htmx:
@@ -90,6 +91,8 @@ def test_mix_launch_during_storage_maintenance_preserves_readonly_local_state(st
                 assert 'data-vid="song"' in page.text
                 assert 'playlistPlayback(' in page.text
                 assert 'gen-done' not in page.text
+                assert ('class="pl-type-badge"' in page.text) == htmx
+                assert ('class="pl-generated-date"' in page.text) == htmx
             assert navigated.wait(5)
         assert len(provider.created) == len(frames) == 1
         playlist = provider.created[0][0]

@@ -1,4 +1,5 @@
 """Runtime cutover precedes analytics, with normal writes between the phases."""
+from collections import deque
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from functools import wraps
@@ -860,7 +861,7 @@ def test_analytics_serves_foreground_writes_between_batches(production64, monkey
         store.conn.close()
 
 
-def test_workers_wait_for_analytics_while_runtime_accepts_writes(production64, monkeypatch):
+def test_workers_wait_for_analytics_while_runtime_accepts_writes(production64, monkeypatch, record_property):
     from yt_playlist.core.storage_maintenance import StorageMaintenance
     entered, release = threading.Event(), threading.Event()
     finish = job.finish_analytics
@@ -871,10 +872,34 @@ def test_workers_wait_for_analytics_while_runtime_accepts_writes(production64, m
     monkeypatch.setattr(job, 'finish_analytics', delayed)
     store = Store(production64)
     maintenance = StorageMaintenance(store)
+    began = time.monotonic()
+    phases = deque(maxlen=32)
+    last_progress = [began]
+    progress = maintenance._progress
+
+    def observed(phase, detail=None):
+        now = time.monotonic()
+        last_progress[0] = now
+        phases.append((now - began, time.thread_time(), phase, detail))
+        assert not maintenance.ready.is_set(), 'Workers admitted before analytics completed'
+        progress(phase, detail)
+
+    monkeypatch.setattr(maintenance, '_progress', observed)
     try:
         store.init_schema()
+        last_progress[0] = time.monotonic()
+        deadline = last_progress[0] + 60
         maintenance.start()
-        assert entered.wait(15), maintenance.error
+        # Real copy/checkpoint/fsync work precedes this handshake. Bound both
+        # total admission and lack of progress, rather than treating fifteen
+        # seconds of advancing copy batches as an analytics-readiness failure.
+        while not entered.wait(.05):
+            diagnostic = (maintenance.phase, maintenance.detail, maintenance.error, list(phases))
+            assert maintenance._thread.is_alive(), diagnostic
+            assert not maintenance.ready.is_set(), diagnostic
+            now = time.monotonic()
+            assert now < deadline and now - last_progress[0] < 15, diagnostic
+        record_property('runtime_cutover', json.dumps(list(phases)))
         assert not maintenance.ready.is_set()
         assert not maintenance.status()['active']
         store.settings.set_setting('before-worker-start', 'accepted')
@@ -887,4 +912,5 @@ def test_workers_wait_for_analytics_while_runtime_accepts_writes(production64, m
         release.set()
         maintenance.stop()
         maintenance.join(15)
+        record_property('storage_phases', json.dumps(list(phases)))
         store.conn.close()

@@ -273,7 +273,10 @@ def test_radio_refreshes_metadata_for_current_and_played_table_rows(poc, monkeyp
         seed_enrichment(c.ctx.store, tid, "Techno", "2001")
     # Use the production catalog refresh against the fixture's deterministic sampler.
     s.candidates.store = c.ctx.store
+    s.candidates.read_store = c.ctx.store
     s.candidates.affinities = {}
+    monkeypatch.setattr(s.candidates, "_rotation_facts",
+                        lambda tracks: RadioCandidates._rotation_facts(s.candidates, tracks), raising=False)
     monkeypatch.setattr(s.candidates, "_energy", lambda tracks: False, raising=False)
     monkeypatch.setattr(s.candidates, "refresh_metadata",
                         lambda tracks: RadioCandidates.refresh_metadata(s.candidates, tracks))

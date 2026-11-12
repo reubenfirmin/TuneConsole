@@ -93,7 +93,7 @@ def test_foreground_can_read_and_write_between_hidden_batches(database, monkeypa
     assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-@pytest.mark.parametrize('change', ['input', 'unrelated-setting', 'external-writer', 'schema', 'head'])
+@pytest.mark.parametrize('change', ['input', 'input-stamp', 'unrelated-setting', 'external-writer', 'schema', 'head'])
 def test_staging_keeps_original_input_and_publication_guards(database, monkeypatch, change):
     tracks = recordings([('Pop', 12, .2)])
     seed(database, tracks)
@@ -108,6 +108,9 @@ def test_staging_keeps_original_input_and_publication_guards(database, monkeypat
         staged.append(prepared['generation'])
         if change == 'input':
             with database.conn:
+                database.conn.execute("UPDATE rec_musical_profiles SET payload='{}'")
+        elif change == 'input-stamp':
+            with database.conn:
                 database.conn.execute('UPDATE rec_musical_profiles SET prepared_at=prepared_at+1')
         elif change == 'unrelated-setting':
             database.settings.set_setting('foreground-setting', 'new')
@@ -121,8 +124,8 @@ def test_staging_keeps_original_input_and_publication_guards(database, monkeypat
 
     monkeypatch.setattr(database.taste_groups, 'stage', stage)
     seed(database, recordings([('Pop', 13, .2)]))
-    assert worker.step(2000) == (change == 'unrelated-setting')
-    if change == 'unrelated-setting':
+    assert worker.step(2000) == (change in {'unrelated-setting', 'input-stamp'})
+    if change in {'unrelated-setting', 'input-stamp'}:
         assert database.taste_groups.head_generation() == staged[0]
     else:
         assert database.taste_groups.head_generation() != staged[0]

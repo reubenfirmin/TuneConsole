@@ -216,13 +216,13 @@ def test_last_good_response_survives_failed_refresh_and_recovery(boundary):
 
 
 @pytest.mark.parametrize('body,missing', [
-    ({'error': 6, 'message': 'Track not found'}, True),
+    ({'error': 6, 'message': 'The artist you supplied could not be found'}, True),
     ({'error': 6, 'message': 'Invalid parameters'}, False),
     ({'error': 6}, False), ({'unexpected': []}, False), ([], False), (b'invalid json', False),
 ])
 def test_only_confirmed_misses_enter_negative_cache(boundary, body, missing):
     b = boundary(lambda request: body)
-    params = query('track.getinfo', track='Song')
+    params = query(artist='Manuelle Musik Steffen Sonnenschein', autocorrect='1')
     with net.probe_errors() as errors:
         if missing:
             assert b.iao.get(params) == body
@@ -231,6 +231,15 @@ def test_only_confirmed_misses_enter_negative_cache(boundary, body, missing):
                 b.iao.get(params)
     assert bool(errors) != missing
     assert bool(b.iao._cache['api']) == missing
+    if missing:
+        assert b.iao.get(params) == body
+        assert len(b.calls) == 1
+        # A corrected query has a separate identity, with no reset or restart.
+        assert b.iao.get({**params, 'artist': 'Corrected artist'}) == body
+        assert len(b.calls) == 2
+        with pytest.raises(IntegrationUnavailable):
+            b.iao.get({**params, 'artist': ' '})
+        assert len(b.calls) == 3
 
 
 def test_query_failure_allows_other_healthy_api_work(boundary):
@@ -506,15 +515,31 @@ def test_worker_waits_for_metadata_and_correction_resumes_only_that_query(bounda
 
 
 @pytest.mark.parametrize('failure', [False, True])
-def test_complete_query_miss_and_transient_failure_keep_their_distinct_outcomes(boundary, store, failure):
+def test_complete_query_miss_and_transient_failure_keep_their_distinct_outcomes(boundary, store, failure, caplog):
+    from yt_playlist.providers import enrichment
+    from tests.test_enrichment_retries import worker
+
+    artist = 'Manuelle Musik Steffen Sonnenschein'
     def fetch(request):
         if failure:
             raise TimeoutError('controlled timeout')
-        return {'error': 6, 'message': 'Track not found'}
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+        if params['method'] == ['artist.gettoptags']:
+            assert params['autocorrect'] == ['1']
+            if params['artist'] == ['Corrected artist']:
+                return tags()
+            assert params['artist'] == [artist]
+            return {'error': 6, 'message': 'The artist you supplied could not be found'}
+        return {'track': {'toptags': {'tag': []}}}
     b = boundary(fetch)
     store.settings.set_setting('lastfm_api_key', 'secret')
-    entry = store.tracks.upsert_track('complete', 'Song', 'Artist', None, 200)
+    entry = store.tracks.upsert_track('complete', 'Song', artist, None, 200)
     track = store.tracks.track_for_waterfall(entry)
+    if not failure:
+        store.enrichment_state.record_enrichment_attempt(track['identity_key'], 'lastfm',
+            {'year': '1996'}, retry=True, now=999, video_id=track['video_id'],
+            error='Last.fm API error 6')
+        b.clock[0] += 31
     completed = run_waterfall(store, [track], [{'name': 'lastfm', 'enabled': True}],
         lambda event: None, registry={'lastfm': lastfm}, now_fn=lambda: b.clock[0])
     state = store.enrichment_state.enrichment_provider_state(track['recording_id'])['lastfm']
@@ -523,6 +548,24 @@ def test_complete_query_miss_and_transient_failure_keep_their_distinct_outcomes(
     assert bool(state['retry_at']) is failure
     assert bool(store.enrichment_state.integration_cooldown('lastfm')) is failure
     assert b.calls
+    if not failure:
+        assert len(b.calls) == 2
+        assert state['fields'] == {'year': '1996'}
+        assert not [r for r in caplog.records if r.name.startswith('yt_playlist.providers.lastfm')]
+        enrichment.save_config(store, [{'name': p['name'], 'enabled': p['name'] == 'lastfm'}
+                                       for p in enrichment.PROVIDERS])
+        w = worker(store, b.clock, [lastfm])
+        assert w.drain_once(limit=10) == 1
+        for _ in range(3):
+            b.clock[0] += access.MISS_TTL + 1
+            assert w.drain_once(limit=10) == 0
+        assert len(b.calls) == 2
+        assert store.enrichment_reports.queue_remaining() == 0
+        assert store.enrichment_state.enrichment_retry_status()['count'] == 0
+        store.tracks.set_track_artist(entry, 'Corrected artist')
+        corrected = lastfm.probe(store.tracks.track_for_waterfall(entry), store)
+        assert corrected.fields['genre'] == 'House'
+        assert len(b.calls) == 4
 
 
 def test_queue_rechecks_metadata_changed_after_snapshot_selection(file_backed_store, monkeypatch):

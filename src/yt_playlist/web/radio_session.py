@@ -59,7 +59,8 @@ class PlaylistRadio:
         self.playback = RadioPlayback(ctx.bridge)
         self.playlists = RadioPlaylistIO(ctx.store.playlists, paused=paused)
         self.mutations = RadioMutations(self.playlists, self.persistence, ctx.store.tracks,
-                                       lambda: self.ctx.now_fn(), paused=paused)
+                                       lambda: self.ctx.now_fn(), paused=paused,
+                                       rotation_facts=lambda keys: ctx.store.radio_catalog.rotation_facts(keys))
         self.policy = RadioPolicy(ctx.store, lambda: self.ctx.now_fn())
         self.listening = RadioListening(ctx.store, self.playback, self.policy, self.lock, lambda: self.ctx.now_fn())
         self.launch = RadioLaunch(ctx.store, self.playlists, self.persistence, self.policy,

@@ -28,7 +28,16 @@ sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
 original_directory, original_environment = tempfile.gettempdir(), os.environ.get('TMPDIR')
 original_sqlite_environment = os.environ.get('SQLITE_TMPDIR')
-result = pytest.main(sys.argv[2:], plugins=[plugin])
+
+class Bootstrap:
+    def pytest_load_initial_conftests(self, early_config):
+        # Register the real conftest at its normal startup phase. Passing it
+        # directly to pytest.main loads its dependent plugins before the early
+        # storage hook, letting their imports initialize SQLite in the parent
+        # session's inherited directory.
+        early_config.pluginmanager.register(plugin)
+
+result = pytest.main(sys.argv[2:], plugins=[Bootstrap()])
 assert tempfile.tempdir == original_directory
 assert os.environ.get('TMPDIR') == original_environment
 assert os.environ.get('SQLITE_TMPDIR') == original_sqlite_environment

@@ -6,6 +6,18 @@ from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronize
 
 class HomeCacheRepo(Repo):
     @lookup_read
+    def unchanged(self, prepared):
+        """Identical bytes retain their existing head, files and evidence roots."""
+        if self._store._home_display_files:
+            row = self.conn.execute('SELECT p.content_digest FROM home_display_heads h '
+                'JOIN home_display_publications p ON p.id=h.publication_id WHERE h.surface=?',
+                (prepared.surface,)).fetchone()
+            return bool(row and row[0] == prepared.digest)
+        row = self.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?',
+                                (prepared.surface,)).fetchone()
+        return bool(row and row[0] == prepared.raw)
+
+    @lookup_read
     def native(self):
         return self._store._home_display_files
 
@@ -30,6 +42,8 @@ class HomeCacheRepo(Repo):
     @synchronized
     def publish(self, prepared, filenames, policies, roots, *, input_revision=None):
         with self.conn.atomic(join=True):
+            if self.unchanged(prepared):
+                return
             if self._store._home_display_files:
                 return home_outputs.publish_files(self.conn, prepared, filenames, policies=policies, roots=roots,
                                                   input_revision=input_revision)

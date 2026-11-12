@@ -214,3 +214,97 @@ try {
     result = subprocess.run([node, '--input-type=module', '-e', script],
         cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_native_audio_reclaims_tv_only_after_the_confirmed_takeover():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node is required for JS behavior checks')
+    script = r'''
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+let now = 90, respond, mounted;
+const calls = [], flush = () => new Promise(setImmediate);
+global.window = new EventTarget();
+window.performance = {now: () => now};
+global.document = new EventTarget();
+Object.assign(document, {readyState: 'loading', getElementById: () => null,
+  body: {classList: {toggle() {}}}, createElement: () => ({})});
+global.location = {origin: 'http://localhost'};
+global.ResizeObserver = class { observe() {} disconnect() {} };
+global.requestAnimationFrame = () => 1;
+global.cancelAnimationFrame = () => {};
+global.fetch = url => url === '/bridge/status' ? new Promise(resolve => { respond = resolve; }) :
+  Promise.resolve({ok: true, status: 202, json: async () => ({ok: true, preparing: true})});
+window.YT = {Player: class {
+  constructor(mount, options) {
+    this.options = options; this.state = 2; mounted = this;
+    queueMicrotask(() => options.events.onReady({target: this}));
+  }
+  getPlayerState() { return this.state; }
+  getCurrentTime() { return 37; }
+  getDuration() { return 200; }
+  playVideo() { this.state = 1; calls.push('play'); this.options.events.onStateChange({data: 1, target: this}); }
+  pauseVideo() { this.state = 2; calls.push('pause'); this.options.events.onStateChange({data: 2, target: this}); }
+  destroy() {}
+}};
+const root = 'src/yt_playlist/web/static/';
+vm.runInThisContext(fs.readFileSync(root + 'playback-status.js', 'utf8'));
+vm.runInThisContext(fs.readFileSync(root + 'tv.js', 'utf8'));
+const model = tvHome();
+model.$refs = {player: {replaceChildren() {}}}; model.$nextTick = () => {};
+model.init(); model.visible = true; model.items = [{video_id: 'tv-song', title: 'TV song'}];
+const owner = window.playbackStatus;
+const audio = {video_id: 'audio-song', title: 'Audio song', paused: false, position: 12,
+  duration: 180, snapshot_age: 0, source: {kind: 'playlist', url: '/playlist/1'}};
+const data = changes => ({connected: true, radio: true, radio_ready: true,
+  now_playing: {...audio, ...changes}, radio_resume: {video_id: 'saved-radio'}});
+async function read(changes) {
+  const pending = owner.refresh(); respond({ok: true, json: async () => data(changes)}); await pending;
+}
+function tvOwns() {
+  assert.equal(window.tvPlaybackControls.active(), true);
+  assert.equal(owner.snapshot.now_playing.video_id, 'tv-song');
+  assert.equal(owner.snapshot.now_playing.paused, false);
+  assert.equal(owner.snapshot.now_playing.source.kind, 'tv');
+  assert.equal(owner.snapshot.radio, false); assert.equal(owner.snapshot.radio_ready, false);
+  assert.equal(owner.snapshot.radio_resume, null);
+}
+try {
+  const staleRead = owner.refresh(); // This read starts before audio is paused for TV.
+  now = 100; await model.select(0); await flush();
+  now = 300; respond({ok: true, json: async () => data({})}); await staleRead;
+  tvOwns();
+  assert.equal(owner.audioSnapshot.now_playing.video_id, 'audio-song');
+  now = 400; await read({snapshot_age: .5}); tvOwns();
+  for (const changes of [{paused: true}, {muted: true}, {tab_muted: true}, {volume: 0},
+      {snapshot_age: -1}, {snapshot_age: null}, {snapshot_age: '0'}]) {
+    now += 10; await read(changes); tvOwns();
+  }
+  // Buffering keeps Pause actionable but does not invent advancing progress.
+  mounted.state = 3; mounted.options.events.onStateChange({data: 3, target: mounted});
+  tvOwns();
+  const position = owner.progress().position;
+  now += 200; assert.equal(owner.progress().position, position);
+  mounted.state = 1; mounted.options.events.onStateChange({data: 1, target: mounted});
+  now = 1000; await read({});
+  assert.equal(window.tvPlaybackControls.active(), false);
+  assert.equal(mounted.state, 2);
+  assert.deepEqual(calls, ['play', 'pause']);
+  assert.equal(owner.snapshot.now_playing.video_id, 'audio-song');
+  assert.equal(owner.snapshot.now_playing.source.kind, 'playlist');
+  assert.equal(owner.progress().videoId, 'audio-song');
+  assert.equal(owner.progress().position, 12);
+  now = 1100; await model.resume(); tvOwns();
+  // Re-publishing that cached audio observation after a new TV Play cannot steal it.
+  model.publish(); tvOwns();
+  now = 1200; await read({snapshot_age: .2}); tvOwns();
+  const failed = owner.refresh(); respond({ok: false}); await failed; tvOwns();
+  assert.deepEqual(calls, ['play', 'pause', 'play']);
+} finally { model.destroy(); owner.stop(); }
+'''
+    result = subprocess.run([node, '--input-type=module', '-e', script],
+                            cwd=Path(__file__).resolve().parents[1],
+                            text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr

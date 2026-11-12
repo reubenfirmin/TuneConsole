@@ -7,13 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core import db_diagnostics, work_diagnostics
-from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
 from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_prepared, measurement, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_tasks import ServingTasks
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.store_fixture_support import initialize_consumer
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +41,14 @@ def budget_store(publication_store, monkeypatch):
         'CREATE TABLE rec_proposals(surface TEXT PRIMARY KEY,payload TEXT NOT NULL,built_at REAL)')
     monkeypatch.setattr(publication_store.rec_ledger, 'card_views', Mock(return_value=0))
     return publication_store
+
+
+@pytest.fixture
+def revisit_store(tmp_path, _pristine_current_schema):
+    source = Store(tmp_path / 'revisit.db')
+    with closing(source.conn):
+        initialize_consumer(source, _pristine_current_schema)
+        yield source
 
 
 @pytest.mark.parametrize('publication_threshold', [0., float('inf')])
@@ -246,10 +255,12 @@ def test_disabled_job_is_retired_once_and_context_is_restored_after_failure():
     assert diagnostics.phases['worker', 'published'] == 1
 
 
-def test_home_revisit_partial_publications_preserve_wait_then_complete(store, monkeypatch):
+def test_home_revisit_partial_publications_preserve_wait_then_complete(revisit_store, monkeypatch):
+    store = revisit_store
     clock = [0.]
     store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
     attempts = []
+    completed = []
     fail = [True]
 
     def albums(*args, **kwargs):
@@ -258,22 +269,65 @@ def test_home_revisit_partial_publications_preserve_wait_then_complete(store, mo
             raise WorkBudgetExceeded('unfinished album summary')
         return ['album']
 
-    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists', lambda *a, **kw: ['playlist'])
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists',
+                        lambda *a, **kw: completed.append('playlist') or ['playlist'])
     monkeypatch.setattr(home_prepared.surfaces, 'rediscover_albums', albums)
-    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_tracks', lambda *a, **kw: ['track'])
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_tracks',
+                        lambda *a, **kw: completed.append('track') or ['track'])
     with work_diagnostics.work_span('rec: different worker label'):
         home_prepared.prepare_revisit(store, 1000)
         assert store.rec_proposals.get_proposals('home_revisit')['rediscover'] == ['playlist']
         assert store.maintenance_diagnostics.waiting == {home_prepared.REVISIT_PHASE: 0.}
+        # Discard all process-local reuse to prove the durable cursor owns
+        # recovery, including across a minute boundary and a worker restart.
+        del store._preparation_memos
         clock[0] = 20.
         home_prepared.prepare_revisit(store, 1060)
-        assert store.rec_proposals.get_proposals('home_revisit')['rediscover_tracks'] == ['track']
+        assert 'rediscover_tracks' not in store.rec_proposals.get_proposals('home_revisit')
         assert store.maintenance_diagnostics.waiting == {home_prepared.REVISIT_PHASE: 0.}
         fail[0] = False
         home_prepared.prepare_revisit(store, 1120)
     assert len(attempts) == 3
+    assert completed == ['playlist', 'track']
     assert not store.maintenance_diagnostics.waiting
     assert store.maintenance_diagnostics.phases[home_prepared.REVISIT_PHASE, 'completed'] == 1
+
+    # A refresh can finish unchanged predecessors before a later component
+    # stops. Their cursor must survive a restart without republishing the head.
+    for index, interruption in enumerate((WorkBudgetExceeded, WorkClosing)):
+        completed.clear()
+        attempts.clear()
+        store.__dict__.pop('_preparation_memos', None)
+        monkeypatch.setattr(home_prepared.surfaces, 'rediscover_albums',
+                            lambda *a, **kw: completed.append('album') or ['album'])
+
+        def tracks(*args, **kwargs):
+            attempts.append('tracks')
+            if len(attempts) == 1:
+                raise interruption('unfinished track summary')
+            return [f'track-{index}']
+
+        monkeypatch.setattr(home_prepared.surfaces, 'rediscover_tracks', tracks)
+        with monkeypatch.context() as refresh:
+            display = Mock(wraps=store.rec_proposals.home.put)
+            refresh.setattr(store.rec_proposals.home, 'put', display)
+            if interruption is WorkClosing:
+                with pytest.raises(WorkClosing):
+                    home_prepared.prepare_revisit(store, 2000 + index * 60)
+            else:
+                assert home_prepared.prepare_revisit(store, 2000 + index * 60) is False
+            display.assert_not_called()
+            assert store.rec_proposals.revisit_remaining() == ['rediscover_tracks']
+            del store._preparation_memos
+            resumed = Store.open_current(store._db_path)
+            with closing(resumed.conn):
+                resumed_display = Mock(wraps=resumed.rec_proposals.home.put)
+                refresh.setattr(resumed.rec_proposals.home, 'put', resumed_display)
+                assert home_prepared.prepare_revisit(resumed, 2030 + index * 60) is True
+                resumed_display.assert_called_once()
+        assert completed == ['playlist', 'album']
+        assert attempts == ['tracks', 'tracks']
+        assert store.rec_proposals.revisit_remaining() == []
 
 
 def test_home_revisit_stale_slice_cannot_be_hidden_by_other_publications(store, monkeypatch):
@@ -294,6 +348,27 @@ def test_home_revisit_stale_slice_cannot_be_hidden_by_other_publications(store, 
     assert store.maintenance_diagnostics.waiting == {phase: start}
     cached = store.rec_proposals.get_proposals('home_revisit')
     assert 'rediscover' not in cached and cached['rediscover_tracks'] == ['track']
+    assert store.rec_proposals.revisit_remaining() == ['rediscover']
     monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists', lambda *a, **kw: ['current'])
     home_prepared.prepare_revisit(store, 1060)
     assert not store.maintenance_diagnostics.waiting
+    assert store.rec_proposals.revisit_remaining() == []
+
+    # A shutdown inside publication must roll back the changed display and its
+    # cursor together, leaving the last completed cohort available.
+    last_good = store.rec_proposals.get_proposals('home_revisit')
+    del store._preparation_memos
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists', lambda *a, **kw: ['replacement'])
+    save = store.rec_proposals.save_revisit_remaining
+
+    def interrupted(remaining):
+        save(remaining)
+        raise WorkClosing('shutdown before commit')
+
+    with monkeypatch.context() as publication:
+        publication.setattr(store.rec_proposals, 'save_revisit_remaining', interrupted)
+        with pytest.raises(WorkClosing):
+            home_prepared.prepare_revisit(store, 1120)
+    assert not store.conn.in_transaction
+    assert store.rec_proposals.get_proposals('home_revisit') == last_good
+    assert store.rec_proposals.revisit_remaining() == []

@@ -232,7 +232,10 @@ def test_retiring_unanswered_events_advances_the_event_generation(tmp_path, monk
     assert ledger.generation() != previous
 
 
-def test_orphan_grace_is_independent_of_choice_retention_and_protects_components(tmp_path):
+def test_orphan_grace_is_independent_of_choice_retention_and_protects_components(tmp_path, monkeypatch):
+    from yt_playlist.core.evidence_inventory import Inventory
+    from yt_playlist.core.file_collection import retained_reader
+
     ledger = EvidenceLedger(tmp_path, byte_budget=1024 * 1024)
     component = ledger.artifact({'large': 'kept'})
     prepared = ledger.artifact({'model': {'$artifact': component}})
@@ -246,7 +249,23 @@ def test_orphan_grace_is_independent_of_choice_retention_and_protects_components
     for identity in (component, prepared, orphan, chosen, reused):
         age_file(ledger._path('artifact', identity), mtime_ns=100 * 10 ** 9)
     age_file(ledger._path('artifact', in_flight), mtime_ns=1000 * 10 ** 9)
+    scan = Inventory.scan
+    reads = []
+
+    def readable_inventory(inventory):
+        # A serving reader can acquire its lifetime and read useful evidence
+        # while maintenance performs its expensive inventory.
+        def read():
+            with retained_reader(ledger.directory):
+                return ledger.get('artifact', chosen)
+
+        with ThreadPoolExecutor(1) as workers:
+            reads.append(workers.submit(read).result(2))
+        return scan(inventory)
+
+    monkeypatch.setattr(Inventory, 'scan', readable_inventory)
     result = ledger.maintain(50, protected_artifacts=[prepared], orphan_before=900)
+    assert reads == [{'chosen': 'durable'}]
     assert ledger.get('artifact', orphan) is None
     for identity in (component, prepared, in_flight, chosen, reused):
         assert ledger.get('artifact', identity) is not None

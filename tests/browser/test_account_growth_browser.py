@@ -35,7 +35,8 @@ def store(store, request):
 
 
 @pytest.mark.parametrize('width', [1536])
-def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, page, monkeypatch, width, action_evidence):
+def test_festival_states_notices_home_choice_and_bonus_details(
+        live_app, store, page, monkeypatch, width, action_evidence, record_testsuite_property):
     growth_catalog(store)
     publish_personal_album(store)
     publish_personal_mix(store)
@@ -171,16 +172,37 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
     expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true')
     expect(popup).to_be_hidden()
     page.get_by_role('tab', name='Your unlocks', exact=True).click()
-    page.evaluate(f'''() => {{
-        const destination = {growth_model}.node('tv');
-        window.originalTv = {{...destination}};
-        Object.assign(destination, {{unlocked: true, ready: false, usable: false, state: 'preparing', href: '/#tv'}});
-    }}''')
+    def refresh_growth():
+        # Drain any response from before the fixture change, then use the real
+        # polling path and wait for Alpine to apply the resulting snapshot.
+        page.wait_for_function(f'!{growth_model}.refreshing')
+        with page.expect_response('**/home/growth') as refreshed:
+            page.evaluate(f'async () => {{ await {growth_model}.refresh(); }}')
+        page.wait_for_function(f'!{growth_model}.refreshing')
+        return refreshed.value.json()
+
+    # Earn access in the server's private fixture, so polling cannot replace a
+    # browser-only override with the still-locked authoritative state.
+    original_tv_draw = store.settings.get_setting('tv_draw')
+    store.settings.set_setting('tv_draw', '1')
+    server_tv = next(node for node in refresh_growth()['nodes'] if node['id'] == 'tv')
+    browser_tv = page.evaluate(f'{growth_model}.node("tv")')
+    record_testsuite_property('tv-after-refresh', json.dumps({
+        'server': server_tv, 'browser': browser_tv,
+    }))
+    assert browser_tv == server_tv
+    assert server_tv['unlocked'] and server_tv['used'] and server_tv['href'] == '/#tv'
+    assert not server_tv['ready'] and not server_tv['usable'] and server_tv['state'] == 'preparing'
     page.get_by_role('button', name=re.compile('^TV,')).click()
     expect(popup.get_by_role('region', name='How to get here')).to_be_hidden()
     expect(popup.get_by_role('link', name='Open TV', exact=True)).to_be_visible()
     page.get_by_role('button', name='Close destination', exact=True).click()
-    page.evaluate(f'Object.assign({growth_model}.node("tv"), window.originalTv)')
+    if original_tv_draw is None:
+        store.settings.delete_setting('tv_draw')
+    else:
+        store.settings.set_setting('tv_draw', original_tv_draw)
+    refresh_growth()
+    assert not page.evaluate(f'{growth_model}.node("tv").unlocked')
     bonus = page.get_by_role('button', name=re.compile('^Richer music details,'))
     bonus_label = bonus.locator('.landmark-label')
     bonus_label.scroll_into_view_if_needed()

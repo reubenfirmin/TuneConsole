@@ -122,6 +122,10 @@ def test_source_changes_refresh_only_relevant_jobs_and_month_rollover(store, mon
     tick(worker)
     worker.projections.retry_at.clear()
     before = worker.projections.completed.copy()
+    with store.conn:
+        store.conn.execute('UPDATE recordings SET first_enriched_at=1,last_enriched_at=2')
+    worker.projections.poll()
+    assert not worker.busy  # enrichment scheduling consumes no summary input
     store.player_events.record_player_event(iid, 'progress', 'video', 30, 200, None, '{}', now[0])
     worker.projections.poll()
     assert not worker.busy  # telemetry must not launch library-wide scans

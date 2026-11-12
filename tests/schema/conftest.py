@@ -1,6 +1,7 @@
 def pytest_addoption(parser):
     parser.addoption('--schema-source-db', help='Offline database to copy for populated schema checks')
     parser.addoption('--radio-tuning-report', help='Report for the opt-in isolated Radio tuning profile')
+    parser.addoption('--radio-rotation-report', help='Measure long Radio rotation and later sessions on a private library')
     parser.addoption('--radio-tuning-baseline', help='Optional local git revision for the Radio planner comparison')
     parser.addoption('--schema-upgraded-db', help='Retained upgraded output to copy when resuming acceptance checks')
     parser.addoption('--schema-evidence-dir', help='Listening evidence directory to copy into the isolated library')

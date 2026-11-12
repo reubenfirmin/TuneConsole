@@ -1,7 +1,9 @@
 """Repository interface for compact group publications and exact evidence roots."""
 import time
+from contextlib import ExitStack
 
 from yt_playlist.core import group_evidence, group_storage
+from yt_playlist.core.db_revisions import keyed_reads
 from .base import lookup_read, snapshot_read, synchronized
 from .group_preparation import GroupPreparationRepo
 from . import compact_group_publication as publication, group_publication as batches, group_queries
@@ -21,6 +23,33 @@ class CompactTasteGroupsRepo(GroupPreparationRepo):
     @snapshot_read
     def head(self, *, members=False):
         return group_queries.head(self.conn, members=members)
+
+    @snapshot_read
+    def preview_head(self):
+        """Guard the served hierarchy without consuming its preparation manifest.
+
+        Hidden builds and historical cleanup touch these owners too. Every row
+        consumed below belongs to the captured head or its exact content IDs;
+        changing that head or any of those rows still invalidates the preview.
+        """
+        head = self.conn.execute('SELECT generation_id FROM group_head WHERE id=1').fetchone()
+        if head is None:
+            return None
+        with ExitStack() as scopes:
+            for table in ('group_generations', 'group_publications', 'generation_groups'):
+                scopes.enter_context(keyed_reads(self._store, table, (head[0],)))
+            selected = self.conn.execute('SELECT group_id,group_version_id FROM generation_groups '
+                                         'WHERE generation_id=?', (head[0],)).fetchall()
+            scopes.enter_context(keyed_reads(self._store, 'taste_groups', [row[0] for row in selected]))
+            scopes.enter_context(keyed_reads(self._store, 'group_versions', [row[1] for row in selected]))
+            generation = self.conn.execute('SELECT policy_version FROM group_generations WHERE id=?',
+                                            (head[0],)).fetchone()
+            scopes.enter_context(keyed_reads(self._store, 'recommendation_policies', (generation[0],)))
+            policy = self.conn.execute('SELECT base_version FROM recommendation_policies WHERE version=?',
+                                       (generation[0],)).fetchone()
+            scopes.enter_context(keyed_reads(self._store, 'recommendation_policy_bodies',
+                                             (policy[0],) if policy and policy[0] is not None else ()))
+            return group_queries.head(self.conn, inputs=False)
 
     @snapshot_read
     def definitions(self, generation, *, members=False):

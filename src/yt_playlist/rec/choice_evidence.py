@@ -77,11 +77,11 @@ def model_context(store, now, *, facet_leans=None):
 
 
 def prepare_context(store, now):
-    """Capture shared model inputs before either surface's ranking deadline starts."""
-    from yt_playlist.core.activity import work_budget, WorkBudgetExceeded
-    from yt_playlist.rec import progressive, transient
+    """Complete shared model inputs before either surface starts ranking."""
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.rec import transient
     try:
-        with work_budget(progressive.Budget().fit_seconds), store.read_snapshot() as snapshot:
+        with store.read_snapshot() as snapshot:
             reader = snapshot.store
             model_context(reader, now, facet_leans=transient.prepared_facet_leans(reader, now))
         return True
@@ -665,7 +665,7 @@ def replay(store, now, predictor=None):
 
 
 def maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
-    from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
+    from yt_playlist.core.activity import WorkBudgetExceeded
     store = group_roots.source(store)
     # Pending work is scheduling intent, not an unsafe installed format. The
     # domain admission/read leases fence publication and collection per turn.
@@ -677,7 +677,9 @@ def maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
     try:
         with group_roots.writer(store):
             store.settings.publish_values({STORAGE_PENDING: '1'})
-        with work_budget(STORAGE_SECONDS), group_roots.admission(store):
+        # Inventory/checkpoint/retention already commit durable prefixes. A
+        # deadline inside a prefix rolls it back and repeats its reads next time.
+        with group_roots.admission(store):
             result = _maintain_storage(store, now, required_bytes=required_bytes,
                                       protected_artifacts=protected_artifacts)
         store._evidence_recovery_failed = False
@@ -706,9 +708,9 @@ def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
     from yt_playlist.rec import choice_retention, group_root_backfill, rec_params
     store = getattr(store, '_evidence_source', store)
     # Finish the bounded inventory before repeating whole-ledger retention.
-    # Each inventory step commits its own progress and checks the same outer
-    # deadline. A large historical checkpoint should not buy another full scan
-    # merely because it fills the inventory's small byte batch.
+    # Each inventory step commits its own progress. A large historical
+    # checkpoint must not cause another full scan merely because it fills
+    # the inventory's small byte batch.
     phase = store.settings.get_setting(STORAGE_PHASE) or 'inventory'
     if phase not in {'inventory', 'checkpoint', 'retention'}:
         raise ValueError('Unknown listening evidence maintenance phase: ' + phase)
@@ -797,8 +799,7 @@ def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
         pending_protection=lambda: store.album_feedback.protection(capture),
         retire_references=(lambda offers, checkpoints: group_roots.retired(store, offers, checkpoints))
             if group_roots.enabled(store) else None)
-    # Derived-history collection has its own RETENTION job and time slices.
-    # It must not consume this owner's deadline after ledger work completed.
+    # Derived-history collection has its own RETENTION job and durable slices.
     roots_pending = group_roots.enabled(store) and not store.group_evidence.roots_complete()
     if getattr(store, '_choice_retention_more', False) or roots_pending:
         result['deferred'] = True

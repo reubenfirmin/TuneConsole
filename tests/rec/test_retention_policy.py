@@ -76,7 +76,7 @@ def test_maintenance_dispatch_uses_repositories_and_keeps_independent_retries(no
 
 @pytest.mark.parametrize('paused_first', [False, True])
 def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlite, monkeypatch, paused_first):
-    from yt_playlist.library import playlist_gc_retry
+    from yt_playlist.library import playlist_gc_retry, playlist_generated
     from yt_playlist.rec import discover, rec_worker
 
     store = NoDatabase()
@@ -85,6 +85,9 @@ def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlit
     store.retention.maintain_collection_recovery.return_value = 0
     store.retention.collection_recovery_pending.side_effect = [True, False]
     monkeypatch.setattr(playlist_gc_retry, 'next_retry_at', lambda owner: None)
+    collections = []
+    monkeypatch.setattr(playlist_generated, 'gc_generated_playlists',
+                        lambda *args, **kwargs: collections.append(args[2]) or [])
     discoveries = []
     monkeypatch.setattr(discover, 'gc_discovery',
                         lambda ctx, now: discoveries.append(now) or {})
@@ -103,7 +106,7 @@ def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlit
             return False
 
     worker = rec_worker.RecWorker.__new__(rec_worker.RecWorker)
-    worker.ctx = SimpleNamespace(store=store, client_provider=lambda: {},
+    worker.ctx = SimpleNamespace(store=store, client_provider=lambda: {1: object()},
                                 now_fn=lambda: clock[0], logger=logging.getLogger(__name__))
     worker.work, worker._stop = Activity(), Stop()
     worker.gc_initial_s, worker.gc_tick_s = 0, 86400
@@ -112,6 +115,7 @@ def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlit
     assert store.retention.collection_recovery_pending.call_args_list == [(), ()]
     assert waits == ([0, 5, 60, 86340] if paused_first else [0, 60, 86340])
     assert discoveries == [5 if paused_first else 0]
+    assert collections == discoveries
     assert not worker.work.active
 
 
@@ -130,14 +134,14 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     store.group_evidence.collect_output_files.return_value = SimpleNamespace(
         files=0, byte_size=0, checked=1, blocked=False, pending=False)
     events = []
-    generations = iter([SimpleNamespace(rows=3, generations=1, pools=0)])
+    clock = [0.0]
+    monkeypatch.setattr(group_roots, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
 
     def generation_turn(*, checkpoint):
         assert checkpoint is False
         events.append('generations')
-        if progress := next(generations, None):
-            return progress
-        raise WorkBudgetExceeded('This committed prefix exhausted its turn')
+        clock[0] += 1
+        return SimpleNamespace(rows=3, generations=1, pools=0)
 
     def pool_turn(*, checkpoint):
         assert checkpoint is False
@@ -149,13 +153,19 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     store.recommendations.cleanup_generations.side_effect = generation_turn
     store.recommendations.cleanup_pools.side_effect = pool_turn
     # OS lifetime-file reaping is a separate integration obligation.
-    monkeypatch.setattr(group_roots, 'reap_pending', lambda value: None)
+    def reap(value):
+        clock[0] += 1
+
+    monkeypatch.setattr(group_roots, 'reap_pending', reap)
+    store.taste_groups.cleanup_builds.side_effect = [True, False]
 
     result = group_roots.maintain_retention(store)
 
     assert result['pending'] and result['recommendation_rows'] == 3
     assert result['generations'] == 1 and result['pools'] == 0
-    assert events == ['generations', 'generations', 'checkpoint', 'pools', 'checkpoint']
+    assert events == ['generations', 'checkpoint', 'pools', 'checkpoint']
+    assert result['group_steps'] == 1
+    assert store.taste_groups.cleanup_builds.call_count == 1
     assert store.recommendations.checkpoint_retirement.call_count == 2
     assert not store._retention_lock.locked()
     assert not store._db_path.exists()

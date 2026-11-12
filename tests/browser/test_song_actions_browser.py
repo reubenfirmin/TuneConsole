@@ -33,18 +33,23 @@ def song_app(store):
 
 
 
-@pytest.mark.parametrize("control", ["menu"])
-def test_playlist_play_starts_selected_track_in_playlist(song_app, page, control, tmp_path):
+@pytest.mark.parametrize("control,width", [("menu", 1040), ("cover", 1440)])
+def test_playlist_play_starts_selected_track_in_playlist(song_app, page, control, width, tmp_path):
     store, source = song_app["store"], song_app["source"]
     title = "Revenge Of The Wankers (Kora Remix) (feat. Scarlett De La Torre)"
-    track = store.tracks.upsert_track("second", title, "Oceanvs Orientalis", "Album", 270,
+    track = store.tracks.upsert_track("second", title, "Nirvana", "A long album name with useful identity", 270,
                                      thumbnail="/static/road-trip-hero.png")
     store.tracks.set_track_genre(track, "Turkish")
     store.playlists.set_playlist_tracks(source, store.playlists.get_playlist_track_ids(source) + [track])
-    page.set_viewport_size({"width": 1280, "height": 850})
+    page.set_viewport_size({"width": width, "height": 1000})
     page.route("**/play", lambda route: route.fulfill(json={"ok": True}))
     page.goto(f"{song_app['base']}/playlist/{source}")
     row = page.locator('tr.srow[data-vid="second"]')
+    assert row.locator('td').nth(4).bounding_box()['width'] >= 80
+    assert row.bounding_box()['height'] < 250
+    expect(row.get_by_role('link', name='Nirvana', exact=True)).to_be_visible()
+    page.get_by_role('button', name='Artist', exact=True).click()
+    expect(row).to_be_visible()
 
     def play():
         with page.expect_request(lambda request: request.url.endswith("/play") and request.method == "POST") as request:

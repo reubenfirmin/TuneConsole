@@ -1,12 +1,16 @@
 """Coalesced shadow grouping on the existing worker, with bounded last-good publication."""
 from dataclasses import dataclass
 import json
-from yt_playlist.core.activity import work_budget, WorkBudgetExceeded, check_stopping
+from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
+from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.rec import group_discovery, group_names, group_similarity, group_versions, musical_profiles
 from yt_playlist.repos import group_publication
 
 CHECKPOINT = 'rec_group_shadow_checkpoint'
 PROGRESS = 'rec_group_shadow_progress'
+# The serial admits work and labels its capture; musical inputs retain their
+# own guards. Operational source timestamps must not discard staged progress.
+BOOKKEEPING = frozenset({'rec_group_clock'})
 
 
 def status(store):
@@ -56,15 +60,17 @@ class Preparation:
         self.retry_at = now + self.budget.interval
         report(self.store, 'preparing', now)
         try:
-            with work_budget(self.budget.seconds):
-                if self._pending is not None:
-                    snapshot, prepared = self._pending
-                    if (self.store.taste_groups.head_generation() == prepared['generation']
-                            or snapshot.is_current(allow_stale_tables=self.store.taste_groups.staged_tables)):
-                        return self._publish_pending(now)
-                    self._pending = None
-                    self.store.taste_groups.abandon_staged(prepared)
-                return self._prepare(now)
+            # Capture and discovery have no recoverable intermediate result.
+            # Finish that admitted plan; staging already commits resumable
+            # prefixes and retains _pending if an output quota makes it yield.
+            if self._pending is not None:
+                snapshot, prepared = self._pending
+                if (self.store.taste_groups.head_generation() == prepared['generation']
+                        or snapshot.is_current(allow_stale_tables=self.store.taste_groups.staged_tables | BOOKKEEPING)):
+                    return self._publish_pending(now)
+                self._pending = None
+                self.store.taste_groups.abandon_staged(prepared)
+            return self._prepare(now)
         except group_publication.BuildUnavailable:
             report(self.store, 'deferred', now, reason='build-owned')
             self.store.maintenance_diagnostics.record('deferred', phase='rec: adaptive grouping',
@@ -76,16 +82,22 @@ class Preparation:
         return False
 
     def _prepare(self, now):
-        with self.store.read_snapshot() as snapshot:
+        with self.store.read_snapshot() as snapshot, \
+                column_group_reads(snapshot.store, 'recordings', 'catalog'), \
+                column_group_reads(snapshot.store, 'rec_musical_profiles', 'definition'), \
+                column_group_reads(snapshot.store, 'prepared_recording_inputs', 'grouping'):
             reader = snapshot.store
             serial = reader.taste_groups.serial()
             reader.taste_groups.corpus_size(self.budget.max_rows)
             # Grouping is independent of the collaborative/content basis. Only the library
             # contributes interests; discovered candidates do not manufacture user interests.
-            recordings, after = [], ''
+            recordings, after, axes = [], '', {}
             while page := reader.taste_groups.corpus_page(after, max_bytes=self.budget.input_bytes):
-                axes = reader.genres.feature_axes({payload['library'].get('genre')
-                    for _key, payload, _profile in page if payload['library'] is not None})
+                missing = {payload['library'].get('genre') for _key, payload, _profile in page
+                           if payload['library'] is not None} - axes.keys()
+                if missing:
+                    matched = reader.genres.feature_axes(missing)
+                    axes.update((genre, matched.get(genre, ('', None))) for genre in missing)
                 for key, payload, profile in page:
                     check_stopping()
                     if payload['library'] is not None:
@@ -98,14 +110,14 @@ class Preparation:
             # mutable retired modes on every build recreates collected history
             # and pins obsolete centroids. Existing legacy versions stay readable.
             legacy_modes, legacy_versions = [], ()
-            reader.settings.get_setting(CHECKPOINT)
             parent = previous['generation'] if previous else None
             resumable = reader.taste_groups.resumable_build(fingerprint, serial,
                 musical_profiles.canonical(self.policy.manifest()), parent)
             if previous and previous['fingerprint'] == fingerprint and resumable is None:
                 # Operational stamps and unchanged legacy rewrites are not new musical input.
                 checkpoint = json.dumps({'generation': previous['generation'], 'serial': serial, 'at': now})
-                if snapshot.publish(lambda: self.store.settings.publish_values({CHECKPOINT: checkpoint})):
+                if snapshot.publish(lambda: self.store.settings.publish_values({CHECKPOINT: checkpoint}),
+                                    allow_stale_tables=BOOKKEEPING):
                     report(self.store, 'ready', now)
                     # Expired unrelated builds and old graph caches do not get
                     # to consume every turn before a new plan can make progress.
@@ -149,7 +161,7 @@ class Preparation:
                 self.store.taste_groups.finish_preparation(prepared['generation'], owner,
                     prepared['serial'], now)
             published = snapshot.publish_ordered(publish,
-                allow_stale_tables=self.store.taste_groups.staged_tables)
+                allow_stale_tables=self.store.taste_groups.staged_tables | BOOKKEEPING)
         if published:
             self._pending = None
             report(self.store, 'ready', now)

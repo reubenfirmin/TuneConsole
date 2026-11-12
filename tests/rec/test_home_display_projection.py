@@ -10,7 +10,7 @@ from tests.home_fixture_support import publish_menu
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
 )
-from yt_playlist.core import fao, home_outputs, json_cache
+from yt_playlist.core import fao, json_cache
 from yt_playlist.rec import home_cache, home_cards, home_prepared
 
 
@@ -103,9 +103,8 @@ def test_display_restores_only_selected_menu_and_preserves_the_same_assignment(f
                 track['serving_context'] = {'checkpoint': index, 'observations': list(range(300))}
     # Use both installed plain JSON and the shared-profile representation.
     encoded = json_cache.encode(payload) if compressed else json.dumps(payload)
-    publication = home_outputs.prepare(home_prepared.SURFACE, encoded, 1000)
     with store.conn.atomic():
-        store.rec_proposals.publish_prepared_home(publication, 1000)
+        store.rec_proposals.publish_prepared_home(encoded, 1000)
     expected = cards(store, payload)
     restored_menus = []
     original = json_cache._restore_profiles

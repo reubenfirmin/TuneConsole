@@ -9,7 +9,8 @@ from ytmusicapi.parsers.browsing import parse_playlist
 
 
 class LibrarySnapshotError(ValueError):
-    def __init__(self, resource, reason, response, page, *, item=None):
+    def __init__(self, resource, reason, response, page, *, item=None, status_code=None):
+        self.resource, self.page, self.status_code = resource, page, status_code
         self.reason = reason
         position = f"; item={item}" if item is not None else ""
         super().__init__(f"{resource} snapshot {reason}; page={page}{position}; shape={response_shape(response)}")
@@ -96,7 +97,9 @@ def _check_response(response, resource, page):
     if logged_out is True or auth_error or sign_in:
         raise LibrarySnapshotError(resource, "signed out", response, page)
     if "error" in response:
-        raise LibrarySnapshotError(resource, "unavailable", response, page)
+        code = error.get('code') if isinstance(error, dict) else None
+        status = code if type(code) is int and 100 <= code <= 599 else None
+        raise LibrarySnapshotError(resource, "unavailable", response, page, status_code=status)
 
 
 def complete_library_albums(client, order=None):

@@ -309,6 +309,20 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     assert "album_browse_id" not in snapshot
 
 
+@pytest.mark.parametrize('field,key', [('muted', 'muted'), ('tabMuted', 'tab_muted')])
+def test_status_preserves_native_muting_for_playback_ownership(field, key):
+    from yt_playlist.web.routes.bridge import _now_playing_snapshot
+    bridge = Bridge()
+    bridge.now_playing_seen_at = time.monotonic()
+    client = TestClient(_app(bridge))
+    for muted in (True, False):
+        bridge.now_playing = _now_playing_snapshot({
+            'videoId': 'native-song', 'title': 'Native song', 'paused': False, field: muted})
+        playing = client.get('/bridge/status').json()['now_playing']
+        assert playing[key] is muted
+        assert playing['paused'] is False
+
+
 @pytest.mark.parametrize('value', [None, '12', True, -1, float('inf'), float('nan')])
 def test_playback_progress_rejects_invalid_sensor_values_and_never_inherits_position(value):
     from yt_playlist.web.routes.bridge import _now_playing_snapshot

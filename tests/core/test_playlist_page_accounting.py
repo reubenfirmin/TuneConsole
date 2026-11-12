@@ -133,11 +133,14 @@ def test_deleted_only_continuation_does_not_stop_before_the_next_page():
     {}, {'onResponseReceivedActions': []},
     page(None), page([{'unknownRenderer': {}}]),
     page([token('one')]),
+    {'error': {'code': 404}},
+    (404, {'error': {'code': 404, 'message': 'Missing continuation'}}),
 ])
 def test_missing_malformed_or_repeated_pages_cannot_certify_completeness(continuation):
+    from yt_playlist.library.playlist_snapshot import playlist_if_present
     client, _ = _production_client([first([token('one')], count=0), continuation])
     with pytest.raises(LibrarySnapshotError):
-        client.get_playlist('PL', limit=None)
+        playlist_if_present(client, 'PL')
 
 
 def test_unknown_header_count_does_not_hide_a_parser_omission():

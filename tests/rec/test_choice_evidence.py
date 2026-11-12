@@ -217,6 +217,7 @@ def test_home_storage_inventory_belongs_to_daily_maintenance(store, monkeypatch)
                           logger=logging.getLogger(__name__))
     assert ServingTasks(ctx, stage).home()
     assert choices.refresh_report in stages and choices.maintain_storage not in stages
+    assert choices.prepare_context not in stages
 
 
 def test_new_and_withdrawn_evidence_from_another_store_refreshes_projection(tmp_path, consumer_store):

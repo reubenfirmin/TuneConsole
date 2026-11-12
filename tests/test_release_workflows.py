@@ -224,7 +224,7 @@ def test_release_timing_reads_only_this_attempts_flattened_candidate_status():
     assert timing["if"] == "needs.candidates.outputs.release_started_at != ''"
 
 
-def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
+def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics(tmp_path, monkeypatch):
     jobs = workflow("ci")["jobs"]
     for name, count in (("unit", 8), ("browser", 4)):
         job = jobs[name]
@@ -235,6 +235,8 @@ def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
         assert "--ci-shard=${{ matrix.shard }}/$SHARD_TOTAL" in commands
         assert "--junitxml=evidence/junit.xml" in commands
         assert " -n " not in commands
+        assert '--ci-runner-capacities' not in commands
+        assert 'ci_runner_capacity.py' not in commands
         artifact = job["steps"][-1]
         assert artifact["if"] == "always()"
         assert "matrix.shard" in artifact["with"]["name"]
@@ -246,6 +248,46 @@ def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics():
     assert jobs["unit"]["env"]["UV_PYTHON"] == "3.12"
     verification = next(step for step in jobs["unit"]["steps"] if step.get("name") == "Verify packaged resolutions")
     assert verification["if"] == "matrix.shard == 1"
+    from types import SimpleNamespace
+    from ci_test_shards import pytest_configure
+
+    # Runner start order and stray artifacts cannot change the common plan.
+    assert not (ROOT / 'ci_runner_capacity.py').exists()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Shard setup must not make network requests')
+    monkeypatch.setattr('urllib.request.urlopen', forbidden)
+    monkeypatch.setenv('GITHUB_SHA', 'current-revision')
+    capacities = tmp_path / 'runner-capacity' / 'all'
+    capacities.mkdir(parents=True)
+    for index in range(1, 8):
+        (capacities / f'{index}.json').write_text(json.dumps({'index': index}))
+    nodes = [f'tests/probe_{file}.py::test_case[{case}]' for file in range(16) for case in range(2)]
+    plans, selected = [], []
+    for index in range(1, 9):
+        if index == 8:
+            (capacities / '8.json').write_text(json.dumps({'index': 8}))
+        options = {'ci_shard': f'{index}/8', 'ci_shard_report': tmp_path / f'shard-{index}.json',
+                   'ci_suite': 'unit', 'ci_duration_baseline': ROOT / '.github/test-durations.json',
+                   'ci_source_report': None}
+        plugins = []
+        config = SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
+            register=lambda plugin, name: plugins.append(plugin)),
+            hook=SimpleNamespace(pytest_deselected=lambda **kwargs: None))
+        pytest_configure(config)
+        shard = plugins[0]
+        items = [SimpleNamespace(nodeid=node) for node in nodes]
+        collection = shard.pytest_collection_modifyitems(config, items)
+        next(collection)
+        with pytest.raises(StopIteration):
+            next(collection)
+        assert shard.report['revision'] == 'current-revision'
+        assert 'runner_capacities' not in shard.report
+        assert items
+        plans.append(shard.report['file_owners'])
+        selected.extend(item.nodeid for item in items)
+    assert all(plan == plans[0] for plan in plans)
+    assert len(selected) == len(set(selected)) == len(nodes)
+    assert set(selected) == set(nodes)
     assert any(step.get("uses", "").startswith("actions/setup-node") for step in jobs["unit"]["steps"])
     assert "--tracing=retain-on-failure" in "\n".join(step.get("run", "") for step in jobs["browser"]["steps"])
 

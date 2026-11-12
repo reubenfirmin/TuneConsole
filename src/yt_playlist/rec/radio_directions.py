@@ -158,6 +158,9 @@ class RadioDirections:
                     target = anchor
                 else:
                     tracks = self.continue_sequence(history, [target], target, exclusions)
+                    if len(tracks) < DEPTH:
+                        # An exclusive anchor need not have six exclusive tracks.
+                        tracks = self.continue_sequence(history, tracks, target, ())
                 self.slots[slot] = self._proposal(target, tracks, transition)
                 if old is not None and not force:
                     occupied = {deadline for other, deadline in self.decay.items() if other != slot}

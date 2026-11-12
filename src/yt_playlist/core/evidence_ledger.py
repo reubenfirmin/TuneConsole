@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, ExitStack
 from collections import Counter
 
 from yt_playlist.core.activity import check_cancellable_work
@@ -33,9 +33,8 @@ class EvidenceBudgetExceeded(ValueError):
 
 
 def root_for_database(path, memory_key):
-    from . import paths
     return (Path(path).with_name(Path(path).name + '.evidence') if path else
-            paths.data_dir() / 'test-evidence' / str(memory_key))
+            Path(tempfile.gettempdir()) / 'tuneconsole-evidence' / str(memory_key))
 
 
 def directory(conn):
@@ -218,15 +217,7 @@ class EvidenceLedger:
 
     def maintain(self, *args, **kwargs):
         """Do not retire files belonging to an analytics reader or backup."""
-        _mkdir(self.directory)
-        with (self.directory / '.readers.lock').open('a+b') as stream:
-            unlock = fao._try_file_lock(stream, exclusive=True)
-            if unlock is None:
-                return {'deferred': True}
-            try:
-                return self._maintain(*args, **kwargs)
-            finally:
-                unlock()
+        return self._maintain(*args, **kwargs)
 
     def _maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None,
                  protected_opportunities=(), pressure_before=None, compacted_contexts=(),
@@ -239,12 +230,21 @@ class EvidenceLedger:
         A pending publication may reclaim optional acknowledged diagnostic graphs
         before considering unanswered menus. Protected roots always survive.
         """
-        with self._budget() as (_used, save):
+        with self._budget() as (_used, save), ExitStack() as leases:
             from .evidence_inventory import Inventory
             from .evidence_retirement import Retirements
             retirements = Retirements(self.directory)
             had_retirements = bool(retirements.offers or retirements.checkpoints)
             inventory = Inventory(self, progress=progress).scan()
+            # Inventory decodes immutable evidence and saves completed prefixes.
+            # It must not exclude serving readers for that potentially long
+            # calculation. The budget lease fences other writers/collectors;
+            # acquire the reader fence only after the inventory is complete.
+            stream = leases.enter_context((self.directory / '.readers.lock').open('a+b'))
+            unlock = fao._try_file_lock(stream, exclusive=True)
+            if unlock is None:
+                return {'deferred': True}
+            leases.callback(unlock)
             offers = {}
             events = []
             for path, entry in inventory.items():
@@ -450,7 +450,10 @@ class EvidenceLedger:
             # The lock excludes writers; only old abandoned staging files may be removed.
             for path in self.directory.glob("*/*/.pending-*"):
                 path.unlink(missing_ok=True)
-            used = sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*/*.json"))
+            # Writers remain fenced by _budget. The validated inventory and
+            # completed unlinks give the exact total without rereading every
+            # surviving file while readers are excluded.
+            used = sum(sizes.values()) - sum(sizes.get(path, 0) for path in removed)
             save(used)
             return {"used_bytes": used, "budget_bytes": self.byte_budget, "deferred": deferred,
                     "required_bytes": required_bytes,

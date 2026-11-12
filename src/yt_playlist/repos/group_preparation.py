@@ -33,14 +33,14 @@ class GroupPreparationRepo(Repo):
                         else 'length(CAST(m.payload AS BLOB))')
         size = self.conn.execute('SELECT COALESCE(SUM(bytes),0) FROM (SELECT '
             + prepared_inputs.byte_bound() + '+COALESCE((' + profile_size + ')*4,0) bytes '
-            'FROM prepared_recording_inputs p JOIN recordings r ON r.id=p.recording_id '
+            'FROM recordings r CROSS JOIN prepared_recording_inputs p ON r.id=p.recording_id '
             'LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
             'WHERE p.library_present=1 AND r.identity_key>? '
             'ORDER BY r.identity_key LIMIT ?)', (after, limit)).fetchone()[0]
         if size > max_bytes:
             raise WorkBudgetExceeded('Musical group page exceeds admitted memory')
-        rows = self.conn.execute('SELECT r.identity_key,p.*,m.payload profile FROM prepared_recording_inputs p '
-            'JOIN recordings r ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
+        rows = self.conn.execute('SELECT r.identity_key,p.*,m.payload profile FROM recordings r '
+            'CROSS JOIN prepared_recording_inputs p ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
             'WHERE p.library_present=1 AND r.identity_key>? '
             'ORDER BY r.identity_key LIMIT ?', (after, limit)).fetchall()
         references = {row[0]: row for row in profile_files.reference_rows(

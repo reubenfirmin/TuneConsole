@@ -71,6 +71,8 @@ def test_exhausted_searches_retry_deeper_candidates_without_waiting_for_cache_ex
                   for i in range(6)]
     offsets = []
     def seeds(store, at, offset=0):
+        # The controlled ranks retain the real Home publication dependency.
+        store.rec_proposals.get_proposals('home_prepared')
         offsets.append(offset)
         return candidates[:3] if not offset else candidates[3:]
     monkeypatch.setattr(tv, 'seed_tracks', seeds)
@@ -83,7 +85,16 @@ def test_exhausted_searches_retry_deeper_candidates_without_waiting_for_cache_ex
     assert not tv.queue(worker.ctx.store, now[0])
     assert tv.cached(worker.ctx.store)['state'] == 'exhausted'
     assert not worker.jobs.retry[Job.TV].dirty
-    now[0] += tv.SEARCH_RETRY_S - 1
+    previous = tv.cached(worker.ctx.store)
+    monkeypatch.setattr(worker.tasks, 'home', lambda: False)
+    worker._schedule(full=False, home=True)
+    targets.pop()()
+    now[0] += 61
+    worker._schedule(full=False, home=True)
+    targets.pop()()
+    assert offsets == [0], 'Unchanged Home repeated completed TV seeds'
+    assert tv.cached(worker.ctx.store) == previous
+    now[0] = 1000 + tv.SEARCH_RETRY_S - 1
     worker._poll_tv()
     assert not targets
     now[0] += 1
@@ -91,3 +102,19 @@ def test_exhausted_searches_retry_deeper_candidates_without_waiting_for_cache_ex
     targets.pop()()
     assert offsets[-1] == tv.MAX_POOL // len(tv.GROUPS)
     assert tv.queue(worker.ctx.store, now[0])[0]['video_id'] == 'visual00003'
+    # A meaningful Home/candidate arrival does not wait for the next deeper
+    # search deadline and does not repeat already searched source keys.
+    now[0] += 61
+    candidates.append({'key': 'new-source', 'title': 'New candidate', 'artist': 'Artist', 'group': 'liked'})
+    worker.ctx.store.rec_proposals.put_proposals('home_prepared', {'new_candidates': True}, now[0])
+    searches = len(client.searches)
+    worker._schedule(full=False, home=True)
+    targets.pop()()
+    assert len(offsets) == 4
+    assert len(client.searches) == searches + len(tv.SEARCHES)
+    assert all('New candidate' in query for query, _ in client.searches[searches:])
+    # Explicit requests recheck the prepared inputs even before the deadline.
+    now[0] += 61
+    worker.trigger_tv_refresh()
+    targets.pop()()
+    assert len(offsets) == 5

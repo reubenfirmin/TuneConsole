@@ -29,6 +29,12 @@ desktop/TV behavior by measured cost, with no fixed test-count target.
 Shard timing includes final journal synchronization, report writing and pytest
 cleanup. A missing final timing receipt cannot establish passing coverage.
 
+Unit shards calibrate historical file costs from one shared timing baseline.
+Each runner independently derives the same whole-file ownership, regardless of
+when the other runners start. There is no runner probe or capacity exchange.
+Whole files execute once in serial shards. Predicted completion times are
+planning evidence; actual charged wall times establish measured balance.
+
 ## Fixtures
 
 - Calculation and policy tests use detached values or repository doubles.
@@ -45,8 +51,12 @@ cleanup. A missing final timing receipt cannot establish passing coverage.
   pytest's cache. Multi-command experiments use `TemporaryDirectory` and clean
   up on success and failure.
 - After a killed run, preview abandoned work with
-  `./scripts/test-artifacts-cleanup.py PATH`, then repeat with `--delete`.
-  The command refuses live owners and preserves shared lock files.
+  `./scripts/test-artifacts-cleanup.py`, then repeat with `--delete`.
+  Discovery covers known temporary and fixture locations; optional `PATH...`
+  arguments restrict it to named workspaces, and `--verbose` lists each path.
+  Run from the host PID namespace. The command refuses live owners, unknown
+  unreadable processes and active legacy test jobs, and preserves shared roots,
+  reports, library baselines and lock files.
 - `live_server.LiveServer` drains admitted requests and background work before
   its Store and temporary directory close. Release deliberately held work
   before stopping it; a timed thread join is not a substitute for shutdown.
@@ -90,6 +100,15 @@ Shared helpers live in `radio_session_support.py`, `browser/radio_ui_support.py`
 `conftest.py` owns Playwright for browser and packaged checks. Browser-only runs
 reuse the session driver; mixed runs close it after each module so subsequent
 unit tests can use `asyncio.run()`.
+
+The shared FakeClient `live_app` consumes prepared state with automatic workers
+disabled and omits metadata tag-matcher configuration. Provider and startup
+configuration tests construct their own app; the browser genre editor retains
+its real configuration. Shared browser apps reuse source-checked Jinja bytecode
+while keeping each app's environment, globals and rendered responses private.
+Prepared Home and mocked Radio consumers use `home_pages_only`; dialog layout
+consumers construct their real page/action routers. Cross-page integration
+journeys retain the full application.
 
 ## Diagnostics
 
@@ -180,9 +199,9 @@ not reformat the host filesystem. Do not repeat setup on an already mounted
 volume. Build the local dependency image from `uv.lock`, then capture once:
 
 ```sh
-python3 scripts/test-library.py build-runtime
-python3 scripts/test-library.py prepare
-python3 scripts/test-library.py list
+./scripts/test-library.py build-runtime
+./scripts/test-library.py prepare
+./scripts/test-library.py list
 ```
 
 Preparation reads the source through a read-only connection and file-lifetime
@@ -198,8 +217,8 @@ container. The explicit plugin supplies a `managed_library` fixture. Existing
 actual-library helpers and benchmark adapters reuse that path in managed runs:
 
 ```sh
-python3 scripts/test-library.py run -- pytest tests/schema/check_radio_launch_actual.py --schema-source-db=/library/state.db -s
-python3 scripts/test-library.py run --readonly -- python3 -c 'import sqlite3; print(sqlite3.connect("file:/library/state.db?mode=ro", uri=True).execute("select count(*) from recordings").fetchone())'
+./scripts/test-library.py run -- pytest tests/schema/check_radio_launch_actual.py --schema-source-db=/library/state.db -s
+./scripts/test-library.py run --readonly -- -c 'import sqlite3; print(sqlite3.connect("file:/library/state.db?mode=ro", uri=True).execute("select count(*) from recordings").fetchone())'
 ```
 
 Python checks can import `tests.library_image.fixtures.managed_database()`.
@@ -219,11 +238,11 @@ stays available even if preparation fails. Preview and remove abandoned runs or
 older unpinned generations with:
 
 ```sh
-python3 scripts/test-library.py gc
-python3 scripts/test-library.py gc --delete
+./scripts/test-library.py gc
+./scripts/test-library.py gc --delete
 ```
 
-`python3 scripts/test-library.py verify` explicitly checks concurrent actual-library
+`./scripts/test-library.py verify` explicitly checks concurrent actual-library
 writes, extent sharing and interrupted-owner recovery. Add `--refresh` to check
 new-generation publication while old workspaces remain active. This is a focused
 local backend check, separate from ordinary pytest and CI.

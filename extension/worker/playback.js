@@ -2,6 +2,8 @@
 // All tab creation/navigation uses musicTabs.coordinate(); controls never create tabs.
 function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
   const playingTabs = new Set(), mediaMutedTabs = new Set(), pendingPlays = new Map();
+  const pausedObservations = new Map();
+  let observation = 0;
   let playbackTabId = null, rescue = null, relay = Promise.resolve();
   const ratings = createNativeRatings({pickTab, sensors, send});
   const RESCUE_WAIT_MS = 2500, RESCUE_DWELL_MS = 600, RESCUE_RETRY_MS = 500, RESCUE_TIMEOUT_MS = 6000;
@@ -242,16 +244,23 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
           return {ok: false, error: 'Reload the TuneConsole browser extension'};
         const reply = await chrome.tabs.sendMessage(tab.id, {type: 'pause-for-tv'});
         if (!reply?.ok || reply.paused !== true) return {ok: false, error: 'Audio pause was not confirmed'};
+        // Observations already received can still be waiting on the relay's
+        // tab lookup. They precede this confirmed pause even if delivered later.
+        pausedObservations.set(tab.id, observation);
         playingTabs.delete(tab.id);
+        pendingPlays.delete(tab.id);
       }
       return {ok: true, paused: true};
     });
   }
 
-  async function relayMessage(msg, sender) {
+  async function relayMessage(msg, sender, received) {
     if (msg.type === 'pevent' && ['rate', 'playlist_edit', 'feedback', 'subscription', 'share_intent'].includes(msg.kind)
         && msg.brandKnown !== true) return;
     const srcTabId = sender && sender.tab && sender.tab.id;
+    const playbackState = msg.type !== 'pevent' || ['state', 'tick', 'bye'].includes(msg.kind);
+    const superseded = () => playbackState && received <= (pausedObservations.get(srcTabId) || 0);
+    if (superseded()) return;
     if ((msg.type === "play" || msg.type === "now-heartbeat") && srcTabId != null) {
       msg = Object.assign({}, msg, {muted: !!msg.muted || msg.volume === 0});
       if (msg.type === "play") pendingPlays.set(srcTabId, msg);
@@ -260,6 +269,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
       if (msg.paused || msg.muted) playingTabs.delete(srcTabId);
       else playingTabs.add(srcTabId);
       const owner = await pickTab();
+      if (superseded()) return;
       playbackTabId = owner ? owner.id : null;
       if (srcTabId !== playbackTabId) return;
       msg = Object.assign({}, msg, {tabMuted: !!owner.mutedInfo?.muted,
@@ -281,6 +291,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     }
     if (msg.type === "pevent" && ["state", "tick", "bye"].includes(msg.kind)) {
       const owner = await pickTab();
+      if (superseded()) return;
       if (owner) playbackTabId = owner.id;
       if (!owner || srcTabId !== playbackTabId) return;
       // Native events can arrive before the matching now-playing heartbeat.
@@ -314,7 +325,8 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
   function receive(msg, sender) {
     if (!msg || !["play", "now-heartbeat", "pevent"].includes(msg.type)) return;
     ratings.observe(msg, sender?.tab?.id);
-    relay = relay.then(() => relayMessage(msg, sender)).catch(error => warn("Playback relay failed", error));
+    const received = ++observation;
+    relay = relay.then(() => relayMessage(msg, sender, received)).catch(error => warn("Playback relay failed", error));
   }
 
   function removed(tabId) {
@@ -322,6 +334,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
     playingTabs.delete(tabId);
     mediaMutedTabs.delete(tabId);
     pendingPlays.delete(tabId);
+    pausedObservations.delete(tabId);
     if (playbackTabId === tabId) {
       playbackTabId = null;
       relay = relay.then(() => send({type: "player-closed"}));

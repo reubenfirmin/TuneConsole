@@ -124,6 +124,7 @@ def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_
             startup.setattr(store_module, 'Revisions', lambda conn: None)
             store.init_schema()
         admitted.assert_called_once_with(store.conn, defer_validation=False)
+        assert store._snapshot_revisions is None
         with mock_snapshot_coordinator(store, monkeypatch):
             monkeypatch.setattr(store.enrichment_queue, 'read_snapshot', store.read_snapshot)
             broken.fail = None
@@ -131,6 +132,7 @@ def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_
             clock[0] += 3600
             for _ in range(3):
                 w.drain_once(limit=2)
+            assert store._snapshot_revisions is not None
             assert store.enrichment_reports.queue_remaining() == 0
             assert len(healthy.calls) == 7
             assert len(store.enrichment_reports.enriched_tracks()) == 7
