@@ -29,12 +29,10 @@ desktop/TV behavior by measured cost, with no fixed test-count target.
 Shard timing includes final journal synchronization, report writing and pytest
 cleanup. A missing final timing receipt cannot establish passing coverage.
 
-Unit shards calibrate historical file costs, then weight ownership using a short
-SQLite/Python probe on each current runner. [ci_runner_capacity.py](../ci_runner_capacity.py)
-exchanges immutable manifests from the same run, attempt, revision and runtime
-before pytest starts; missing manifests fail after a bounded 180-second wait.
-All eight shards use the same measurements and retain them in their receipts.
-Whole files still execute once in serial shards. Predicted completion times are
+Unit shards calibrate historical file costs from one shared timing baseline.
+Each runner independently derives the same whole-file ownership, regardless of
+when the other runners start. There is no runner probe or capacity exchange.
+Whole files execute once in serial shards. Predicted completion times are
 planning evidence; actual charged wall times establish measured balance.
 
 ## Fixtures

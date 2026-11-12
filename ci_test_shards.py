@@ -132,14 +132,10 @@ def calibrate_unit_timings(current, previous):
             for name, row in current.items()}, scales
 
 
-def partition(nodeids, durations, count=2, *, capacities=None):
+def partition(nodeids, durations, count=2):
     """Keep files together and spread each timing source across the new shards."""
     if count < 1 or len(nodeids) != len(set(nodeids)):
         raise ValueError("Shard count must be positive and collected case IDs must be unique")
-    capacities = [1.0] * count if capacities is None else list(capacities)
-    if len(capacities) != count or any(type(value) not in (int, float)
-                                      or not math.isfinite(value) or value <= 0 for value in capacities):
-        raise ValueError('Every shard needs a positive finite runner capacity')
     files = defaultdict(list)
     for nodeid in nodeids:
         files[nodeid.split("::", 1)[0]].append(nodeid)
@@ -167,8 +163,7 @@ def partition(nodeids, durations, count=2, *, capacities=None):
         source_loads = [0.0] * count
         for name in sorted(sources[source], key=lambda name: (-estimates[name], name)):
             owner = min(range(count), key=lambda index: (
-                source_loads[index] / capacities[index],
-                (loads[index] + estimates[name]) / capacities[index], index))
+                source_loads[index], loads[index] + estimates[name], index))
             owners[name] = owner + 1
             loads[owner] += estimates[name]
             source_loads[owner] += estimates[name]
@@ -182,7 +177,6 @@ def pytest_addoption(parser):
     group.addoption("--ci-shard-report", type=Path, help="Record coverage and setup/call/teardown timings as JSON")
     group.addoption("--ci-source-report", type=Path, help="Record Python source hashes before and after the measured run")
     group.addoption("--ci-duration-baseline", type=Path, default=BASELINE)
-    group.addoption('--ci-runner-capacities', type=Path, help='Current-attempt unit runner capacity manifests')
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -227,15 +221,7 @@ def pytest_configure(config):
                 durations, source_scales = calibrate_unit_timings(durations, reference.get('unit', {}))
     else:
         durations = json.loads(baseline_path.read_text()).get(suite, {})
-    capacity_path = config.getoption('ci_runner_capacities')
-    capacities, probes = None, None
-    if capacity_path is not None:
-        if suite != 'unit':
-            raise pytest.UsageError('Current runner capacities apply only to unit shards')
-        from ci_runner_capacity import load_capacities
-        capacities, probes = load_capacities(capacity_path, total)
     config.pluginmanager.register(Shard(config, index, total, path, suite, durations, source_scales=source_scales,
-                                      capacities=capacities, capacity_probes=probes,
                                       source_path=config.getoption('ci_source_report')), "isolated-ci-shard")
 
 
@@ -253,10 +239,8 @@ def _cpu_model():
 
 
 class Shard:
-    def __init__(self, config, index, total, path, suite, durations, *, source_path=None, source_scales=None,
-                 capacities=None, capacity_probes=None):
+    def __init__(self, config, index, total, path, suite, durations, *, source_path=None, source_scales=None):
         self.config, self.path, self.durations = config, path.resolve(), durations
-        self.capacities = capacities
         self.source_path = source_path.resolve() if source_path is not None else None
         if self.source_path is not None:
             self.source_root = Path(config.rootpath).resolve()
@@ -279,8 +263,6 @@ class Shard:
                        'active': None}
         if source_scales:
             self.report['planning_source_scales'] = {str(source): scale for source, scale in source_scales.items()}
-        if capacities is not None:
-            self.report.update(runner_capacities=capacities, capacity_probes=capacity_probes)
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_collection_modifyitems(self, config, items):
@@ -288,14 +270,12 @@ class Shard:
         # includes every intended parametrized case from normal collection.
         yield
         nodeids = [item.nodeid for item in items]
-        owners, loads = partition(nodeids, self.durations, self.report["total"], capacities=self.capacities)
+        owners, loads = partition(nodeids, self.durations, self.report["total"])
         selected, deselected = [], []
         for item in items:
             (selected if owners[item.nodeid.split("::", 1)[0]] == self.report["index"] else deselected).append(item)
         self.report.update(expected=nodeids, selected=[item.nodeid for item in selected],
                            file_owners=owners, estimated_seconds=loads)
-        if self.capacities is not None:
-            self.report['estimated_runner_seconds'] = [load / capacity for load, capacity in zip(loads, self.capacities)]
         items[:] = selected
         config.hook.pytest_deselected(items=deselected)
         self.write()
@@ -392,6 +372,7 @@ def _measure(reports, suite, total, *, diagnostic=False):
     original = reports[0]["expected"]
     if not original or len(original) != len(set(original)):
         raise ValueError(f"{suite}: normal collection must be nonempty and unique")
+    # Previously published capacity-weighted receipts remain verifiable.
     capacities = reports[0].get('runner_capacities')
     if capacities is not None:
         if (suite != 'unit' or len(capacities) != total

@@ -1,10 +1,8 @@
 """Exact parametrized-case coverage and measurements across isolated serial runners."""
 from copy import deepcopy
-import io
 import json
 import os
 from pathlib import Path
-import platform
 import subprocess
 import sys
 import time
@@ -18,7 +16,6 @@ from ci_test_shards import (BASELINE, DIAGNOSTIC_BYTES, _diagnostic, calibrate_u
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from ci_plan import timing_source
 from ci_test_metrics import collect, compare, measure
-from ci_runner_capacity import WORKLOAD, artifact_ids, artifacts as list_capacity_artifacts, load_capacities
 
 
 def test_duration_balance_keeps_files_together_and_automatically_assigns_new_cases():
@@ -32,27 +29,6 @@ def test_duration_balance_keeps_files_together_and_automatically_assigns_new_cas
     assert min(loads) == 120
     assert set(owners) == {node.split("::")[0] for node in nodes}
     assert sum(loads) == 280  # unknown cases use measured median per-case time (50s)
-    # Current runners can have different throughput even after old timing
-    # sources have been calibrated. Give the faster one more whole files.
-    current = {f'{i}.py': {'seconds': 10, 'cases': 2, 'source_shard': i % 2 + 1}
-               for i in range(60)}
-    nodes = [f'{name}::case[{i}]' for name in current for i in range(2)]
-    speeds = [1, 2]
-    owners, loads = partition(nodes, current, 2, capacities=speeds)
-    assert loads == [200, 400]
-    assert [load / speed for load, speed in zip(loads, speeds)] == [200, 200]
-    assert owners == partition(list(reversed(nodes)), dict(reversed(list(current.items()))),
-                               2, capacities=speeds)[0]
-    assert set(owners) == set(current)
-    assert partition(nodes, current, 2, capacities=[1, 1]) == partition(nodes, current, 2)
-    sparse = {'one.py': {'seconds': 100, 'cases': 1, 'source_shard': 1},
-              'two.py': {'seconds': 50, 'cases': 1, 'source_shard': 2}}
-    sparse_owners, sparse_loads = partition(['one.py::case', 'two.py::case'], sparse, 2, capacities=[1, 1.1])
-    assert sparse_owners == {'one.py': 2, 'two.py': 1}
-    assert sparse_loads == [50, 100]
-    for invalid in ([], [1], [0, 1], [-1, 1], [float('nan'), 1], [float('inf'), 1], [True, 1]):
-        with pytest.raises(ValueError, match='runner capacity'):
-            partition(nodes, current, 2, capacities=invalid)
 
 
 def test_removed_consumers_do_not_erase_measured_module_setup_from_the_plan():
@@ -147,80 +123,12 @@ def test_source_balance_keeps_new_files_and_legacy_measurements(tmp_path, monkey
     artifact.mkdir()
     (artifact / 'unit-timings.json').write_text(json.dumps({'revision': 'current', 'suite': 'unit', 'files': measured}))
     options = {'ci_shard': '1/8', 'ci_shard_report': tmp_path / 'shard.json', 'ci_suite': 'unit',
-               'ci_duration_baseline': artifact, 'ci_source_report': None, 'ci_runner_capacities': None}
+               'ci_duration_baseline': artifact, 'ci_source_report': None}
     registered = []
     configure_shard(SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
         register=lambda plugin, name: registered.append(plugin))))
     assert registered[0].durations == adjusted
     assert registered[0].report['planning_source_scales'] == pytest.approx({str(k): v for k, v in scales.items()})
-
-    # Every owner must read the same complete current-runner inventory; old
-    # attempts, missing measurements and corrupt probes cannot plan tests.
-    for name, value in (('GITHUB_RUN_ID', '123'), ('GITHUB_RUN_ATTEMPT', '2'), ('GITHUB_SHA', 'current')):
-        monkeypatch.setenv(name, value)
-    directory = tmp_path / 'capacities'
-    directory.mkdir()
-    probes = []
-    for index in range(1, 9):
-        seconds = 1.0 if index % 2 else 2.0
-        row = {'run_id': '123', 'attempt': '2', 'revision': 'current', 'index': index, 'total': 8,
-               'workload': WORKLOAD, 'python': platform.python_version(), 'seconds': seconds,
-               'samples': [{'seconds': seconds, 'cpu_seconds': seconds, 'checksum': 6000000}] * 3}
-        probes.append(row)
-        (directory / f'{index}.json').write_text(json.dumps(row))
-    capacities, loaded = load_capacities(directory, 8)
-    assert capacities == [1.5, .75] * 4
-    assert loaded == probes
-    options['ci_runner_capacities'] = directory
-    configure_shard(SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
-        register=lambda plugin, name: registered.append(plugin))))
-    assert registered[-1].report['runner_capacities'] == capacities
-    assert registered[-1].report['capacity_probes'] == probes
-    for key, value in (('run_id', '122'), ('attempt', '1'), ('revision', 'old'), ('total', 4), ('workload', 'old'),
-                       ('python', '2.7'), ('seconds', 0), ('seconds', float('nan')), ('samples', [])):
-        (directory / '8.json').write_text(json.dumps({**probes[-1], key: value}))
-        with pytest.raises(ValueError):
-            load_capacities(directory, 8)
-    (directory / '8.json').unlink()
-    with pytest.raises(ValueError, match='exactly once'):
-        load_capacities(directory, 8)
-    (directory / '8.json').write_text(json.dumps(probes[0]))
-    with pytest.raises(ValueError, match='exactly once'):
-        load_capacities(directory, 8)
-
-    clock, calls = [0.0], []
-    artifacts = [{'name': f'unit-capacity-{i}-2', 'id': i, 'expired': False} for i in range(1, 9)]
-    def fetched(timeout):
-        calls.append(timeout)
-        return list(reversed(artifacts if len(calls) > 1 else artifacts[:-1]))
-    def sleep(seconds):
-        clock[0] += seconds
-    assert artifact_ids(fetched, 8, '2', now=lambda: clock[0], sleep=sleep) == '1,2,3,4,5,6,7,8'
-    assert len(calls) == 2 and clock[0] == 3
-    with pytest.raises(ValueError, match='Duplicate'):
-        artifact_ids(lambda timeout: artifacts + [artifacts[0]], 8, '2')
-    with pytest.raises(TimeoutError, match='before test execution'):
-        artifact_ids(lambda timeout: artifacts, 8, '3', now=lambda: clock[0], sleep=sleep, seconds=5)
-    assert clock[0] == 8
-    with pytest.raises(TimeoutError):
-        artifact_ids(lambda timeout: [{**row, 'expired': True} for row in artifacts],
-                     8, '2', now=lambda: clock[0], sleep=sleep, seconds=1)
-
-    # Old attempts can fill more than one API page. Keep the current run scope
-    # and a shared request deadline when listing the manifests.
-    monkeypatch.setenv('GITHUB_REPOSITORY', 'owner/repo')
-    monkeypatch.setenv('GITHUB_TOKEN', 'test-token')
-    requests = []
-    def urlopen(request, timeout):
-        requests.append(request.full_url)
-        assert 0 < timeout <= 10
-        assert request.get_header('Cache-control') == 'no-cache'
-        rows = [{}] * 100 if len(requests) == 1 else [artifacts[0]]
-        return io.BytesIO(json.dumps({'total_count': 101, 'artifacts': rows}).encode())
-    monkeypatch.setattr('ci_runner_capacity.urllib.request.urlopen', urlopen)
-    assert list_capacity_artifacts(10)[-1] == artifacts[0]
-    assert requests == [f'https://api.github.com/repos/owner/repo/actions/runs/123/artifacts?per_page=100&page={i}'
-                        for i in (1, 2)]
 
 
 @pytest.mark.parametrize("suite,total", [("unit", 8), ("browser", 4)])
@@ -271,8 +179,7 @@ def test_shards_cover_every_parameter_once_and_keep_modules_together(total):
 @pytest.mark.parametrize("shard", ["1/1", "2/2", "1/4", "4/4", "1/8", "8/8", "0/4", "5/4", "1/3", "9/8", "1/16"])
 def test_runner_configuration_accepts_supported_splits_and_rejects_invalid_indices(tmp_path, shard):
     options = {"ci_shard": shard, "ci_shard_report": tmp_path / "shard.json",
-               "ci_suite": "unit", "ci_duration_baseline": BASELINE, 'ci_source_report': None,
-               'ci_runner_capacities': None}
+               "ci_suite": "unit", "ci_duration_baseline": BASELINE, 'ci_source_report': None}
     registered = []
     config = SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
         register=lambda plugin, name: registered.append(plugin)))

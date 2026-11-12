@@ -56,24 +56,6 @@ jobs:
       - name: Verify packaged resolutions
         if: matrix.shard == 1
         run: uv run --frozen --group build python packaging/generate_deps.py --check
-      - name: Measure this unit runner
-        run: uv run python ci_runner_capacity.py probe --index=${{ matrix.shard }} --total=$SHARD_TOTAL --output=runner-capacity/${{ matrix.shard }}.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: unit-capacity-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: runner-capacity/${{ matrix.shard }}.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Await the current unit runner measurements
-        id: capacity
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: uv run python ci_runner_capacity.py wait --total=$SHARD_TOTAL --output="$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.capacity.outputs.artifacts }}
-          path: runner-capacity/all
-          merge-multiple: true
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.timing_artifact != ''
         with:
@@ -85,7 +67,7 @@ jobs:
       - name: Run the unit / route suite
         env:
           SHARD_BASELINE: ${{ needs.plan.outputs.timing_artifact != '' && 'shard-baseline' || '.github/test-durations.json' }}
-        run: uv run pytest --test-progress=evidence/progress.jsonl --ci-suite=unit --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --ci-runner-capacities=runner-capacity/all --junitxml=evidence/junit.xml
+        run: uv run pytest --test-progress=evidence/progress.jsonl --ci-suite=unit --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --junitxml=evidence/junit.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
