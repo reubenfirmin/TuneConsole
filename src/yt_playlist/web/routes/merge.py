@@ -271,7 +271,8 @@ def build(ctx) -> APIRouter:
     @router.get("/dupe/{a}/{b}")
     def dupe_detail(a: int, b: int):
         # back-compat: the pairwise compare is just the 2-playlist case of the N-way editor
-        ctx.playlist_by_id(a), ctx.playlist_by_id(b)
+        if store.playlists.get_playlist(a) is None or store.playlists.get_playlist(b) is None:
+            raise HTTPException(status_code=404, detail="playlist not found")
         return RedirectResponse(f"/merge?ids={a},{b}&return=/cleanup%23overlaps", status_code=307)
 
     return router

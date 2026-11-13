@@ -17,18 +17,6 @@ PACKAGE = "yt-playlist"
 _CHECK_INTERVAL_S = 4 * 3600       # every four hours
 _github = GitHubReleasesIAO()
 
-# (button label, optional link) per install kind. Flatpak and macOS have in-app controls;
-# otherwise-unrecognized release installs go to the release page. TuneConsole does not offer or
-# document pip-based installation, so the update card must not invent a pip upgrade path. There is
-# deliberately no "dev" entry: a source/editable checkout is never nagged (see update_nudge), so it
-# never needs an update command -- you update it with git, not a package manager.
-_INSTRUCTIONS = {
-    "flatpak": ("Update now", None),
-    "macos": ("Update now", None),
-    "container": ("Update your container", "https://tuneconsole.com/#container-updates"),
-    "release": ("Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
-}
-
 
 def _raw_version() -> str:
     """The raw installed version string (indirection so tests can substitute one)."""
@@ -132,11 +120,6 @@ def install_kind() -> str:
     return "release"
 
 
-def update_instruction(kind: str):
-    """(command-or-label, optional-link) describing how to update this install kind."""
-    return _INSTRUCTIONS.get(kind, _INSTRUCTIONS["release"])
-
-
 def _ver_tuple(v):
     """Base version 'X.Y.Z' -> a 3-int tuple for ordering (pads/truncates to 3 parts)."""
     parts = [int(p) for p in str(v).split(".")]
@@ -153,7 +136,8 @@ def _out_of_date(current: str, latest: str) -> bool:
 
 def update_nudge(store):
     """Nag payload dict when the backend is behind the latest seen release and the user has not
-    dismissed that exact version, else None. Keys: current, latest, kind, command, link.
+    dismissed that exact version, else None. Keys: current, latest, kind. `kind` is a neutral
+    token; the update command/label/link for it is presentation (see web/update_labels.py).
 
     A source/editable checkout (is_dev_install) is never nagged: it runs HEAD code, its reported
     version is a stale hatch-vcs snapshot, and it is not managed by any package manager, so 'you are
@@ -168,6 +152,4 @@ def update_nudge(store):
         return None
     if store.settings.get_setting("backend_update_dismissed_version") == latest:
         return None
-    kind = install_kind()
-    command, link = update_instruction(kind)
-    return {"current": current, "latest": latest, "kind": kind, "command": command, "link": link}
+    return {"current": current, "latest": latest, "kind": install_kind()}

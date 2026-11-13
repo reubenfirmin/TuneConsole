@@ -46,7 +46,7 @@ def build(ctx):
         updater = updater_for(request)
         if pending.phase is not None:
             return response(pending.snapshot(updater.snapshot()), 202)
-        pending.message = ""
+        pending.clear_message()
         return response(await updater.install())
 
     @router.post("/app-update/restart")

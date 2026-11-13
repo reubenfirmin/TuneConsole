@@ -7,7 +7,7 @@ board and tuning routes.
 from fastapi import Response
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
-from yt_playlist.rec import artist_start, choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
+from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.jobs import start_fresh_pool, start_library_pool
 from yt_playlist.web.theme import genre_tint
@@ -63,55 +63,29 @@ class HomeViews:
             self.schedule()
         else:
             payload = self.prepared(now, request)
-            record = (request.url.path in ("/", "/home/cards", "/home/refresh-cards")
-                      and not getattr(self.writer, 'activity_paused', False)
-                      and not getattr(self.writer, '_read_only', False))
-            if record and request.url.path == "/":
-                record = growth_state(self.ctx, request)['ready_formats']['mixes']
+            record = home_prepared.card_record_gate(request.url.path,
+                activity_paused=getattr(self.writer, 'activity_paused', False),
+                read_only=getattr(self.writer, '_read_only', False),
+                mixes_ready=lambda: growth_state(self.ctx, request)['ready_formats']['mixes'])
             result = home_prepared.cards(store, payload, now, self.recommendations, self.schedule,
                                         record=record, writer=self.writer)
-        if not result.protos and not home_vibe.current(store, now):
-            first = artist_start.first_set(store, now)
-            if first:
-                result.protos = [first]
-                result.slots = [{'proto': first}]
-                result.preparing = True
-                result.choice_context = {'source': 'explicit_artist_choices',
-                                         'artists': first['recipe']['artists']}
+        result = home_prepared.with_starter_fallback(store, result, now)
         context = vars(result).copy()
         vibe_request = self.ctx.vibe_requests.state() if self.ctx.vibe_requests else None
         context['vibe_request'] = vibe_request
         if vibe_request and vibe_request['phase'] in ('pending', 'waiting'):
             context['preparing'] = True
             context['preference_notice'] = None
-        frozen_context = result.choice_context if result.choice_context is not None else (payload or {}).get('choice_context')
-        if (live or record) and result.protos and frozen_context is not None:
-            for proto in result.protos:
-                if proto.get('experiment'):
-                    proto['experiment']['ranker_controlled'] = False
-            options = [{"id": p["experiment_id"], "position": i + 1,
-                        "label": p["label"], "note": p["note"], "intent": p["lane"],
-                        "genres": list(p.get('genres', [])),
-                        "assignment": p.get("assignment")} for i, p in enumerate(result.protos)]
-            try:
-                oid = choice_evidence.present(self.writer, "mixes", options, now,
-                    context=frozen_context, window=result.epoch, vibe=result.vibe or None)
-                for proto in result.protos:
-                    proto["recipe"] = {**proto.get("recipe", {}), "opportunity_id": oid,
-                                       "option_id": proto["experiment_id"]}
-            except Exception:
-                self.ctx.logger.warning("Mix choice capture failed", exc_info=True)
+        if (live or record) and result.protos:
+            home_prepared.present_mix_choices(self.writer, result, payload, now, logger=self.ctx.logger)
         try:
             attempt = min(10, max(0, int(request.query_params.get("prepare_attempt", "0"))))
         except ValueError:
             attempt = 0
         waiting = result.preparing or (not result.protos and bool(result.slots))
-        context["prepare_attempt"] = (min(10, attempt + 1) if not live and waiting
-            and not (vibe_request and vibe_request['phase'] in ('pending', 'waiting')) else None)
-        # Preparation can outlast the first minute after a restart. Keep checking
-        # at a bounded rate until usable offers arrive instead of stranding the
-        # board after ten requests.
-        context["prepare_interval"] = min(30, 3 * 2 ** min(attempt, 4))
+        context["prepare_attempt"], context["prepare_interval"] = home_prepared.polling_schedule(
+            attempt, live=live, waiting=waiting,
+            vibe_pending=bool(vibe_request and vibe_request['phase'] in ('pending', 'waiting')))
         context["genre_options"] = [option | {"tint": genre_tint(option["family"])}
                                     for option in result.genre_options]
         self.recommendations.audit(result.protos, now, request.url.path, reader=store)

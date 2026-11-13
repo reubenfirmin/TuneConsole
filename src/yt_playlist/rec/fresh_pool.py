@@ -3,16 +3,13 @@ from collections import Counter, deque
 from contextlib import nullcontext
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.core.accounts import catalog_client
 from yt_playlist.core.action_errors import ActionInputError
 
 from yt_playlist.rec import embedding_vectors as vectors, home_themes, home_vibe, measurement, mode_surfaces, rec_params, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
 
 
-def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message: None):
-    store = ctx.store
-    client = catalog_client(ctx.client_provider())
+def populate(store, client, now, include_genres=(), avoid_genres=(), on_progress=lambda message: None):
     if client is None:
         raise ActionInputError('fresh_account_required')
     options = home_themes.genre_options(store)
@@ -22,7 +19,7 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
         raise ActionInputError('fresh_genres_required')
     owned = store.rec_query.library_keys()
     have = store.discovery.discovered_track_keys()
-    suppressed = store.rec_model.suppressed_keys("for_you", ctx.now_fn())
+    suppressed = store.rec_model.suppressed_keys("for_you", now)
     muted = store.rec_model.muted_artists()
     added = 0
     members = store.genres.family_members(family for family in genres if family not in labels)
@@ -50,7 +47,7 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
                     continue
                 key = store.discovery.upsert_discovered_track(
                     identity_key(title, name), row["video_id"], title, name, row.get("album"), row.get("thumbnail"),
-                    actual_genre, None, f"genre:{family}", ctx.now_fn())
+                    actual_genre, None, f"genre:{family}", now)
                 have.add(key)
                 added += 1
         on_progress(f"Found {added} new songs. Preparing your mix…")

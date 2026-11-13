@@ -3,7 +3,7 @@ import random
 
 import numpy as np
 
-from yt_playlist.rec import mode_eval, rec_params
+from yt_playlist.rec import mode_eval
 
 PROTO_SIZE = 12
 ROTATION_POOL = PROTO_SIZE * 25
@@ -28,17 +28,17 @@ def thompson_mode_scores(stats, mode_ids, rng):
     return {mid: rng.betavariate(*mode_eval.choice_posterior(*stats.get(mid, (0, 0)))) for mid in mode_ids}
 
 
-def select_modes(store, modes, leans, epoch, n=4, stats=None, now_posterior=None):
+def select_modes(modes, leans, epoch, n=4, stats=None, now_posterior=None, now_gain=None):
     """Choose distinct modes using acceptance, library share, mood and diversity.
 
-    Sampling is deterministic for fixed inputs. Absent NOW evidence performs no
-    parameter reads and preserves the original quiet-hours behavior.
+    Sampling is deterministic for fixed inputs. `now_gain` is only used when
+    `now_posterior` is supplied; pass it explicitly (the caller's `now_gain` param)
+    alongside `now_posterior` to preserve the original quiet-hours behavior.
     """
     if not modes:
         return []
     rng = random.Random(epoch)
     cents = {mode['mode_id']: np.asarray(mode['centroid'], dtype=np.float64) for mode in modes}
-    now_gain = rec_params.get_param(store, 'now_gain') if now_posterior else None
     samples = thompson_mode_scores(stats or {}, [mode['mode_id'] for mode in modes], rng)
     scores = {mode['mode_id']: samples[mode['mode_id']] * max(1, mode['size'])
               * _mode_mood_weight(mode, leans)

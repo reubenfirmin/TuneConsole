@@ -9,8 +9,8 @@ from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import genre_identity
 from yt_playlist.repos.rec_query import RecQueryRepo
 from yt_playlist.util.matching import identity_key
+from yt_playlist.rec.graduation import feedback_axis as _feedback_axis
 from yt_playlist.web.app import create_app
-from yt_playlist.web.routes.suggest import _feedback_axis
 
 
 @pytest.mark.parametrize('installed', [93, 107], indirect=True)
@@ -21,7 +21,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
     entry = store.tracks.upsert_track('feedback-genre', 'Feedback song', 'Artist', None, 200)
     store.tracks.set_track_genre(entry, 'Synth Pop')
     key = identity_key('Feedback song', 'Artist')
-    assert _feedback_axis(store, {}, 'vibe', key) == 'genre:pop'
+    assert _feedback_axis(store, None, 'vibe', key) == 'genre:pop'
     begin, locked, resolved = (threading.Event() for _ in range(3))
     metadata, axis_matches = RecQueryRepo.track_genres, genre_identity.axis_match_rows
     observed = []
@@ -65,14 +65,14 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
                         'item': key, 'surface': 'suggest', 'kind': 'dismiss', 'reason': 'vibe'})
                     assert response.status_code == 200
                 else:
-                    axis = _feedback_axis(store, {}, 'vibe', key)
+                    axis = _feedback_axis(store, None, 'vibe', key)
             finally:
                 resolved.set()
             work.result(5)
     monkeypatch.setattr(RecQueryRepo, 'track_genres', metadata)
     monkeypatch.setattr(genre_identity, 'axis_match_rows', axis_matches)
     assert observed == ['pop']
-    assert _feedback_axis(store, {}, 'vibe', key) == 'genre:pop'
+    assert _feedback_axis(store, None, 'vibe', key) == 'genre:pop'
     if http:
         assert store.rec_signals.get_theme('genre:pop') < 0
         assert not store.rec_signals.get_theme('genre:jazz')
@@ -91,9 +91,9 @@ def test_feedback_reuses_the_callers_owned_transaction(installed):
         store.conn.execute('BEGIN IMMEDIATE')
         try:
             store.conn.execute("UPDATE genre_catalog SET family_key='jazz' WHERE key='synth pop'")
-            assert _feedback_axis(store, {}, 'vibe', key) == 'genre:jazz'
-            assert _feedback_axis(store, {'axis': 'genre:rock'}, 'vibe', key) == 'genre:rock'
+            assert _feedback_axis(store, None, 'vibe', key) == 'genre:jazz'
+            assert _feedback_axis(store, 'genre:rock', 'vibe', key) == 'genre:rock'
             assert store.conn.in_transaction
         finally:
             store.conn.rollback()
-    assert _feedback_axis(store, {}, 'vibe', key) == 'genre:pop'
+    assert _feedback_axis(store, None, 'vibe', key) == 'genre:pop'

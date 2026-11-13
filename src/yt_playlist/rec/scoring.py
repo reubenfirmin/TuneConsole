@@ -19,28 +19,41 @@ from yt_playlist.rec.taste_context import PlaylistTaste
 _NORM_EPS = 1e-9
 
 
-def _playlist_centroids(store, M, idx) -> PlaylistTaste:
-    """Per-playlist taste model over a vector space: each non-excluded playlist's normalized centroid in
-    `M` (rows indexed by `idx` = {key: row}), play-weighted. Shared by playlist_taste (co-occurrence
-    space) and content_taste (#38, content space). Generated + grab-bag catch-all playlists are skipped."""
-    stats = store.charts.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
+def _playlist_track_rows(store, idx):
+    """(title, pid, matrix-row indices) for each non-excluded playlist with at least one modeled
+    track. Generated + grab-bag catch-all playlists are skipped (they don't shape taste)."""
     excluded = store.rec_eligibility.excluded_playlist_ids()  # generated playlists don't shape taste
     catchall = store.rec_eligibility.catchall_playlist_ids()  # overlarge grab-bags carry weak signal
-    titles, cents, ws, pids = [], [], [], []
+    result = []
     for p in store.playlists.get_playlists():
         if p.id in excluded or p.id in catchall:             # skip generated + grab-bags (coherent large OK)
             continue
         rows = [idx[k] for k in store.playlists.get_playlist_track_keys(p.id) if k in idx]
-        if not rows:
+        if rows:
+            result.append((p.title, p.id, rows))
+    return result
+
+
+def _centroid_from_rows(M, rows):
+    """Pure: unit centroid of `M`'s given row indices, or None for an empty/degenerate set."""
+    if not rows:
+        return None
+    c = M[rows].mean(0)
+    n = np.linalg.norm(c)
+    return c / n if n > 0 else None
+
+
+def _centroids_from_playlist_rows(M, rows, stats) -> PlaylistTaste:
+    """Pure: normalized, play-weighted centroid per playlist row-set. `stats` = {pid: (last_ts, count)}."""
+    titles, cents, ws, pids = [], [], [], []
+    for title, pid, item_rows in rows:
+        c = _centroid_from_rows(M, item_rows)
+        if c is None:
             continue
-        c = M[rows].mean(0)
-        n = np.linalg.norm(c)
-        if n == 0:
-            continue
-        titles.append(p.title)
-        cents.append(c / n)
-        ws.append(stats.get(p.id, (None, 0))[1] or 0)        # how much you listen to this playlist
-        pids.append(p.id)
+        titles.append(title)
+        cents.append(c)
+        ws.append(stats.get(pid, (None, 0))[1] or 0)        # how much you listen to this playlist
+        pids.append(pid)
     if not titles:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     w = np.asarray(ws, dtype=np.float64)
@@ -48,16 +61,21 @@ def _playlist_centroids(store, M, idx) -> PlaylistTaste:
     return PlaylistTaste(titles, np.asarray(cents), w, pids)
 
 
+def _playlist_centroids(store, M, idx) -> PlaylistTaste:
+    """Per-playlist taste model over a vector space: each non-excluded playlist's normalized centroid in
+    `M` (rows indexed by `idx` = {key: row}), play-weighted. Shared by playlist_taste (co-occurrence
+    space) and content_taste (#38, content space)."""
+    stats = store.charts.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
+    rows = _playlist_track_rows(store, idx)
+    return _centroids_from_playlist_rows(M, rows, stats)
+
+
 def _behavior_centroid(store, M, idx):
     """Unit centroid of the tracks you've actually played, in vector space M (the behavior taste signal,
     #38). Flat membership: the A/B found play-count/like/save weighting added nothing over plain played-
     membership, so this stays simple. None when nothing you've played is modeled."""
     rows = [idx[k] for k in store.rec_query.play_counts() if k in idx]
-    if not rows:
-        return None
-    c = M[rows].mean(0)
-    n = np.linalg.norm(c)
-    return c / n if n > 0 else None
+    return _centroid_from_rows(M, rows)
 
 
 def _with_albums(store, taste, matrix, index):
@@ -306,9 +324,10 @@ def center_known_weights(weights, present):
             for k, v in weights.items()}
 
 
-def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=None):
-    """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
-    the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
+def _axis_inputs(store, keys, now=None, *, metadata=None):
+    """Acquisition: every store-derived input `_compute_axis_weights` needs to score `keys`.
+    None when every factor is neutral (permanent weights, leans and breadth all no-op), so the
+    caller can skip scoring entirely."""
     mix_tuning.expire(store, time.time() if now is None else now)
     w = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
@@ -336,13 +355,27 @@ def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=Non
         genres, decades, artists, pops = ({k: row[name] for k, row in metadata.items() if row.get(name) is not None}
                                          for name in ('genre', 'decade', 'artist', 'popularity'))
     pop_min = rec_params.get_param(store, "pop_mainstream_min")
-    lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
     fparams = (rec_params.get_param(store, "facet_gain"),
                rec_params.get_param(store, "facet_mult_min"),
                rec_params.get_param(store, "facet_mult_max"))
+    genre_axes = store.genres.feature_axes(genres.values())
+    return dict(keys=keys, gw=gw, ew=ew, aw=aw, pw=pw, leans=leans, standing=standing, bfac=bfac,
+               genres=genres, decades=decades, artists=artists, pops=pops, pop_min=pop_min,
+               fparams=fparams, genre_axes=genre_axes)
+
+
+def _compute_axis_weights(inputs, with_details=False):
+    """Pure: {key: genre_w * era_w * artist_w * pop_w} from already-acquired weights/leans/metadata
+    (`inputs`, from `_axis_inputs`), where each axis weight is permanent x standing lean x the
+    transient facet multiplier (live 'more/less this facet')."""
+    keys, genre_axes = inputs["keys"], inputs["genre_axes"]
+    gw, ew, aw, pw = inputs["gw"], inputs["ew"], inputs["aw"], inputs["pw"]
+    leans, standing, bfac = inputs["leans"], inputs["standing"], inputs["bfac"]
+    genres, decades, artists, pops = inputs["genres"], inputs["decades"], inputs["artists"], inputs["pops"]
+    pop_min, fparams = inputs["pop_min"], inputs["fparams"]
+    lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
 
     mult, details, present = {}, {}, {}
-    genre_axes = store.genres.feature_axes(genres.values())
     for k in keys:
         fam, sub = genre_axes.get(genres.get(k), ('', None) if k in genres else (None, None))
         breadth = bfac.get(fam, 1.0)
@@ -378,6 +411,15 @@ def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=Non
             details[k]["raw_product"] = mult[k]
             details[k]["metadata_present"] = present[k]
     return (mult, details) if with_details else mult
+
+
+def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=None):
+    """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
+    the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
+    inputs = _axis_inputs(store, keys, now=now, metadata=metadata)
+    if inputs is None:
+        return None
+    return _compute_axis_weights(inputs, with_details=with_details)
 
 
 def _apply_axis_weights(store, sims, now=None):

@@ -65,30 +65,9 @@ def build(ctx):
             return JSONResponse({'preparing': True}, status_code=202)
         return {'video_id': item['video_id'], **result}
 
-    def preparation_message():
-        pool = tv.cached(ctx.store) or {}
-        if (ctx.store.tv_preparation.state() or {}).get('failed'):
-            return 'TV couldn’t reach the video catalog. We’re reconnecting; you can also reset TV to try again.'
-        if pool.get('state') == 'no_sources':
-            return 'TV needs a few liked songs or discoveries to find videos. Your library is still being prepared.'
-        if pool.get('state') == 'exhausted' and not tv.queue(ctx.store, ctx.now_fn()):
-            if tv.eligible(ctx.store, pool.get('items', []), None, ctx.now_fn()):
-                return 'No playable videos matched this length. Try a longer video length, or reset TV to search again.'
-            return 'No playable videos matched your current TV choices. Reset TV to search again.'
-        return None
-
     def status():
-        # No search, ranking, playlist creation or preview on a read.
-        ready = bool(tv.queue(ctx.store, ctx.now_fn()))
-        if not ready and ctx.rec_worker:
-            ctx.rec_worker.trigger_tv_refresh()
-        result = {'ready': ready, 'max_minutes': tv.max_minutes(ctx.store)}
-        account = next((a for a in ctx.store.accounts.get_accounts() if a.is_master), None)
-        if account and (pending := ctx.store.tv.pending_launch(account.id)):
-            result['pending_launch'] = pending
-        if not ready and (message := preparation_message()):
-            result['message'] = message
-        return result
+        return tv.status(ctx.store, ctx.now_fn(),
+                         trigger_refresh=ctx.rec_worker.trigger_tv_refresh if ctx.rec_worker else None)
 
     @router.get('/home/tv')
     def prepared():
@@ -130,7 +109,7 @@ def build(ctx):
             if ctx.rec_worker:
                 ctx.rec_worker.trigger_tv_refresh()
             result = {'preparing': True}
-            if message := preparation_message():
+            if message := tv.preparation_message(ctx.store, ctx.now_fn()):
                 result['message'] = message
             return JSONResponse(result, status_code=202)
         try:

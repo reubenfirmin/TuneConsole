@@ -17,7 +17,7 @@ from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded
 from yt_playlist.core.read_memo import preparation_memo
 from yt_playlist.core import home_outputs, home_revisit_progress, json_cache
 from yt_playlist.core.work_diagnostics import maintenance_job
-from yt_playlist.rec import (album_choices, choice_evidence, discover, fresh_pool, home_cache, home_cards, home_themes, home_vibe,
+from yt_playlist.rec import (album_choices, artist_start, choice_evidence, discover, fresh_pool, home_cache, home_cards, home_themes, home_vibe,
                              mode_eval, mode_surfaces, rec_params, recipes, surfaces, taste_analysis,
                              transient, mix_tuning)
 from yt_playlist.rec import group_learning, group_serving, musical_character, stored_home
@@ -48,6 +48,113 @@ _PREPARATION_CHURN_TABLES = frozenset({
 class _NoJobs:
     def latest(self, kind, parameters):
         return None
+
+
+ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover",
+                  "rediscover", "into_recently", "cards")
+MENU_MAX_AGE_S = 86400
+
+
+def record_visit(store, now):
+    """Count the visit before pinning the content it will display."""
+    started = store.modes.epoch_started_at(home_cards._epoch(store, 'cards'))
+    refreshes = {'cards': rec_params.get_param(store, 'erosion_view_cap')} if (
+        started is not None and now - started >= MENU_MAX_AGE_S) else {}
+    store.rec_ledger.record_home_visit(ROTATING_CARDS, now, refreshes=refreshes)
+
+
+def with_launch_playlist(store, bootstrap, launch_id):
+    """Attach a requested playlist's tracks to the radio bootstrap for an in-place launch."""
+    if launch_id is None:
+        return bootstrap
+    source = store.playlists.get_playlist(int(launch_id)) if launch_id.isdecimal() and len(launch_id) < 16 else None
+    if source is not None:
+        bootstrap["launchPlaylist"] = {"id": source.id, "title": source.title,
+            "tracks": [track for track in store.charts.playlist_tracks_detail(source.id)
+                       if track.get("video_id") and track.get("available") != 0][:8]}
+    return bootstrap
+
+
+def recap_notice(store, now):
+    """Monthly recap ("Your <Month>") nag: once a calendar month is baked into the rollup,
+    surface it as a nag card (gated on a completed first sync) linking into the full-screen
+    reel. Shown until viewed or dismissed for that month; next month's recap re-shows. Expires
+    at the next rollover even if the worker hasn't rebuilt yet, or recent listening is missing.
+    """
+    from yt_playlist.rec.trend_statistics import last_complete_month
+    story = (store.rec_proposals.get_proposals("trend_rollups") or {}).get("story")
+    if (story and story.get("month") == last_complete_month(now)
+            and store.settings.get_setting("last_sync_at") is not None
+            and store.settings.get_setting("recap_viewed_month") != story.get("month")
+            and store.settings.get_setting("recap_dismissed_month") != story.get("month")):
+        return {"month": story["month"], "month_name": story["month_name"]}
+    return None
+
+
+def card_record_gate(path, *, activity_paused, read_only, mixes_ready):
+    """Does this request's assembled board get committed into the serving ledger?
+
+    `mixes_ready` is a zero-arg callable, invoked only for "/" once the cheaper
+    checks pass, matching the prior short-circuit (it may itself compute and
+    cache an access snapshot, which is not needed otherwise).
+    """
+    if path not in ("/", "/home/cards", "/home/refresh-cards"):
+        return False
+    if activity_paused or read_only:
+        return False
+    if path == "/":
+        return mixes_ready()
+    return True
+
+
+def polling_schedule(attempt, *, live, waiting, vibe_pending):
+    """Pure: how long before Home polls again while content prepares.
+
+    Preparation can outlast the first minute after a restart. Keep checking at
+    a bounded rate until usable offers arrive instead of stranding the board
+    after ten requests.
+    """
+    next_attempt = min(10, attempt + 1) if not live and waiting and not vibe_pending else None
+    interval = min(30, 3 * 2 ** min(attempt, 4))
+    return next_attempt, interval
+
+
+def with_starter_fallback(store, result, now):
+    """Substitute the artist-choice starter set, in place, when nothing else is ready yet."""
+    if result.protos or home_vibe.current(store, now):
+        return result
+    first = artist_start.first_set(store, now)
+    if first:
+        result.protos = [first]
+        result.slots = [{'proto': first}]
+        result.preparing = True
+        result.choice_context = {'source': 'explicit_artist_choices',
+                                 'artists': first['recipe']['artists']}
+    return result
+
+
+def present_mix_choices(writer, result, payload, now, *, logger=None):
+    """Issue a choice-evidence offer for the currently assembled board, in place."""
+    frozen_context = (result.choice_context if result.choice_context is not None
+                      else (payload or {}).get('choice_context'))
+    if not (result.protos and frozen_context is not None):
+        return
+    for proto in result.protos:
+        if proto.get('experiment'):
+            proto['experiment']['ranker_controlled'] = False
+    options = [{"id": p["experiment_id"], "position": i + 1,
+                "label": p["label"], "note": p["note"], "intent": p["lane"],
+                "genres": list(p.get('genres', [])),
+                "assignment": p.get("assignment")} for i, p in enumerate(result.protos)]
+    try:
+        oid = choice_evidence.present(writer, "mixes", options, now,
+            context=frozen_context, window=result.epoch, vibe=result.vibe or None)
+        for proto in result.protos:
+            proto["recipe"] = {**proto.get("recipe", {}), "opportunity_id": oid,
+                               "option_id": proto["experiment_id"]}
+    except Exception:
+        if logger is not None:
+            logger.warning("Mix choice capture failed", exc_info=True)
 
 
 def tuning_key(store, now=None):
@@ -982,6 +1089,18 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True, r
         if protos:
             service.record_modes(protos, epoch, now)
     return result
+
+
+def refresh_card_proto(store, payload, now, service, schedule, card):
+    """Advance one card's ledger epoch and return its newly chosen proto, if any."""
+    cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
+    store.rec_ledger.refresh_card(card, cap, now)
+    store.rec_ledger.refresh_card("cards", cap, now)
+    result = cards(store, payload, now, service, schedule, record=False)
+    proto = next((p for p in result.protos if p["lane"] == card), None)
+    if proto is not None:
+        service.record_modes([proto], result.epoch, now)
+    return proto
 
 
 def fingerprint(store, payload, now):

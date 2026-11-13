@@ -4,8 +4,7 @@ import logging
 from fastapi import APIRouter, Body, HTTPException, Request
 
 from yt_playlist.core.activity import cancellable_work, WorkClosing
-from yt_playlist.rec import onboarding, radio_tuning
-from yt_playlist.web.routes.home_access import guard
+from yt_playlist.rec import access, onboarding, radio_tuning
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +73,10 @@ def build(ctx):
                                        and playlist_id is None and data.get('menu_id') == bootstrap.get('seedMenu')
                                        and any(track.get('video_id') == data.get('video_id') for track in bootstrap['seeds']))
                             if not starter and not bootstrap['state'].get('active'):
-                                guard(ctx, 'radio', radio=bootstrap)(request)
+                                try:
+                                    access.require(ctx.store, 'radio', now=ctx.now_fn(), radio=bootstrap)
+                                except access.AccessDenied as exc:
+                                    raise HTTPException(409, str(exc)) from exc
                     except WorkClosing:
                         return {'ok': False, 'reason': 'Stopped during start.'}
                     return radio.start(data.get("video_id"), data.get("local_date"), data.get("menu_id"),
@@ -122,10 +124,8 @@ def build(ctx):
                 # Use the access projection directly. Building the entire Home
                 # journey here adds unrelated preparation to an explicit Apply.
                 if values['energy'] != .5:
-                    guard(ctx, 'vibes')(request)
-            except HTTPException as exc:
-                if exc.status_code != 409:
-                    raise
+                    access.require(ctx.store, 'vibes', now=ctx.now_fn())
+            except access.AccessDenied:
                 logger.info("Radio tuning refused: reason=energy_locked values=%s", values)
                 return {"ok": False, "tune_reason": "energy_locked"}
             logger.info("Radio tuning admitted: values=%s", values)

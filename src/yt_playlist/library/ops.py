@@ -8,6 +8,7 @@ and the orchestration lives in one place.
 Shared song actions use ActionInputError for explicit validation. Provider, parser and
 storage exceptions, including ValueError, must go through the caller's diagnostic handler.
 """
+import json
 import logging
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.action_errors import ActionInputError
@@ -247,6 +248,25 @@ class PlaylistOps:
             raise ValueError("missing client for an identity")
         return copy_or_move_playlist(self.store, playlist_id, target_identity, src_client, tgt_client,
                                      self.now_fn(), delete_source=not copy_only)
+
+    # --- action queries -------------------------------------------------------
+    def deletion_snapshot_report(self, action_id, entry_index) -> dict | None:
+        """Inspect saved deletion intent even when sync has removed its local playlist row.
+
+        Returns None when the action/entry doesn't exist (a 404 concern for the caller);
+        raises ValueError/ActionInputError when the recorded account isn't currently available.
+        """
+        action = self.store.actions.get_action(action_id)
+        entries = json.loads(action.undo_json or "{}").get("deletions", []) if action else []
+        if entry_index < 0 or entry_index >= len(entries):
+            return None
+        entry = entries[entry_index]
+        account_id, client = client_for(self.store, self._clients(), account_id=entry["identity"])
+        owner = next((account for account in self.store.accounts.get_accounts() if account.id == account_id), None)
+        if owner is None:
+            raise ValueError("Saved account unavailable")
+        return {"account_id": account_id, "action_id": action_id, "entry_index": entry_index,
+                "reads": client.deletion_read_report(entry["ytm"], owner.brand_account_id)}
 
     # --- undo ---------------------------------------------------------------
     def recheck_deletion(self, action_id):

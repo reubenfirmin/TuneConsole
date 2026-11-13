@@ -80,6 +80,21 @@ def refresh_cleanup(store, now=None, *, summary=None) -> dict | None:
     return payload
 
 
+def cleanup_page(store, now):
+    """Analyze cleanup and keep the home card's cached summary honest in one call."""
+    result = analysis.analyze_cleanup(store)
+    if not getattr(store, 'activity_paused', False):
+        refresh_cleanup(store, now, summary=result.summary())
+    return result
+
+
+def mute_other_overlaps(store, a, b, now):
+    """Keep the a-b pair visible, but mute every other overlap involving either side."""
+    store.overlaps.keep_overlap_pair(a, b, now)
+    store.overlaps.ignore_overlap_playlist(a, now)
+    store.overlaps.ignore_overlap_playlist(b, now)
+
+
 def take_action(store, now, auth_expired) -> list[ActionItem]:
     """Cards for things that genuinely need attention. Empty list = render nothing.
 

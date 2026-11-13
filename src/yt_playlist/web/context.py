@@ -12,7 +12,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
 from yt_playlist.library.ops import PlaylistOps
@@ -122,9 +122,3 @@ class Ctx:
         """A PlaylistOps bound to this context's store, client provider, and clock."""
         return PlaylistOps(self.store, self.client_provider, self.now_fn,
                            rating_updated=self.rec_worker.trigger_rating_update if self.rec_worker else None)
-
-    def playlist_by_id(self, pid):
-        pl = self.store.playlists.get_playlist(pid)
-        if pl is None:
-            raise HTTPException(status_code=404, detail="playlist not found")
-        return pl

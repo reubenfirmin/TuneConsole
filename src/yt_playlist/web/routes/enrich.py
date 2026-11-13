@@ -1,7 +1,6 @@
 """Tools › Enrichment: corpus coverage charts + worker state/pause, all served from the store's
 enrichment stats. The page polls /enrich/stats so the bars advance live as the worker drains."""
 import math
-from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -184,17 +183,7 @@ def build(ctx) -> APIRouter:
                 ctx.logger.warning('Genre lookup %s for track %s: %r', job.id, track_id, event)
             job.events.append(event)
 
-        def run():
-            try:
-                waterfall.run_waterfall(store, [track], enrichment.load_config(store), progress)
-            except Exception as exc:  # noqa: BLE001
-                ctx.logger.exception('Genre lookup %s for track %s failed', job.id, track_id)
-                job.error = str(exc) or type(exc).__name__
-                job.events.append({"type": "err", "text": f"Lookup failed: {job.error}"})
-            finally:
-                job.done = True
-
-        activity_for(ctx).start_thread(run)
+        job = waterfall.start_enrichment_job(ctx, job, True, lambda: [track], on_progress=progress)
         return JSONResponse({"job_id": job.id})
 
     @router.get("/track/genre-lookup/events/{job_id}")

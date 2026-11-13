@@ -43,13 +43,9 @@ class ServingTasks:
         tuning = album_tuning.state(self.ctx.store, now)
         from yt_playlist.rec.home_cards import _epoch
         epoch = _epoch(self.ctx.store, 'album_choices')
-        refresh = self.ctx.store.rec_proposals.get_proposals('album_menu_refresh') or {}
-        excluded = refresh.get('exclude', []) if refresh.get('epoch') == epoch else []
+        excluded = album_choices.excluded_from_refresh(self.ctx.store, epoch)
         playing = getattr(getattr(self.ctx, 'bridge', None), 'now_playing', None) or {}
-        current = playing.get('album_browse_id')
-        if not current and playing.get('playlist_ytm_id'):
-            source = self.ctx.store.collection.playback_source(playing['playlist_ytm_id'], playing.get('video_id'))
-            current = source.get('browse') if source and source['kind'] == 'album' else None
+        current = album_choices.current_browse_id(self.ctx.store, playing)
         _, menu, _ = album_choices.selection(self.ctx.store, (albums or {}).get('items', []), now,
                                             tuning['values'], epoch, tuning['genres'],
                                             exclude=excluded, current=current)

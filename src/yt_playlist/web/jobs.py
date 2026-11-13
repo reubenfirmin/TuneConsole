@@ -5,7 +5,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 
-from yt_playlist.providers import enrichment, waterfall
+from yt_playlist.providers import waterfall
 from yt_playlist.core.activity import activity_for
 
 
@@ -48,38 +48,24 @@ def run_library_sync(ctx, job, *, automatic=False, retry_now=False, max_age_s=86
         job.done = True
 
 
-def record_enrichment_progress(ctx, job, event):
-    job.events.append(event)
-    if event.get("warning") or event.get("deferred") or event.get("type") == "err":
-        ctx.logger.warning("Enrichment job %s: %s", job.id, event.get("text"))
+def start_library_sync(ctx):
+    """Start a manual library sync job on a background thread, under the shared sync lock
+    (never overlapping the automatic background sync). Shared by the manual /sync route."""
+    job = ctx.jobs.create(kind="library")
+
+    def run():
+        with ctx.sync_lock:
+            run_library_sync(ctx, job)
+
+    activity_for(ctx).start_thread(run)
+    return job
 
 
 def start_playlist_enrichment(ctx, playlist_id):
     """Start or rejoin a playlist waterfall, shared by creation and the manual enrich action."""
     job, created = ctx.jobs.create_or_rejoin_playlist(playlist_id)
-    if not created:
-        return job
-
-    def run():
-        try:
-            waterfall.run_waterfall(ctx.store, ctx.store.tracks.tracks_for_waterfall(playlist_id),
-                                    enrichment.load_config(ctx.store),
-                                    on_progress=lambda event: record_enrichment_progress(ctx, job, event))
-        except Exception as e:  # noqa: BLE001
-            ctx.logger.exception("Playlist enrichment job %s failed", job.id)
-            detail = str(e) or type(e).__name__
-            job.error = detail
-            job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
-        finally:
-            job.done = True
-
-    try:
-        activity_for(ctx).start_thread(run)
-    except BaseException as exc:
-        job.error = str(exc) or type(exc).__name__
-        job.done = True
-        raise
-    return job
+    return waterfall.start_enrichment_job(ctx, job, created,
+        lambda: ctx.store.tracks.tracks_for_waterfall(playlist_id))
 
 
 def start_fresh_pool(ctx, parameters):
@@ -90,9 +76,10 @@ def start_fresh_pool(ctx, parameters):
 
     def run():
         from yt_playlist.rec import fresh_pool
+        from yt_playlist.core.accounts import catalog_client
         from yt_playlist.core.action_errors import ActionInputError
         try:
-            fresh_pool.populate(ctx, **parameters,
+            fresh_pool.populate(ctx.store, catalog_client(ctx.client_provider()), ctx.now_fn(), **parameters,
                                 on_progress=lambda text: job.events.append({"text": text}))
             job.events.append({"text": "Preparing your fresh mix…"})
             head = ctx.store.recommendations.head('fresh')

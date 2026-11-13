@@ -57,35 +57,32 @@ def build(ctx):
 
     @router.post("/onboard/lastfm/dismiss")
     def dismiss_lastfm_nudge():
-        store.settings.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
+        onboarding.dismiss_lastfm_nudge(store, now_fn())
         return Response(status_code=200)
 
     @router.post("/onboard/takeout/dismiss")
     def dismiss_takeout_nag():
-        store.settings.set_setting("takeout_nag_dismissed_at", str(now_fn()))
+        onboarding.dismiss_takeout_nag(store, now_fn())
         return Response(status_code=200)
 
     @router.post("/onboard/identities/dismiss")
     def dismiss_identities_nudge():
-        store.settings.set_setting("identities_nudge_dismissed", "1")
+        onboarding.dismiss_identities_nudge(store)
         return Response(status_code=200)
 
     @router.post("/onboard/intro/dismiss")
     def dismiss_intro_nudge():
-        store.settings.set_setting("intro_dismissed", "1")
+        onboarding.dismiss_intro_nudge(store)
         return Response(status_code=200)
 
     @router.post("/onboard/recap/dismiss")
     def dismiss_recap_nudge(month: str = ""):
-        if month:
-            store.settings.set_setting("recap_dismissed_month", month)
+        onboarding.dismiss_recap_nudge(store, month)
         return Response(status_code=200)
 
     @router.post("/onboard/update/dismiss")
     def dismiss_update_nudge(v: str = ""):
-        dismissed = v or store.settings.get_setting("latest_version_seen")
-        if dismissed:
-            store.settings.set_setting("backend_update_dismissed_version", dismissed)
+        onboarding.dismiss_update_nudge(store, v)
         return Response(status_code=200)
 
     @router.get("/home/onboard/radio")
@@ -113,29 +110,28 @@ def build(ctx):
 
     @router.get("/home/onboard/start")
     def home_onboard_start(request: Request):
-        if artist_start.required(store):
+        starter = onboarding.starter_kind(store, ctx.radio.bootstrap)
+        if starter['kind'] == 'artists':
             return templates.TemplateResponse(request, 'artist_start.html', {
                 'artist_choices': store.discovery.starter_artists(),
                 'minimum_artists': artist_start.MIN_ARTISTS,
             })
-        preference = home_preferences.default_format(store)
-        if preference == 'albums':
+        if starter['kind'] == 'albums':
             return templates.TemplateResponse(request, '_partials/onboarding_album.html', {
                 'album': onboarding.starter_album(store)})
-        if preference == 'radio':
-            bootstrap = ctx.radio.bootstrap()
-            if (bootstrap['seeds'] and bootstrap.get('seedMenu')) or bootstrap['state'].get('active'):
-                return templates.TemplateResponse(request, '_partials/onboarding_radio.html', {
-                    'radio_bootstrap': bootstrap,
-                    'radio_tracks': ctx.radio.history_tracks(bootstrap['state'])})
+        if starter['kind'] == 'radio':
+            bootstrap = starter['bootstrap']
+            return templates.TemplateResponse(request, '_partials/onboarding_radio.html', {
+                'radio_bootstrap': bootstrap,
+                'radio_tracks': ctx.radio.history_tracks(bootstrap['state'])})
         tracks = onboarding.library_sample(store, n=home_cards.PROTO_SIZE)
         proto = _proto(store, "onboard_library", "Something to listen to", tracks, now_fn()) if tracks else None
         return templates.TemplateResponse(request, "_partials/onboarding_start.html", {
-            "proto": proto, 'radio_fallback': preference == 'radio'})
+            "proto": proto, 'radio_fallback': starter['radio_fallback']})
 
     @router.post("/onboard/done")
     def onboard_done():
-        store.settings.set_setting("onboard_dismissed", "1")
+        onboarding.complete(store)
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     return router

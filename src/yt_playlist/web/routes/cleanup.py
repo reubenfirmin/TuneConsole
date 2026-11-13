@@ -6,7 +6,7 @@ from fastapi.responses import Response
 
 from yt_playlist.core.activity import activity_for
 from yt_playlist.library import analysis
-from yt_playlist.rec.actions import refresh_cleanup
+from yt_playlist.rec.actions import cleanup_page, mute_other_overlaps as _mute_other_overlaps
 
 
 def build(ctx) -> APIRouter:
@@ -20,7 +20,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/cleanup")
     def cleanup(request: Request):
-        result = analysis.analyze_cleanup(store)
+        result = cleanup_page(store, now_fn())
         prefs = result.analysis.preferences
         ci, ignored_ytm = prefs.ignored, prefs.ignored_ytm
         groups, near_pairs, overlaps = result.groups, result.near_pairs, result.overlaps
@@ -44,10 +44,6 @@ def build(ctx) -> APIRouter:
                            "titles": [pl_by_ytm[y].title for y in m["members"] if y in pl_by_ytm]}
                           for m in prefs.merges]
         ignored_merges = [m for m in ignored_merges if len(m["titles"]) > 1]   # need 2+ live members
-        # Every cleanup edit HX-Refreshes back through here, so this is where the home card's cached
-        # summary goes stale. Refresh it now so the home "Playlist cleanups" count stays honest.
-        if not getattr(store, 'activity_paused', False):
-            refresh_cleanup(store, now_fn(), summary=result.summary())
         identities = store.accounts.get_accounts()
         return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_pairs": near_pairs, "overlaps": overlaps,
@@ -75,10 +71,7 @@ def build(ctx) -> APIRouter:
 
     @router.post("/overlaps/mute-others")
     def mute_other_overlaps(a: str = Form(...), b: str = Form(...)):
-        # Keep the a–b pair, but mute every OTHER overlap involving either a or b.
-        store.overlaps.keep_overlap_pair(a, b, now_fn())
-        store.overlaps.ignore_overlap_playlist(a, now_fn())
-        store.overlaps.ignore_overlap_playlist(b, now_fn())
+        _mute_other_overlaps(store, a, b, now_fn())
         return _refresh()
 
     @router.post("/overlaps/suppress")

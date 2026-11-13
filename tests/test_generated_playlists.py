@@ -345,6 +345,24 @@ def test_create_generated_playlist_stores_recipe_and_versions(store):
     assert r2["title"] == "Fresh songs - June 21 2026 #2"          # next version that day
 
 
+def test_create_and_record_logs_the_save_action_only_when_something_was_added(store, monkeypatch):
+    from yt_playlist.rec import measurement
+
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    fc = FakeClient()
+    tracks = [{"video_id": "v0", "title": "S0", "artist": "A"}]
+    fc._catalog.update(remote_catalog(tracks))
+    calls = []
+    monkeypatch.setattr(measurement, "record_action", lambda *a, **k: calls.append((a, k)))
+    result = playlist_generated.create_and_record(store, "Shared command", tracks, fc, 1.0, iid,
+        recipe={"model": "road_trip"})
+    assert result["added"] == 1
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[:3] == (store, "save", 1.0)
+    assert kwargs == {"playlist_id": result["pid"], "event_id": f"generate:{result['new_ytm']}", "generated": True}
+
+
 # --- garbage collection of unplayed generated playlists (daily worker) -------------------------
 
 def _seed_generated_at(store, iid, created, n=3, ytm="PLG"):

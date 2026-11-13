@@ -13,8 +13,11 @@ table as `rec_param:<name>` keys.
 Embedding internals (dim, method, item2vec hyperparams, seeds) are deliberately NOT exposed:
 hand-setting them only degrades quality, so they stay managed by Auto-tune.
 """
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from yt_playlist.core.recommendation_settings import LANES, LANE_NAMES, MAX_TRACK_MINUTES
+from yt_playlist.core.taste_control_state import CHECKPOINT as CHECKPOINT_SETTING
 
 SETTING_PREFIX = "rec_param:"
 
@@ -421,6 +424,63 @@ def reset_all_params(store) -> None:
     """Revert every scalar knob to its default."""
     for p in PARAMS:
         store.settings.delete_setting(SETTING_PREFIX + p.name)
+
+
+def checkpoint_keys():
+    """Every setting key a taste checkpoint captures/restores: one scalar knob per registered param."""
+    return tuple(SETTING_PREFIX + p.name for p in PARAMS)
+
+
+def checkpoint(store):
+    """The saved starting point for this tinkering session, or None. Weight/genre axes live in the
+    checkpoint itself (captured by `rec_model.save_taste_settings`); this just adds a display ISO time."""
+    raw = store.settings.get_setting(CHECKPOINT_SETTING)
+    saved = json.loads(raw) if raw else None
+    if saved:
+        saved["saved_at_iso"] = datetime.fromtimestamp(saved["saved_at"], timezone.utc).isoformat()
+    return saved
+
+
+def save_checkpoint(store, now, *, replace=False) -> None:
+    """Capture the current weights/params as the session's starting point (first change only,
+    unless `replace`)."""
+    store.rec_model.save_taste_settings(CHECKPOINT_SETTING, checkpoint_keys(), now, replace=replace)
+
+
+def restore_checkpoint(store) -> None:
+    store.rec_model.restore_taste_settings(CHECKPOINT_SETTING, checkpoint_keys())
+
+
+def set_weight(store, axis, weight, now) -> None:
+    """Checkpoint the starting point, then apply a weight change with the right axis bounds
+    (genre families can be muted to 0, so they get the wider [GENRE_MIN, GENRE_MAX] band)."""
+    save_checkpoint(store, now)
+    if axis.startswith("genre:"):
+        store.rec_model.set_weight(axis, weight, lo=GENRE_MIN, hi=GENRE_MAX, now=now)
+    else:
+        store.rec_model.set_weight(axis, weight, now=now)
+
+
+def checkpointed_set_param(store, name, value, now) -> None:
+    save_checkpoint(store, now)
+    if value not in (None, ""):
+        set_param(store, name, value)
+
+
+def checkpointed_reset_param(store, name, now) -> None:
+    save_checkpoint(store, now)
+    reset_param(store, name)
+
+
+def checkpointed_reset_weights(store, now) -> None:
+    save_checkpoint(store, now)
+    store.rec_model.reset_weights()
+
+
+def checkpointed_reset_all(store, now) -> None:
+    save_checkpoint(store, now)
+    store.rec_model.reset_weights()
+    reset_all_params(store)
 
 
 # --- Transient model (lifecycle / recency) ---

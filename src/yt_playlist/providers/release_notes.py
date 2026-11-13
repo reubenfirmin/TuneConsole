@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.providers import discogs, musicbrainz
 from yt_playlist.util import net
-from yt_playlist.util.matching import recording_title
+from yt_playlist.util.matching import artist_key, recording_title
 
 
 def public_url(value):
@@ -33,8 +33,8 @@ def _mb_matches(row, album):
 
 def _discogs_matches(row, album):
     return (recording_title(row.get('title')) == recording_title(album['title'])
-            and discogs._artist_key(album['artist']) in {
-                discogs._artist_key(artist.get('name')) for artist in row.get('artists') or []})
+            and artist_key(album['artist']) in {
+                artist_key(artist.get('name')) for artist in row.get('artists') or []})
 
 
 def _rating(value, count, scale, source, url):
@@ -106,7 +106,7 @@ def _fetch(album, store):
                                           store=store, tok=tok, timeout=5)
             for row in rows:
                 artist, sep, title = (row.get('title') or '').partition(' - ')
-                if (sep and discogs._artist_key(artist) == discogs._artist_key(album['artist'])
+                if (sep and artist_key(artist) == artist_key(album['artist'])
                         and recording_title(title) == recording_title(album['title'])):
                     release = ('release', str(row.get('id', '')))
                     break

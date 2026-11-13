@@ -273,6 +273,24 @@ def prepare(store, now, discoveries):
             for i in order if i in frontier]
 
 
+def excluded_from_refresh(store, epoch):
+    """Carryover exclusions from the album menu's last rotation, if they still apply to this
+    epoch (a later epoch means the rotation is stale and nothing carries over)."""
+    refresh = store.rec_proposals.get_proposals('album_menu_refresh') or {}
+    return refresh.get('exclude', []) if refresh.get('epoch') == epoch else []
+
+
+def current_browse_id(store, now_playing):
+    """The browse_id of the album actively playing right now, if any (never offered as a pick:
+    callers pass this as `selection`'s `current`). `now_playing` is the bridge's now-playing dict,
+    or {}/None when nothing is playing."""
+    current = (now_playing or {}).get('album_browse_id')
+    if not current and (now_playing or {}).get('playlist_ytm_id'):
+        source = store.collection.playback_source(now_playing['playlist_ytm_id'], now_playing.get('video_id'))
+        current = source.get('browse') if source and source['kind'] == 'album' else None
+    return current
+
+
 def selection(store, items, now, controls, epoch=0, genres=(), *, exclude=(), current=None):
     """Reconcile the prepared frontier and its genre filter in one owned view."""
     if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:

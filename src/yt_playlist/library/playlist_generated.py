@@ -12,12 +12,46 @@ from yt_playlist.library import playlist_gc_retry
 from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION, content_hash, versioned_title
 from yt_playlist.library.playlist_writes import (
     account_additions, add_items as _add_items, retain_addition_snapshot)
+from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.library.undo_capture import capture_copy
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.util.action_kinds import COPY_PLAYLIST, GC_GENERATED
+from yt_playlist.util.matching import track_album, track_artist
+from yt_playlist.util.thumbnails import best_thumb
 
 logger = logging.getLogger(__name__)
 GC_PLAYED_FRACTION = 0.5
+
+
+def saved_playlist_query(store, jobs, client_provider, account_id, ytm):
+    """A confirmed destination, viewable before its local row exists or after a restart.
+
+    Returns None when a local row already exists (the caller should redirect there).
+    """
+    if store.playlists.get_playlist_for_account(account_id, ytm) is not None:
+        return None
+    # Reuse the bounded job registry for the confirmed save receipt. This
+    # avoids waiting for provider indexing or writing to a read-only DB.
+    receipt = jobs.latest('generated_playlist', {'account_id': account_id, 'ytm': ytm})
+    if receipt is not None:
+        saved = receipt.result
+    else:
+        # The stable link still works after a restart or receipt expiry.
+        client = (client_provider() or {}).get(account_id)
+        if client is None:
+            raise ConnectionError('Connect YouTube Music to open this playlist.')
+        detail = validate_playlist(client.get_playlist(ytm, limit=None))
+        saved = {'title': detail.get('title') or 'Your Mix Tape', 'recipe': None,
+                 'tracks': [{'video_id': t['videoId'], 'title': t.get('title') or '',
+                             'artist': track_artist(t), 'album': track_album(t),
+                             'duration': t.get('duration_seconds'),
+                             'thumbnail': best_thumb(t.get('thumbnails'))} for t in detail['tracks']]}
+    known = {t['video_id']: t for t in store.charts.video_tracks_detail(
+        [t['video_id'] for t in saved['tracks']])}
+    tracks = [{**{'album': '', 'genre': '', 'year': None, 'plays': 0, 'liked': False,
+                   'identity_key': '', 'thumbnail': None, 'duration': None},
+               **t, **known.get(t['video_id'], {})} for t in saved['tracks']]
+    return {'title': saved['title'], 'recipe': saved.get('recipe'), 'tracks': tracks}
 
 
 class TrackLengthLimitError(ValueError):
@@ -251,4 +285,19 @@ def create_generated_playlist(store, title, tracks, client, now, account_id=None
     return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added,
             "skipped": len(skipped) + excluded, "added_handles": handles,
             "tracks": confirmed_tracks}
+
+
+def create_and_record(store, title, tracks, client, now, account_id, *, recipe, **kwargs) -> dict:
+    """create_generated_playlist, then record the save action once it actually added anything.
+
+    The shared command behind every generated-playlist save (Home, Clusters, Road Trip):
+    one place owns the "what counts as a successful save" evidence rule.
+    """
+    from yt_playlist.rec import measurement
+
+    result = create_generated_playlist(store, title, tracks, client, now, account_id, recipe=recipe, **kwargs)
+    if result["added"]:
+        measurement.record_action(store, "save", now, playlist_id=result["pid"],
+                                  event_id=f"generate:{result['new_ytm']}", generated=True)
+    return result
 

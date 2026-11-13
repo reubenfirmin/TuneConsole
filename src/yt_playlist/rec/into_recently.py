@@ -10,8 +10,8 @@ import re
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import transient
 from yt_playlist.util import genre_catalog, genre_map, net
+from yt_playlist.util.genre_theme import genre_tint
 from yt_playlist.util.matching import is_remix
-from yt_playlist.web import theme
 from yt_playlist.providers import wikipedia
 from yt_playlist.providers.base import LookupUnavailable
 
@@ -505,10 +505,10 @@ def refresh_summary(store, subj, now, fetch_fn):
 def subject_color(subj) -> str:
     """The heading tint/glow colour for a picked subject. Genres map by family; artists use accent."""
     if subj["kind"] != "genre":
-        return theme.genre_tint(None)
+        return genre_tint(None)
     token = subj["subject"].split(":", 1)[1]
-    tint = theme.genre_tint(token)
-    return tint if tint != "var(--genre-default)" else theme.genre_tint(genre_map.family(token))
+    tint = genre_tint(token)
+    return tint if tint != "var(--genre-default)" else genre_tint(genre_map.family(token))
 
 
 def _genres_in_token(store, token) -> list:

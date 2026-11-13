@@ -229,12 +229,9 @@ def build(ctx) -> APIRouter:
             result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
-                res = playlist_generated.create_generated_playlist(store, name, tracks, client, now_fn(),
+                res = playlist_generated.create_and_record(store, name, tracks, client, now_fn(),
                                                          account_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
-                if res["added"]:
-                    measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
-                                              event_id=f"generate:{res['new_ytm']}", generated=True)
                 # Play in the already-open YouTube Music tab (background), same as /home/generate:
                 # wait until YouTube confirms the new playlist is loadable before switching, on a
                 # background thread so this response is not held.

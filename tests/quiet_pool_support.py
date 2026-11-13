@@ -86,11 +86,11 @@ def quiet_case(store, selected, monkeypatch):
             raise json.JSONDecodeError(DIAGNOSTIC, '<html>invalid response</html>', 0)
         raise ValueError(DIAGNOSTIC)
 
-    def observe_populate(owner, **parameters):
+    def observe_populate(store, client, now, **parameters):
         case.calls.append({key: value for key, value in parameters.items() if key != 'on_progress'})
         local.populating = True
         try:
-            return populate(owner, **parameters)
+            return populate(store, client, now, **parameters)
         finally:
             local.populating = False
 

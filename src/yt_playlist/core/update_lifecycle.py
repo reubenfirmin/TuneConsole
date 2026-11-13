@@ -55,6 +55,10 @@ class PendingRestart:
                 "busy": self.phase in ("draining", "launching"),
                 "can_cancel": self.phase == "draining"}
 
+    def clear_message(self):
+        """Drop a stale message from an earlier cancelled/failed restart before a new install."""
+        self.message = ""
+
     def request(self, host, port):
         if self.phase is not None:
             return

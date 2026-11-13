@@ -33,7 +33,10 @@ def compile(store, offers, responses, now, head):
     menus = {}
     visible, picked = {}, {}
     expiry = []
-    for observation in choice_bandit.observations(store, offers, responses, now, excluded):
+    params = choice_bandit.parameters(store)
+    expanded_options = choice_bandit.expand_offers(store, offers)
+    for observation in choice_bandit.observations(offers, responses, now, excluded,
+                                                  params=params, expanded_options=expanded_options):
         option = observation['option']
         version = observation['context_id']  # Broad descriptor identity, not a group version.
         gid = destination(option)
@@ -86,7 +89,6 @@ def compile(store, offers, responses, now, head):
                      'days': len(own), 'menus': sorted(all_menus), 'shared_strength': strength,
                      'shared_from': parent['version'] if parent and shared else None,
                      'alpha': alpha, 'beta': beta, 'estimate': alpha / (alpha + beta)}
-    params = choice_bandit.parameters(store)
     return {'schema': 1, 'policy': POLICY, 'generation': head['generation'], 'parameters': params,
             'at': now, 'expires_at': min(expiry) if expiry else None, 'rows': list(rows.values()),
             'offered': sum(len(items) for items in visible.values()),

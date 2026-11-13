@@ -75,8 +75,9 @@ def test_actual_fresh_input_validation_uses_fixed_codes(quiet_pool, monkeypatch,
         monkeypatch.setattr(case.ctx, 'client_provider', lambda: {})
     else:
         monkeypatch.setattr(fresh_pool.home_themes, 'genre_options', lambda owner: [])
+    from yt_playlist.core.accounts import catalog_client
     with pytest.raises(ActionInputError) as raised:
-        fresh_pool.populate(case.ctx)
+        fresh_pool.populate(case.store, catalog_client(case.ctx.client_provider()), case.ctx.now_fn())
     assert raised.value.code == ('fresh_account_required' if validation == 'account' else 'fresh_genres_required')
     assert not case.calculations
 

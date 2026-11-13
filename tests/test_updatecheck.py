@@ -55,14 +55,13 @@ def test_install_kind_dev_beats_everything(monkeypatch):
     assert uc.install_kind() == "dev"
 
 
-def test_container_update_nudge_uses_container_instructions(monkeypatch):
+def test_container_update_nudge_reports_container_kind(monkeypatch):
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
     monkeypatch.setattr(uc, "_is_editable_install", lambda: False)
     monkeypatch.setenv("YT_PLAYLIST_CONTAINER", "1")
     nudge = uc.update_nudge(FakeStore({"latest_version_seen": "0.2.0"}))
     assert nudge["kind"] == "container"
-    assert nudge["command"] == "Update your container"
-    assert nudge["link"] == "https://tuneconsole.com/#container-updates"
+    # The command/label/link for that kind is presentation; see test_update_labels.py.
 
 
 def test_is_dev_install_from_version_markers(monkeypatch):
@@ -80,14 +79,6 @@ def test_is_dev_install_from_editable_metadata(monkeypatch):
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
     monkeypatch.setattr(uc, "_is_editable_install", lambda: True)
     assert uc.is_dev_install() is True
-
-
-def test_update_instruction_per_kind():
-    assert uc.update_instruction("flatpak") == (
-        "Update now", None)
-    assert uc.update_instruction("macos") == ("Update now", None)
-    assert uc.update_instruction("release") == (
-        "Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest")
 
 
 def test_update_nudge_none_when_no_latest_seen(monkeypatch):
@@ -110,9 +101,7 @@ def test_update_nudge_present_when_behind(monkeypatch):
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     store = FakeStore({"latest_version_seen": "0.2.0"})
     nudge = uc.update_nudge(store)
-    assert nudge == {"current": "0.1.6", "latest": "0.2.0", "kind": "release",
-                     "command": "Get the latest release",
-                     "link": "https://github.com/reubenfirmin/TuneConsole/releases/latest"}
+    assert nudge == {"current": "0.1.6", "latest": "0.2.0", "kind": "release"}
 
 
 def test_update_nudge_dev_build_on_latest_does_not_nag(monkeypatch):
