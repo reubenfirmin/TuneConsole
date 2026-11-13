@@ -109,13 +109,13 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
     encoded = []
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: encoded.append(s))
     messages = []
-    ctx = SimpleNamespace(store=store, client_provider=lambda: {1: object()}, now_fn=lambda: 1000)
+    client = object()
 
     def unexpected_full_read(*args):
         raise AssertionError('Population must read membership without hydrating discovery tracks')
     with monkeypatch.context() as patch:
         patch.setattr(type(store.discovery), 'get_discovered_tracks', unexpected_full_read)
-        assert fresh_pool.populate(ctx, genres, on_progress=messages.append) == 3
+        assert fresh_pool.populate(store, client, 1000, genres, on_progress=messages.append) == 3
     assert requested == ["drum & bass", "house", "pop"]
     rows = store.discovery.get_discovered_tracks()
     assert {axes[0] for axes in store.genres.feature_axes(r['genre'] for r in rows).values()} == {'house', 'dnb', 'pop'}
@@ -125,7 +125,7 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
     seed_discovered_enrichment(store, rows[0]["identity_key"], rows[0]["genre"], "2020")
     with monkeypatch.context() as patch:
         patch.setattr(type(store.discovery), 'get_discovered_tracks', unexpected_full_read)
-        assert fresh_pool.populate(ctx, genres) == 0
+        assert fresh_pool.populate(store, client, 1000, genres) == 0
     assert store.discovery.discovered_tracks_by_keys([rows[0]["identity_key"]])[rows[0]["identity_key"]]["year"] == "2020"
     store.discovery.prune_orphan_discovered_tracks()
     assert len(store.discovery.get_discovered_tracks()) == 3
@@ -138,8 +138,7 @@ def test_populate_respects_genres_to_avoid(store, monkeypatch):
     requested = []
     monkeypatch.setattr(road_trip_candidates, "genre_artists", lambda s, genre, limit: requested.append(genre) or [])
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
-    ctx = SimpleNamespace(store=store, client_provider=lambda: {1: object()}, now_fn=lambda: 1000)
-    fresh_pool.populate(ctx, avoid_genres=["jazz", "techno"])
+    fresh_pool.populate(store, object(), 1000, avoid_genres=["jazz", "techno"])
     assert set(requested) == {'house', 'dnb'}
 
 
@@ -258,7 +257,7 @@ def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(fres
     store, client = fresh_workflow_home
     started, release = threading.Event(), threading.Event()
     calls = []
-    def populate(ctx, **params):
+    def populate(store, client, now, **params):
         calls.append(params)
         params["on_progress"]("Finding fresh jazz songs…")
         started.set()
@@ -319,13 +318,14 @@ def test_fresh_workflow_job_starts_once_and_rejoins_until_publication(monkeypatc
     started, release = threading.Event(), threading.Event()
     ctx = SimpleNamespace(work=Activity(), jobs=SyncJobs(), now_fn=lambda: 1000,
         store=SimpleNamespace(recommendations=SimpleNamespace(head=Mock(return_value={'id': 17}))),
+        client_provider=lambda: {1: object()},
         rec_worker=SimpleNamespace(trigger_candidate_refresh=Mock(), trigger_home_refresh=Mock()),
         logger=logging.getLogger(__name__))
     parameters = {'include_genres': ['jazz', 'techno'], 'avoid_genres': []}
     calls = []
 
-    def populate(owner, **kwargs):
-        assert owner is ctx and threading.current_thread() is not threading.main_thread()
+    def populate(store, client, now, **kwargs):
+        assert store is ctx.store and threading.current_thread() is not threading.main_thread()
         calls.append({key: value for key, value in kwargs.items() if key != 'on_progress'})
         kwargs['on_progress']('Finding fresh jazz songs…')
         started.set()

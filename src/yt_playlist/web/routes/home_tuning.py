@@ -4,6 +4,7 @@ import json
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
+from yt_playlist.providers import genres as genre_lib
 from yt_playlist.rec import home_cache, home_prepared, home_vibe, mix_tuning, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.context import form_float, request_form
@@ -93,10 +94,7 @@ def build(ctx, views):
             now = now_fn()
             with mix_tuning.adjusting(store, now):
                 perm = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
-                lean = target / perm if perm > 0 else target
-                lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
-                lean = max(lo, min(hi, lean))
-                store.rec_model.set_lean(axis, lean, now)
+                store.rec_model.set_lean(axis, mix_tuning.lean_for_target(perm, target), now)
         return views.cards_safe(request, now_fn())
 
     @router.post("/home/fingerprint/add")
@@ -156,25 +154,8 @@ def build(ctx, views):
         library-scoped clusters list, this is the whole map, so you can pin a bar for a genre you have
         zero plays of yet. Each option: {name, kind: 'family'|'genre'}; the Alpine picker filters it
         client-side (so reset/close are instant) and posts a pick to /home/fingerprint/add."""
-        taxonomy = store.genres.taxonomy()
-        fams = sorted(taxonomy['families'])
-        seen = set(fams)
-        options = [{"name": f, "kind": "family"} for f in fams]
-        options += [{"name": row['key'], "label": row['name'], "kind": "genre"}
-                    for row in taxonomy['genres'] if row['key'] not in seen]
-        # This picker only needs play totals for ordering. Resolving the active
-        # complete menu here repeats journey/Vibe admission while the browser
-        # is already sending its explicit selection.
         prepared = home_cache.read(store, home_prepared.SURFACE, fields=('fingerprint',)) or {}
-        plays = {g.lower(): count for g, count in
-                 (prepared.get("fingerprint") or {}).get("genre_plays", {}).items()}
-        family_plays = {}
-        axes = store.genres.feature_axes(plays)
-        for genre, count in plays.items():
-            family = axes[genre][0]
-            family_plays[family] = family_plays.get(family, 0) + count
-        options.sort(key=lambda o: (-(family_plays.get(o["name"], 0) if o["kind"] == "family"
-                                     else plays.get(o["name"], 0)), o["name"]))
+        options = genre_lib.picker_options(store, prepared.get('fingerprint'))
         return JSONResponse({"options": options})
 
     return router

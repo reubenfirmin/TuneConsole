@@ -4,45 +4,11 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from yt_playlist.rec import embed, graduation, rec_params, scoring, surfaces
+from yt_playlist.rec import embed, graduation, rec_params, surfaces
 from yt_playlist.web.context import request_form
 
 # feedback kinds that suppress an item (vs 'more'/'less' which only nudge future weights)
 _SNOOZE_DAYS = 14
-
-
-def _feedback_axis(store, form, reason, item):
-    """The single taste axis a suggestion-dismiss / why-chip should steer, derived from the dismissed
-    track (#43). An explicit `axis` form value wins (the Home why-chips, and the 'not this artist'
-    tile, which sends artist:<name>). Otherwise map the reason via the track's own metadata. Returns
-    None when there is nothing to steer (the track has no genre/decade/artist, or it is not actually
-    mainstream), so the caller no-ops gracefully rather than inventing a steer."""
-    axis = form.get("axis")
-    if axis and axis.split(":", 1)[0] in ("genre", "era", "artist", "pop"):
-        return axis
-    if reason not in ("vibe", "era", "artist", "mainstream"):
-        return None
-    # Metadata and its canonical facet must come from one owned read. A
-    # synchronized metadata method alone does not protect the later raw genre
-    # lookup from borrowing another thread's uncommitted serving transaction.
-    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
-        with store.read_view() as reader:
-            return _feedback_axis(reader, form, reason, item)
-    dao = store.rec_query
-    if reason == "vibe":
-        g = dao.track_genres([item]).get(item)
-        return f"genre:{store.genres.feature_axes([g])[g][0]}" if g else None
-    if reason == "era":
-        d = dao.track_decades([item]).get(item)
-        return f"era:{d}" if d else None
-    if reason == "artist":
-        a = dao.track_artists([item]).get(item)
-        return f"artist:{a}" if a else None
-    if reason == "mainstream":
-        pop = dao.track_popularity([item]).get(item)
-        band = scoring._pop_band(pop, rec_params.get_param(store, "pop_mainstream_min"))
-        return f"pop:{band}" if band else None
-    return None
 
 
 def build(ctx) -> APIRouter:
@@ -118,7 +84,7 @@ def build(ctx) -> APIRouter:
         # promises (wrong era -> era, wrong vibe -> genre, too mainstream -> pop, not this artist ->
         # artist); 'already know it' (own_it) suppresses ONLY, with no taste penalty.
         if reason != "own_it":
-            axis = _feedback_axis(store, form, reason, item)
+            axis = graduation.feedback_axis(store, form.get("axis"), reason, item)
             if axis:
                 signed = 1.0 if kind == "more" else -1.0
                 graduation.graduate_facet(store, axis, signed, now,
@@ -154,24 +120,13 @@ def build(ctx) -> APIRouter:
                 keys = json.loads(keys_raw)
             except (ValueError, TypeError):
                 keys = []
-            if keys:
-                now = now_fn()
-                halflife_d = rec_params.get_param(store, "mood_halflife_d")
-                prune_before = now - 4 * halflife_d * 86400
-                store.rec_signals.record_mood(keys, signed, now, prune_before=prune_before)
-                graduation.graduate_moods(store, keys, signed, now, source=rec_params.get_param(store, "source_w_vibe"))
+            graduation.mood_tilt(store, keys, signed, now_fn())
             return HTMLResponse("")
         try:                                          # whole-mix simple buttons
             pid = int(form.get("pid"))
         except (TypeError, ValueError):
             return HTMLResponse("", status_code=422)
-        keys = store.playlists.get_playlist_track_keys(pid)
-        if keys:
-            now = now_fn()
-            halflife_d = rec_params.get_param(store, "mood_halflife_d")
-            prune_before = now - 4 * halflife_d * 86400
-            store.rec_signals.record_mood(keys, signed, now, prune_before=prune_before)
-            graduation.graduate_moods(store, list(keys), signed, now, source=rec_params.get_param(store, "source_w_vibe"))
+        graduation.mood_tilt(store, store.playlists.get_playlist_track_keys(pid), signed, now_fn())
         return HTMLResponse("")                        # no swap: the panel stays put (Advanced reachable)
 
     @router.post("/recs/journey")

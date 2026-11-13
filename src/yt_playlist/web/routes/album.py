@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from yt_playlist.library.album_fetch import fetch_album, is_upload_album, shareable_album_tracks
 from yt_playlist.library.album_catalog import remember_album
-from yt_playlist.providers import enrichment, waterfall
+from yt_playlist.providers import waterfall
 from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_cache
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb, is_placeholder_art
@@ -331,29 +331,8 @@ def build(ctx) -> APIRouter:
         """Run the enrichment waterfall over a saved album's folded-in tracks, same harness and SSE
         stream as playlist enrichment, scoped by album_browse instead of a playlist."""
         job, created = ctx.jobs.create_or_rejoin_album(browse)
-        if not created:
-            return JSONResponse({"job_id": job.id})
-
-        def run():
-            try:
-                from yt_playlist.web.jobs import record_enrichment_progress
-                pending = store.tracks.album_tracks_for_waterfall(browse)
-                waterfall.run_waterfall(store, pending, enrichment.load_config(store),
-                                        on_progress=lambda event: record_enrichment_progress(ctx, job, event))
-            except Exception as e:  # noqa: BLE001
-                ctx.logger.exception("Album enrichment job %s failed", job.id)
-                detail = str(e) or type(e).__name__
-                job.error = detail
-                job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
-            finally:
-                job.done = True
-
-        try:
-            activity_for(ctx).start_thread(run)
-        except BaseException as exc:
-            job.error = str(exc) or type(exc).__name__
-            job.done = True
-            raise
+        job = waterfall.start_enrichment_job(ctx, job, created,
+            lambda: store.tracks.album_tracks_for_waterfall(browse))
         return JSONResponse({"job_id": job.id})
 
     @router.get("/album/{browse}/conflicts")

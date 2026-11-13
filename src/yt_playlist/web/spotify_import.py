@@ -49,18 +49,31 @@ def load_job(store) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def save_job(store, job: dict) -> None:
-    original = job
+def _retained_report(job: dict) -> dict:
+    """Trim a schema-5+ report before it becomes the lasting audit: playlist names/counts and
+    YouTube destinations stay; source song metadata (including unmatched/ambiguous rows) is
+    available only in the active preview, never persisted."""
     if job.get("report_schema", 0) >= 5 and job.get("report"):
-        # Playlist names/counts and YouTube destinations are the lasting audit. Source song
-        # metadata is available in the active preview only, including unmatched/ambiguous rows.
         report = job["report"]
         details = {**report["details"], "unmatched_tracks": []}
-        job = {**job, "report": {**report, "details": details}}
+        return {**job, "report": {**report, "details": details}}
+    return job
+
+
+def save_job(store, job: dict) -> None:
+    original = job
+    job = _retained_report(job)
     revision = store.settings.save_spotify_import_job(job)
     if revision is not None:
         from yt_playlist.core.spotify_job_state import TOKEN
         original[TOKEN] = revision
+
+
+def _recovered(job: dict, now) -> dict:
+    """Pure: project a pre-restart running/queued job as a retryable failure."""
+    return {**job, "status": "error", "finished_at": now,
+            "error": "TuneConsole stopped before the import finished. Upload the same export "
+                     "again to resume recorded transfers."}
 
 
 def current_job(ctx) -> dict | None:
@@ -75,9 +88,7 @@ def current_job(ctx) -> dict | None:
         # the report, since the first read. Recovery owns and checks the latest state.
         job = load_job(ctx.store)
         if job and job.get("status") in ACTIVE_STATUSES:
-            job = {**job, "status": "error", "finished_at": ctx.now_fn(),
-                   "error": "TuneConsole stopped before the import finished. Upload the same export "
-                            "again to resume recorded transfers."}
+            job = _recovered(job, ctx.now_fn())
             # Return the recovery projection during maintenance; persist it on
             # the next ordinary read. Recheck under the lock so a cutover cannot
             # start between the pause check and the settings write.

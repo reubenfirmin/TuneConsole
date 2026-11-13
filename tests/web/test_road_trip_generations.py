@@ -197,9 +197,9 @@ def test_remote_save_completion_does_not_replace_newer_or_deleted_draft(native_s
         owner.build(rid, object())
     elif replacement == 'balance':
         recipe = store.road_trip.get_road_trip_recipe(rid)
-        owner.edit_recipe(lambda: store.road_trip.save_road_trip_recipe(
-            rid, recipe['name'], 20, recipe['artists'], recipe['genres'],
-            recipe['target_minutes'], 1000, familiarity_pct=80), object())
+        owner.save_recipe(rid, recipe['name'], 20, recipe['artists'], recipe['genres'],
+            recipe['target_minutes'], familiarity_pct=80, blacklist_genres=recipe.get('blacklist_genres', []),
+            client=object())
     else:
         owner.delete(rid, recipe=replacement == 'delete-recipe')
     newer = store.road_trip.get_road_trip_draft(rid)

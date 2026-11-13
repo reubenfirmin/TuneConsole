@@ -52,6 +52,43 @@ def reset(store):
     configure(store, read_only=True)
 
 
+def add(store, name):
+    """Add a custom genre to the whitelist and reconfigure the active matcher."""
+    store.genres.add_genre(name)
+    configure(store, read_only=True)
+
+
+def remove(store, name):
+    """Remove a genre from the whitelist and reconfigure the active matcher."""
+    store.genres.remove_genre(name)
+    configure(store, read_only=True)
+
+
+def picker_options(store, prepared_fingerprint):
+    """Family + sub-genre options for the Home taste-bar picker, ordered by recent play weight.
+
+    This only needs play totals for ordering: resolving the active complete menu
+    here would repeat journey/Vibe admission while the browser already sent its
+    explicit selection.
+    """
+    taxonomy = store.genres.taxonomy()
+    fams = sorted(taxonomy['families'])
+    seen = set(fams)
+    options = [{"name": f, "kind": "family"} for f in fams]
+    options += [{"name": row['key'], "label": row['name'], "kind": "genre"}
+                for row in taxonomy['genres'] if row['key'] not in seen]
+    plays = {g.lower(): count for g, count in
+             (prepared_fingerprint or {}).get("genre_plays", {}).items()}
+    family_plays = {}
+    axes = store.genres.feature_axes(plays)
+    for genre, count in plays.items():
+        family = axes[genre][0]
+        family_plays[family] = family_plays.get(family, 0) + count
+    options.sort(key=lambda o: (-(family_plays.get(o["name"], 0) if o["kind"] == "family"
+                                 else plays.get(o["name"], 0)), o["name"]))
+    return options
+
+
 @functools.lru_cache(maxsize=1)
 def _builtin_canon():
     return build_canon(builtin_names())

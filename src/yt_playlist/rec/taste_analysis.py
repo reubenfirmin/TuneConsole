@@ -14,36 +14,32 @@ def era_distribution(store, *, era_plays=None) -> list:
     return sorted(((d, c / total) for d, c in dist.items()), key=lambda x: -x[1])
 
 
-def taste_fingerprint(store, now, *, prepared=None) -> dict:
-    """Compact, legible 'you right now' for the Home header: top genre families, breadth, era lean.
-
-    Each family/era carries its current steering weight so the header can render a draggable bar.
-    Also includes 'effective' = permanent x standing lean, clamped to [GENRE_MIN, GENRE_MAX], which
-    is what the slider THUMB binds to (the held steer the user experiences), plus 'live' = effective x
-    the live transient facet multiplier (recent plays/likes/dislikes/mood), clamped the same way, which
-    a separate MARKER binds to. Splitting them keeps the two independent mood signals (explicit steer
-    vs. listen behavior) from overloading one bar position. 'live_active' is False when there is no
-    meaningful live signal (e.g. a stale sync), so the bar can hide the marker.
-
-    Pinned axes: 'pinned' is True for any family/era that has an explicit stored lean (set via
-    /home/fingerprint/add or by steering its bar). The Home column always renders the top-by-share
-    bars PLUS every pinned one, so an added bar shows even when it's a low-share PLAYED family (e.g.
-    'rock-post', the family post-rock lives under) that ranks past the top few, not just a zero-play
-    niche. A pinned axis not in the play distribution at all is appended with share=0.0.
-    """
-    mix_tuning.expire(store, now)
-    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
-        with store.read_view() as reader:
-            return taste_fingerprint(reader, now, prepared=prepared)
+def _fingerprint_inputs(store, now, prepared=None):
+    """Acquisition: every store-derived input `_compute_fingerprint` needs. Call only on an
+    already-resolved reader (after the read-view recursion in `taste_fingerprint`)."""
     bd = prepared["breadth"] if prepared is not None else taste_breadth(store)
-    w = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-    leans = store.rec_model.get_leans()
-    hidden = store.rec_model.hidden_facets()                                   # bars the user removed (display-only)
-    tleans = prepared["transient"] if prepared is not None else transient.facet_leans(store, now)
-    fgain = rec_params.get_param(store, "facet_gain")
-    fmin = rec_params.get_param(store, "facet_mult_min")
-    fmax = rec_params.get_param(store, "facet_mult_max")
-    family_members = store.genres.family_members(bd['families'])
+    return dict(
+        bd=bd,
+        w=store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")),
+        leans=store.rec_model.get_leans(),
+        hidden=store.rec_model.hidden_facets(),                                # bars the user removed (display-only)
+        tleans=prepared["transient"] if prepared is not None else transient.facet_leans(store, now),
+        fgain=rec_params.get_param(store, "facet_gain"),
+        fmin=rec_params.get_param(store, "facet_mult_min"),
+        fmax=rec_params.get_param(store, "facet_mult_max"),
+        family_members=store.genres.family_members(bd['families']),
+        era_shares=prepared["eras"] if prepared is not None else era_distribution(store),
+        bias=rec_params.get_param(store, "breadth_bias"),
+        tuning_remaining=mix_tuning.remaining(store, now),
+    )
+
+
+def _compute_fingerprint(inputs) -> dict:
+    """Pure: the fingerprint's families/eras/breadth, from already-acquired weights, leans and
+    shares (`inputs`, from `_fingerprint_inputs`). See `taste_fingerprint` for the full contract."""
+    bd, w, leans, hidden = inputs["bd"], inputs["w"], inputs["leans"], inputs["hidden"]
+    tleans, fgain, fmin, fmax = inputs["tleans"], inputs["fgain"], inputs["fmin"], inputs["fmax"]
+    family_members, bias = inputs["family_members"], inputs["bias"]
 
     def _live(axis, effective):
         """Where the live transient model puts this axis right now: effective x facet multiplier,
@@ -80,7 +76,7 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
                          "effective": eff, "live": live, "live_active": active,
                          "pinned": ax in leans, "subgenres": subs, "expandable": bool(subs)})
     eras = []
-    for d, share in (prepared["eras"] if prepared is not None else era_distribution(store)):
+    for d, share in inputs["era_shares"]:
         if f"era:{d}" in hidden:
             continue
         ax = f"era:{d}"
@@ -120,11 +116,34 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
     # focused<->eclectic steer that the draggable handle binds to (#7). has_steering gates the "Reset to
     # default" affordance: true whenever the user has steered (a lean), removed a bar (hidden), or moved
     # breadth off-center, i.e. there's something to reset.
-    bias = rec_params.get_param(store, "breadth_bias")
     return {"families": families, "eras": eras, "breadth": bd["breadth"],
             "breadth_bias": bias,
             "has_steering": bool(leans) or bool(hidden) or bias != 0.0,
-            "tuning_remaining": mix_tuning.remaining(store, now)}
+            "tuning_remaining": inputs["tuning_remaining"]}
+
+
+def taste_fingerprint(store, now, *, prepared=None) -> dict:
+    """Compact, legible 'you right now' for the Home header: top genre families, breadth, era lean.
+
+    Each family/era carries its current steering weight so the header can render a draggable bar.
+    Also includes 'effective' = permanent x standing lean, clamped to [GENRE_MIN, GENRE_MAX], which
+    is what the slider THUMB binds to (the held steer the user experiences), plus 'live' = effective x
+    the live transient facet multiplier (recent plays/likes/dislikes/mood), clamped the same way, which
+    a separate MARKER binds to. Splitting them keeps the two independent mood signals (explicit steer
+    vs. listen behavior) from overloading one bar position. 'live_active' is False when there is no
+    meaningful live signal (e.g. a stale sync), so the bar can hide the marker.
+
+    Pinned axes: 'pinned' is True for any family/era that has an explicit stored lean (set via
+    /home/fingerprint/add or by steering its bar). The Home column always renders the top-by-share
+    bars PLUS every pinned one, so an added bar shows even when it's a low-share PLAYED family (e.g.
+    'rock-post', the family post-rock lives under) that ranks past the top few, not just a zero-play
+    niche. A pinned axis not in the play distribution at all is appended with share=0.0.
+    """
+    mix_tuning.expire(store, now)
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return taste_fingerprint(reader, now, prepared=prepared)
+    return _compute_fingerprint(_fingerprint_inputs(store, now, prepared=prepared))
 
 
 def playlist_facets(store, playlist_id) -> dict:

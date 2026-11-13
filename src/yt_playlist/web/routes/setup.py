@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 
 from yt_playlist.core.activity import activity_for
-from yt_playlist.core.accounts import client_for
+from yt_playlist.core.accounts import client_for, select_remaining_master
 from urllib.parse import quote
 from html import escape
 
@@ -92,7 +92,7 @@ def build(ctx) -> APIRouter:
         remaining = [i for i in identities if i.id != account_id]
         if not remaining:
             raise HTTPException(status_code=409, detail="Keep at least one identity.")
-        main = next((i for i in remaining if i.is_master), remaining[0])
+        main = select_remaining_master(remaining)
         try:
             setup.apply_setup([{"id": i.id, "label": i.label, "credential_ref": i.credential_ref,
                                 "brand_account_id": i.brand_account_id, "is_master": i.id == main.id}

@@ -12,9 +12,7 @@ two are coupled - saving a draft updates its recipe's "last generated" link, del
 its draft - so one swap keeps them consistent. Saving to YouTube uses the standard generated-playlist
 result, which closes the loading screen and opens the saved playlist.
 """
-import hashlib
 import json
-import random
 import threading
 
 from fastapi import APIRouter, Depends, Request
@@ -22,10 +20,8 @@ from fastapi.responses import JSONResponse
 
 from yt_playlist.library import playlist_generated, playlist_navigation
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
-from yt_playlist.rec import measurement, road_trip as road_trip_rec
+from yt_playlist.rec import road_trip as road_trip_rec
 from yt_playlist.rec import road_trip_candidates as candidates
-from yt_playlist.rec.road_trip_axes import canonical_genre
-from yt_playlist.util.matching import identity_key
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.road_trip_contract import MIN_TARGET_MINUTES, MAX_TARGET_MINUTES
@@ -60,25 +56,10 @@ def build(ctx) -> APIRouter:
 
     def _draft_ctx(recipe_id=None):
         """The draft to show: a named recipe's, else whichever was touched most recently."""
-        entry = drafts.view(recipe_id)
+        entry = drafts.view_with_measurement(recipe_id)
         if entry is None:
             return None
-        state, rid = entry['state'], entry['recipe_id']
-        tracks = road_trip_rec.draft_tracks(state)
-        # Progress polls of an unchanged draft are one offer, rather than new opportunities.
-        fingerprint = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:16]
-        request_id = f"road-trip:{rid}:{fingerprint}"
-        already_shown = store.rec_ledger.has_served_request(request_id)
-        if not already_shown:
-            measurement.record_recommendations(store, "road_trip", [
-                {**track, "key": store.tracks.identity_key_for_video(track["video_id"]) or
-                                identity_key(track["title"], track["artist"]),
-                 "out_of_corpus": track.get("source") == "theirs"} for track in tracks],
-                now_fn(), lane="draft", ranker="road-trip-mix", request_id=request_id,
-                provenance={"recipe_id": rid, "seed": state.get("seed"),
-                            "own_pct": state.get("own_pct"),
-                            "familiarity_pct": state.get("familiarity_pct"),
-                            "targets": state.get("targets"), "blacklist_genres": state.get("blacklist_genres")})
+        state, rid, tracks = entry['state'], entry['recipe_id'], entry['tracks']
         # Keep acquisition diagnostics in the durable draft and logs, outside
         # the template context. The screen only needs the incomplete outcome.
         return {"state": {**state, 'build_error': bool(state.get('build_error'))},
@@ -142,25 +123,10 @@ def build(ctx) -> APIRouter:
         except (TypeError, ValueError):
             target_minutes = 60
         artists, genres = _clean_list(form.get("artists")), _clean_list(form.get("genres"))
-        previous = store.road_trip.get_road_trip_recipe(recipe_id) if recipe_id is not None else None
-        previous_artists = {a.casefold() for a in (previous or {}).get("artists", [])}
-        known_genres = {canonical_genre(g) for g in genres}
-        for artist in artists:
-            if artist.casefold() in previous_artists:
-                continue
-            genre = canonical_genre(candidates.artist_genre(store, artist))
-            if genre and genre not in known_genres:
-                genres.append(genre)
-                known_genres.add(genre)
-
-        def save():
-            return store.road_trip.save_road_trip_recipe(
-                recipe_id, name, own_pct, artists, genres, target_minutes, now_fn(),
-                familiarity_pct=familiarity_pct,
-                blacklist_genres=_clean_list(form.get("blacklist_genres")))
-
         _, client = _client()
-        recipe_id = drafts.edit_recipe(save, client)
+        recipe_id = drafts.save_recipe(recipe_id, name, own_pct, artists, genres, target_minutes,
+            familiarity_pct=familiarity_pct, blacklist_genres=_clean_list(form.get("blacklist_genres")),
+            client=client)
         return _body(request, recipe_id)
 
     @router.delete("/road_trip/recipes/{recipe_id}")
@@ -196,14 +162,11 @@ def build(ctx) -> APIRouter:
         draft, this just shows where it got to."""
         return _body(request, recipe_id)
 
-    def _mutate(request, recipe_id, change):
-        """Apply a change to the stored draft and re-render. `change(state)` returns the state.
-
-        Most changes are pure re-picks. One isn't: dragging a slider past what the pool holds queues
-        YouTube searches to deepen it (rec.set_share), which the background worker then runs - so if
-        anything ends up pending, kick it off and let the panel poll, exactly as a build does."""
-        _, client = _client()
-        state = drafts.mutate(recipe_id, change, client)
+    def _rendered(request, recipe_id, state):
+        """Most changes are pure re-picks. One isn't: dragging a slider past what the pool holds
+        queues YouTube searches to deepen it (rec.set_share), which the background worker then runs -
+        so if anything ends up pending, it's already kicked off and the panel polls, exactly as a
+        build does."""
         if state is None:
             return _body(request, error="That playlist is gone - build it again.")
         return _body(request, recipe_id)
@@ -218,31 +181,27 @@ def build(ctx) -> APIRouter:
             share = float(form.get("share")) / 100.0
         except (TypeError, ValueError):
             return _body(request, recipe_id)
-        return _mutate(request, recipe_id,
-                       lambda s: road_trip_rec.set_share(s, party, axis, share, store,
-                                                        now_fn()))
+        _, client = _client()
+        return _rendered(request, recipe_id, drafts.tilt(recipe_id, party, axis, share, client))
 
     @router.post("/road_trip/draft/{recipe_id}/unpin")
     def unpin_draft(request: Request, recipe_id: int, form=Depends(request_form)):
         """Reset this genre or year group to follow the available tracks again."""
         party, axis = form.get("party") or "", form.get("axis") or ""
-        return _mutate(request, recipe_id,
-                       lambda s: road_trip_rec.clear_share(s, party, axis, store, now_fn()))
+        _, client = _client()
+        return _rendered(request, recipe_id, drafts.unpin(recipe_id, party, axis, client))
 
     @router.post("/road_trip/draft/{recipe_id}/slot/{index}")
     def reroll_slot(request: Request, recipe_id: int, index: int):
         """Cross out one slot; the recipe fills it back in with something else of the same side."""
-        return _mutate(request, recipe_id,
-                       lambda s: road_trip_rec.reroll_slot(s, store, index, now_fn()))
+        _, client = _client()
+        return _rendered(request, recipe_id, drafts.reroll(recipe_id, index, client))
 
     @router.post("/road_trip/draft/{recipe_id}/shuffle")
     def shuffle_draft(request: Request, recipe_id: int):
         """A different draw from the same pool: no network, new seed."""
-        def change(state):
-            state["seed"] = random.randrange(1 << 30)
-            return road_trip_rec.repick(state, store, now_fn())
-
-        return _mutate(request, recipe_id, change)
+        _, client = _client()
+        return _rendered(request, recipe_id, drafts.shuffle(recipe_id, client))
 
     @router.delete("/road_trip/draft/{recipe_id}")
     def discard_draft(request: Request, recipe_id: int):
@@ -276,7 +235,7 @@ def build(ctx) -> APIRouter:
             return response("Couldn't save it - connect the main account and keep at least one track.")
         stats = state["stats"]
         try:
-            saved = playlist_generated.create_generated_playlist(store, result["name"], tracks,
+            saved = playlist_generated.create_and_record(store, result["name"], tracks,
                 client, now_fn(), account_id,
                 recipe={"model": "road_trip", "road_trip_recipe_id": recipe_id, "journey": "road_trip",
                         "own_pct": state["own_pct"], "familiarity_pct": state["familiarity_pct"],
@@ -285,9 +244,6 @@ def build(ctx) -> APIRouter:
                         "their_count": stats.get("their_count")})
             drafts.saved(recipe_id, state, saved["new_ytm"])
             result.update(ytm=saved["new_ytm"], pid=saved["pid"], added=saved["added"])
-            if saved["added"]:
-                measurement.record_action(store, "save", now_fn(), playlist_id=saved["pid"],
-                                          event_id=f"generate:{saved['new_ytm']}", generated=True)
             bridge = getattr(ctx, "bridge", None)
             if bridge is not None and getattr(bridge, "connected", False):
                 watch_url = f"https://music.youtube.com/watch?list={saved['new_ytm']}"

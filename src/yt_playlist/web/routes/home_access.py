@@ -3,7 +3,7 @@ from contextlib import contextmanager
 
 from fastapi import HTTPException, Request
 
-from yt_playlist.rec import account_growth, mix_tuning
+from yt_playlist.rec import access, account_growth, mix_tuning
 
 
 def state(ctx, request=None):
@@ -16,20 +16,18 @@ def state(ctx, request=None):
 
 
 def guard(ctx, area, *, radio=None):
+    """A FastAPI dependency; the access decision itself needs no Request.
+
+    See `yt_playlist.rec.access` for the transport-neutral decision that Radio,
+    TV, Vibe and background workers call directly without this wrapper.
+    """
     def require(request: Request):
-        if not hasattr(request.state, 'account_growth') and account_growth.retained_access(ctx.store, area):
-            allowed = True
-        elif area == 'radio' and not hasattr(request.state, 'account_growth'):
-            allowed = account_growth.radio_access(ctx.store, ctx.now_fn(),
-                radio=ctx.radio.bootstrap() if radio is None else radio)
-        elif area == 'vibes' and not hasattr(request.state, 'account_growth'):
-            allowed = account_growth.vibe_access(ctx.store, ctx.now_fn(),
-                ctx.radio.bootstrap() if radio is None else radio)
-        else:
-            growth = state(ctx, request)
-            allowed = account_growth.has_access(growth, area)
-        if not allowed:
-            raise HTTPException(409, 'This stop is still ahead on your journey. Open Your unlocks to see what is next.')
+        growth = getattr(request.state, 'account_growth', None)
+        try:
+            access.require(ctx.store, area, now=ctx.now_fn(),
+                           radio=ctx.radio.bootstrap() if radio is None else radio, growth=growth)
+        except access.AccessDenied as exc:
+            raise HTTPException(409, str(exc)) from exc
     return require
 
 

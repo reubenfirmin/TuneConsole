@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Request
 
 from yt_playlist.rec.recap_story import listening_summary
 from yt_playlist.rec.recap_details import slides
+from yt_playlist.rec.trend_rollups import mark_viewed
+from yt_playlist.web import theme
 
 
 def build(ctx) -> APIRouter:
@@ -26,6 +28,16 @@ def build(ctx) -> APIRouter:
         story = {**story, 'beats': slides(story['beats'])}
         if grouped and ctx.rec_worker:
             ctx.rec_worker.trigger_trends_refresh()
+        # The personality/closing beats' aura hue is a presentation token: recap_story stays
+        # detached from web/theme and only bakes in the neutral genre family (top_family, on the
+        # personality beat the closing beat's aura is copied from); fill the colour in here.
+        personality_beat = next((b for b in story["beats"] if b["kind"] == "personality"), None)
+        if personality_beat is not None:
+            hue = theme.family_hue(personality_beat.get("top_family"))
+            story = {**story, "beats": [
+                {**b, "aura": {**b["aura"], "hue": hue}} if b["kind"] in ("personality", "closing") else b
+                for b in story["beats"]
+            ]}
         # Refresh the copy from baked counts so cached recaps also get accurate wording immediately.
         numbers = next((b for b in story["beats"] if b["kind"] == "numbers"), None)
         if numbers:
@@ -36,7 +48,7 @@ def build(ctx) -> APIRouter:
             ]}
         response = templates.TemplateResponse(request, "story_reel.html", {"story": story})
         if not getattr(store, 'activity_paused', False):
-            store.settings.set_setting("recap_viewed_month", month)
+            mark_viewed(store, month)
         return response
 
     return router

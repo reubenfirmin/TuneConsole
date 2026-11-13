@@ -90,13 +90,32 @@ def first_set(store, now):
 
 
 class ArtistCatalog:
-    """Small coalesced cache. Slow catalog calls never hold the Store connection."""
-    def __init__(self, clients):
+    """Small coalesced cache. Slow catalog calls never hold the Store connection.
+
+    Owns the First sounds artist-start commands/queries end to end: selection
+    persistence (with the one worker refresh it requires), starter readiness,
+    and the listen fragment's starter-set context.
+    """
+    def __init__(self, clients, *, trigger_refresh=None):
         self.clients = clients
+        self.trigger_refresh = trigger_refresh
         self._cache = OrderedDict()
         self._pending = {}
         self._lock = Lock()
         self._slots = BoundedSemaphore(2)
+
+    def state(self, store):
+        choices = store.discovery.starter_artists()
+        songs = store.discovery.starter_tracks()
+        return {'selected': choices, 'songs': len(songs), 'minimum': MIN_ARTISTS,
+                'complete': not required(store),
+                'ready': len(choices) >= MIN_ARTISTS and bool(songs)}
+
+    def listen_context(self, store):
+        tracks = store.discovery.starter_tracks()
+        choices = store.discovery.starter_artists()
+        return {'tracks': tracks, 'choices': choices,
+                'ready': len(choices) >= MIN_ARTISTS and bool(tracks)}
 
     def _read(self, key, fetch):
         with self._lock:
@@ -202,4 +221,6 @@ class ArtistCatalog:
             related = artist(row)
             if related and related['browse_id'] != browse_id:
                 result.append({**related, 'because': choice['name']})
+        if self.trigger_refresh:
+            self.trigger_refresh()
         return result

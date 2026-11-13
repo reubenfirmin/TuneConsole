@@ -14,13 +14,13 @@ def build(ctx):
 
     @router.post('/home/growth/format')
     def choose_format(form=Depends(request_form)):
-        choice = form.get('format')
-        if choice not in home_preferences.PANELS:
-            return Response('Choose Long play, Mix tapes or On air.', status_code=422)
         state = account_growth.view(ctx.store, ctx.now_fn(), radio=ctx.radio.bootstrap())
-        if not all(state['ready_formats'].values()):
-            return Response('Wait until all three listening formats are ready.', status_code=409)
-        ctx.store.settings.set_setting('home_format', choice)
+        try:
+            home_preferences.choose(ctx.store, form.get('format'), ready_formats=state['ready_formats'])
+        except home_preferences.FormatNotReady as exc:
+            return Response(str(exc), status_code=409)
+        except ValueError as exc:
+            return Response(str(exc), status_code=422)
         return Response(status_code=204)
 
     return router

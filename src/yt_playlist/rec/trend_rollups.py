@@ -9,6 +9,12 @@ from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.rec import trend_payload, trend_statistics as stats
 
 
+def mark_viewed(store, month) -> None:
+    """Record that the recap for `month` has been viewed, so Home's nag card (home_prepared.py)
+    stops surfacing it."""
+    store.settings.set_setting("recap_viewed_month", month)
+
+
 def day_counts_source(store) -> list:
     """Prefer exact plays with GENERATED_GROUP quarantine; otherwise distinct account listen days.
 

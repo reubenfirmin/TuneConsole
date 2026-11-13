@@ -27,15 +27,10 @@ def build(ctx, views):
         if card not in (*home_cards._CARD_LABELS, "temporal"):
             return Response(status_code=404)
         now = now_fn()
-        cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
-        store.rec_ledger.refresh_card(card, cap, now)
-        store.rec_ledger.refresh_card("cards", cap, now)
-        result = home_prepared.cards(store, views.prepared(now), now, recommendations,
-                                     views.schedule, record=False)
-        proto = next((p for p in result.protos if p["lane"] == card), None)
+        proto = home_prepared.refresh_card_proto(store, views.prepared(now), now,
+            recommendations, views.schedule, card)
         if proto is None:
             return Response(status_code=204)
-        recommendations.record_modes([proto], result.epoch, now)
         response = templates.TemplateResponse(request, "_partials/generated_playlist.html",
                                                {"p": proto, "regenerating": True})
         recommendations.audit([proto], now, request.url.path)

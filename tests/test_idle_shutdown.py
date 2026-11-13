@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from yt_playlist.providers import enrichment
 from yt_playlist.web import app as web_app
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.core.activity import Activity, WorkClosing
@@ -174,7 +175,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
     app, monitor = idle_app
     from yt_playlist.web import jobs
     ctx = SimpleNamespace(updater=None, work=Activity(), sync_lock=threading.Lock(),
-        spotify_import_lock=threading.Lock(), jobs=SyncJobs(),
+        spotify_import_lock=threading.Lock(), jobs=SyncJobs(), client_provider=lambda: {},
         store=SimpleNamespace(tracks=SimpleNamespace()), templates=SimpleNamespace(),
         logger=SimpleNamespace(warning=lambda *a, **kw: None))
     app.state.ctx = ctx
@@ -200,7 +201,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
             assert scope == (1 if kind == "playlist_enrichment" else "BID")
             return pending
 
-        monkeypatch.setattr(jobs.enrichment, "load_config", lambda store: {})
+        monkeypatch.setattr(enrichment, "load_config", lambda store: {})
         monkeypatch.setattr(jobs.waterfall, "run_waterfall", blocking)
         if kind == "playlist_enrichment":
             ctx.store.tracks.tracks_for_waterfall = pending_for

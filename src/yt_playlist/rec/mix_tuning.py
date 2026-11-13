@@ -15,6 +15,16 @@ def card_epoch(store):
     return max(0, store.rec_ledger.card_views('cards') - 1) // cap
 
 
+def lean_for_target(current_weight, target):
+    """Pure: the temporary lean so permanent * lean == target, clamped to the genre lean range.
+
+    The fingerprint bar shows the EFFECTIVE multiplier (permanent x lean); storing the lean
+    rather than the target keeps long-term taste edits (the Taste Model page) untouched.
+    """
+    lean = target / current_weight if current_weight > 0 else target
+    return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, lean))
+
+
 def genre_active(store, request):
     return (request.get('epoch') == card_epoch(store)
             or (bool(store.settings.get_setting('home_mix_vibe'))

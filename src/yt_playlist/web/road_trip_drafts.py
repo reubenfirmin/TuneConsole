@@ -1,4 +1,6 @@
 """One application's Road Trip draft mutations and generation-scoped build jobs."""
+import hashlib
+import json
 import logging
 import random
 import threading
@@ -6,7 +8,10 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from yt_playlist.core.activity import activity_for
-from yt_playlist.rec import road_trip
+from yt_playlist.rec import measurement, road_trip
+from yt_playlist.rec import road_trip_candidates as candidates
+from yt_playlist.rec.road_trip_axes import canonical_genre
+from yt_playlist.util.matching import identity_key
 
 
 @dataclass(frozen=True)
@@ -40,10 +45,24 @@ class RoadTripDrafts:
             self._jobs[recipe_id] = job
         return job
 
-    def edit_recipe(self, save, client):
-        # The caller resolves metadata before entering this local transaction.
+    def save_recipe(self, recipe_id, name, own_pct, artists, genres, target_minutes, *,
+                    familiarity_pct, blacklist_genres, client):
+        """Resolve a genre for any newly added artist, save the recipe, then refresh its draft."""
+        artists, genres = list(artists), list(genres)
+        previous = self.store.road_trip.get_road_trip_recipe(recipe_id) if recipe_id is not None else None
+        previous_artists = {a.casefold() for a in (previous or {}).get("artists", [])}
+        known_genres = {canonical_genre(g) for g in genres}
+        for artist in artists:
+            if artist.casefold() in previous_artists:
+                continue
+            genre = canonical_genre(candidates.artist_genre(self.store, artist))
+            if genre and genre not in known_genres:
+                genres.append(genre)
+                known_genres.add(genre)
         with self._lock:
-            recipe_id = save()
+            recipe_id = self.store.road_trip.save_road_trip_recipe(
+                recipe_id, name, own_pct, artists, genres, target_minutes, self.now(),
+                familiarity_pct=familiarity_pct, blacklist_genres=blacklist_genres)
             state = self._read(recipe_id)
             job = None
             if state is not None:
@@ -65,7 +84,29 @@ class RoadTripDrafts:
         self._launch(job)
         return state
 
-    def mutate(self, recipe_id, change, client):
+    def tilt(self, recipe_id, party, axis, share, client):
+        """Set the requested percentage and proportionally rebalance the rest of its slider group."""
+        return self._mutate(recipe_id, client,
+            lambda state: road_trip.set_share(state, party, axis, share, self.store, self.now()))
+
+    def unpin(self, recipe_id, party, axis, client):
+        """Reset this genre or year group to follow the available tracks again."""
+        return self._mutate(recipe_id, client,
+            lambda state: road_trip.clear_share(state, party, axis, self.store, self.now()))
+
+    def reroll(self, recipe_id, index, client):
+        """Cross out one slot; the recipe fills it back in with something else of the same side."""
+        return self._mutate(recipe_id, client,
+            lambda state: road_trip.reroll_slot(state, self.store, index, self.now()))
+
+    def shuffle(self, recipe_id, client):
+        """A different draw from the same pool: no network, new seed."""
+        def change(state):
+            state["seed"] = random.randrange(1 << 30)
+            return road_trip.repick(state, self.store, self.now())
+        return self._mutate(recipe_id, client, change)
+
+    def _mutate(self, recipe_id, client, change):
         with self._lock:
             state = self._read(recipe_id)
             if state is None:
@@ -94,6 +135,30 @@ class RoadTripDrafts:
                 self.store.road_trip.replace_road_trip_draft(rid, state, self.now(),
                                                            expected_revision=revision)
             return {'recipe_id': rid, 'state': state}
+
+    def view_with_measurement(self, recipe_id=None):
+        """The draft to show, recording one impression per distinct shown content.
+
+        Progress polls of an unchanged draft are one offer, rather than new opportunities.
+        """
+        entry = self.view(recipe_id)
+        if entry is None:
+            return None
+        state, rid = entry['state'], entry['recipe_id']
+        tracks = road_trip.draft_tracks(state)
+        fingerprint = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:16]
+        request_id = f"road-trip:{rid}:{fingerprint}"
+        if not self.store.rec_ledger.has_served_request(request_id):
+            measurement.record_recommendations(self.store, "road_trip", [
+                {**track, "key": self.store.tracks.identity_key_for_video(track["video_id"]) or
+                                identity_key(track["title"], track["artist"]),
+                 "out_of_corpus": track.get("source") == "theirs"} for track in tracks],
+                self.now(), lane="draft", ranker="road-trip-mix", request_id=request_id,
+                provenance={"recipe_id": rid, "seed": state.get("seed"),
+                            "own_pct": state.get("own_pct"),
+                            "familiarity_pct": state.get("familiarity_pct"),
+                            "targets": state.get("targets"), "blacklist_genres": state.get("blacklist_genres")})
+        return {"tracks": tracks, "recipe_id": rid, "state": state}
 
     def delete(self, recipe_id, *, recipe=False):
         with self._lock:

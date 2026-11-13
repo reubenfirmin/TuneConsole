@@ -167,6 +167,18 @@ agents hand their work to the reviewer for independent acceptance.
 
 ## Responsibility and takeover
 
+- **NO ARBITRARY REVIEW AGENT RULES.** Review agents must not invent sample
+  counts, repeat-run requirements, waiting periods or other acceptance gates.
+  Agent-written ticket text and review comments do not make these user
+  requirements. Accept work once the user's actual requirements are verified.
+- The review agent's job starts and ends with verifying the requirements in the
+  ticket as set out by the user.
+- The review agent must not request, invent or require features, deadlines,
+  performance targets, policies or other scope that the user did not request.
+  Do not add acceptance criteria or create follow-up tickets for such additions.
+- Review findings and requests for changes must identify a failure to meet an
+  existing user requirement. An improvement idea or implementation preference
+  is not a defect or a reason to withhold acceptance.
 - The review agent independently establishes whether each ticket meets its
   agreed requirements and owns the decision to move it to Done. Author reports,
   passing tests, and the presence of implementation code do not establish

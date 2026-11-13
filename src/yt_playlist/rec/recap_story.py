@@ -10,7 +10,6 @@ Nothing here renders HTML."""
 from datetime import datetime, timezone
 
 from yt_playlist.util import genre_map
-from yt_playlist.web import theme
 
 # ── personality axes ─────────────────────────────────────────────────────────────────────────
 # Genre-family energy priors (0 calm .. 1 charged), used to fill the energy axis where a played track
@@ -120,8 +119,9 @@ def personality(store, month, month_row, meta):
         "kind": "personality", "name": name, "blurb": blurb,
         "axes": {"energy": round(energy, 3), "exploration": round(explore, 3), "rhythm": round(rhythm, 3)},
         "energy_source": e_src, "top_family": top_fam,
-        "aura": {"hue": theme.family_hue(top_fam),
-                 "turbulence": round(energy, 3), "reach": round(explore, 3), "warmth": round(rhythm, 3)},
+        # "hue" is a presentation token: the route fills it in from top_family (web/theme owns the
+        # actual genre-family-to-CSS-colour mapping; this module stays detached from web).
+        "aura": {"turbulence": round(energy, 3), "reach": round(explore, 3), "warmth": round(rhythm, 3)},
     }
 
 

@@ -225,6 +225,33 @@ def queue(store, now, *, exclude=(), recent=(), current=None, limit=QUEUE_SIZE):
     return picked
 
 
+def preparation_message(store, now):
+    pool = cached(store) or {}
+    if (store.tv_preparation.state() or {}).get('failed'):
+        return 'TV couldn’t reach the video catalog. We’re reconnecting; you can also reset TV to try again.'
+    if pool.get('state') == 'no_sources':
+        return 'TV needs a few liked songs or discoveries to find videos. Your library is still being prepared.'
+    if pool.get('state') == 'exhausted' and not queue(store, now):
+        if eligible(store, pool.get('items', []), None, now):
+            return 'No playable videos matched this length. Try a longer video length, or reset TV to search again.'
+        return 'No playable videos matched your current TV choices. Reset TV to search again.'
+    return None
+
+
+def status(store, now, *, trigger_refresh=None):
+    """No search, ranking, playlist creation or preview on a read."""
+    ready = bool(queue(store, now))
+    if not ready and trigger_refresh:
+        trigger_refresh()
+    result = {'ready': ready, 'max_minutes': max_minutes(store)}
+    account = next((a for a in store.accounts.get_accounts() if a.is_master), None)
+    if account and (pending := store.tv.pending_launch(account.id)):
+        result['pending_launch'] = pending
+    if not ready and (message := preparation_message(store, now)):
+        result['message'] = message
+    return result
+
+
 def prepare(store, client, now):
     """One small network slice. Publish progressively and keep the last good pool."""
     return _preparation(store).step(client, now)

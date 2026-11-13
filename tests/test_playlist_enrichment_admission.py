@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
+from yt_playlist.providers import enrichment
 from yt_playlist.web import jobs
 
 
@@ -22,9 +23,9 @@ def test_concurrent_playlist_requests_share_a_fully_initialized_job(monkeypatch)
             super().__setattr__(name, value)
 
     monkeypatch.setattr(jobs, 'SyncJob', PausedMetadataJob)
-    monkeypatch.setattr(jobs.enrichment, 'load_config', lambda store: {})
+    monkeypatch.setattr(enrichment, 'load_config', lambda store: {})
     monkeypatch.setattr(jobs.waterfall, 'run_waterfall',
-                        lambda store, tracks, config, **kw: waterfalls.append(tracks))
+                        lambda store, tracks, config, on_progress=None, **kw: waterfalls.append(tracks))
     registry = jobs.SyncJobs()
     ctx = SimpleNamespace(jobs=registry, work=SimpleNamespace(start_thread=workers.append),
         store=SimpleNamespace(tracks=SimpleNamespace(tracks_for_waterfall=lambda pid: [pid])))

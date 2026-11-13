@@ -80,3 +80,30 @@ def default_panel(store, *, albums_ready=False, mixes_ready=False):
         if format == 'mixes' and not mixes_ready and albums_ready:
             format = 'albums'
     return PANELS[format]
+
+
+def resolve_default_panel(store, growth):
+    """Which panel Home should open: the explicit/learned preference, if unlocked, else 'unlocks'."""
+    from yt_playlist.rec import account_growth
+
+    panel = default_panel(store, albums_ready=growth['ready_formats']['albums'],
+                          mixes_ready=growth['ready_formats']['mixes'])
+    preferred = PANELS[default_format(store)]
+    if account_growth.has_access(growth, preferred):
+        panel = preferred
+    if not account_growth.has_access(growth, panel):
+        panel = 'unlocks'
+    return panel
+
+
+class FormatNotReady(ValueError):
+    pass
+
+
+def choose(store, choice, *, ready_formats):
+    """Persist an explicit Home format choice once every listening format has arrived."""
+    if choice not in PANELS:
+        raise ValueError('Choose Long play, Mix tapes or On air.')
+    if not all(ready_formats.values()):
+        raise FormatNotReady('Wait until all three listening formats are ready.')
+    store.settings.set_setting('home_format', choice)

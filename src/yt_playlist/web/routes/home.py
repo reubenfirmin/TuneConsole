@@ -4,18 +4,15 @@ from contextlib import ExitStack
 from fastapi import APIRouter, Request
 
 from yt_playlist.core import updatecheck
-from yt_playlist.rec import account_growth, actions, artist_start, home_cache, home_preferences, home_prepared, mix_tuning, onboarding, rec_params, tv
+from yt_playlist.rec import account_growth, actions, artist_start, home_cache, home_preferences, home_prepared, mix_tuning, onboarding, tv
 from yt_playlist.rec.home_cards import _epoch
-from yt_playlist.rec.trend_statistics import last_complete_month
+from yt_playlist.rec.home_prepared import MENU_MAX_AGE_S, ROTATING_CARDS
 from yt_playlist.web.routes import home_artist_start, home_board, home_discovery, home_generation, home_growth, home_onboarding, home_tuning, home_tv
 from yt_playlist.web.routes.home_views import HomeViews
 from yt_playlist.web.home_timing import opening
 from yt_playlist.web.radio_projection import home_view as radio_home_view
 from yt_playlist.web.spotify_import import load_job as load_spotify_import_job
-
-ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover",
-                  "rediscover", "into_recently", "cards")
-MENU_MAX_AGE_S = 86400
+from yt_playlist.web.update_labels import update_instruction
 
 
 def build(ctx) -> APIRouter:
@@ -42,12 +39,8 @@ def build(ctx) -> APIRouter:
             store.activity_paused or getattr(store, '_evidence_maintenance', 0)
             or ctx.storage_maintenance.phase == 'schema')
         if not paused:
-            # Count the visit before pinning the content it will display.
             with timing.measure('visit_accounting'):
-                started = store.modes.epoch_started_at(_epoch(store, 'cards'))
-                refreshes = {'cards': rec_params.get_param(store, 'erosion_view_cap')} if (
-                    started is not None and now - started >= MENU_MAX_AGE_S) else {}
-                store.rec_ledger.record_home_visit(ROTATING_CARDS, now, refreshes=refreshes)
+                home_prepared.record_visit(store, now)
             with timing.measure('tuning_expiry'):
                 mix_tuning.expire(store, now)
         # Serve the committed menu while its evidence owner is busy. Keep the
@@ -62,17 +55,10 @@ def build(ctx) -> APIRouter:
     def render_home(request, store, views, now, timing):
         artists_required = artist_start.required(store)
         backend_update = updatecheck.update_nudge(store)
-        # Monthly recap ("Your <Month>"): once a calendar month is baked into the rollup, surface it as
-        # a nag card (gated on a completed first sync) that links into the full-screen reel. Shown
-        # until viewed or dismissed for that month; next month's recap re-shows. Expire a cached story
-        # at the next rollover even if the worker has not rebuilt yet, or recent listening data is missing.
-        _story = (store.rec_proposals.get_proposals("trend_rollups") or {}).get("story")
-        recap = ({"month": _story["month"], "month_name": _story["month_name"]}
-                 if (_story and _story.get("month") == last_complete_month(now)
-                     and store.settings.get_setting("last_sync_at") is not None
-                     and store.settings.get_setting("recap_viewed_month") != _story.get("month")
-                     and store.settings.get_setting("recap_dismissed_month") != _story.get("month"))
-                 else None)
+        if backend_update is not None:
+            command, link = update_instruction(backend_update["kind"])
+            backend_update = {**backend_update, "command": command, "link": link}
+        recap = home_prepared.recap_notice(store, now)
         # Opening Home reads the durable report from this same snapshot. The
         # notice's existing poll owns interrupted-import recovery; that write
         # must not hold up unrelated prepared music on the opening request.
@@ -80,14 +66,8 @@ def build(ctx) -> APIRouter:
         if spotify_library_job and spotify_library_job.get("dismissed"):
             spotify_library_job = None
         with timing.measure('radio_bootstrap'):
-            radio_bootstrap = ctx.radio.bootstrap(reader=store)
-        launch_id = request.query_params.get("radio_playlist")
-        if launch_id is not None:
-            source = store.playlists.get_playlist(int(launch_id)) if launch_id.isdecimal() and len(launch_id) < 16 else None
-            if source is not None:
-                radio_bootstrap["launchPlaylist"] = {"id": source.id, "title": source.title,
-                    "tracks": [track for track in store.charts.playlist_tracks_detail(source.id)
-                               if track.get("video_id") and track.get("available") != 0][:8]}
+            radio_bootstrap = home_prepared.with_launch_playlist(
+                store, ctx.radio.bootstrap(reader=store), request.query_params.get("radio_playlist"))
         radio_state = radio_bootstrap["state"]
         radio_tracks = ctx.radio.history_tracks(radio_state, reader=store) if radio_state.get('active') else []
         with timing.measure('prepared_menu'):
@@ -122,13 +102,7 @@ def build(ctx) -> APIRouter:
             story_schedule = ctx.rec_worker.trigger_story_refresh if ctx.rec_worker else lambda: None
             story_board = (home_discovery.story_context(store, now, story_schedule)
                 if not getting_started and account_growth.has_access(growth, 'recent') else None)
-        default_panel = home_preferences.default_panel(store,
-            albums_ready=growth['ready_formats']['albums'], mixes_ready=growth['ready_formats']['mixes'])
-        preferred = home_preferences.PANELS[home_preferences.default_format(store)]
-        if account_growth.has_access(growth, preferred):
-            default_panel = preferred
-        if not account_growth.has_access(growth, default_panel):
-            default_panel = 'unlocks'
+        default_panel = home_preferences.resolve_default_panel(store, growth)
         context = {
             'growth': growth,
             'album_board': album_board,

@@ -12,18 +12,9 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
     comparison_setting = "taste_comparison_baseline_v2"
-    checkpoint_setting = "taste_settings_checkpoint_v1"
-    param_keys = tuple(rec_params.SETTING_PREFIX + p.name for p in rec_params.PARAMS)
 
     def _checkpoint_context():
-        raw = store.settings.get_setting(checkpoint_setting)
-        checkpoint = json.loads(raw) if raw else None
-        if checkpoint:
-            checkpoint["saved_at_iso"] = datetime.fromtimestamp(checkpoint["saved_at"], timezone.utc).isoformat()
-        return {"checkpoint": checkpoint}
-
-    def _save_starting_point(replace=False):
-        store.rec_model.save_taste_settings(checkpoint_setting, param_keys, ctx.now(), replace=replace)
+        return {"checkpoint": rec_params.checkpoint(store)}
 
     # The three multiplier layers of a facet's chain, in the order the ranker composes them:
     # lasting bias (permanent weight x standing lean), the transient tilt, and their product.
@@ -350,12 +341,12 @@ def build(ctx) -> APIRouter:
 
     @router.post("/taste/checkpoint")
     def taste_save_checkpoint(request: Request):
-        _save_starting_point(replace=True)
+        rec_params.save_checkpoint(store, ctx.now(), replace=True)
         return templates.TemplateResponse(request, "_partials/taste_checkpoint.html", _checkpoint_context())
 
     @router.post("/taste/checkpoint/restore")
     def taste_restore_checkpoint():
-        store.rec_model.restore_taste_settings(checkpoint_setting, param_keys)
+        rec_params.restore_checkpoint(store)
         return _refresh()
 
     @router.get("/taste/viz/recent-sound")
@@ -511,37 +502,28 @@ def build(ctx) -> APIRouter:
         if axis and weight is not None:
             if axis.startswith("lane:") and axis.removeprefix("lane:") not in rec_params.LANE_NAMES:
                 raise HTTPException(status_code=400, detail="Unknown recommendation source")
-            _save_starting_point()
-            if axis.startswith("genre:"):     # genre weights use the [0,2] band so a family can be muted
-                store.rec_model.set_weight(axis, weight, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX, now=ctx.now())
-            else:
-                store.rec_model.set_weight(axis, weight, now=ctx.now())
+            rec_params.set_weight(store, axis, weight, ctx.now())
         return _stale()
 
     @router.post("/taste/param")
     def taste_param(request: Request, form=Depends(request_form)):
         name, val = form.get("name"), form.get("value")
         if name in rec_params.PARAMS_BY_NAME:
-            _save_starting_point()
-            if val not in (None, ""):
-                rec_params.set_param(store, name, val)
+            rec_params.checkpointed_set_param(store, name, val, ctx.now())
         return _stale()
 
     @router.post("/taste/reset-param")
     def taste_reset_param(request: Request, form=Depends(request_form)):
         name = form.get("name")
         if name in rec_params.PARAMS_BY_NAME:
-            _save_starting_point()
-            rec_params.reset_param(store, name)
+            rec_params.checkpointed_reset_param(store, name, ctx.now())
         return _stale()
 
     @router.post("/taste/reset-all")
     def taste_reset_all():
         # Everything back to defaults: lane + genre weights and every scalar knob. Full reload so the
         # sliders visibly snap back. Leaves vectors / feedback alone (they have their own controls).
-        _save_starting_point()
-        store.rec_model.reset_weights()
-        rec_params.reset_all_params(store)
+        rec_params.checkpointed_reset_all(store, ctx.now())
         return _refresh()
 
     def _autotune_status(request):
@@ -561,25 +543,24 @@ def build(ctx) -> APIRouter:
 
     @router.post("/taste/model-selection/restore")
     def restore_model_selection(request: Request):
-        run_id = store.settings.get_setting("rec_selection_active_run")
+        run_id = store.model_selection.active_run_id()
         if not run_id:
             raise HTTPException(status_code=409, detail="There is no model selection to restore.")
-        store.settings.set_setting("rec_selection_paused", "1")
-        store.settings.set_setting("rec_selection_restore", run_id)
+        store.model_selection.request_restore(run_id)
         ctx.rec_worker.trigger()
         return _autotune_status(request)
 
     @router.post("/taste/model-selection/pause")
     def pause_model_selection(request: Request):
-        store.settings.set_setting("rec_selection_paused", "1")
+        store.model_selection.request_pause()
         ctx.rec_worker.trigger()
         return _autotune_status(request)
 
     @router.post("/taste/model-selection/resume")
     def resume_model_selection(request: Request):
-        if store.settings.get_setting("rec_selection_restore"):
+        if store.model_selection.restore_pending():
             raise HTTPException(status_code=409, detail="Wait for the previous model to finish restoring.")
-        store.settings.set_setting("rec_selection_paused", "")
+        store.model_selection.request_resume()
         ctx.rec_worker.trigger()
         return _autotune_status(request)
 
@@ -604,8 +585,7 @@ def build(ctx) -> APIRouter:
 
     @router.post("/taste/reset-weights")
     def taste_reset_weights():
-        _save_starting_point()
-        store.rec_model.reset_weights()
+        rec_params.checkpointed_reset_weights(store, ctx.now())
         return _refresh()
 
     @router.post("/taste/clear-feedback")

@@ -38,9 +38,20 @@ def source_step(store, now, *, batch=32, seconds=2):
     return False
 
 
+def load_inputs(reader, rows):
+    """The source/override/truncation inputs `recordings` needs, by recording key."""
+    return reader.musical_profiles.recording_inputs([row[0] for row in rows])
+
+
+def load_masked_inputs(reader, rows):
+    """The source/override/truncation inputs `masked_recordings` needs, by recording key."""
+    return reader.musical_profiles.recording_inputs([row[0] for row in rows],
+                                                   source_scopes=('artist', 'release'))
+
+
 def recordings(reader, rows, *, inputs=None):
     if inputs is None:
-        inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
+        inputs = load_inputs(reader, rows)
     result = []
     for key, _revision, raw, _digest, _different in rows:
         check_stopping()
@@ -66,8 +77,7 @@ def masked_recordings(reader, rows, *, inputs=None):
     Prepared target profiles cannot be unmasked, so always start from inputs.
     """
     if inputs is None:
-        inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows],
-                                                        source_scopes=('artist', 'release'))
+        inputs = load_masked_inputs(reader, rows)
     masked, allowed = [], {}
     for key, revision, raw, digest, different in rows:
         content = json.loads(raw)

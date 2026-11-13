@@ -8,6 +8,57 @@ from yt_playlist.util.duration import parse_duration
 SETUP_COMPLETE = 'onboard_setup_complete'
 
 
+def starter_kind(store, radio_bootstrap):
+    """Which First-run starter experience Home should offer right now.
+
+    `radio_bootstrap` is a zero-arg callable so it's only invoked when the
+    preferred format is actually radio, matching the prior route's laziness.
+    """
+    from yt_playlist.rec import artist_start, home_preferences
+
+    if artist_start.required(store):
+        return {'kind': 'artists'}
+    preference = home_preferences.default_format(store)
+    if preference == 'albums':
+        return {'kind': 'albums'}
+    if preference == 'radio':
+        bootstrap = radio_bootstrap()
+        if (bootstrap['seeds'] and bootstrap.get('seedMenu')) or bootstrap['state'].get('active'):
+            return {'kind': 'radio', 'bootstrap': bootstrap}
+    return {'kind': 'library', 'radio_fallback': preference == 'radio'}
+
+
+def dismiss_lastfm_nudge(store, now):
+    store.settings.set_setting('lastfm_nudge_dismissed_at', str(now))
+
+
+def dismiss_takeout_nag(store, now):
+    store.settings.set_setting('takeout_nag_dismissed_at', str(now))
+
+
+def dismiss_identities_nudge(store):
+    store.settings.set_setting('identities_nudge_dismissed', '1')
+
+
+def dismiss_intro_nudge(store):
+    store.settings.set_setting('intro_dismissed', '1')
+
+
+def dismiss_recap_nudge(store, month):
+    if month:
+        store.settings.set_setting('recap_dismissed_month', month)
+
+
+def dismiss_update_nudge(store, version):
+    dismissed = version or store.settings.get_setting('latest_version_seen')
+    if dismissed:
+        store.settings.set_setting('backend_update_dismissed_version', dismissed)
+
+
+def complete(store):
+    store.settings.set_setting('onboard_dismissed', '1')
+
+
 def setup_completed(store) -> bool:
     """First-run completion survives disposable offers and model rebuilds.
 

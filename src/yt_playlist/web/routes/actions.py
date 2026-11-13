@@ -6,8 +6,6 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from yt_playlist.core.accounts import client_for
-
 from yt_playlist.util.action_kinds import (
     ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
     MOVE_IDENTITY, PLAN, REMOVE_TRACK, REMOVE_LOCAL_PLAYLIST, RENAME_PLAYLIST, UNDO, is_undoable)
@@ -149,22 +147,13 @@ def build(ctx) -> APIRouter:
     @router.get("/actions/{action_id}/deletions/{entry_index}/snapshot-report")
     def deletion_snapshot_report(action_id: int, entry_index: int):
         """Inspect saved intent even when sync has removed its local playlist row."""
-        action = store.actions.get_action(action_id)
-        entries = json.loads(action.undo_json or "{}").get("deletions", []) if action else []
-        if entry_index < 0 or entry_index >= len(entries):
-            raise HTTPException(404, "Saved deletion not found")
-        entry = entries[entry_index]
         try:
-            account_id, client = client_for(store, ctx.client_provider(), account_id=entry["identity"])
+            report = ctx.ops().deletion_snapshot_report(action_id, entry_index)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
-        owner = next((account for account in store.accounts.get_accounts() if account.id == account_id), None)
-        if owner is None:
-            raise HTTPException(409, "Saved account unavailable")
-        return JSONResponse({"account_id": account_id, "action_id": action_id,
-                             "entry_index": entry_index,
-                             "reads": client.deletion_read_report(entry["ytm"], owner.brand_account_id)},
-                            headers={"Cache-Control": "no-store"})
+        if report is None:
+            raise HTTPException(404, "Saved deletion not found")
+        return JSONResponse(report, headers={"Cache-Control": "no-store"})
 
     @router.post("/actions/{action_id}/recheck-deletion")
     def recheck_deletion(action_id: int):

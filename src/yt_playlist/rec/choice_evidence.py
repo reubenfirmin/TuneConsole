@@ -577,12 +577,14 @@ def replay(store, now, predictor=None):
     menus; a candidate proposing different menus needs controlled prospective exposure.
     No candidate is fitted or published into serving by this interface.
     """
+    from yt_playlist.rec import choice_bandit
     ledger = store.rec_ledger.evidence()
     offers = {offer["id"]: offer for offer in ledger.records("opportunity")
               if offer["observed_at"] <= now and offer['at'] <= now}
     events = sorted((event for event in ledger.records("response") if event["observed_at"] <= now and event['at'] <= now),
                     key=lambda event: (event["observed_at"], event["id"]))
     withdrawn = {event["details"].get("action_id") for event in events if event["kind"] == "withdraw"}
+    expanded_options = choice_bandit.expand_offers(store, offers)
     forecasts, visible, choices, episodes = {}, {}, set(), {}
     counts = {format: {"choices": 0, "scored": 0, "hits": 0, "unseen": 0,
                        "unscored": 0, "future_context": 0, "missing_context": 0,
@@ -606,8 +608,7 @@ def replay(store, now, predictor=None):
             except ValueError:
                 context = None
             valid = context is not None and context.get("at", offer["at"]) <= offer["at"]
-            options = (store.rec_ledger.expand_mix_options(offer['options'])
-                       if offer['format'] == 'mixes' else offer['options'])
+            options = expanded_options[oid] if offer['format'] == 'mixes' else offer['options']
             forecasts[oid] = ((predictor.predict(context, options) if predictor else offer["prediction"])
                               if valid else None)
             if not valid:

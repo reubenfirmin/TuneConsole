@@ -12,15 +12,13 @@ class Selection(BaseModel):
 
 def build(ctx):
     router = APIRouter()
-    catalog = artist_start.ArtistCatalog(ctx.client_provider)
-    store = ctx.store
 
-    def state():
-        choices = store.discovery.starter_artists()
-        songs = store.discovery.starter_tracks()
-        return {'selected': choices, 'songs': len(songs), 'minimum': artist_start.MIN_ARTISTS,
-                'complete': not artist_start.required(store),
-                'ready': len(choices) >= artist_start.MIN_ARTISTS and bool(songs)}
+    def trigger_refresh():
+        if ctx.rec_worker:
+            ctx.rec_worker.trigger_mode_refresh()
+
+    catalog = artist_start.ArtistCatalog(ctx.client_provider, trigger_refresh=trigger_refresh)
+    store = ctx.store
 
     @router.get('/home/onboard/artists/search')
     def search(q: str = ''):
@@ -31,7 +29,7 @@ def build(ctx):
 
     @router.get('/home/onboard/artists/state')
     def current_state():
-        return state()
+        return catalog.state(store)
 
     @router.get('/home/onboard/artists/suggestions')
     def suggestions():
@@ -48,17 +46,14 @@ def build(ctx):
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        if selection.selected and ctx.rec_worker:
-            ctx.rec_worker.trigger_mode_refresh()
-        return {**state(), 'related': related}
+        return {**catalog.state(store), 'related': related}
 
     @router.get('/home/onboard/artists/listen')
     def listen(request: Request):
-        tracks = store.discovery.starter_tracks()
-        choices = store.discovery.starter_artists()
-        ready = len(choices) >= artist_start.MIN_ARTISTS and bool(tracks)
+        context = catalog.listen_context(store)
         return ctx.templates.TemplateResponse(request, '_partials/artist_first_listen.html', {
-            'proto': home_cards._proto(store, 'artist_start', 'My first set', tracks, ctx.now_fn()) if ready else None,
-            'artists': choices})
+            'proto': home_cards._proto(store, 'artist_start', 'My first set', context['tracks'], ctx.now_fn())
+                     if context['ready'] else None,
+            'artists': context['choices']})
 
     return router

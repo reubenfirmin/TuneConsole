@@ -16,8 +16,8 @@ import time
 from collections.abc import Mapping
 
 from yt_playlist.core.metadata_observations import SubjectChanged
-from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
-from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz
+from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, activity_for
+from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz, enrichment
 from yt_playlist.providers import base, coverart
 from yt_playlist.core import provider_queries
 from yt_playlist.providers.enrich_queue import PriorityGate
@@ -404,3 +404,38 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
         return fully_attempted
     finally:
         _gate.leave(seq)
+
+
+def record_progress(ctx, job, event):
+    job.events.append(event)
+    if event.get("warning") or event.get("deferred") or event.get("type") == "err":
+        ctx.logger.warning("Enrichment job %s: %s", job.id, event.get("text"))
+
+
+def start_enrichment_job(ctx, job, created, load_tracks, *, on_progress=None):
+    """Start the waterfall over `load_tracks()` on a background thread, recording progress/errors/
+    completion on `job`, if `job` was freshly created (not rejoined). Shared by playlist, album
+    and single-track enrichment starts; the caller owns job creation/dedup. `load_tracks` is a
+    zero-arg callable so a rejoin (not created) never queries for a track list nothing will use."""
+    if not created:
+        return job
+    progress = on_progress or (lambda event: record_progress(ctx, job, event))
+
+    def run():
+        try:
+            run_waterfall(ctx.store, load_tracks(), enrichment.load_config(ctx.store), progress)
+        except Exception as e:  # noqa: BLE001
+            ctx.logger.exception("Enrichment job %s failed", job.id)
+            detail = str(e) or type(e).__name__
+            job.error = detail
+            job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
+        finally:
+            job.done = True
+
+    try:
+        activity_for(ctx).start_thread(run)
+    except BaseException as exc:
+        job.error = str(exc) or type(exc).__name__
+        job.done = True
+        raise
+    return job

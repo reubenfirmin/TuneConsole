@@ -10,8 +10,7 @@ from pathlib import Path
 
 from yt_playlist.core import fao
 
-from yt_playlist.providers.discogs import _artist_key
-from yt_playlist.util.matching import recording_title
+from yt_playlist.util.matching import artist_key, recording_title
 
 
 @lru_cache(maxsize=1)
@@ -25,7 +24,7 @@ def lookup(album):
     for entry in _entries():
         artists = [entry['artist'], *entry.get('artist_aliases', [])]
         titles = [entry['title'], *entry.get('title_aliases', [])]
-        if (_artist_key(album['artist']) in {_artist_key(artist) for artist in artists}
+        if (artist_key(album['artist']) in {artist_key(artist) for artist in artists}
                 and recording_title(album['title']) in {recording_title(title) for title in titles}):
             # A defensive copy: presentation code cannot mutate checked evidence.
             return json.loads(json.dumps(entry))

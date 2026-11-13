@@ -8,10 +8,9 @@ import logging
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.providers import release_notes, album_editorial, wikipedia
 from yt_playlist.rec import album_descriptions
-from yt_playlist.providers.discogs import _artist_key
 from yt_playlist.library.album_fetch import fetch_album
 from yt_playlist.library.album_catalog import remember_album
-from yt_playlist.util.matching import recording_title
+from yt_playlist.util.matching import artist_key, recording_title
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.util import net
 
@@ -54,10 +53,10 @@ def _artist_artwork(client, album):
         return None
     entry = album_editorial.lookup(album) or {}
     names = {album['artist'], entry.get('artist', ''), *entry.get('artist_aliases', [])} - {''}
-    keys = {_artist_key(name) for name in names}
+    keys = {artist_key(name) for name in names}
     check_cancellable_work()
     for row in (client.search(album['artist'], filter='artists') or [])[:5]:
-        if (_artist_key(row.get('artist') or '') not in keys
+        if (artist_key(row.get('artist') or '') not in keys
                 or row.get('resultType') not in (None, 'artist')):
             continue
         url = release_notes.public_url(best_thumb(row.get('thumbnails')))
@@ -74,10 +73,10 @@ def _matching_credits(store, album, release):
     if not fetched or any(not artist.get('name') for artist in fetched):
         return False
     known = store.artists.album_credits(album['browse_id'])
-    display = _artist_key(', '.join(artist['name'] for artist in fetched))
+    display = artist_key(', '.join(artist['name'] for artist in fetched))
     if not known:
-        return _artist_key(album['artist']) in {display, _artist_key(fetched[0]['name'])}
-    if len(known) == 1 and not known[0]['browse_id'] and _artist_key(known[0]['credit']) == display:
+        return artist_key(album['artist']) in {display, artist_key(fetched[0]['name'])}
+    if len(known) == 1 and not known[0]['browse_id'] and artist_key(known[0]['credit']) == display:
         # Legacy rows may contain one unresolved combined display credit. The
         # exact fetched release can supply structured credits without parsing it.
         return True
@@ -88,7 +87,7 @@ def _matching_credits(store, album, release):
         if expected['browse_id'] and provider_id:
             if expected['browse_id'] != provider_id:
                 return False
-        elif _artist_key(expected['credit']) != _artist_key(actual['name']):
+        elif artist_key(expected['credit']) != artist_key(actual['name']):
             return False
     # A discovered primary credit may be enriched with additional collaborators.
     return True

@@ -5,7 +5,53 @@ Permanent-weight nudges are gated by the registered theme_threshold.
 import math
 import time
 
-from yt_playlist.rec import mix_tuning, rec_params, transient
+from yt_playlist.rec import mix_tuning, rec_params, scoring, transient
+
+
+def feedback_axis(store, explicit_axis, reason, item):
+    """The single taste axis a suggestion-dismiss / why-chip should steer, derived from the
+    dismissed track (#43). An explicit axis wins (the Home why-chips, and the 'not this artist'
+    tile, which sends artist:<name>). Otherwise map the reason via the track's own metadata.
+    Returns None when there is nothing to steer (the track has no genre/decade/artist, or it is
+    not actually mainstream), so the caller no-ops gracefully rather than inventing a steer."""
+    if explicit_axis and explicit_axis.split(":", 1)[0] in ("genre", "era", "artist", "pop"):
+        return explicit_axis
+    if reason not in ("vibe", "era", "artist", "mainstream"):
+        return None
+    # Metadata and its canonical facet must come from one owned read. A
+    # synchronized metadata method alone does not protect the later raw genre
+    # lookup from borrowing another thread's uncommitted serving transaction.
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return feedback_axis(reader, explicit_axis, reason, item)
+    dao = store.rec_query
+    if reason == "vibe":
+        g = dao.track_genres([item]).get(item)
+        return f"genre:{store.genres.feature_axes([g])[g][0]}" if g else None
+    if reason == "era":
+        d = dao.track_decades([item]).get(item)
+        return f"era:{d}" if d else None
+    if reason == "artist":
+        a = dao.track_artists([item]).get(item)
+        return f"artist:{a}" if a else None
+    if reason == "mainstream":
+        pop = dao.track_popularity([item]).get(item)
+        band = scoring._pop_band(pop, rec_params.get_param(store, "pop_mainstream_min"))
+        return f"pop:{band}" if band else None
+    return None
+
+
+def mood_tilt(store, keys, signed, now):
+    """Transient mood feedback: tilt these tracks' recent-mood signal, then graduate it.
+
+    #85: fades on the wall clock (mood_halflife_d), reactive, never a permanent taste signal.
+    """
+    if not keys:
+        return
+    halflife_d = rec_params.get_param(store, "mood_halflife_d")
+    prune_before = now - 4 * halflife_d * 86400
+    store.rec_signals.record_mood(keys, signed, now, prune_before=prune_before)
+    graduate_moods(store, list(keys), signed, now, source=rec_params.get_param(store, "source_w_vibe"))
 
 
 def apply_ratings(store, states):
@@ -26,6 +72,16 @@ def apply_ratings(store, states):
                                source=rec_params.get_param(store, w_param), source_label="like")
 
 
+def graduation_factor(score, threshold, *, up_factor, down_factor):
+    """Pure: does this accumulated score cross the threshold, and by what nudge factor?
+
+    Returns None when nothing graduates yet.
+    """
+    if abs(score) < threshold:
+        return None
+    return up_factor if score > 0 else down_factor
+
+
 def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -> None:
     """Accumulate one facet's signed event into the graduation ledger; when its running total
     crosses theme_threshold, graduate it (a gentle permanent weight nudge, then a smooth reset).
@@ -33,9 +89,9 @@ def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -
     signal for the §1c graduation log. Model-only. NEVER suppresses."""
     threshold = rec_params.get_param(store, "theme_threshold")
     score = store.rec_signals.bump_theme(axis, signed * source, now)
-    if abs(score) >= threshold:
-        factor = (rec_params.get_param(store, "graduate_up") if score > 0
-                  else rec_params.get_param(store, "graduate_down"))
+    factor = graduation_factor(score, threshold, up_factor=rec_params.get_param(store, "graduate_up"),
+                               down_factor=rec_params.get_param(store, "graduate_down"))
+    if factor is not None:
         new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
                                         now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
         store.rec_signals.discount_theme(axis, math.copysign(threshold, score))
@@ -91,9 +147,9 @@ def graduate_slider_exposure(store, now) -> None:
             continue
         signed = math.copysign(magnitude * w_slider, value - 1.0)
         score = store.rec_signals.bump_theme(axis, signed, now)
-        if abs(score) >= threshold:
-            factor = (rec_params.get_param(store, "graduate_up") if score > 0
-                      else rec_params.get_param(store, "graduate_down"))
+        factor = graduation_factor(score, threshold, up_factor=rec_params.get_param(store, "graduate_up"),
+                                   down_factor=rec_params.get_param(store, "graduate_down"))
+        if factor is not None:
             halflife = rec_params.get_param(store, "weight_revert_halflife_d")
             old_perm = store.rec_model.get_weights(now=now, revert_halflife_d=halflife).get(axis, 1.0)
             new_perm = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
@@ -131,9 +187,9 @@ def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
         if magnitude == 0.0:
             continue
         score = store.rec_signals.bump_theme(axis, magnitude * w_play, now)    # plays only ever push up
-        if abs(score) >= threshold:
-            factor = (rec_params.get_param(store, "graduate_up") if score > 0
-                      else rec_params.get_param(store, "graduate_down"))
+        factor = graduation_factor(score, threshold, up_factor=rec_params.get_param(store, "graduate_up"),
+                                   down_factor=rec_params.get_param(store, "graduate_down"))
+        if factor is not None:
             new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
                                             now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
             store.rec_signals.discount_theme(axis, math.copysign(threshold, score))

@@ -296,9 +296,11 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
     n = max(4, int(rec_params.get_param(reader, 'modes_menu_size')))
     if mode_order is None:
         evidence_before = reader.modes.epoch_started_at(epoch)
-        chosen = mode_selection.select_modes(reader, modes, leans, epoch, n=n,
+        now_posterior = layers.now_mode_posterior(reader, now)
+        chosen = mode_selection.select_modes(modes, leans, epoch, n=n,
             stats=mode_eval.mode_bandit_stats(reader, before=evidence_before, now=now),
-            now_posterior=layers.now_mode_posterior(reader, now))
+            now_posterior=now_posterior,
+            now_gain=rec_params.get_param(reader, 'now_gain') if now_posterior else None)
     else:
         available = {mode['mode_id'] for mode in modes}
         chosen = [mode for mode in mode_order if mode in available][:n]

@@ -54,11 +54,7 @@ def album_context(ctx, views, now):
     store, writer = views.store, views.writer
     prepared = album_choices.load(store, now, views.schedule)
     payload = prepared or {}
-    playing = ctx.bridge.now_playing or {}
-    current = playing.get("album_browse_id")
-    if not current and playing.get("playlist_ytm_id"):
-        source = store.collection.playback_source(playing["playlist_ytm_id"], playing.get("video_id"))
-        current = source.get("browse") if source and source["kind"] == "album" else None
+    current = album_choices.current_browse_id(store, ctx.bridge.now_playing or {})
     epoch = _epoch(store, "album_choices")
     comparison = payload.get('context', {}).get('comparison')
     if comparison and not getattr(writer, '_read_only', False) and not writer.activity_paused:
@@ -66,8 +62,7 @@ def album_context(ctx, views, now):
         if writer.rec_proposals.get_proposals('model_album_assignment') != held:
             writer.rec_proposals.put_proposals('model_album_assignment', held, now)
     tuning = album_tuning.state(store, now)
-    refresh = store.rec_proposals.get_proposals('album_menu_refresh') or {}
-    excluded = refresh.get('exclude', []) if refresh.get('epoch') == epoch else []
+    excluded = album_choices.excluded_from_refresh(store, epoch)
     pool, items, policy = album_choices.selection(store, payload.get('items', []), now,
         tuning['values'], epoch, tuning['genres'], exclude=excluded, current=current)
     policy['temporary_until'] = now + tuning['remaining'] if tuning['remaining'] else None
@@ -133,8 +128,7 @@ def build(ctx, views):
             payload = album_choices.load(store, now) or {}
             tuning = album_tuning.state(store, now)
             epoch = _epoch(store, 'album_choices')
-            refresh = store.rec_proposals.get_proposals('album_menu_refresh') or {}
-            excluded = refresh.get('exclude', []) if refresh.get('epoch') == epoch else []
+            excluded = album_choices.excluded_from_refresh(store, epoch)
             _, items, _ = album_choices.selection(store, payload.get('items', []), now,
                 tuning['values'], epoch, tuning['genres'], exclude=excluded)
             ids = [item['browse_id'] for item in items]
