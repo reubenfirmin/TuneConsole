@@ -5,7 +5,6 @@ import sqlite3
 import pytest
 
 from tests.genre_catalog_support import bound_catalog
-from yt_playlist.core import entity_names
 from yt_playlist.core.config import AccountConfig
 from yt_playlist.core.migrations import runner
 from yt_playlist.core.store import Store
@@ -43,7 +42,7 @@ def admitted_installed(request, tmp_path, _admitted_installed_schema):
         store.conn.close()
 
 
-@pytest.fixture(params=[79, 93, 102, 107])
+@pytest.fixture(params=[107])
 def installed(request, tmp_path, _pristine_installed_schema):
     path = tmp_path / 'installed.db'
     setup = Store(path)
@@ -66,7 +65,7 @@ def installed(request, tmp_path, _pristine_installed_schema):
 
 
 
-@pytest.fixture(params=[79, 93, 102, 107])
+@pytest.fixture(params=[107])
 def consumer_installed(request, tmp_path, monkeypatch, _bounded_installed_schema):
     """Exact completed SQL beneath publication tests, without startup admission.
 
@@ -99,7 +98,7 @@ def consumer_installed(request, tmp_path, monkeypatch, _bounded_installed_schema
         store.conn.close()
 
 
-@pytest.mark.parametrize('admitted_installed', [79, 93, 107], indirect=True)
+@pytest.mark.parametrize('admitted_installed', [107], indirect=True)
 def test_admitted_publication_inputs_keep_pinned_reads_and_real_write_guards(
         admitted_installed, _admitted_installed_schema):
     store, version = admitted_installed
@@ -135,7 +134,6 @@ def test_account_reconciliation_keeps_physical_ids_and_rolls_back(installed):
     assert store.accounts.get_master_account().id == main
     with pytest.raises(ValueError, match='retargeted'):
         store.accounts.upsert_account('Brand', 'new.json', 'another-remote-account', True)
-    assert entity_names.owner(store.conn, 'accounts').table == 'main.' + table
     assert [tuple(row) for row in store.conn.execute(f'SELECT id,label FROM main.{table} ORDER BY id')] == [
         (main, 'Brand'), (brand, 'Main')]
 

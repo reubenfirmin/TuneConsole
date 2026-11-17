@@ -380,8 +380,11 @@ def test_home_has_no_journal_and_hidden_charts_stories_do_not_count(prepared_cha
         page.clock.fast_forward(1800)
     assert any('/charts/listening-impressions' in url for url in requests)
     assert not any('/charts/listening-data' in url or '/charts/listening-chunk' in url for url in requests)
-    page.locator('.chart-views').get_by_role('button',name='Listening analytics',exact=True).click()
-    expect(page.locator('.lp-summary')).to_be_visible()
+    with page.expect_response('**/charts/listening-data', timeout=20_000) as manifest:
+        page.locator('.chart-views').get_by_role('button',name='Listening analytics',exact=True).click()
+    assert manifest.value.status == 200
+    # The worker still has to load and aggregate the prepared chunks.
+    expect(page.locator('.lp-summary')).to_be_visible(timeout=20_000)
     page.go_back()
     expect(page.locator('.le-lead')).to_be_visible()
 

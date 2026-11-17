@@ -13,7 +13,7 @@ from tests.test_home_other_genres import genre_bundles, offered
 from tests.test_home_tuning import home_clients, prepare_tuning_home
 from tests.musical_support import prepare_profiles, prepare_vibes
 from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.recommendation_support import publish_bundles, seed_library_favorites, seed_publication_subjects
 from tests.store_fixture_support import (bounded_consumer_schema, initialize_consumer,
                                          mock_snapshot_coordinator)
 from yt_playlist.providers.base import MetadataObservation
@@ -89,7 +89,10 @@ def select_sounds(pools, preset, monkeypatch):
     monkeypatch.setattr(vibe_pools, 'eligibility_inputs', lambda *_args, **_kwargs:
                         (set(), owned, discovered, {}, {}, 3600, set(), axes))
     reader = SimpleNamespace(settings=SimpleNamespace(get_setting=lambda _key: None),
-                             musical_profiles=SimpleNamespace(by_keys=lambda _keys: {}))
+                             musical_profiles=SimpleNamespace(by_keys=lambda _keys: {}),
+                             rec_candidates=SimpleNamespace(comfort_candidates=
+                                 lambda now, *, keys, limit, **kwargs:
+                                     [item for item in pools['comfort'] if item['key'] in keys][:limit]))
     bundles = {'_meta': {'comfort_pool': 100},
                '_vibes': {'version': home_vibe.VERSION, 'pools': {preset: pools}}}
     return vibe_pools.assemble(reader, 1000, preset, bundles=bundles)
@@ -386,6 +389,7 @@ def seed_sounds(store, *, by_mode=False):
                       for lane in mode_surfaces.CARD_SURFACES}
     seed_publication_subjects(store, [item for items in bundles['all'].values() for item in items],
                               discoveries=[item['key'] for item in bundles['all']['fresh']])
+    seed_library_favorites(store, bundles['all']['comfort'])
     with store.conn:
         store.conn.executemany('UPDATE recordings SET energy=?,bpm=?,mood_relaxed=? WHERE identity_key=?',
                                audio_rows)
@@ -523,6 +527,7 @@ def genre_vibe_candidates(vibe_http_schema):
             track['video_id'] = track['key']
         fresh = bundles['0']['fresh']
         seed_publication_subjects(source, tracks.values(), discoveries=[track['key'] for track in fresh])
+        seed_library_favorites(source, bundles['all']['comfort'])
         profile = musical_character.compact(musical_profiles.resolve([], selected={
             'energy': .7, 'mood_relaxed': .3, 'mood_happy': .7}))
         profiles = {key: profile for key in tracks}

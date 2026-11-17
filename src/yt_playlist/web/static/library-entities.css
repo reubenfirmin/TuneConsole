@@ -227,24 +227,22 @@
   flex-wrap: wrap;
   align-items: center;
   gap: .45rem .65rem;
-  margin-block-end: .85rem;
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+  margin: 0;
   color: var(--light-source);
   font-size: var(--type-sm);
   line-height: 1.4;
 }
-.page-playlist .release-hero {
-  align-items: stretch;
-}
-.page-playlist .release-hero .pl-headmain {
-  justify-content: flex-start;
-}
 .page-playlist .release-hero h1 {
-  max-width: 28ch;
+  max-width: none;
+  margin: 0;
   font-size: clamp(2rem, 3vw, 3rem);
   line-height: 1.08;
   letter-spacing: -.035em;
   overflow-wrap: anywhere;
-  text-wrap: balance;
+  text-wrap: wrap;
 }
 .page-playlist .release-hero :is(.pl-type-badge, .pl-version, .pl-vibe-badge) {
   display: inline-block;
@@ -314,17 +312,48 @@
   box-shadow: 0 5px 16px color-mix(in srgb, var(--shadow-ink) 34%, transparent);
   flex-basis: auto;
 }
-/* Tools occupy real layout space, including when metadata wraps or text grows. */
+/* Only the metadata shares a row with tools. The title and playback span the
+   artwork, with spare height kept around the title rather than below playback. */
 .page-playlist .release-hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(min-content, 1fr) auto;
+  align-items: stretch;
   gap: 1rem;
 }
-.page-playlist .release-hero .pl-headmain { width: 100%; }
+.page-playlist .release-hero .pl-headmain {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  grid-template-columns: subgrid;
+  grid-template-rows: subgrid;
+  width: 100%;
+}
+.page-playlist .release-hero #pl-title {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-row: 1 / 3;
+  grid-template-columns: subgrid;
+  grid-template-rows: subgrid;
+  min-width: 0;
+}
+.page-playlist .release-hero .pl-title-main {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  align-self: center;
+  min-width: 0;
+}
+.page-playlist .release-hero .pl-actions {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  margin: 0;
+}
 .page-playlist .release-hero .head-tools {
   position: relative;
   inset: auto;
-  align-self: start;
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
   max-width: 100%;
   flex-wrap: wrap;
 }
@@ -384,9 +413,6 @@
   :is(.page-playlist, .page-album, .page-track) .release-hero .pl-headmain {
     width: 100%;
   }
-  .page-playlist .release-hero { grid-template-columns: minmax(0, 1fr); }
-  .page-playlist .release-hero .pl-headmain { grid-column: 1 / -1; grid-row: 2; }
-  .page-playlist .release-hero .head-tools { grid-column: 1; grid-row: 1; justify-self: end; }
 }
 @media (max-width: 32rem) {
   .artist-hero {

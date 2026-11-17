@@ -13,7 +13,7 @@ from yt_playlist.rec.graduation import feedback_axis as _feedback_axis
 from yt_playlist.web.app import create_app
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('http', [False, True], ids=['resolver', 'http'])
 def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch, http):
     store, _ = installed
@@ -81,7 +81,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
         assert axis == 'genre:pop'
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_feedback_reuses_the_callers_owned_transaction(installed):
     store, _ = installed
     entry = store.tracks.upsert_track('owned-feedback', 'Owned song', 'Artist', None, 200)

@@ -7,6 +7,7 @@ import pytest
 from yt_playlist.core import audio_annotation_files
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.providers.base import MetadataObservation
+from tests.file_custody_support import expire_file
 
 
 def test_annotation_publication_is_safe_from_collection_without_holding_a_sql_writer(
@@ -19,7 +20,7 @@ def test_annotation_publication_is_safe_from_collection_without_holding_a_sql_wr
 
     def collecting(*args, **kwargs):
         assert not store.conn.in_transaction
-        filename, _digest = kwargs['reference']
+        filename, _digest, _size = kwargs['reference']
         assert audio_annotation_files.collect_orphans(other) == 0
         assert Path(filename).is_file()
         return publish(*args, **kwargs)
@@ -44,8 +45,12 @@ def test_failed_annotation_sql_keeps_the_previous_judgment_and_retry_advances_on
     assert not store.conn.in_transaction
     assert store.audio_vibes.feedback('run') == previous
     assert store.conn.execute('SELECT COUNT(*) FROM audio_annotations').fetchone()[0] == 1
-    # The failed publication releases its file lease; its unreferenced bytes can
-    # expire independently, while the previous judgment remains readable.
+    pending = store.conn.execute("SELECT id FROM annotation_file_writes WHERE file_status='pending'").fetchone()[0]
+    filename = audio_annotation_files.record_path(store.audio_vibes.annotation_files.root, pending)
+    assert audio_annotation_files.collect_orphans(store.conn, memory_key=store._evidence_key) == 0
+    expire_file(filename)
+    # A failed native publication retains its ordinary expiry grace; once old,
+    # it expires independently of the readable previous judgment.
     assert audio_annotation_files.collect_orphans(store.conn, memory_key=store._evidence_key) == 1
     store.conn.execute('DROP TRIGGER fail_annotation_seal')
     store.audio_vibes.save_feedback('run', [], ['relax'], TAXONOMY_VERSION, {'new': True}, 4)
@@ -61,7 +66,7 @@ def test_an_outdated_sample_receipt_plan_cannot_insert_over_a_committed_receipt(
     observed = repository.sample_conflicts('run', 'sample')
     store.audio_vibes.save_sample(sample, 1)
     with pytest.raises(ValueError, match='already been saved'):
-        repository.save_sample(sample, 'outdated-file-reference', 2, expected=observed)
+        repository.reserve_sample(sample, store.audio_vibes.sample_files.reference(sample), 2, expected=observed)
     assert store.conn.execute('SELECT COUNT(*) FROM sample_attributes').fetchone()[0] == 1
     assert store.audio_vibes.samples('run') == [sample]
 

@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_metadata_evidence_migration import additive_catalog, catalog, capture, mutate
-from yt_playlist.core import metadata_attempts as attempts, metadata_legacy as legacy
+from tests.metadata_catalog_support import catalog, capture, mutate
+from yt_playlist.core import metadata_attempts as attempts
 from yt_playlist.core.activity import WorkBudgetExceeded
 
 
@@ -54,25 +54,100 @@ def test_one_result_supplies_attempt_and_current_fields_without_copying_its_valu
     assert 'fields_json' not in {row[1] for row in store.conn.execute('PRAGMA table_info(provider_attempts)')}
 
 
-def test_legacy_attempt_and_state_keep_separate_evidence_without_guessing_a_matching_delivery(additive_catalog):
-    store = additive_catalog
-    _, recording, _, _ = capture(store, fields={})
-    with store.conn:
-        old = store.conn.execute('INSERT INTO provider_attempts(recording_id,input_video_id,provider,at,status,fields_json) '
-            "VALUES (?,'video','a',10,'found',?)", (recording, json.dumps({'genre': 'Jazz', 'isrc': ['ONE']}))).lastrowid
-        store.conn.execute('INSERT INTO enrichment_provider_state VALUES (?,\'a\',1,10,\'found\',?,0,0,\'\')',
-                           (recording, json.dumps({'genre': 'Jazz', 'bpm': 120})))
-    mutate(store, lambda: legacy.backfill_operational(store.conn))
-    assert attempts.attempt_fields(store.conn, old) == {'genre': 'Jazz', 'isrc': ['ONE']}
-    assert attempts.state_fields(store.conn, recording, 'a') == {'genre': 'Jazz', 'bpm': 120}
-    observations = store.conn.execute("SELECT * FROM metadata_observations WHERE origin IN ('legacy_attempt','legacy_state')").fetchall()
-    assert len(observations) == 3 and len({row['delivery_id'] for row in observations}) == 2
-    assert all(row['entry_id'] is None and row['recording_id'] == recording and row['field_scope'] == 'legacy_recording'
-               for row in observations)
-    assert attempts.completed_genres(store.conn, recording) == {'a': 'Jazz'}
-    before = list(store.conn.iterdump())
-    mutate(store, lambda: legacy.backfill_operational(store.conn))
-    assert list(store.conn.iterdump()) == before
+def test_artist_credits_survive_retry_reuse_and_cycle_reset_with_original_delivery(catalog):
+    store = catalog
+    entry, recording, _, _ = capture(store, fields={})
+    credits = [{'name': 'Artist', 'provider': 'musicbrainz', 'provider_id': 'artist-id'}]
+    first, _ = mutate(store, lambda: attempts.record(store.conn, entry, 'a',
+        {'artist_credits': credits, 'genre': 'Jazz'}, cycle=1, run_id='credits', now=10))
+    delivery = store.conn.execute('SELECT delivery_id FROM provider_attempts WHERE id=?', (first,)).fetchone()[0]
+    assert attempts.attempt_fields(store.conn, first)['artist_credits'] == credits
+    assert attempts.state_fields(store.conn, recording, 'a')['artist_credits'] == credits
+    assert store.conn.execute('SELECT delivery_id FROM provider_state_credits').fetchone()[0] == delivery
+    mutate(store, lambda: attempts.record(store.conn, entry, 'a', {'bpm': 120},
+        cycle=1, retry=True, run_id='later', now=20))
+    assert attempts.state_fields(store.conn, recording, 'a') == {
+        'artist_credits': credits, 'genre': 'Jazz', 'bpm': 120}
+    assert mutate(store, lambda: attempts.record(store.conn, entry, 'a',
+        {'artist_credits': credits, 'genre': 'Jazz'}, cycle=1, run_id='credits', now=30)) == (first, False)
+    mutate(store, lambda: attempts.record(store.conn, entry, 'b', {'artist_credits': credits},
+        cycle=1, run_id='other', now=31))
+    wrong = store.conn.execute("SELECT delivery_id FROM provider_state_credits WHERE provider='b'").fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError, match='different subject or provider'):
+        mutate(store, lambda: store.conn.execute(
+            "UPDATE provider_state_credits SET delivery_id=? WHERE provider='a'", (wrong,)))
+    mutate(store, lambda: attempts.record(store.conn, entry, 'a', {}, cycle=2, run_id='reset', now=40))
+    assert attempts.state_fields(store.conn, recording, 'a') == {}
+    assert attempts.attempt_fields(store.conn, first)['artist_credits'] == credits
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_provider_credit_upgrade_is_additive_and_preserves_applied_history(catalog):
+    from yt_playlist.core.migrations import regular
+
+    conn = catalog.conn
+    entry, _, _, _ = capture(catalog, fields={})
+    original, _ = mutate(catalog, lambda: attempts.record(conn, entry, 'a', {'bpm': 120},
+                                                        cycle=1, run_id='before-upgrade', now=10))
+    tables = ('schema_migrations', 'provider_attempts', 'provider_attempt_fields', 'provider_state_fields')
+    before = {table: list(map(tuple, conn.execute('SELECT * FROM ' + table))) for table in tables}
+    with conn:
+        conn.execute('DROP TABLE provider_state_credits')
+        conn.execute('DROP TABLE provider_attempt_credits')
+        conn.execute('DELETE FROM schema_changes WHERE version=57')
+    history = list(map(tuple, conn.execute('SELECT * FROM schema_changes')))
+    regular.migrate(conn, clock=lambda: 20)
+    assert {table: list(map(tuple, conn.execute('SELECT * FROM ' + table))) for table in tables} == before
+    assert list(map(tuple, conn.execute('SELECT * FROM schema_changes WHERE version<57'))) == history
+    assert attempts.attempt_fields(conn, original) == {'bpm': 120}
+    assert conn.execute('SELECT count(*) FROM provider_state_credits').fetchone()[0] == 0
+    mutate(catalog, lambda: attempts.record(conn, entry, 'a', {'artist_credits': []},
+                                           cycle=1, run_id='after-upgrade', now=21))
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_batched_import_selections_keep_overrides_and_roll_back_foreign_evidence(catalog):
+    from yt_playlist.core import metadata
+
+    store = catalog
+    entry = store.tracks.upsert_track('batch', 'Song', 'Artist', 'Old album', 200)
+    store.metadata_choices.choose(entry, 'album', 'My album', now=1)
+    fields = {'album': 'New album', 'duration_s': 201}
+    _, evidence = store.metadata_choices.capture_fields(entry, 'youtube', fields,
+        purpose='batch-test', body={'fields': fields}, now=2)
+    store.metadata_choices.select_fields(entry, fields, 'youtube', now=2, observations=evidence)
+    track = store.tracks.track_detail('batch')
+    assert track['album'] == 'My album' and track['duration_s'] == 201
+    assert metadata.selected_sources(store.conn, entry, fields) == {'album': 'youtube', 'duration_s': 'youtube'}
+    other = store.tracks.upsert_track('foreign', 'Other', 'Artist', duration_s=205)
+    _, foreign = store.metadata_choices.capture_fields(other, 'youtube', {'duration_s': 205},
+        purpose='foreign-test', body={'duration_s': 205}, now=3)
+    _, valid = store.metadata_choices.capture_fields(entry, 'youtube', {'album': 'Uncommitted album'},
+        purpose='rollback-test', body={'album': 'Uncommitted album'}, now=3)
+    with pytest.raises(ValueError, match='different subject'):
+        store.metadata_choices.select_fields(entry, {'album': 'Uncommitted album', 'duration_s': 205},
+            'youtube', now=3, observations={**valid, **foreign})
+    store.metadata_choices.choose(entry, 'album', withdraw=True, now=4)
+    assert store.tracks.track_detail('batch')['album'] == 'New album'
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_waterfall_accepts_artist_credits_and_reuses_the_completed_provider(catalog):
+    from tests.test_waterfall import FakeProv, _cfg
+    from yt_playlist.providers.waterfall import run_waterfall
+
+    store = catalog
+    entry, _, _, _ = capture(store, fields={})
+    track = dict(store.tracks.track_for_waterfall(entry))
+    provider = FakeProv('musicbrainz', {'Song': {'genre': 'Jazz', 'artist_credits': [
+        {'name': 'Artist', 'id': 'mb-artist', 'provider': 'musicbrainz'}]}})
+    for run, reuse in (('first', False), ('reuse', True)):
+        events = []
+        assert run_waterfall(store, [track], _cfg(('musicbrainz', True)), events.append,
+            registry={'musicbrainz': provider}, run_id=run, now_fn=lambda: 10, reuse_completed=reuse) == [entry], '\n'.join(
+                event.get('text', '') for event in events)
+    assert provider.calls == ['Song']
+    assert store.conn.execute('SELECT count(*) FROM provider_attempt_credits').fetchone()[0] == 1
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -88,28 +163,6 @@ def test_provider_state_rejects_cross_provider_evidence_and_cannot_admit_a_bare_
     with pytest.raises(sqlite3.IntegrityError):
         mutate(store, lambda: store.conn.execute("UPDATE provider_state_fields SET observation_id=NULL WHERE provider='a'"))
     assert attempts.state_fields(store.conn, recording, 'a') == {'bpm': 120}
-
-
-def test_migrated_provider_state_can_refresh_without_deleting_its_retained_result(additive_catalog):
-    store = additive_catalog
-    _, recording, _, _ = capture(store, fields={})
-    repo = store.enrichment_state
-    repo._configure_providers({'a': {'fingerprint': 'first', 'status': 'available'}})
-    with store.conn:
-        store.conn.execute('INSERT INTO enrichment_provider_state VALUES (?,\'a\',1,10,\'found\',?,0,0,\'\')',
-                           (recording, json.dumps({'genre': 'Jazz', 'bpm': 120})))
-    mutate(store, lambda: legacy.backfill_operational(store.conn))
-    assert attempts.state_fields(store.conn, recording, 'a') == {'genre': 'Jazz', 'bpm': 120}
-    before = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')))
-              for table in ('metadata_deliveries', 'metadata_observations', 'metadata_legacy_records')}
-    current = {'fingerprint': 'second', 'status': 'available'}
-    repo._configure_providers({'a': current})
-    assert repo._advance_provider_refresh('a', current)
-    assert not store.conn.execute('SELECT 1 FROM enrichment_provider_state').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM provider_state_fields').fetchone()
-    for table, rows in before.items():
-        assert list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2'))) == rows
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_result_consumers_share_exact_evidence_and_identifier_lineage(catalog):
@@ -200,33 +253,6 @@ def test_waterfall_reuses_completed_answers_without_manufacturing_deliveries(cat
     assert store.tracks.get_track_enrichment(entry)[0] == 'Jazz'
 
 
-def test_reuse_of_legacy_recording_state_keeps_its_original_missing_item_scope(additive_catalog):
-    store = additive_catalog
-    entry, recording, _, _ = capture(store, fields={})
-    with store.conn:
-        store.conn.execute("INSERT INTO enrichment_provider_state VALUES (?,'a',1,10,'found',?,0,0,'')",
-                           (recording, json.dumps({'genre': 'Jazz', 'year': '2000'})))
-    mutate(store, lambda: legacy.backfill_operational(store.conn))
-    original = dict(store.conn.execute("SELECT * FROM metadata_observations WHERE origin='legacy_state' AND field='genre'").fetchone())
-    deliveries = store.conn.execute('SELECT count(*) FROM metadata_deliveries').fetchone()[0]
-    observations = store.enrichment.reuse_provider_fields(entry, 'a', {'genre': 'Jazz', 'year': '2000'},
-                                                         providers=('a',), now=20)
-    assert set(observations) == {'genre'}
-    derived = store.conn.execute('SELECT * FROM metadata_observations WHERE id=?', (observations['genre'],)).fetchone()
-    assert derived['origin'] == 'selection_transfer' and derived['derived_from_observation_id'] == original['id']
-    assert derived['entry_id'] == entry and derived['recording_id'] == recording
-    assert original['entry_id'] is None and original['field_scope'] == 'legacy_recording'
-    assert dict(store.conn.execute('SELECT * FROM metadata_observations WHERE id=?', (original['id'],)).fetchone()) == original
-    assert store.conn.execute('SELECT count(*) FROM metadata_deliveries').fetchone()[0] == deliveries
-    assert store.conn.execute('SELECT genre FROM recordings WHERE id=?', (recording,)).fetchone()[0] == 'Jazz'
-    assert not store.conn.execute("SELECT 1 FROM entry_metadata_selections WHERE entry_id=? AND field='mb_year'", (entry,)).fetchone()
-    count = store.conn.execute('SELECT count(*) FROM metadata_observations').fetchone()[0]
-    assert store.enrichment.reuse_provider_fields(entry, 'a', {'genre': 'Jazz', 'year': '2000'},
-                                                  providers=('a',), now=30) == observations
-    assert store.conn.execute('SELECT count(*) FROM metadata_observations').fetchone()[0] == count
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
 def test_genre_refresh_selects_the_existing_alternative_observation(catalog):
     from yt_playlist.core import metadata
     store = catalog
@@ -246,7 +272,8 @@ def test_genre_refresh_selects_the_existing_alternative_observation(catalog):
                               (recording,)).fetchone()[0] == expected
     assert tuple(store.conn.execute('SELECT (SELECT count(*) FROM metadata_observations),'
                                      '(SELECT count(*) FROM metadata_deliveries)').fetchone()) == counts
-    assert store.conn.execute('SELECT genre FROM recordings WHERE id=?', (recording,)).fetchone()[0] == 'Rock'
+    from yt_playlist.core import genre_classifications
+    assert genre_classifications.read(store.conn, 'recordings', recording) == 'Rock'
 
 
 def test_coverage_refresh_keeps_unchanged_provider_candidate_evidence(catalog):
@@ -273,32 +300,4 @@ def test_coverage_refresh_keeps_unchanged_provider_candidate_evidence(catalog):
     assert list(map(tuple, store.conn.execute("SELECT o.field,o.id FROM metadata_conflict_candidates c "
         "JOIN metadata_observations o ON o.id=c.observation_id JOIN metadata_deliveries d ON d.id=o.delivery_id "
         "WHERE d.provider='a' ORDER BY o.field"))) == original
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_legacy_completed_conflicts_use_derived_evidence_with_the_original_parent(additive_catalog):
-    from tests.test_waterfall import FakeProv, _cfg
-    from yt_playlist.providers.waterfall import run_waterfall
-    store = additive_catalog
-    entry, recording, _, _ = capture(store, fields={})
-    with store.conn:
-        store.conn.execute('UPDATE recordings SET last_enriched_at=1 WHERE id=?', (recording,))
-        store.conn.executemany('INSERT INTO enrichment_provider_state VALUES (?,?,1,10,\'found\',?,0,0,\'\')',
-            [(recording, 'a', json.dumps({'genre': 'Jazz', 'bpm': 120})),
-             (recording, 'b', json.dumps({'genre': 'Rock', 'bpm': 130}))])
-    mutate(store, lambda: legacy.backfill_operational(store.conn))
-    a, b = FakeProv('a', {}), FakeProv('b', {})
-    before = store.conn.execute('SELECT count(*) FROM metadata_deliveries').fetchone()[0]
-    assert run_waterfall(store, [dict(store.tracks.track_for_waterfall(entry))], _cfg(('a', True), ('b', True)),
-        lambda _: None, registry={'a': a, 'b': b}, run_id='reuse-legacy', now_fn=lambda: 20,
-        reuse_completed=True) == [entry]
-    assert a.calls == b.calls == []
-    rows = store.conn.execute('SELECT o.origin,o.entry_id,o.recording_id,p.origin AS parent_origin,'
-        'p.entry_id AS parent_entry,p.field_scope AS parent_scope FROM metadata_conflict_candidates c '
-        'JOIN metadata_observations o ON o.id=c.observation_id '
-        'JOIN metadata_observations p ON p.id=o.derived_from_observation_id').fetchall()
-    assert len(rows) == 4
-    assert all(tuple(row) == ('selection_transfer', entry, recording, 'legacy_state', None, 'legacy_recording')
-               for row in rows)
-    assert store.conn.execute('SELECT count(*) FROM metadata_deliveries').fetchone()[0] == before
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()

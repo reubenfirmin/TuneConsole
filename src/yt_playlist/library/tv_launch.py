@@ -4,7 +4,7 @@ import uuid
 
 from yt_playlist.core.accounts import client_for
 from yt_playlist.library.action_claim import claim_action
-from yt_playlist.library.playlist_generated import create_generated_playlist
+from yt_playlist.library.generated_composition import commands as generated_commands
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.library.tv_stream import PendingTV
@@ -64,7 +64,7 @@ def start(store, clients, request_id, items, now):
             return _recover(store, clients, store.tv.launch(request_id), now)
         recipe = {'lane': 'tv', 'media': 'video', 'max_minutes': maximum, 'videos': items, 'tv_stream': stream}
         try:
-            result = create_generated_playlist(store, 'TV', items, client, now, account_id, recipe=recipe,
+            result = generated_commands(store, now).create('TV', items, client=client, account_id=account_id, recipe=recipe,
                 max_duration_s=float('inf') if maximum is None else maximum * 60,
                 on_created=lambda remote, title: store.tv.save_launch(
                     request_id, destination=(remote, title)))

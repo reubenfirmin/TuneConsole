@@ -6,33 +6,14 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import account_auth_state, album_feedback_storage, collection_recovery, genre_identity, model_state, radio_storage, sync_state
+from tests.file_custody_support import expire_file
+from yt_playlist.core import account_auth_state, album_feedback_storage, albums, collection_recovery, genre_identity, model_state, radio_storage, sync_state
+from yt_playlist.library.retention_composition import collect_collections
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.store import Store
 from yt_playlist.library import sync_outcomes
 from yt_playlist.rec import album_feedback
 from yt_playlist.rec import album_tuning
-
-
-def installed_92(path):
-    store = Store(path)
-    try:
-        for sql in current.statements(version=92):
-            store.conn.execute(sql)
-        genre_identity.seed_catalog(store.conn)
-        store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-        store.conn.execute('INSERT INTO rec_preparation VALUES (1,0,0)')
-        store.conn.execute('INSERT INTO rec_group_clock VALUES (1,0)')
-        store.conn.execute('INSERT INTO group_retention_state VALUES (1,0)')
-        store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-                               [(item.version,item.name) for item in registry.MIGRATIONS[:92]])
-        store.conn.commit()
-        store._bind_repositories()
-        assert [row[1] for row in store.conn.execute('PRAGMA table_info(road_trip_drafts)')]==['recipe_id','state','updated_at']
-        return store
-    except BaseException:
-        store.conn.close()
-        raise
 
 
 def test_independent_feedback_and_withdrawal_keep_lineage(tmp_path):
@@ -60,7 +41,9 @@ def test_scoped_feedback_does_not_withdraw_another_accounts_legacy_fallback(stor
     first = store.accounts.upsert_account('First','first.json',None,True)
     second = store.accounts.upsert_account('Second','second.json',None,False)
     with store.conn:
-        album_feedback_storage.import_legacy(store.conn,{'release':{'kind':'more','at':1}})
+        album = albums.observe(store.conn, 'release')
+        store.conn.execute('INSERT INTO album_feedback(album_id,source_browse_id,response,created_at,'
+            'legacy_author_unknown) VALUES (?,\'release\',\'more\',1,1)', (album,))
         album_feedback_storage.replace(store.conn,'release','reject',2,account_id=first)
     assert [row['response'] for row in album_feedback_storage.rows(store.conn,account_id=first)]==['reject']
     assert [row['response'] for row in album_feedback_storage.rows(store.conn,account_id=second)]==['more']
@@ -137,13 +120,15 @@ def test_collection_backup_exact_coverage_and_reader_fenced_cleanup(store,tmp_pa
     collection_recovery.restore(store.conn,manifest)
     assert store.road_trip.get_road_trip_draft(recipe)==state
     filenames = [Path(row[3]) for row in collection_recovery.references(store.conn)]
+    for filename in filenames:
+        expire_file(filename)
     with store.conn:
         store.road_trip.delete_road_trip_draft(recipe)
     from yt_playlist.core import policy_documents
     with policy_documents.retained_reader(collection_recovery.directory(store.conn)):
-        assert collection_recovery.collect_orphans(store.conn)==0
+        assert collect_collections(store.conn)==0
         assert all(path.is_file() for path in filenames)
-    assert collection_recovery.collect_orphans(store.conn)>=1
+    assert collect_collections(store.conn)>=1
     assert store.settings.get_setting('rec_content_model')=='{"ncat":0,"cont":[]}'
     with pytest.raises(ValueError,match='owners'):
         collection_recovery.restore(store.conn,manifest)
@@ -151,13 +136,18 @@ def test_collection_backup_exact_coverage_and_reader_fenced_cleanup(store,tmp_pa
 
 def test_temporary_genre_choices_keep_identity_after_alias_edit_and_merge(store):
     store.genres.configure_catalog()
-    store.genres.set_genre_alias('Saved menu choice','synth pop')
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_alias VALUES ('saved menu choice','Saved menu choice','synth pop','custom')")
     album_tuning.apply(store,100,{'novelty':.6},['Saved menu choice','An unknown historical style'])
-    store.genres.set_genre_alias('Saved menu choice','drum bass')
+    with store.conn:
+        store.conn.execute("UPDATE genre_alias SET genre_key='drum bass' WHERE label_key='saved menu choice'")
     assert album_tuning.state(store,101)['genres']==['An unknown historical style','synth pop']
-    store.genres.rename_genre('synth pop','A new display name')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET name='A new display name' WHERE key='synth pop'")
     assert album_tuning.state(store,102)['genres']==['An unknown historical style','synth pop']
-    store.genres.merge_genres('synth pop','drum bass')
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_redirects VALUES ('synth pop','drum bass')")
+        store.conn.execute("UPDATE album_menu_control_genres SET genre_key='drum bass' WHERE genre_key='synth pop'")
     assert album_tuning.state(store,103)['genres']==['An unknown historical style','drum bass']
     assert album_tuning.state(store,100+album_tuning.DURATION_S)['remaining']==0
     album_tuning.reset(store)
@@ -179,18 +169,6 @@ def test_account_auth_updates_and_clears_do_not_replace_other_context(store):
     with pytest.raises(ValueError,match='recorded account'),store.conn:
         account_auth_state.flag(store.conn,999,'Unknown')
     assert not store.conn.execute("SELECT 1 FROM settings WHERE key='auth_expired_identities'").fetchone()
-
-
-def test_failed_collection_conversion_rolls_back_schema_and_retains_original(tmp_path, legacy_owner_store):
-    old = legacy_owner_store(tmp_path/'invalid-collection.db')
-    old.settings.set_setting('album_feedback','{"release":{"kind":"more","at":1,"unknown":true}}')
-    from yt_playlist.core.migrations import MigrationError
-    with pytest.raises(MigrationError,match='original retained'):
-        migrate(old.conn, registry=registry.MIGRATIONS)
-    assert old.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==93
-    assert old.settings.get_setting('album_feedback')=='{"release":{"kind":"more","at":1,"unknown":true}}'
-    assert not old.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='album_feedback'").fetchone()
-    assert [row[1] for row in old.conn.execute('PRAGMA table_info(road_trip_drafts)')]==['recipe_id','state','updated_at']
 
 
 def test_collection_sql_rejects_cross_account_scope_and_wrong_recording(store):

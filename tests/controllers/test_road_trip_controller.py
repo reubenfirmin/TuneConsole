@@ -6,6 +6,7 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.road_trip import RoadTrips
+from yt_playlist.core.collection_files import RecoveryFiles
 from yt_playlist.repos.road_trip import RoadTripRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -31,7 +32,7 @@ def trips():
         assert not writing
         yield
 
-    def publish(*args):
+    def publish(*args, **kwargs):
         assert not writing, 'Draft file publication must run outside the SQL transaction'
         return 'file', 'digest', 50
 
@@ -50,8 +51,13 @@ def trips():
     repository.captured_video.return_value = (10, 20)
     repository.save_draft.return_value = True
     repository.save_legacy_draft.return_value = True
-    return RoadTrips(repository, Mock(retained=retained, publish=Mock(side_effect=publish), read=Mock(side_effect=read)),
-                     Mock(return_value=json.dumps({'revision':'prepared'})))
+    repository.reserve_draft_file.return_value = 41
+    files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
+    files.retained.side_effect = retained
+    files.publish_reserved.side_effect = publish
+    files.read.side_effect = read
+    files.describe.return_value = ('digest', 50)
+    return RoadTrips(repository, files)
 
 
 def test_catalog_rekey_preserves_exact_draft_selections_and_compares_the_current_revision(trips):
@@ -63,12 +69,13 @@ def test_catalog_rekey_preserves_exact_draft_selections_and_compares_the_current
     trips.recovery.read.return_value = {'revision': 'stale-file', 'pool': [{'key': 'old', 'video_id': 'old'}]}
     trips.repository.rekey_draft_reference.return_value = True
     trips.rekey_recordings({'old': 'new'})
-    kind, identity, payload = trips.recovery.publish.call_args.args
+    file_id, kind, identity, payload = trips.recovery.publish_reserved.call_args.args
+    assert file_id == 41
     assert (kind, identity) == ('road-trip-draft', 'draft')
     assert payload['pool'][0]['key'] == 'new' and payload['pool'][0]['video_id'] == 'old'
     assert 'picks' not in payload and 'banned' not in payload
     trips.repository.rekey_draft_reference.assert_called_once_with(
-        'draft', 'current', payload['revision'], ('file', 'digest', 50))
+        'draft', 'current', payload['revision'], ('file', 'digest', 50), file_id=41)
     trips.repository.save_draft.assert_not_called()
     trips.repository.captured_video.assert_not_called()
 
@@ -78,7 +85,7 @@ def test_catalog_rekey_does_not_publish_a_reference_after_file_failure(trips):
     trips.repository.draft_facts.return_value = {'recipe_id': 3,
         'row': {'id': 'draft', 'revision': 'current', 'recovery_filename': 'file', 'recovery_digest': 'digest', 'recovery_bytes': 5},
         'selections': []}
-    trips.recovery.publish.side_effect = OSError('full')
+    trips.recovery.publish_reserved.side_effect = OSError('full')
     with pytest.raises(OSError, match='full'):
         trips.rekey_recordings({'old': 'new'})
     trips.repository.rekey_draft_reference.assert_not_called()
@@ -149,9 +156,9 @@ def test_draft_publishes_recovery_after_admission_then_supplies_exact_ordered_re
     args = trips.repository.save_draft.call_args.args
     assert args[0] == 2 and args[2:6] == (4, 'next', 'building', ('file', 'digest', 50))
     assert args[6] == [('picked', 0, 20, 10, 'video'), ('excluded', 0, 20, 10, 'video')]
-    published = trips.recovery.publish.call_args.args
-    assert published[:2] == ('road-trip-draft', args[1])
-    assert 'picks' not in published[2] and 'banned' not in published[2]
+    published = trips.recovery.publish_reserved.call_args.args
+    assert published[:3] == (41, 'road-trip-draft', args[1])
+    assert 'picks' not in published[3] and 'banned' not in published[3]
     assert state['picks'] == ['video'] and state['banned'] == ['video']
 
 
@@ -160,7 +167,7 @@ def test_invalid_native_draft_cannot_create_an_identity_or_file(trips, state):
     with pytest.raises(ValueError):
         trips.save_road_trip_draft(2, state, 100)
     trips.repository.captured_video.assert_not_called()
-    trips.recovery.publish.assert_not_called()
+    trips.recovery.publish_reserved.assert_not_called()
 
 
 @pytest.mark.parametrize('state', [{'revision':'next', 'picks':['video']}, {'picks':[None]}])
@@ -168,19 +175,19 @@ def test_stale_worker_cannot_admit_videos_or_publish_a_file(trips, state):
     trips.repository.draft_owner.return_value = {'id':'owner', 'account_id':4, 'revision':'newer'}
     assert not trips.replace_road_trip_draft(2, state, 100, expected_revision='old')
     trips.repository.captured_video.assert_not_called()
-    trips.recovery.publish.assert_not_called()
+    trips.recovery.publish_reserved.assert_not_called()
 
 
 def test_changed_revision_during_file_write_is_rejected_by_the_final_sql_comparison(trips):
     trips.repository.draft_owner.return_value = {'id':'owner', 'account_id':4, 'revision':'old'}
     trips.repository.save_draft.return_value = False
     assert not trips.replace_road_trip_draft(2, {'revision':'next'}, 100, expected_revision='old')
-    assert trips.repository.save_draft.call_args.kwargs == {'expected_revision':'old', 'conditional':True}
-    trips.recovery.publish.assert_called_once()
+    assert trips.repository.save_draft.call_args.kwargs == {'file_id':41, 'expected_revision':'old', 'conditional':True}
+    trips.recovery.publish_reserved.assert_called_once()
 
 
 def test_failed_file_write_cannot_replace_the_durable_draft(trips):
-    trips.recovery.publish.side_effect = OSError('controlled file failure')
+    trips.recovery.publish_reserved.side_effect = OSError('controlled file failure')
     with pytest.raises(OSError, match='controlled file failure'):
         trips.save_road_trip_draft(2, {'revision':'next'}, 100)
     trips.repository.save_draft.assert_not_called()
@@ -197,7 +204,7 @@ def test_new_draft_needs_an_active_master_before_any_file_write(trips):
     trips.repository.master_account.return_value = None
     with pytest.raises(ValueError, match='Choose an active account'):
         trips.save_road_trip_draft(2, {'revision':'next'}, 100)
-    trips.recovery.publish.assert_not_called()
+    trips.recovery.publish_reserved.assert_not_called()
 
 
 def test_sql_choices_and_revision_override_recovery_contents(trips):
@@ -206,16 +213,6 @@ def test_sql_choices_and_revision_override_recovery_contents(trips):
         'selections':[('excluded','b'), ('picked','a')]}
     assert trips.latest_road_trip_draft() == {
         'recipe_id':2, 'state':{'revision':'sql', 'picks':['a'], 'banned':['b'], 'pool':[]}}
-
-
-def test_prepared_legacy_read_uses_its_manifest_and_compare_save_uses_original_sql_bytes(trips):
-    trips.repository.uses_draft_files.return_value = False
-    trips.repository.draft_facts.return_value = {
-        'recipe_id':2, 'raw':'original bytes', 'prepared':{'recipe_id':2}, 'parts':[(0, 'file', 'digest', 50)]}
-    assert trips.replace_road_trip_draft(2, {'revision':'next'}, 100, expected_revision='prepared')
-    trips.repository.save_legacy_draft.assert_called_once_with(2, json.dumps({'revision':'next'}), 100,
-        expected_raw='original bytes', conditional=True)
-    trips.recovery.publish.assert_not_called()
 
 
 def test_missing_draft_is_not_recreated_by_a_legacy_worker(trips):

@@ -131,7 +131,8 @@ def test_two_ready_menu_has_real_library_and_fresh_inputs_with_two_unbuilt_slots
 def test_two_ready_mixes_keep_all_four_slots_without_starting_work(two_ready_menu, monkeypatch, operation):
     def unexpected(*args, **kwargs):
         raise AssertionError("Only a click may rank the missing pools")
-    monkeypatch.setattr(library_pool, "prepare", unexpected)
+    from yt_playlist.library import pool_composition
+    monkeypatch.setattr(pool_composition, 'library', lambda database: SimpleNamespace(prepare=unexpected))
     monkeypatch.setattr(surfaces, "explore_for_you", unexpected)
     with two_ready_menu.open(':memory:') as store:
         completed = {**two_ready_menu.result, 'mode_id': None, 'ranker': 'completed-library-selection'}
@@ -328,7 +329,8 @@ def test_empty_and_failed_library_builds_stop_polling_and_offer_retry(store, mon
     def prepare(*args, **kwargs):
         if failed:
             raise RuntimeError("provider internals")
-    monkeypatch.setattr(library_pool, "prepare", prepare)
+    from yt_playlist.library import pool_composition
+    monkeypatch.setattr(pool_composition, 'library', lambda database: SimpleNamespace(prepare=prepare))
     # An explicit empty-lane job needs neither candidate generation nor an
     # already prepared menu. Its terminal fragment is the behavior under test.
     client = _client(store, prepare=False)
@@ -353,7 +355,8 @@ def test_library_pool_rejects_invalid_requests(store, monkeypatch):
         {'family': 'jazz', 'label': 'jazz'}]})
     def unexpected(*args, **kwargs):
         raise AssertionError('Invalid input started a library-pool job')
-    monkeypatch.setattr(library_pool, 'prepare', unexpected)
+    from yt_playlist.library import pool_composition
+    monkeypatch.setattr(pool_composition, 'library', lambda database: SimpleNamespace(prepare=unexpected))
     client = _client(store, prepare=False)
     for data in ({"lane": "unknown", "epoch": "0"}, {"lane": "explore", "epoch": "-1"},
                  {"lane": "explore", "epoch": "x"},

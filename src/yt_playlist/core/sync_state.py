@@ -1,11 +1,11 @@
 """Typed library progress with immutable attempt details for restart and display."""
 import json
 
-from . import collection_recovery, entity_names, playlist_scopes
+from . import collection_recovery, playlist_scopes
 
 KEY = 'library_sync_state'
 STATUSES = frozenset({'complete','partial','failed','skipped'})
-RESOURCES = frozenset({'playlist_listing','playlists','ratings','history','saved_albums','saved_album_mirror','album_tracks'})
+RESOURCES = frozenset({'playlist_listing','playlists','ratings','history','saved_songs','saved_albums','saved_album_mirror','album_tracks'})
 STAMPS = {'last_sync_at':'last_success_at','last_sync_attempt_at':'started_at','last_sync_outcome':'outcome'}
 
 
@@ -41,9 +41,8 @@ def read(conn):
         return {}
     result = collection_recovery.read(attempt['recovery_filename'],attempt['recovery_digest'],attempt['recovery_bytes'],
                                       kind='library-sync',owner=1)
-    scopes = entity_names.owner(conn, 'playlist_scopes')
-    for row in conn.execute(f'SELECT c.*,s.{scopes.column("provider_playlist_id")} AS provider_playlist_id FROM sync_cursors c '
-                            f'LEFT JOIN {scopes.table} s ON s.{scopes.column("id")}=c.playlist_scope_id ORDER BY c.id'):
+    for row in conn.execute('SELECT c.*,s.provider_playlist_id FROM sync_cursors c '
+                            'LEFT JOIN playlist_scopes s ON s.id=c.playlist_scope_id ORDER BY c.id'):
         account = (result.get('accounts',{}).get(str(row['account_id'])) if row['account_id'] is not None else result)
         if account is None:
             # Retired/omitted accounts retain their typed cursors, but do not
@@ -67,7 +66,22 @@ def read(conn):
                 item[target] = row[column]
         if row['cursor'] is not None:
             item['cursor'] = row['cursor']
-    result['last_attempt_at'] = attempt['finished_at']
+    result['last_attempt_at'] = attempt['finished_at'] or 0
+    # Native songs have an additive progress owner so historical cursor domains
+    # and installed schemas remain writable without rebuilding their tables.
+    song_progress = (conn.execute('SELECT * FROM song_library_sync') if conn.execute(
+        "SELECT 1 FROM main.sqlite_schema WHERE name='song_library_sync'").fetchone() else ())
+    for row in song_progress:
+        account = result.get('accounts', {}).get(str(row['account_id']))
+        if account is None:
+            continue
+        item = account.setdefault('resources', {}).setdefault('saved_songs', {})
+        for column, target in (('phase', 'status'), ('updated_at', 'last_attempt_at'),
+                               ('last_success_at', 'last_success_at'), ('failures', 'failures'), ('retry_at', 'retry_at')):
+            if row[column] is None:
+                item.pop(target, None)
+            else:
+                item[target] = row[column]
     # A running attempt keeps the last published result, including freshness.
     if attempt['phase']!='running':
         result['status'] = attempt['phase']
@@ -116,6 +130,12 @@ def write_prepared(conn,result,now,*,reference,last_success=None):
     _write_attempt(conn, result, now, reference, last_success)
 
 
+def write_checkpoint(conn, result, reference):
+    """Keep the attempt's lease and success clock while committing resumable work."""
+    _write_cursors(conn, result)
+    conn.execute('UPDATE sync_attempts SET recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE id=1', reference)
+
+
 def _write_cursors(conn, result):
     if not isinstance(result,dict) or result.get('status') not in STATUSES:
         raise ValueError('Unsupported sync result; original retained')
@@ -124,6 +144,13 @@ def _write_cursors(conn, result):
     for account_id,collection,provider_id,item in rows:
         if not isinstance(item,dict) or item.get('status') not in STATUSES or (item.get('cursor') is not None and not isinstance(item['cursor'],str)):
             raise ValueError('Unsupported sync cursor; original retained')
+        if collection == 'saved_songs':
+            conn.execute('INSERT INTO song_library_sync VALUES (?,?,?,?,?,?) '
+                         'ON CONFLICT(account_id) DO UPDATE SET phase=excluded.phase,updated_at=excluded.updated_at,'
+                         'last_success_at=excluded.last_success_at,failures=excluded.failures,retry_at=excluded.retry_at',
+                         (account_id, item['status'], item.get('last_attempt_at'), item.get('last_success_at'),
+                          item.get('failures'), item.get('retry_at')))
+            continue
         scope = playlist_scopes.ensure(conn,provider_id,account_id) if provider_id is not None else None
         old = conn.execute('SELECT id,revision FROM sync_cursors WHERE account_id IS ? AND provider=\'youtube\' '
                            'AND collection=? AND playlist_scope_id IS ?',(account_id,collection,scope)).fetchone()

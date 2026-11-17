@@ -12,6 +12,7 @@ from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 @pytest.mark.parametrize('path', ['/', '/artists'])
 def test_saved_radio_survives_browser_restart_and_reclaims_playback(live_app, store, page, path):
+    from tests.browser.welcome_support import dismiss_welcome
     identity = store.accounts.get_master_account().id
     store.tracks.observe_track_entry('saved-upload', 'Take Me (Mixed)', 'Ajenda', now=1)
     track = store.radio_catalog.details(['saved-upload'])['saved-upload']
@@ -24,6 +25,8 @@ def test_saved_radio_survives_browser_restart_and_reclaims_playback(live_app, st
     store.radio_checkpoints.save(json.dumps(state), expected=revision)
     page.set_viewport_size({'width': 1280, 'height': 900})
     page.goto(live_app + path)
+    if path == '/':
+        dismiss_welcome(page)
     player = page.locator('.global-now-playing')
     play = player.get_by_role('button', name='Play', exact=True)
     expect(player).to_be_visible()

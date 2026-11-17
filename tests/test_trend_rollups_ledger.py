@@ -80,7 +80,7 @@ def test_first_play_index_uses_history_without_a_ledger(store):
 
 def _months(store):
     return stats.compute_months(tr.day_counts_source(store), store.trends.track_meta(),
-                             store.trends.first_play_map("artist"))
+                             store.trends.first_play_map("artist"), genre_axes={}, family_adjacency={})
 
 
 def test_month_review_song_of_the_month_counts_real_plays(store):
@@ -145,7 +145,8 @@ def test_compute_months_does_not_call_a_catalog_artist_new():
     """An artist already in your playlists is not a discovery, whenever we first happened to see them."""
     dc = [(10, "a", 3)]
     meta = {"a": ("Underworld", None)}
-    weeks = stats.compute_months(dc, meta, {"Underworld": 10}, catalog_artists={"Underworld"})
+    weeks = stats.compute_months(dc, meta, {"Underworld": 10}, catalog_artists={"Underworld"},
+                                 genre_axes={}, family_adjacency={})
     assert weeks[0]["new_artist_plays"] == 0
     assert weeks[0]["new_artists"] == 0
 
@@ -153,7 +154,8 @@ def test_compute_months_does_not_call_a_catalog_artist_new():
 def test_compute_months_counts_an_artist_absent_from_the_catalog():
     dc = [(10, "a", 3)]
     meta = {"a": ("Brand New Act", None)}
-    weeks = stats.compute_months(dc, meta, {"Brand New Act": 10}, catalog_artists=set())
+    weeks = stats.compute_months(dc, meta, {"Brand New Act": 10}, catalog_artists=set(),
+                                 genre_axes={}, family_adjacency={})
     assert weeks[0]["new_artist_plays"] == 3
     assert weeks[0]["new_artists"] == 1
 
@@ -162,7 +164,8 @@ def test_compute_months_respects_the_catalog(store):
     dc = [(10, "a", 2), (10, "b", 1)]
     meta = {"a": ("Owned", None), "b": ("Fresh", None)}
     af = {"Owned": 10, "Fresh": 10}
-    months = stats.compute_months(dc, meta, af, catalog_artists={"Owned"})
+    months = stats.compute_months(dc, meta, af, catalog_artists={"Owned"},
+                                  genre_axes={}, family_adjacency={})
     assert months[0]["new_artist_plays"] == 1 and months[0]["new_artists"] == 1
 
 
@@ -175,7 +178,7 @@ def test_build_treats_a_migrated_library_as_known(store):
     dc = tr.day_counts_source(store)
     weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
-                             store.trends.catalog_artists())
+                             store.trends.catalog_artists(), genre_axes={}, family_adjacency={})
     assert sum(w["new_artist_plays"] for w in weeks) == 0
 
 
@@ -190,7 +193,7 @@ def test_build_still_finds_a_true_discovery(store):
     dc = tr.day_counts_source(store)
     weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
-                             store.trends.catalog_artists())
+                             store.trends.catalog_artists(), genre_axes={}, family_adjacency={})
     assert sum(w["new_artist_plays"] for w in weeks) == 1
     assert sum(w["new_artists"] for w in weeks) == 1
 
@@ -203,5 +206,5 @@ def test_a_generated_playlist_does_not_make_an_artist_familiar(store):
     dc = tr.day_counts_source(store)
     weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
-                             store.trends.catalog_artists())
+                             store.trends.catalog_artists(), genre_axes={}, family_adjacency={})
     assert sum(w["new_artists"] for w in weeks) == 1

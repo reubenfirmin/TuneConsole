@@ -3,7 +3,7 @@ import json
 import time
 from uuid import uuid4
 
-from . import catalog, collection_recovery, entity_names, playlist_scopes
+from . import catalog, collection_recovery, playlist_scopes
 
 SESSION_KEY = 'radio_current_session'
 
@@ -72,7 +72,7 @@ def save(conn,state,*,expected,legacy=False,now=None):
         state = {**state,'episode_id':owner}
     account_id = state.get('identity')
     if type(account_id) is not int or not conn.execute(
-            'SELECT 1 FROM '+entity_names.accounts(conn)+' WHERE id=?',(account_id,)).fetchone():
+            'SELECT 1 FROM accounts WHERE id=?',(account_id,)).fetchone():
         raise ValueError('Radio checkpoint requires its recorded account')
     existing = conn.execute('SELECT account_id,revision FROM radio_sessions WHERE id=?',(owner,)).fetchone()
     if existing and (existing[0]!=account_id or not head or head[0]!=owner):

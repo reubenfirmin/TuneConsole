@@ -80,6 +80,7 @@ def test_native_host_can_run_and_stop_http_server_on_a_worker_thread(monkeypatch
     assert not failures
 
 
+@pytest.mark.filterwarnings('error::pytest.PytestUnhandledThreadExceptionWarning')
 def test_quit_stops_disconnected_sync_and_closes_its_live_stream(store, monkeypatch):
     import http.client
     import json
@@ -138,6 +139,10 @@ def test_quit_stops_disconnected_sync_and_closes_its_live_stream(store, monkeypa
         assert response.status == 200
         job_id = json.loads(response.read())["job_id"]
         assert entered.wait(5)
+        checkpoint = store.sync.state()
+        resources = checkpoint['accounts'][str(iid)]['resources']
+        assert resources['playlist_listing']['status'] == 'complete'
+        assert resources['playlists']['status'] == 'partial'
         stream = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         stream.request("GET", f"/sync/events/{job_id}")
         events = stream.getresponse()
@@ -146,13 +151,17 @@ def test_quit_stops_disconnected_sync_and_closes_its_live_stream(store, monkeypa
         # Exercise the same handler as the first Ctrl-C while the bridge read is in flight.
         server.handle_exit(signal.SIGINT, None)
         release.set()
-        assert b'"type": "end"' in events.read()
+        frames = [json.loads(line.removeprefix('data: ')) for line in events.read().decode().splitlines()
+                  if line.startswith('data: ')]
+        assert frames[-1]['type'] == 'end' and frames[-1]['outcome'] == 'cancelled'
+        assert frames[-1]['error'] is None and frames[-1]['result'] is None
         worker.join(timeout=5)
         assert not worker.is_alive(), app.state.ctx.work.active
         assert not failures
         assert remote.reads == ["NEXT-0"]
         assert app.state.ctx.work.wait(0)
         assert app.state.ctx.jobs.get(job_id).done
+        assert store.sync.state() == checkpoint
         assert float(store.settings.get_setting("last_sync_at")) == 1.0
         assert [p.provider_playlist_id for p in store.playlists.get_playlists()] == ["OLD"]
         assert store.playlists.get_playlist_track_keys(cached) == {"cached song|artist"}

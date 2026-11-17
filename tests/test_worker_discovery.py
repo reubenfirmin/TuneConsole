@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -34,7 +37,8 @@ def test_discovery_input_keeps_empty_catalog_and_real_guards(_pristine_current_s
 class _ArtistClient(FakeClient):
     """A client that answers the outward-discovery fetch with one new + one owned album."""
     def search(self, query, filter="songs"):
-        return [{"browseId": "ART1"}]
+        assert filter != 'artists', 'Discovery must use the stored artist identity'
+        return []
 
     def get_artist(self, browse_id):
         return {"name": "Fav", "description": None, "thumbnails": None, "subscribers": None,
@@ -68,7 +72,7 @@ def test_discovery_waits_for_priority_recommendation_retirement(store, monkeypat
 
 def test_worker_materializes_proposals(store, monkeypatch):
     iid, ctx = _ctx(store, _ArtistClient())
-    t = store.tracks.upsert_track("v1", "Song", "Fav", None, None)
+    t = store.tracks.upsert_track("v1", "Song", "Fav", None, None, artist_browse_id='ART1')
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 1, "h", 0.0), [t])
     store.history.record_history_plays(iid, 1.0, ["song|fav"], source_timezone="UTC")
 
@@ -111,12 +115,14 @@ def test_home_discover_serves_cached(store, monkeypatch, predecessors):
 
 
 def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monkeypatch):
-    from yt_playlist.rec import discover, fresh_pool
+    from yt_playlist.library import discovery_composition
+    from yt_playlist.rec import fresh_pool
 
     _, ctx = _ctx(store, FakeClient())
-    monkeypatch.setattr(discover, "new_artists", lambda ctx: [])
+    artist_query = Mock(return_value=[])
+    monkeypatch.setattr(discovery_composition, 'artists', lambda _: SimpleNamespace(query=artist_query))
 
-    def populate(ctx, now):
+    def populate(now, limit):
         # Discovery's completed output is below the worker admission boundary.
         # Keep all twelve real discoveries and their source; metadata capture
         # and provider ingestion are independent of publishing the next pool.
@@ -129,12 +135,15 @@ def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monke
                                              (track['key'],)).fetchone()[0]
                 discovery_sources.retain(store.conn, subject, 'radio:seed', track['video_id'], now)
 
-    monkeypatch.setattr(discover, "populate_discovered_tracks", populate)
-    monkeypatch.setattr(discover, "populate_radio_tracks", lambda *a: None)
+    catalog = SimpleNamespace(populate=Mock(side_effect=populate), radio=Mock())
+    monkeypatch.setattr(discovery_composition, 'catalog', lambda _: catalog)
     worker = RecWorker(ctx)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     try:
         worker._discover(10)
+        artist_query.assert_called_once_with(15, 30)
+        catalog.populate.assert_called_once_with(10, 4)
+        catalog.radio.assert_called_once_with(10, 6, 12)
         # Discovery persists new inputs, then joins the admitted ranking round.
         # Only that producer can make the candidates available to serving.
         assert len(store.discovery.discovered_track_keys()) == 12

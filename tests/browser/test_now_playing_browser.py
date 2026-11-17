@@ -21,11 +21,13 @@ def test_space_controls_playback_without_intercepting_search_or_focused_buttons(
     page.keyboard.press('Space')
     expect(player.get_by_role('button', name='Play', exact=True)).to_be_visible()
     assert len(commands) == 1
-    search = page.get_by_role('searchbox', name='Search your library')
+    page.get_by_role('button', name='Search music…', exact=True).click()
+    search = page.get_by_role('searchbox', name='Search music', exact=True)
     search.fill('two')
     search.press('Space')
     expect(search).to_have_value('two ')
     assert len(commands) == 1
+    page.get_by_role('button', name='Close music search', exact=True).click()
     player.get_by_role('button', name='Play', exact=True).focus()
     page.keyboard.press('Space')
     expect(player.get_by_role('button', name='Pause', exact=True)).to_be_visible()

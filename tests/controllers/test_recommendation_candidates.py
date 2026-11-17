@@ -36,7 +36,7 @@ def test_revisit_uses_two_rest_windows_and_preserves_explicit_empty_keys(candida
 def test_comfort_normalizes_recency_before_persistence(candidates, days, seconds):
     candidates.comfort_candidates(100, min_plays=8, recency_full_days=days, limit=7)
     candidates.repository.comfort_candidates.assert_called_once_with(
-        100, min_plays=8, full_seconds=seconds, maximum_duration=600,
+        candidate_policy.RevisitCriteria(100-seconds, 100-seconds, 8, 20), keys=None, maximum_duration=600,
         order=candidate_policy.COMFORT_ORDER, limit=7)
 
 

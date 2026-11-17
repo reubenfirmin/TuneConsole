@@ -5,6 +5,7 @@ import json
 
 from tests.conftest import FakeClient, _track
 from yt_playlist.library import executor, playlist_positions, ratings, sync
+from yt_playlist.controllers import library_synchronization as acquisition
 from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION, content_hash
 from yt_playlist.library.sync_outcomes import sync_due
 
@@ -18,7 +19,7 @@ class SnapshotClient(FakeClient):
 
 @pytest.fixture
 def cached(store, monkeypatch):
-    monkeypatch.setattr(sync, "with_retry", lambda fn, **kwargs: fn())
+    monkeypatch.setattr(acquisition, "with_retry", lambda fn, **kwargs: fn())
     iid = store.accounts.upsert_account("Main", "bridge", None, True)
     tracks = [{**_track(video, video.upper(), "Artist", set_video_id="set-" + video),
                "likeStatus": "INDIFFERENT"} for video in ("b", "a", "c")]

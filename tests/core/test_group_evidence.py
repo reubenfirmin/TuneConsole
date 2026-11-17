@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor, apply
+from tests.group_history_support import predecessor
 from yt_playlist.core import group_evidence
 
 
@@ -13,7 +13,6 @@ def context(generation='first', version='first-leaf'):
 
 def test_offer_and_feedback_retain_their_exact_aliases_even_when_content_is_shared(predecessor):
     conn = predecessor
-    apply(conn)
     with conn:
         conn.execute('BEGIN IMMEDIATE')
         assert group_evidence.retain(conn, 'offer', 'first-menu', context(), 10)
@@ -35,7 +34,6 @@ def test_offer_and_feedback_retain_their_exact_aliases_even_when_content_is_shar
 
 def test_same_content_does_not_prove_that_an_alias_occurred_in_the_served_generation(predecessor):
     conn = predecessor
-    apply(conn)
     with pytest.raises(ValueError, match='wrong_generation'), conn:
         conn.execute('BEGIN IMMEDIATE')
         group_evidence.retain(conn, 'offer', 'bad-menu', context('second', 'first-leaf'), 10)
@@ -49,7 +47,6 @@ def test_same_content_does_not_prove_that_an_alias_occurred_in_the_served_genera
 
 def test_historical_unknown_reference_is_not_reinterpreted_when_an_alias_appears_later(predecessor):
     conn = predecessor
-    apply(conn)
     raw = {'groups': [{'definition_version': 'previously-unknown'}]}
     with conn:
         conn.execute('BEGIN IMMEDIATE')
@@ -67,7 +64,6 @@ def test_historical_unknown_reference_is_not_reinterpreted_when_an_alias_appears
 
 def test_reference_ownership_and_immutable_owner_identity_are_enforced(predecessor):
     conn = predecessor
-    apply(conn)
     with conn:
         conn.execute('BEGIN IMMEDIATE')
         group_evidence.retain(conn, 'comparison', 'comparison-1', context(), 10)
@@ -85,6 +81,5 @@ def test_reference_ownership_and_immutable_owner_identity_are_enforced(predecess
 
 def test_evidence_owner_cannot_be_published_without_the_callers_transaction(predecessor):
     conn = predecessor
-    apply(conn)
     with pytest.raises(ValueError, match='outer transaction'):
         group_evidence.retain(conn, 'offer', 'unguarded', context(), 10)

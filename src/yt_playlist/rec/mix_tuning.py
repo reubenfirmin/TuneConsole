@@ -47,8 +47,17 @@ def _resume_genres(store, now):
 
 
 def _left(store, key, now):
-    raw = store.settings.get_setting(key)
+    return clock_left(store.settings.get_setting(key), now)
+
+
+def clock_left(raw, now):
     return None if raw is None else max(0.0, float(raw) + TTL_S - now)
+
+
+def expiry_values(ordinary, vibe, now):
+    ordinary, vibe = clock_left(ordinary, now), clock_left(vibe, now)
+    return {'ordinary': ordinary == 0, 'vibe': vibe == 0 or (vibe is None and ordinary == 0),
+            'resume_genres': ordinary != 0, 'has_vibe_clock': vibe is not None}
 
 
 def remaining(store, now) -> float:
@@ -87,19 +96,19 @@ def expire(store, now) -> bool:
         changed = False
         # Older saved vibes shared the ordinary deadline. Preserve that deadline
         # until the first explicit vibe change gives them their own clock.
-        ordinary = _left(store, UPDATED_AT_SETTING, now)
-        vibe = _left(store, VIBE_UPDATED_AT_SETTING, now)
-        if ordinary != 0 and vibe != 0:
+        decision = expiry_values(store.settings.get_setting(UPDATED_AT_SETTING),
+                                 store.settings.get_setting(VIBE_UPDATED_AT_SETTING), now)
+        if not decision['ordinary'] and not decision['vibe']:
             return False
         with atomic_write(store):
-            if vibe == 0 or (vibe is None and ordinary == 0):
-                changed = bool(store.settings.get_setting('home_mix_vibe')) or vibe is not None
+            if decision['vibe']:
+                changed = bool(store.settings.get_setting('home_mix_vibe')) or decision['has_vibe_clock']
                 store.settings.delete_setting('home_mix_vibe')
                 store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
                 store.settings.delete_setting(VIBE_REQUEST_SETTING)
-                if ordinary != 0:
+                if decision['resume_genres']:
                     _resume_genres(store, now)
-            if ordinary == 0:
+            if decision['ordinary']:
                 reset(store, keep_vibe=True)
                 changed = True
         return changed

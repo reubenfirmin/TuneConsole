@@ -57,9 +57,9 @@ def _tracks(store, spec):
     store.rec_query.track_decades.return_value = {
         f'{title.lower()}|{artist.lower()}': str(year // 10 * 10)
         for title, artist, _, year in spec if year}
-    return ordering.attach_genres(store, [
+    return ordering.attach_genres([
         {'key': f'{title.lower()}|{artist.lower()}', 'title': title, 'artist': artist}
-        for title, artist, _, _ in spec])
+        for title, artist, _, _ in spec], genres=store.rec_query.track_genres.return_value)
 
 
 def _owned_tracks(store, spec):
@@ -75,8 +75,8 @@ def _owned_tracks(store, spec):
             store.tracks.set_track_year(tid, str(year))
         ids.append(tid)
     store.playlists.set_playlist_tracks(pid, ids)
-    return ordering.attach_genres(store, [
-        {"key": f"{t.lower()}|{a.lower()}", "title": t, "artist": a} for t, a, _, _ in spec])
+    items = [{"key": f"{t.lower()}|{a.lower()}", "title": t, "artist": a} for t, a, _, _ in spec]
+    return ordering.attach_genres(items, genres=store.rec_query.track_genres(ordering.genre_keys(items)))
 
 
 def test_it_names_the_genres_and_decades_actually_present(description_store):

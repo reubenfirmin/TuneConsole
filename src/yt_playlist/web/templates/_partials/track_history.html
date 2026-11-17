@@ -15,7 +15,7 @@
     </li>
   {% endfor %}</ol>{% else %}<p class="muted">No listening evidence recorded{% if page %} on this page{% endif %}.</p>{% endif %}
   {% if page or more %}<nav class="track-ledger-pages" aria-label="Listening history pages">
-    {% if page %}<a href="/track/{{ track.video_id|urlencode }}?page={{ page-1 }}">Newer entries</a>{% endif %}
-    {% if more %}<a href="/track/{{ track.video_id|urlencode }}?page={{ page+1 }}">Older entries</a>{% endif %}
+    {% if page %}<a href="{{ track_url(track.video_id, page=page-1) }}">Newer entries</a>{% endif %}
+    {% if more %}<a href="{{ track_url(track.video_id, page=page+1) }}">Older entries</a>{% endif %}
   </nav>{% endif %}
 </section>

@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 import numpy as np
@@ -18,7 +19,7 @@ import pytest
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (account_growth, artist_model, embedding_training as embed,
-                             model_refresh, mode_surfaces, rec_params, taste_modes)
+                             model_refresh, model_calculations, mode_inputs, mode_surfaces, rec_params, taste_modes)
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from tests.home_fixture_support import (home_routes_only, publish_menu, returning_listener,
@@ -95,8 +96,8 @@ def refresh_costs(monkeypatch, record_property):
     for owner, name in (
         (model_refresh, 'rebuild'), (model_refresh, 'prepare'),
         (embed, 'build_vectors_from_baskets'), (taste_modes, 'prepare_modes'),
-        (mode_surfaces, 'prepare_bundles'), (mode_surfaces, '_calculate_bundles'),
-        (mode_surfaces, '_publish_typed_bundles'),
+        (mode_surfaces, 'prepare_bundles'), (mode_inputs, '_calculate_bundles'),
+        (mode_inputs, '_publish_typed_bundles'),
     ):
         original = getattr(owner, name)
 
@@ -182,10 +183,10 @@ def test_changed_source_keeps_last_good_generation_and_notification(
     tids = initial_generation_template.result
     before = deepcopy(store.rec_model.content_generation())
     store.tracks.set_track_genre(tids[0], 'Classical')
-    original = model_refresh.prepare
+    original = model_calculations.calculate
 
-    def changed(reader, now, **kwargs):
-        prepared = original(reader, now, **kwargs)
+    def changed(inputs, now, **kwargs):
+        prepared = original(inputs, now, **kwargs)
         if external:
             writer = Store(store._db_path)
             try:
@@ -199,7 +200,7 @@ def test_changed_source_keeps_last_good_generation_and_notification(
             store.tracks.set_track_genre(tids[1], 'Ambient')
         return prepared
 
-    monkeypatch.setattr(model_refresh, 'prepare', changed)
+    monkeypatch.setattr(model_calculations, 'calculate', changed)
     assert model_refresh.rebuild(store, 2001) is None
     assert store.tracks.get_track_enrichment(tids[1])[0] == 'Ambient'
     assert store.rec_model.content_generation() == before
@@ -211,15 +212,15 @@ def test_changed_source_keeps_last_good_generation_and_notification(
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_enrichment_stamps_allow_full_model_and_pool_publication(store, monkeypatch):
     seed(store)
-    original_prepare = model_refresh.prepare
+    original_prepare = model_calculations.calculate
 
     def stamp():
         with store.conn:
             store.conn.execute('UPDATE recordings SET first_enriched_at=COALESCE(first_enriched_at,1),'
                                'last_enriched_at=COALESCE(last_enriched_at,0)+1')
 
-    def fitting(reader, now, **kwargs):
-        result = original_prepare(reader, now, **kwargs)
+    def fitting(captured, now, **kwargs):
+        result = original_prepare(captured, now, **kwargs)
         stamp()
         return result
 
@@ -234,9 +235,11 @@ def test_enrichment_stamps_allow_full_model_and_pool_publication(store, monkeypa
         return {mode: {'wheelhouse': items}, 'all': {'wheelhouse': items},
                 '_meta': {'full_pools': True}}, []
 
-    monkeypatch.setattr(model_refresh, 'prepare', fitting)
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', ranking)
+    calculate = Mock(wraps=fitting)
+    monkeypatch.setattr(model_calculations, 'calculate', calculate)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', ranking)
     assert model_refresh.rebuild(store, 2000) is not None
+    calculate.assert_called_once()
     assert not store.rec_refresh.has_pending_changes()
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert store.recommendations.head('home') is not None
@@ -267,23 +270,23 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     store.tracks.set_track_genre(tids[0], 'Classical')
     revision = store.rec_refresh.revision()
     assert revision is not None
-    prepared_batches, prepare = [], model_refresh.prepare
+    prepared_batches, prepare = [], model_calculations.calculate
 
     def capture_batch(*args, **kwargs):
         batch = prepare(*args, **kwargs)
         prepared_batches.append(deepcopy(batch))
         return batch
 
-    monkeypatch.setattr(model_refresh, 'prepare', capture_batch)
+    monkeypatch.setattr(model_calculations, 'calculate', capture_batch)
     writes = []
-    original_write = fao.write
+    original_write = fao.prepare
     def write_without_serving_lock(path, data, **kwargs):
         if path.suffix == '.bin':
             assert not store._lock.held_by_current_thread, 'Embedding bytes prepared under the serving lock'
             assert not store.conn.in_transaction
             writes.append(path)
         return original_write(path, data, **kwargs)
-    monkeypatch.setattr(fao, 'write', write_without_serving_lock)
+    monkeypatch.setattr(fao, 'prepare', write_without_serving_lock)
 
     def selected():
         return {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')]
@@ -336,7 +339,7 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     # own parity tests; the snapshot, file writes and repository writes remain
     # real on both attempts.
     assert len(prepared_batches) == 1
-    monkeypatch.setattr(model_refresh, 'prepare', lambda *args, **kwargs: deepcopy(prepared_batches[0]))
+    monkeypatch.setattr(model_calculations, 'calculate', lambda *args, **kwargs: deepcopy(prepared_batches[0]))
     retry = model_refresh.rebuild(store, 2002)
     assert retry is not None
     after = store.rec_model.content_generation()

@@ -29,7 +29,7 @@ def activate_runtime(directory):
 def verify_route(prediction, shared, specialists, *, compatible):
     routed = {v: m['sha256'] for v, m in prediction.get('individual_models', {}).items()}
     if compatible:
-        if prediction.get('model', {}).get('sha256') != shared or routed != specialists:
+        if (shared is not None and prediction.get('model', {}).get('sha256') != shared) or routed != specialists:
             raise ValueError('Compatible capture did not use all pinned specialists')
     elif prediction.get('model') or routed:
         raise ValueError('Incompatible capture unexpectedly used a learned model')
@@ -37,7 +37,7 @@ def verify_route(prediction, shared, specialists, *, compatible):
 
 
 def inference_audit(directory, run, profiles):
-    """Verify specialist routing and legacy audio fallback without a database reader."""
+    """Verify specialist routing, retaining interpretation of older frozen runs."""
     from pytest import MonkeyPatch
     from yt_playlist.core import audio_embedding, sample_files
     from yt_playlist.rec import audio_vibe_prediction
@@ -46,8 +46,10 @@ def inference_audit(directory, run, profiles):
     joins = json.loads((run / 'capture-joins.json').read_text())
     expected = {name.rsplit('_', 1)[-1]: model['sha256'] for name, model in plan['models'].items()}
     expected['concentrate'] = expected.pop('focus')
-    shared = expected.pop('model')
-    shared_artifact = json.loads(Path(plan['models']['yt_playlist.rec.audio_vibe_model']['path']).read_text())
+    shared = expected.pop('model', None)
+    reference = (plan['models']['yt_playlist.rec.audio_vibe_model'] if shared is not None else
+                 next(iter(plan['models'].values())))
+    artifact = json.loads(Path(reference['path']).read_text())
     maximum, rows = 0., {}
     with MonkeyPatch.context() as patch:
         configure(patch, directory / 'report-environment')
@@ -55,23 +57,27 @@ def inference_audit(directory, run, profiles):
             captured = [sample_files.read(samples[sid]['filename'], expected={'id': sid}) for sid in ids]
             reason = None
             try:
-                compatible = all(audio_embedding.signature(sample) == shared_artifact['embedding_signature']
+                compatible = all(audio_embedding.signature(sample) == artifact['embedding_signature']
                                  for sample in captured)
                 if not compatible:
-                    reason = 'Embedding provenance differs from the pinned shared model'
+                    reason = 'Embedding provenance differs from the pinned model'
             except ValueError as error:
                 compatible, reason = False, str(error)
             prediction = audio_vibe_prediction.predict(captured, metadata={})
             routed = verify_route(prediction, shared, expected, compatible=compatible)
-            if not compatible and prediction != audio_vibe_prediction.predict(captured, use_model=False):
+            if shared is not None and not compatible and prediction != audio_vibe_prediction.predict(captured, use_model=False):
                 raise ValueError('Legacy capture did not retain the exact audio heuristic: ' + key)
-            shared_scores = {row['vibe']: row['score'] for row in prediction['ranking']}
-            for vibe, score in (prediction.get('suitability') or shared_scores).items():
+            ranking = {row['vibe']: row['score'] for row in prediction['ranking']}
+            suitability = prediction.get('suitability') or ranking
+            for vibe, score in suitability.items():
                 maximum = max(maximum, abs(score - profiles[key]['vibes']['fits'][vibe]['score']))
+            components = ranking if shared is not None else suitability
             for vibe in ('energize', 'release'):
-                maximum = max(maximum, abs(shared_scores[vibe] - profiles[key]['vibes']['intensity_fits'][vibe]['score']))
+                if vibe in components:
+                    maximum = max(maximum, abs(components[vibe] - profiles[key]['vibes']['intensity_fits'][vibe]['score']))
             rows[key] = {'sample_ids': ids, 'shared_model': shared if compatible else None,
-                         'specialists': routed, 'route': 'six_specialists' if compatible else 'audio_heuristic',
+                         'specialists': routed, 'route': 'six_specialists' if compatible else
+                             'audio_heuristic' if shared is not None else 'unavailable',
                          'fallback_reason': reason, 'excerpts_without_embedding': sum('embedding' not in s for s in captured)}
     if maximum > 1e-12:
         raise ValueError('Direct consumer profiles do not replay from their exact captures')

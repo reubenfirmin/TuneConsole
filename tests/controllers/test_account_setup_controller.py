@@ -16,7 +16,7 @@ def test_setup_validates_clients_then_commits_bindings_then_publishes_config(tmp
     accounts = create_autospec(Accounts, instance=True, spec_set=True)
     runtime = runtime_module.Runtime(SimpleNamespace(accounts=accounts), tmp_path / 'config.toml', tmp_path)
     order = []
-    original_replace = runtime_module.os.replace
+    original_replace = runtime.files.publish
 
     def build_client(config, bridge):
         order.append('validate')
@@ -36,7 +36,7 @@ def test_setup_validates_clients_then_commits_bindings_then_publishes_config(tmp
         original_replace(staged, destination)
 
     monkeypatch.setattr(runtime_module, 'build_client', build_client)
-    monkeypatch.setattr(runtime_module.os, 'replace', publish)
+    monkeypatch.setattr(runtime.files, 'publish', publish)
     accounts.replace_accounts.side_effect = bind
     runtime.apply_setup([dict(label='Main', credential_ref='bridge', is_master=True)])
     assert order == ['validate', 'bindings', 'config']

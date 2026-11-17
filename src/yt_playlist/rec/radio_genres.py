@@ -16,13 +16,9 @@ def genre(track):
 
 
 class GenrePolicy:
-    def __init__(self, theme, history, *, current=None, store=None):
-        self.store = store
+    def __init__(self, theme, history, *, current=None, axes=None):
         self.current = current if current is not None else history[-1] if history else None
-        # Detach genre meanings through the repository before scoring. The
-        # serving connection can belong to sync/enrichment on another thread.
-        labels = [t.get('genre') for t in [*history[-8:], self.current] if t]
-        self.axes = store.genres.feature_axes(labels) if store is not None else None
+        self.axes = axes
         self.pinned = theme == 1
         self.breadth = max(0., 1 - 2 * theme)
         self.focus = max(0., 2 * theme - 1)
@@ -34,9 +30,7 @@ class GenrePolicy:
     def _axis(self, label):
         if not label:
             return None, None
-        if label not in self.axes:
-            self.axes.update(self.store.genres.feature_axes([label]))
-        return self.axes[label]
+        return self.axes.get(label, (None, None))
 
     def key(self, track):
         if self.axes is None:

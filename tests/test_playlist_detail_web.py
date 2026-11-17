@@ -149,7 +149,7 @@ def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist, *, observations=None: ("Rock", "1998", None, [], []) if title == "S0"
+                        lambda title, artist, *, observations=None, matcher=None, credits=None: ("Rock", "1998", None, [], []) if title == "S0"
                         else (None, None, None, [], []))
     iid, a = _seed_one_track(store)
     only_provider(store, "musicbrainz")

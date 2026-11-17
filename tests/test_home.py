@@ -119,21 +119,22 @@ def test_next_home_visit_expires_a_day_old_theme_menu(store):
     seed_modes(store,1)
     returning_listener(store, 'mixes', now=1000)
     from yt_playlist.rec import rec_params
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec.home_prepared import MENU_MAX_AGE_S
+    from yt_playlist.rec.home_cards import _epoch
     rec_params.set_param(store, "erosion_view_cap", 10)
     dao = store.rec_ledger
     dao.bump_card_view("cards", 1000.0)
     store.modes.log_impressions(0, [("wheelhouse", 1)], 1000.0)
-    clock = [1000.0 + home.MENU_MAX_AGE_S - 1]
+    clock = [1000.0 + MENU_MAX_AGE_S - 1]
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     publish_menu(store, clock[0], tracks_per_card=1)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0]),
                         base_url='http://127.0.0.1')
     assert client.get("/").status_code == 200
-    assert home._epoch(store, "cards") == 0
+    assert _epoch(store, "cards") == 0
     clock[0] += 1
     assert client.get("/").status_code == 200
-    assert home._epoch(store, "cards") == 1
+    assert _epoch(store, "cards") == 1
 
     # Fragment previews do not advance the new menu, even if its previous menu was old.
     views = dao.card_views("cards")

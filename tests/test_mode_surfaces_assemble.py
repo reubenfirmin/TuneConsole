@@ -137,6 +137,7 @@ def ranked_cards():
                 disliked_key_page=lambda **kwargs: [], suppressed_keys=lambda *args, **kwargs: set()),
             rec_eligibility=SimpleNamespace(suppressed_candidate_keys=lambda keys, now: set()),
             rec_query=SimpleNamespace(track_genres=lambda keys: {}),
+            artists=SimpleNamespace(credited_pages=lambda rows: (dict(row) for row in rows)),
             genres=SimpleNamespace(feature_axes=lambda genres: dict.fromkeys(genres, ('house', None))))
         return stored_home._assemble(reader, 1, 10., epoch, (), (), order, {'leans': {}})
 
@@ -432,13 +433,13 @@ def test_diversify_caps_artist_and_album():
     items = (
         [{"artist": "A", "album": "AlbA", "key": f"a{i}"} for i in range(4)]        # same artist -> cap
         + [{"artist": f"B{i}", "album": "Comp", "key": f"c{i}"} for i in range(4)]  # one album -> cap
-        + [{"artist": f"S{i}", "album": "", "key": f"s{i}"} for i in range(3)]      # singles -> uncapped
+        + [{"artist": f"S{i}", "album": "", "key": f"s{i}"} for i in range(12)]     # singles -> uncapped
     )
     out = ms._diversify(items, max_artist=2, max_album=2)
     assert sum(1 for d in out if d["artist"] == "A") == 2
     assert sum(1 for d in out if d["album"] == "Comp") == 2
-    assert sum(1 for d in out if d["album"] == "") == 3
-    assert [d['key'] for d in out] == ['a0', 'a1', 'c0', 'c1', 's0', 's1', 's2']
+    assert sum(1 for d in out if d["album"] == "") == 12
+    assert [d['key'] for d in out] == ['a0', 'a1', 'c0', 'c1'] + [f's{i}' for i in range(12)]
 
 
 def test_thin_bucket_backfilled_from_general_pool(store):

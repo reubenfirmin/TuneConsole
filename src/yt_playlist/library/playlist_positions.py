@@ -5,6 +5,7 @@ from contextlib import ExitStack
 
 from yt_playlist.library.action_claim import claim_deletion_target
 from yt_playlist.library.playlist_snapshot import validate_playlist
+from yt_playlist.library.playlist_policy import placement_moves
 from yt_playlist.util.action_kinds import ADD_TRACKS
 from yt_playlist.util.retry import with_retry
 
@@ -22,25 +23,8 @@ def pending_insertions(store, playlist_id):
 
 def _move(client, ytm_id, plan):
     tracks = validate_playlist(client.get_playlist(ytm_id, limit=None))["tracks"]
-    videos = plan["video_ids"]
-    # Resolve the anchor's current successor, excluding the songs we are positioning. This also
-    # makes a retry safe after only part of a multi-song move succeeded or the old successor went away.
-    order = [t["videoId"] for t in tracks if t.get("videoId") and t["videoId"] not in videos]
-    anchor = plan["after_video_id"]
-    if anchor not in order:
-        raise ValueError("the original track is not visible on YouTube yet")
-    index = order.index(anchor) + 1
-    if index == len(order):
-        return  # Appending already placed these songs after the last track.
-    successor = order[index]
-    handles = {t["videoId"]: t["setVideoId"] for t in tracks if t.get("videoId") and t.get("setVideoId")}
-    # YouTube returns the new item handles with the add, before playlist readback indexes them.
-    # Prefer those exact handles over a potentially older occurrence of the same video.
-    handles.update(plan.get("set_video_ids", {}))
-    if any(not handles.get(vid) for vid in [successor, *videos]):
-        raise ValueError("YouTube has not exposed the playlist item handles yet")
-    for video in videos:
-        result = client.edit_playlist(ytm_id, moveItem=(handles[video], handles[successor]))
+    for move in placement_moves(tracks, plan):
+        result = client.edit_playlist(ytm_id, moveItem=move)
         status = result.get("status") if isinstance(result, dict) else result
         if status != "STATUS_SUCCEEDED":
             raise ValueError("YouTube did not confirm the playlist move")

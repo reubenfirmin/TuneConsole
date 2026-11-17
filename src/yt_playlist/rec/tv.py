@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 import re
-import threading
+from yt_playlist.controllers.tv_preparation import TVPoolPreparation
 
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
 from yt_playlist.rec import fresh_pool, home_prepared, mix_tuning, tv_visual
@@ -134,19 +134,27 @@ def eligible(store, items, maximum, now):
     """Current suppression is a hard constraint, including while a job was searching."""
     if not isinstance(items, list) or len(items) > MAX_POOL:
         return []
-    items = [t for t in items if isinstance(t, dict)
-             and all(isinstance(t.get(k), str) for k in
-                     ('video_id', 'title', 'artist', 'kind', 'source_key', 'source_artist'))
-             and _VIDEO.fullmatch(t['video_id']) and type(t.get('duration')) is int]
+    items = valid_items(items)
     identities = store.tracks.identity_keys_for_videos(t['video_id'] for t in items)
     upload_keys = {t['video_id']: (identities.get(t['video_id'])
                                   or identity_key(t['title'], t['artist'])) for t in items}
     blocked = home_exclusions(store, [t['source_key'] for t in items], now)
-    # Video uploads are deliberately saved in Generated playlists. That origin
-    # must not exclude them from subsequent TV draws; feedback still applies.
     blocked |= store.rec_model.suppressed_keys('for_you', now, keys=list(upload_keys.values()))
-    muted = store.rec_model.muted_artists()
-    static = tv_visual.static_ids(store)
+    return eligible_items(items, maximum, upload_keys=upload_keys, blocked=blocked,
+                          muted=store.rec_model.muted_artists(), static=tv_visual.static_ids(store))
+
+
+def valid_items(items):
+    if not isinstance(items, list) or len(items) > MAX_POOL:
+        return []
+    return [t for t in items if isinstance(t, dict)
+             and all(isinstance(t.get(k), str) for k in
+                     ('video_id', 'title', 'artist', 'kind', 'source_key', 'source_artist'))
+             and _VIDEO.fullmatch(t['video_id']) and type(t.get('duration')) is int]
+
+
+def eligible_items(items, maximum, *, upload_keys, blocked, muted, static):
+    """Video and source-recording constraints remain separate, supplied facts."""
     return [t for t in items if t['source_key'] not in blocked
             and t['video_id'] not in static
             and upload_keys[t['video_id']] not in blocked
@@ -194,21 +202,25 @@ def record_draw(store, items):
 def queue(store, now, *, exclude=(), recent=(), current=None, limit=QUEUE_SIZE):
     """A bounded draw from the pool; length changes never require another search."""
     items = eligible(store, (cached(store) or {}).get('items', []), max_minutes(store), now)
+    return draw(items, exclude=exclude, recent=recent, current=current, limit=limit,
+        number=draw_number(store), history=_video_history(store, 'tv_recent_videos', MAX_POOL),
+        last=_video_history(store, 'tv_last_videos', QUEUE_SIZE))
+
+
+def draw(items, *, exclude=(), recent=(), current=None, limit=QUEUE_SIZE, number=0, history=(), last=()):
     excluded = set(exclude)
     if current:
         excluded.add(current)
     items = [item for item in items if item['video_id'] not in excluded]
-    draw = draw_number(store)
-    history = (_video_history(store, 'tv_recent_videos', MAX_POOL) + list(recent))[-MAX_POOL:]
+    history = (list(history) + list(recent))[-MAX_POOL:]
     recent = {video: index for index, video in enumerate(history)}
-    last = _video_history(store, 'tv_last_videos', QUEUE_SIZE)
     def freshness(item):
         video = item['video_id']
         if video in last:
             return 2, 0
         return (1, recent[video]) if video in recent else (0, 0)
-    if draw:
-        items.sort(key=lambda item: hashlib.sha256(f"{draw}:{item['video_id']}".encode()).digest())
+    if number:
+        items.sort(key=lambda item: hashlib.sha256(f"{number}:{item['video_id']}".encode()).digest())
     items.sort(key=freshness)
     lanes = [[{**item, 'key': item['video_id']} for item in items if item['group'] == group]
              for group in GROUPS]
@@ -274,67 +286,15 @@ def refresh(store):
         store._tv_refresh_requested = getattr(store, '_tv_refresh_requested', 0) + 1
 
 
-class Preparation:
+class Preparation(TVPoolPreparation):
     def __init__(self, store):
-        self.store, self.complete = store, None
-        self.lock = threading.RLock()
-
-    def due(self, now):
-        completed = self.complete
-        if completed is None:
-            return True
-        guard, pool, at, expires, requested = completed
-        return (not at <= now < expires
-                or not 0 <= now - pool['at'] < MAX_AGE
-                or requested != getattr(self.store, '_tv_refresh_requested', 0)
-                or cached(self.store) != pool or not guard.is_current())
-
-    def step(self, client, now):
-        store = self.store
-        with self.lock:
-            check_cancellable_work()
-            if not self.due(now):
-                return False
-            self.complete = None
-            requested = getattr(store, '_tv_refresh_requested', 0)
-            previous = cached(store)
-            pool = previous
-            try:
-                # Keep output reads separate from candidate inputs. Publishing
-                # this pool must not invalidate its own completed seed work.
-                with store.read_snapshot() as snapshot:
-                    expiry = snapshot.store.rec_model.next_suppression_change(now)
-                    tuning_left = mix_tuning.remaining(snapshot.store, now)
-
-                    def publish(payload):
-                        nonlocal pool
-                        encoded = json.dumps(payload, separators=(',', ':'))
-
-                        def write():
-                            if cached(store) != previous:
-                                raise WorkBudgetExceeded('TV output changed during preparation')
-                            store.rec_proposals.publish_prepared_home(encoded, now, surface=SURFACE)
-
-                        published = snapshot.publish(write)
-                        if published:
-                            pool = payload
-                        return published
-
-                    more = _prepare(snapshot.store, client, now, previous or {}, publish)
-                if not more and pool is not None:
-                    expires = min(pool.get('retry_at', pool['at'] + SEARCH_RETRY_S), pool['at'] + MAX_AGE)
-                    if expiry is not None:
-                        expires = min(expires, expiry)
-                    if tuning_left:
-                        expires = min(expires, now + tuning_left)
-                    self.complete = snapshot, pool, now, expires, requested
-            except (WorkBudgetExceeded, WorkClosing):
-                raise
-            except Exception:
-                store.tv_preparation.record(True, now)
-                raise
-            store.tv_preparation.record(False, now)
-            return more or requested != getattr(store, '_tv_refresh_requested', 0)
+        super().__init__(snapshot=store.read_snapshot, cached=lambda: cached(store),
+            requested=lambda: getattr(store, '_tv_refresh_requested', 0),
+            publish=lambda payload, now: store.rec_proposals.publish_prepared_home(
+                json.dumps(payload, separators=(',', ':')), now, surface=SURFACE),
+            record=store.tv_preparation.record, prepare=_prepare,
+            expiry=lambda reader, now: reader.rec_model.next_suppression_change(now),
+            tuning=mix_tuning.remaining, max_age=lambda: MAX_AGE, retry_seconds=lambda: SEARCH_RETRY_S)
 
 
 def _prepare(reader, client, now, previous, publish):

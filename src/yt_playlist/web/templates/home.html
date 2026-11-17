@@ -15,6 +15,7 @@
 <script src="/static/account-growth.js?v={{ asset_v }}"></script>
 <link rel="stylesheet" href="/static/artist-start.css?v={{ asset_v }}">
 <script src="/static/artist-start.js?v={{ asset_v }}"></script>
+<script src="/static/onboarding-welcome.js?v={{ asset_v }}"></script>
 {% endblock %}
 {# Transient success toast (e.g. re-authed with auto-sync on, nothing for them to do). Mirrors the
    OOB error toast: Alpine auto-dismisses after 5s. Renders into base.html's #toasts container. #}
@@ -29,6 +30,7 @@
 {% include "_partials/tv.html" %}
 {% endblock %}
 {% block body %}
+{% if show_welcome %}{% include '_partials/onboarding_welcome.html' %}{% endif %}
 {% if flash %}
 <div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak>
   <span class="banner-body">{{ flash }}</span>

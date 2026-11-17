@@ -17,7 +17,7 @@ from tests.store_fixture_support import (
 )
 from yt_playlist.rec import content_model, embedding_vectors, progressive, taste_modes
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.core import activity, content_preparation_state, schema_inspection, store as store_core
+from yt_playlist.core import activity, content_preparation_state, schema_inspection, sqlite_database as store_core
 from yt_playlist.core.store import Store
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.prepared_content import PreparedContentRepo
@@ -279,7 +279,7 @@ def test_repair_captures_only_its_four_owner_counters_after_unrelated_key_churn(
 ])
 def test_repair_fences_each_read_owner_and_ignores_independent_owners(store, monkeypatch, owner, invalidates):
     from yt_playlist.core import prepared_inputs
-    from yt_playlist.core.preparation import embeddings as embedding_preparation
+    from tests.file_preparation_support import embeddings as embedding_preparation
 
     catalog(store, 6)
     subjects = list(store.conn.execute('SELECT id,identity_key FROM recordings ORDER BY id'))

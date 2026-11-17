@@ -49,7 +49,7 @@ def test_artists_page_includes_saved_albums_without_playlists(store):
     artist, = response.context["artists"]
     assert (artist["artist"], artist["songs"], artist["n_albums"], artist["n_pls"]) == (
         "Album artist", 1, 1, 0)
-    assert '/artist?name=Album%20artist' in response.text
+    assert f'/artist?artist_id={artist["artist_id"]}' in response.text
 
 
 @pytest.mark.parametrize('headers,content_type', [({}, 'text/html'),

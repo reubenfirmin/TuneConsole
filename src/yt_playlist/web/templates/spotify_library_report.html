@@ -202,7 +202,7 @@
                   {{ (candidate.artist_score * 100)|round|int }}% artist</span>
               </div>
               <div class="import-candidate-actions">
-                <a class="btn-ghost btn-sm" href="/album?browse={{ candidate.browse_id }}"
+                <a class="btn-ghost btn-sm" href="{{ album_url(candidate.browse_id) }}"
                    target="_blank" rel="noopener">Inspect</a>
                 <form method="post" action="/import/spotify-library/resolve-album"
                       x-data="{ saving: false }" @submit="saving = true" :aria-busy="saving">
@@ -247,7 +247,7 @@
               <td>{{ album_reasons.get(item.reason, item.reason) }}</td>
               <td class="text-end">{% if item.ytm_playlist_id %}<a href="https://music.youtube.com/playlist?list={{ item.ytm_playlist_id|urlencode }}"
                 target="_blank" rel="noopener">Open playlist {{ arrow_icon('external') }}</a>
-                {% elif item.browse_id %}<a href="/album?browse={{ item.browse_id }}">Open {{ arrow_icon('right') }}</a>{% endif %}</td>
+                {% elif item.browse_id %}<a href="{{ album_url(item.browse_id) }}">Open {{ arrow_icon('right') }}</a>{% endif %}</td>
             </tr>
           {% endfor %}
           </tbody>

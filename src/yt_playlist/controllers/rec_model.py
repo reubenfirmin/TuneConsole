@@ -47,8 +47,12 @@ class RecommendationModel:
             snapshot = {'saved_at': now, 'params': self.repository.parameter_values(param_keys),
                         'weights': list(self.weight_records().values())}
             if facts['typed']:
-                reference = self.recovery.publish('taste-checkpoint', 1, snapshot['params'])
-                self.repository.publish_checkpoint(uuid.uuid4().hex, now, snapshot['weights'], reference)
+                integrity = self.recovery.describe('taste-checkpoint', 1, snapshot['params'])
+                file_id = self.repository.reserve_checkpoint_file(integrity)
+                reference = self.recovery.publish_reserved(file_id, 'taste-checkpoint', 1, snapshot['params'],
+                                                            expected=integrity)
+                self.repository.publish_checkpoint(uuid.uuid4().hex, now, snapshot['weights'], reference,
+                                                   file_id=file_id)
             else:
                 self.settings.set_setting(key, json.dumps(snapshot))
 

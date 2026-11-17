@@ -2,6 +2,8 @@
 import hashlib
 import json
 import time
+import sqlite3
+from contextlib import closing, contextmanager
 
 import pytest
 from tests.metadata_provenance_support import metadata_provenance
@@ -11,6 +13,70 @@ from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import metadata_runtime as runtime, metadata_runtime_files as files
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.store import Store
+from yt_playlist.core.metadata_file_contract import record_path
+
+
+@pytest.mark.parametrize('kind', ['choices', 'alternatives', 'native', 'conflicts'])
+def test_native_file_interruption_preserves_head_and_recovers_after_restart(runtime_store, monkeypatch, kind):
+    store = runtime_store
+    track, recording = entry(store)
+    now = time.time()
+
+    def publish(current, revision):
+        if kind == 'choices':
+            current.metadata_choices.choose(track, 'bpm', 100 + revision, now=now + revision)
+        elif kind == 'alternatives':
+            current.enrichment_state.record_enrichment_attempt('song|artist', 'a', {'bpm': 100 + revision},
+                now=now + revision, video_id='video', run_id=str(revision))
+        elif kind == 'conflicts':
+            current.enrichment.upsert_conflict(track, 'genre', [{'provider': 'a', 'value': str(revision)}], now=now + revision)
+        else:
+            current.enrichment_state.record_metadata_observations(track, 'native', [MetadataObservation(
+                'mood_party', revision / 10, 'recording', 'native-id', 'prediction', unit='classifier_probability')],
+                run_id=str(revision), now=now + revision)
+
+    publish(store, 1)
+    selected = tuple(store.conn.execute('SELECT file_id FROM metadata_file_references').fetchone())
+    observed = []
+
+    @contextmanager
+    def interrupted(path, *args, **kwargs):
+        assert not store.conn.in_transaction
+        with closing(sqlite3.connect(store._db_path)) as observer:
+            pending = observer.execute("SELECT id FROM metadata_file_writes WHERE file_status='pending' ORDER BY id DESC").fetchone()[0]
+        assert record_path(files.directory(store.conn), pending) == path
+        observed.append(pending)
+        raise OSError('file publication interrupted')
+        yield
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fao, 'prepare', interrupted)
+        with pytest.raises(OSError, match='file publication interrupted'):
+            publish(store, 2)
+    assert tuple(store.conn.execute('SELECT file_id FROM metadata_file_references').fetchone()) == selected
+    assert not record_path(files.directory(store.conn), observed[0]).exists()
+    store.conn.execute("CREATE TEMP TRIGGER fail_metadata_completion BEFORE UPDATE OF file_status ON metadata_file_writes "
+                       "WHEN NEW.file_status='ready' BEGIN SELECT RAISE(ABORT,'head interrupted'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='head interrupted'):
+        publish(store, 3)
+    store.conn.execute('DROP TRIGGER fail_metadata_completion')
+    assert tuple(store.conn.execute('SELECT file_id FROM metadata_file_references').fetchone()) == selected
+    pending = [row[0] for row in store.conn.execute("SELECT id FROM metadata_file_writes WHERE file_status='pending' ORDER BY id")]
+    assert len(pending) == 2
+    assert record_path(files.directory(store.conn), pending[-1]).is_file()
+    path = store._db_path
+    store.conn.close()
+    reopened = Store(path)
+    try:
+        reopened.init_schema()
+        assert tuple(reopened.conn.execute('SELECT file_id FROM metadata_file_references').fetchone()) == selected
+        publish(reopened, 4)
+        latest = reopened.conn.execute('SELECT max(id) FROM metadata_file_writes WHERE file_status=\'ready\'').fetchone()[0]
+        assert latest > max(pending)
+        assert record_path(files.directory(reopened.conn), latest).is_file()
+        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        reopened.conn.close()
 
 
 @pytest.fixture
@@ -151,7 +217,7 @@ def test_rejected_backup_preserves_all_live_metadata_bytes(runtime_store, tmp_pa
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup')
     document = json.loads(fao.read(manifest).bytes)
-    paths = [files.relative(member['kind'], member['owner'], member['revision'])
+    paths = [files.reference_path(store.conn, member['kind'], member['owner'], member['revision']).relative_to(files.directory(store.conn))
              for member in document['entries']]
     before = {path: (files.directory(store.conn)/path).read_bytes() for path in paths}
     assert len(paths) == 2
@@ -360,7 +426,7 @@ def test_relocation_restores_current_native_inputs_alternatives_and_conflicts(ru
         assert moved.enrichment.resolve_enrichment_candidate(track,'genre','Rock')
         assert moved.tracks.get_track_enrichment(track)[0] == 'Rock'
         row = moved.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?',(source,)).fetchone()
-        path = files.directory(moved.conn)/files.relative('native',(source,),row[0])
+        path = files.reference_path(moved.conn, 'native', (source,), row[0])
         path.unlink()
         with pytest.raises(ValueError, match='Missing runtime metadata document'):
             metadata_native.source_values(moved.conn, source)
@@ -384,7 +450,7 @@ def test_restore_requires_each_durable_metadata_kind(runtime_store, tmp_path, ki
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup')
     document = json.loads(fao.read(manifest).bytes)
-    paths = [files.relative(member['kind'], member['owner'], member['revision'])
+    paths = [files.reference_path(store.conn, member['kind'], member['owner'], member['revision']).relative_to(files.directory(store.conn))
              for member in document['entries']]
     before = {path: (files.directory(store.conn)/path).read_bytes() for path in paths}
     omitted = next(member for member in document['entries'] if member['kind'] == kind)

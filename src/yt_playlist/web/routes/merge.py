@@ -5,7 +5,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.core.action_errors import ActionInputError
-from yt_playlist.library.merge_order import track_positions
+from yt_playlist.controllers.merge_drafts import ordered as _ordered, liked_id as _liked_id
 from yt_playlist.library.playlist_mutation import PlaylistWriteUnconfirmed
 from yt_playlist.rec.actions import refresh_cleanup
 
@@ -28,77 +28,10 @@ def build(ctx) -> APIRouter:
         return [int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()]
 
     def _members_tracks(ids):
-        """Build members + de-duped track rows for a set of playlist ids (None if <2 exist)."""
-        pls = [p for p in (store.playlists.get_playlist(i) for i in ids) if p is not None]
-        if len(pls) < 2:
-            return None
-        idmap = {i.id: i.label for i in store.accounts.get_accounts()}
-        members = [{"id": p.id, "letter": chr(65 + n), "ident": idmap.get(p.account_id, "?"),
-                    "title": p.title, "ytm": p.provider_playlist_id} for n, p in enumerate(pls)]
-        tracks = {}
-        seqs = [[] for _ in pls]
-        for mi, p in enumerate(pls):
-            for pos, (k, v, t, ar, d, av) in enumerate(store.playlists.get_playlist_tracks_with_meta(p.id)):
-                tid = ("v:" + v) if v else ("k:" + k)
-                seqs[mi].append(tid)
-                row = tracks.get(tid)
-                if row is None:
-                    row = {"tid": tid, "title": t, "artist": ar, "video_id": v,
-                           "available": av, "duration": d, "present": [False] * len(pls),
-                           "pos": [None] * len(pls)}
-                    tracks[tid] = row
-                elif row["duration"] is None and d is not None:
-                    row["duration"] = d
-                row["present"][mi] = True
-                row["pos"][mi] = pos + 1
-        positions = track_positions(seqs)
-        lens = [len(sq) for sq in seqs]
-        for row in tracks.values():
-            row["order"] = positions.get(row["tid"], 1.0)
-            row["npos"] = [((row["pos"][mi] - 1) / (lens[mi] - 1) if lens[mi] > 1 else 0.0)
-                           if row["pos"][mi] is not None else None
-                           for mi in range(len(pls))]
-        return members, sorted(tracks.values(), key=lambda r: (r["order"], (r["title"] or "").lower()))
-
-    def _eff_pos(t, pick):
-        p = pick.get(t["tid"])
-        npos = t["npos"]
-        if p is not None and p < len(npos) and npos[p] is not None:
-            return npos[p]
-        vals = [v for v in npos if v is not None]
-        return sum(vals) / len(vals) if vals else 1.0
-
-    def _ordered(tracks, draft_params):
-        by_title = lambda t: (t["title"] or "").lower()
-        if draft_params["sort"] == "playlist":
-            out = sorted(tracks, key=lambda t: (_eff_pos(t, draft_params["pick"]), by_title(t)))
-        else:
-            out = sorted(tracks, key=by_title)
-        if draft_params["mode"] == "ducks":   # shared (present in >=2) first, odd ducks last (stable within)
-            out = sorted(out, key=lambda t: 0 if sum(t["present"]) >= 2 else 1)
-        return out
-
-    def _liked_id(members):
-        # Liked Music can't be deleted, so a merge that includes it can only keep Liked (delete the
-        # others) or keep all. The per-other "keep" options are dropped. Returns LM's member id or None.
-        return next((m["id"] for m in members if m["ytm"] == "LM"), None)
+        return ctx.merge_drafts().members_tracks(ids)
 
     def _draft(ids, members, *, return_to=None):
-        sig = ",".join(str(i) for i in ids)
-        draft = store.actions.get_draft(sig)
-        if draft is None:
-            liked = _liked_id(members)
-            params = {"excluded": [], "pick": {}, "sort": "playlist", "mode": "interleaved",
-                      "keep": str(liked if liked is not None else members[0]["id"]),
-                      "return_to": return_to or "/cleanup"}
-            draft_id = store.actions.record_action(
-                "merge_draft", json.dumps(params), sig, "draft", None, now_fn())
-            draft = store.actions.get_action(draft_id)
-        elif return_to:
-            params = json.loads(draft.params_json)
-            params["return_to"] = return_to
-            store.actions.update_draft(draft.id, json.dumps(params))
-        return draft
+        return ctx.merge_drafts().draft(ids, members, return_to=return_to)
 
     def _view(request, ids, members, tracks, draft):
         draft_params = json.loads(draft.params_json)
@@ -136,34 +69,8 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="merge no longer available")
         members, tracks = mt
         draft = _draft(ids, members)
-        params = json.loads(draft.params_json)
         form = await request.form()
-        field, value = form.get("field", ""), form.get("value", "")
-        valid = {t["tid"] for t in tracks}
-        if field == "toggle" and value in valid:
-            excluded = set(params["excluded"])
-            excluded ^= {value}
-            params["excluded"] = list(excluded)
-        elif field == "setall":
-            params["excluded"] = [] if value == "1" else list(valid)
-        elif field == "sort" and value in ("alpha", "playlist"):
-            params["sort"] = value
-        elif field == "mode" and value in ("interleaved", "ducks"):
-            params["mode"] = value
-        elif field == "keep":
-            liked = _liked_id(members)   # with Liked in the merge, only "keep Liked" or "all" are valid
-            if liked is None or value in (str(liked), "all"):
-                params["keep"] = value
-        elif field == "pick" and ":" in value:
-            tid, _, idx = value.rpartition(":")
-            if tid in valid and idx.isdigit():
-                i = int(idx)
-                if params["pick"].get(tid) == i:
-                    params["pick"].pop(tid, None)        # toggle off
-                else:
-                    params["pick"][tid] = i
-        store.actions.update_draft(draft.id, json.dumps(params))
-        draft = store.actions.get_action(draft.id)   # re-read so the re-render reflects the just-saved params
+        draft = ctx.merge_drafts().update(draft, members, tracks, form.get('field', ''), form.get('value', ''))
         return templates.TemplateResponse(request, "_partials/merge_body.html",
                                           _view(request, ids, members, tracks, draft))
 
@@ -172,18 +79,7 @@ def build(ctx) -> APIRouter:
         # Apply the N-way editor: set the kept playlist(s) to the draft's included tracks, in order.
         ids = _ids(request.query_params.get("ids", ""))
         try:
-            mt = _members_tracks(ids)
-            if mt is None:
-                raise ActionInputError('merge_unavailable')
-            members, tracks = mt
-            draft = _draft(ids, members)
-            draft_params = json.loads(draft.params_json)
-            draft_params["excluded"] = set(draft_params["excluded"])
-            vids = [t["video_id"] for t in _ordered(tracks, draft_params)
-                    if t["tid"] not in draft_params["excluded"] and t["video_id"]]
-            member_ids = [m["id"] for m in members]   # existing playlists only (not stale ?ids entries)
-            s = ctx.ops().apply_merge(member_ids, vids, draft_params["keep"],
-                                      reviewed_draft=(draft.id,draft.revision))
+            s, draft_params = ctx.merge_drafts().apply(ids)
         except PlaylistWriteUnconfirmed:
             logger.exception("merge/apply unconfirmed")
             return Response(status_code=503, headers={"HX-Reswap": "none"})
@@ -192,7 +88,6 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             logger.exception("merge/apply failed")
             return Response(status_code=503, headers={"HX-Reswap": "none"})
-        store.actions.delete_action(draft.id)
         parts = []
         if s["added"]:
             parts.append(f"{s['added']} added")
@@ -271,7 +166,7 @@ def build(ctx) -> APIRouter:
     @router.get("/dupe/{a}/{b}")
     def dupe_detail(a: int, b: int):
         # back-compat: the pairwise compare is just the 2-playlist case of the N-way editor
-        if store.playlists.get_playlist(a) is None or store.playlists.get_playlist(b) is None:
+        if not ctx.merge_drafts().available((a, b)):
             raise HTTPException(status_code=404, detail="playlist not found")
         return RedirectResponse(f"/merge?ids={a},{b}&return=/cleanup%23overlaps", status_code=307)
 

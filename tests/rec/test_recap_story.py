@@ -29,16 +29,19 @@ def test_wide_net_is_the_honest_counterpart():
 # ── personality axes ───────────────────────────────────────────────────────────────────────────
 def test_energy_axis_falls_back_to_genre_when_no_acoustic():
     # No acoustic rows at all: energy comes purely from the genre prior (techno is high-energy).
-    val, src = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "techno")})
+    val, src = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "techno")},
+                              genre_axes={'techno': ('techno', None)})
     assert src == "genre" and val > 0.7
     # ambient with no acoustic -> low
-    val2, _ = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "ambient")})
+    val2, _ = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "ambient")},
+                             genre_axes={'ambient': ('ambient', None)})
     assert val2 < 0.3
 
 
 def test_energy_axis_uses_acoustic_when_present():
     audio = {"k": {"energy": 0.9, "bpm": 140, "dance": 0.8}}
-    val, src = rs.energy_axis({"k": 20}, audio, meta={"k": ("A", "ambient")})
+    val, src = rs.energy_axis({"k": 20}, audio, meta={"k": ("A", "ambient")},
+                              genre_axes={'ambient': ('ambient', None)})
     assert val > 0.7   # acoustic 0.9 dominates the ambient prior once coverage is full
     assert src in ("acoustic", "genre")
 
@@ -69,20 +72,12 @@ def test_archetype_matrix_is_total():
 
 
 # ── assembly ────────────────────────────────────────────────────────────────────────────────────
-class _FakeTrends:
-    def ledger_track_plays(self, since, until, *, calendar=False): return {"k1": 10, "k2": 4}
-    def track_audio(self): return {"k1": {"energy": 0.5, "bpm": 120, "dance": 0.7}}
-    def play_hours(self, since, until, *, calendar=False): h = [0] * 24; h[22] = 8; h[14] = 6; return h
-    def track_meta(self): return {"k1": ("A1", "house"), "k2": ("A2", "ambient")}
-
-
-class _FakeStore:
-    trends = _FakeTrends()
-    class genres:
-        @staticmethod
-        def feature_axes(labels):
-            from yt_playlist.util import genre_map
-            return {label:(genre_map.family(label),genre_map.subgenre(label)) for label in labels if label}
+def _personality(month_row=None):
+    hours = [0] * 24
+    hours[22], hours[14] = 8, 6
+    return rs.personality(month_row, {'k1': ('A1', 'house'), 'k2': ('A2', 'ambient')},
+        track_plays={'k1': 10, 'k2': 4}, audio={'k1': {'energy': .5, 'bpm': 120, 'dance': .7}},
+        hours=hours, genre_axes={'house': ('house', None), 'ambient': ('ambient', None)})
 
 
 def test_build_story_assembles_cover_personality_and_closing():
@@ -92,7 +87,7 @@ def test_build_story_assembles_cover_personality_and_closing():
     months = [{"month": "2026-05", "diversity": 0.67, "distinct_artists": 200},
               {"month": "2026-06", "diversity": 0.60, "distinct_artists": 300, "plays": 535,
                "new_artist_plays": 40}]
-    story = rs.build_story(_FakeStore(), months, review, month_name="June")
+    story = rs.build_story(months, review, month_name="June", personality_beat=_personality(months[-1]))
     kinds = [b["kind"] for b in story["beats"]]
     assert kinds[0] == "cover" and kinds[-1] == "closing" and "personality" in kinds
     assert "wide_net" in kinds and "all_in" not in kinds          # 14/535 -> wide net, not all in
@@ -111,7 +106,7 @@ def test_build_story_assembles_cover_personality_and_closing():
 def test_cover_reports_activity_even_when_one_artist_dominates(plays, days, artist_plays, expected):
     review = {"month": "2026-09", "plays": plays, "listen_days": days, "longest_streak": 1,
               "top_artists": [{"artist": "A", "plays": artist_plays}]}
-    story = rs.build_story(_FakeStore(), [], review, month_name="September")
+    story = rs.build_story([], review, month_name="September", personality_beat=_personality())
     assert story["beats"][0]["thesis"] == expected
     # The artist's share is still useful, but says nothing about how often the app was used.
     artist = next(b for b in story["beats"] if b["kind"] == "all_in")
@@ -120,4 +115,4 @@ def test_cover_reports_activity_even_when_one_artist_dominates(plays, days, arti
 
 
 def test_build_story_none_without_review():
-    assert rs.build_story(_FakeStore(), [], None, None) is None
+    assert rs.build_story([], None, None) is None

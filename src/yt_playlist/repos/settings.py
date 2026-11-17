@@ -1,17 +1,22 @@
 """SettingsRepo: small key/value app settings (e.g. the Last.fm API key)."""
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 from yt_playlist.core.db_revisions import setting_reads
+from yt_playlist.repos import collection_file_writes, recommendation_file_writes
 from yt_playlist.core import (album_tuning_state, content_preparation_state, experiment_decision_state,
                               group_preparation_state, model_selection_heads, model_state,
                               ranking_checkpoints, spotify_job_state, sync_state, recommendation_setting_outputs, taste_control_state, workflow_settings)
 
 
 class SettingsRepo(Repo):
-    @snapshot_read
-    def prepared_document(self, key, default=None):
-        from yt_playlist.repos.setting_documents import prepared
-        with setting_reads(self._store, (key,)):
-            return prepared(self.conn, key, default)
+    @synchronized
+    def reserve_output_file(self, key, integrity):
+        with self.conn.atomic():
+            return recommendation_file_writes.reserve(self.conn, recommendation_setting_outputs.TABLES[key], key, '', integrity)
+
+    @synchronized
+    def reserve_file(self, kind, owner, integrity):
+        with self.conn.atomic():
+            return collection_file_writes.reserve(self.conn, kind, owner, integrity)
 
     @lookup_read
     def native_models(self):
@@ -89,21 +94,7 @@ class SettingsRepo(Repo):
                 row = self.conn.execute('SELECT filename,content_digest,byte_size FROM '+
                     recommendation_setting_outputs.TABLES[key]+' WHERE id=1').fetchone()
                 return True, {**dict(row), 'prepared': False} if row else None
-            from yt_playlist.core.preparation import saved_output_publication as publication
-            revision = publication.selected(self.conn, key)
-            if revision is None:
-                return False, None
-            generation = self.conn.execute('SELECT generation FROM '+publication.tables(key)[0]+
-                                           ' WHERE revision=?', (revision,)).fetchone()[0]
-            if generation is None:
-                return True, None
-            from yt_playlist.core.preparation.saved_outputs import tables
-            row = self.conn.execute('SELECT * FROM '+tables(key)[0]+
-                ' WHERE source=? AND preparation_revision=?', (key, generation)).fetchone()
-            if row is None:
-                from yt_playlist.core.schema_contract import MigrationError
-                raise MigrationError('Published saved output file reference is missing')
-            return True, {**dict(row), 'prepared': True}
+            return False, None
 
     @synchronized
     def replace_keys(self, keys, values):
@@ -112,13 +103,21 @@ class SettingsRepo(Repo):
             self.conn.executemany('DELETE FROM settings WHERE key=?', [(key,) for key in keys])
             self.conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', values.items())
 
-    def _publish_owned(self,values,outputs=None,model_references=None,import_job=None,controls=None,decisions=None,workflow_records=None):
+    def _publish_owned(self,values,outputs=None,model_references=None,import_job=None,controls=None,decisions=None,workflow_records=None,file_writes=()):
+        for identity, kind, owner, reference in file_writes:
+            collection_file_writes.complete(self.conn, identity, kind, owner, reference)
         if recommendation_setting_outputs.available(self.conn):
             selected = {key for key in values if key in recommendation_setting_outputs.KEYS}
             if selected:
                 if outputs is None or set(outputs[0]) != selected:
                     raise ValueError('Saved settings require prepared output and file references')
-                recommendation_setting_outputs.register(self.conn, *outputs)
+                prepared, durable, identities = outputs
+                if set(identities) != set(durable):
+                    raise ValueError('Saved outputs require their pending SQL identities')
+                for key, identity in identities.items():
+                    recommendation_file_writes.complete(self.conn, identity, recommendation_setting_outputs.TABLES[key],
+                                                         key, '', durable[key])
+                recommendation_setting_outputs.register(self.conn, prepared, durable)
                 values = {key: value for key, value in values.items() if key not in selected}
         workflows = {key:value for key,value in values.items() if workflow_settings.owns(key)} if workflow_settings.available(self.conn) else {}
         if workflows:
@@ -136,6 +135,8 @@ class SettingsRepo(Repo):
                 self.conn.execute('DELETE FROM spotify_import_jobs')
             else:
                 spotify_job_state.register(self.conn, prepared, reference)
+                collection_file_writes.complete(self.conn, prepared['file_id'], 'spotify-import',
+                                                prepared['identity'], reference)
             values = {key: value for key, value in values.items() if key != spotify_job_state.KEY}
         selected = {key for key in values if key in taste_control_state.KEYS} if taste_control_state.available(self.conn) else set()
         if selected:
@@ -170,33 +171,13 @@ class SettingsRepo(Repo):
 
     @lookup_read
     def prefix_documents(self, prefix):
-        """Capture a namespace and its selected manifests in one SQL read."""
-        from yt_playlist.core.preparation import workflow_publication, workflow_receipts
-        from yt_playlist.repos.setting_documents import parts
-        selections = [(owner, stage) for owner in workflow_publication.OWNERS.values()
-                      if (stage := owner.selected(self.conn)) is not None]
+        """Capture a namespace and its native owners in one SQL read."""
         pattern = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
-        exclude = (' AND NOT ('+' OR '.join(owner.job._filter('settings') for owner, _ in selections)+')'
-                   if selections else '')
         values = dict(self.conn.execute(
-            "SELECT key,value FROM settings WHERE key LIKE ? ESCAPE '!'"+exclude, (pattern,)))
-        documents = {}
-        for owner, stage in selections:
-            after = ''
-            while True:
-                sources = self.conn.execute('SELECT source FROM '+owner.table('map')+
-                    ' WHERE stage=? AND substr(source,1,?)=? AND source>? ORDER BY source LIMIT 128',
-                    (stage, len(prefix), prefix, after)).fetchall()
-                if not sources:
-                    break
-                for source, in sources:
-                    captured = owner.capture(self.conn, stage, source)
-                    documents[source] = parts(self.conn, captured, workflow_receipts.table(owner.name, 'parts'),
-                        generation='preparation_revision', digest='content_digest', prefix='original:', nullable_part=True, limit=513)
-                after = sources[-1][0]
+            "SELECT key,value FROM settings WHERE key LIKE ? ESCAPE '!'", (pattern,)))
         from yt_playlist.repos.setting_workflows import keys
         native = keys(self.conn, prefix) if workflow_settings.available(self.conn) else []
-        return values, documents, native
+        return values, {}, native
 
     @snapshot_read
     def gc_retry_deadlines(self):
@@ -207,21 +188,19 @@ class SettingsRepo(Repo):
             'FROM playlist_gc_attempts')]
 
     @synchronized
-    def set_values(self, values, *, outputs=None, model_references=None, import_job=None, controls=None, decisions=None, workflow_records=None):
+    def set_values(self, values, *, outputs=None, model_references=None, import_job=None, controls=None, decisions=None, workflow_records=None, file_writes=()):
         """Save related settings together, so workers cannot observe half a form."""
-        with self.conn:
-            if not self.conn.in_transaction:
-                self.conn.execute('BEGIN IMMEDIATE')
-            values = self._publish_owned(values, outputs, model_references, import_job, controls, decisions, workflow_records)
+        with self.conn.atomic():
+            values = self._publish_owned(values, outputs, model_references, import_job, controls, decisions, workflow_records, file_writes)
             self.conn.executemany('INSERT INTO settings(key,value) VALUES (?,?) '
                 'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                 [(key, value or '') for key, value in values.items()])
 
     @synchronized
-    def publish_values(self, values, *, outputs=None, model_references=None, import_job=None, controls=None, decisions=None, workflow_records=None):
+    def publish_values(self, values, *, outputs=None, model_references=None, import_job=None, controls=None, decisions=None, workflow_records=None, file_writes=()):
         """Persist supplied serialized settings in this repository's write."""
-        with self.conn.atomic(join=True):
-            values = self._publish_owned(values, outputs, model_references, import_job, controls, decisions, workflow_records)
+        with self.conn.atomic():
+            values = self._publish_owned(values, outputs, model_references, import_job, controls, decisions, workflow_records, file_writes)
             self.conn.executemany('INSERT INTO settings(key,value) VALUES (?,?) '
                 'ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value',
                 values.items())
@@ -232,11 +211,6 @@ class SettingsRepo(Repo):
             return self._get_setting(key, default)
 
     def _get_setting(self, key, default):
-        if key in sync_state.STAMPS:
-            from yt_playlist.core.preparation.library_sync_publication import STAMPS
-            revision = STAMPS.selected(self.conn)
-            if revision is not None:
-                return STAMPS.value(self.conn,key,revision,default)
         for owner in (album_tuning_state,model_selection_heads,ranking_checkpoints):
             if key in owner.KEYS and owner.available(self.conn):
                 return owner.get(self.conn,key,default)
@@ -310,7 +284,10 @@ class SettingsRepo(Repo):
     @synchronized
     def save_spotify_import_job(self, prepared, reference):
         with self.conn.atomic():
-            return spotify_job_state.register(self.conn, prepared, reference)
+            revision = spotify_job_state.register(self.conn, prepared, reference)
+            collection_file_writes.complete(self.conn, prepared['file_id'], 'spotify-import',
+                                            prepared['identity'], reference)
+            return revision
 
     @lookup_read
     def has_transfer_receipts(self):

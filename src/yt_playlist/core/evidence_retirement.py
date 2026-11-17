@@ -13,10 +13,12 @@ BATCH = 32
 
 
 class Retirements:
-    def __init__(self, directory):
-        self.path = directory / '.retention-retirements'
+    def __init__(self, directory, *, path=None):
+        self.path = path if path is not None else directory / '.retention-retirements'
+        source = self.path if self.path.exists() else directory / '.retention-retirements'
+        self.source_path = source
         try:
-            value = json.loads(fao.read(self.path).bytes)
+            value = json.loads(fao.read(source).bytes)
         except FileNotFoundError:
             value = {'schema': 1, 'offers': [], 'checkpoints': []}
         if (not isinstance(value, dict) or value.get('schema') != 1

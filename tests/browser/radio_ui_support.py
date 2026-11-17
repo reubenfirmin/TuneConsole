@@ -15,7 +15,8 @@ def radio_ui(home_pages_only, live_app, store, page):
     # live app starts. All routing, remote state and browser context stay local.
     tracks = [{"key": f"night frequency {i + 1}|artist {i + 1}",
                "video_id": f"radio{i}", "title": f"Night frequency {i + 1}",
-               "artist": f"Artist {i + 1}", "thumbnail": f"{live_app}/radio-art/{i}.svg"}
+               "artist": f"Artist {i + 1}", "thumbnail": f"{live_app}/radio-art/{i}.svg",
+               "artist_links": [{'name': f'Artist {i + 1}', 'href': f'/artist?artist_id={i + 1}'}]}
               for i in range(16)]
     # This fixture offers an already prepared Radio menu. Match the observed
     # readiness used by native Home navigation, as well as the mocked API.

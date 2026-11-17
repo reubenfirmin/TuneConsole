@@ -155,15 +155,23 @@ export class AudioVibeCards {
     if (state.samples.length >= card.state.samples.length) card.state = state;
     else if ('collection_status' in state) card.state.collection_status = state.collection_status;
     const current = card.state;
-    const guess = current.prediction && (current.prediction.vibe || current.prediction.ranking[0]?.vibe);
     // Compatible installed extensions and retained views can contain older
     // diagnostic messages. Never use their free-form text in the human card.
-    card.find('prediction').textContent = guess
-      ? 'Prediction: ' + current.choices[guess].attribute_label
+    card.find('prediction').textContent = current.prediction
+      ? 'Independent listening-purpose scores'
       : current.collection_status?.update ? 'Update to TuneConsole extension 0.1.24 or later to resume audio checks.'
       : current.collection_status?.phase === 'unavailable' ? 'Audio checks are paused. You can still label this song.'
       : `${current.samples.length} of 3 audio checks complete`;
     card.find('extension-update').hidden = !current.collection_status?.update;
+    for (const row of card.node.querySelectorAll('[data-vibe-specialist]')) {
+      const key = row.dataset.vibeSpecialist;
+      const score = current.prediction?.suitability?.[key];
+      const output = row.querySelector('output');
+      output.textContent = Number.isFinite(score) ? score.toFixed(2) : '—';
+      output.setAttribute('aria-label', Number.isFinite(score) ? score.toFixed(2) : 'Not available');
+      output.title = Number.isFinite(score) ? 'Uncalibrated suitability for this purpose' : 'Not available';
+    }
+    card.find('specialists').hidden = !current.prediction;
     const checks = card.find('checks');
     checks.replaceChildren();
     for (const [point, label] of [['thirty', '30 seconds'], ['middle', 'Halfway'], ['two_thirds', 'Two-thirds']]) {
@@ -233,11 +241,12 @@ export class AudioVibeCards {
       card.find('sync-detail').textContent = record?.sync_error?.rejected
         ? 'Your labels are kept here and have not synced yet.' : '';
       card.find('dismiss').disabled = !!edits.length;
+      card.find('dismiss-all').hidden = available.length < 2;
+      card.find('dismiss-all').disabled = available.some(row => this.edits.get(row.id)?.length);
     }
-    const rejected = records.filter(row => row.dismissed && row.dirty && row.sync_error?.rejected);
-    this.find('pending').hidden = !rejected.length;
-    this.find('pending').textContent = `${rejected.length} saved ${rejected.length === 1 ? 'answer needs' : 'answers need'} attention`;
-    this.root.hidden = !available.length && !rejected.length;
+    // Dismissal also suppresses optional sync follow-up. Keep pending answers
+    // in the durable queue without leaving an empty popup or reopening it.
+    this.root.hidden = !available.length;
     this.root.dataset.stacked = String(available.length > 1);
     this.find('deck').hidden = available.length < 2;
     this.find('count').textContent = `${available.findIndex(row => row.id === this.active) + 1} of ${available.length} songs`;
@@ -275,11 +284,17 @@ export class AudioVibeCards {
           ? {sync_error: null, retry_at: 0, retry_attempts: 0} : null);
         this.render(); this.flush();
       }
-    } else if (event.target.closest('[data-vibe-pending]')) {
-      const record = this.records().find(row => row.dismissed && row.dirty && row.sync_error?.rejected);
-      if (record && await this.update(record.id, {dismissed: false})) {
-        await this.restore(); this.active = record.id; this.render(); this.focusCard();
-      }
+    } else if (event.target.closest('[data-vibe-dismiss-all]') && card) {
+      if (!navigator.locks) return;
+      // Capture this stack before waiting for the shared lock. A later play
+      // remains eligible, and closing never discards a memory-only label edit.
+      const ids = new Set(this.records().filter(row => !row.dismissed).map(row => row.id));
+      const saved = await navigator.locks.request(CARDS_LOCK, () => {
+        if ([...ids].some(key => this.edits.get(key)?.length)) return false;
+        return this.write(KEY, this.compact(this.records().map(row => ids.has(row.id)
+          ? {...row, dismissed: true} : row)));
+      });
+      if (saved) { this.render(); this.focusCard(); }
     } else if (event.target.closest('[data-vibe-dismiss]') && card) {
       if (this.edits.get(id)?.length) return;
       if (await this.update(id, {dismissed: true})) { this.render(); this.focusCard(); }
@@ -293,8 +308,8 @@ export class AudioVibeCards {
       this.find('inspect-title').textContent = (state.playback || state.samples[0]).title;
       this.find('evidence').textContent = state.prediction?.evidence.join('. ')
         || `${state.samples.length} of 3 audio checks complete. Your labels can be saved now.`;
-      this.find('alternatives').textContent = state.prediction ? 'Target fits: ' + state.prediction.ranking.map(row =>
-        `${state.choices[row.vibe].attribute_label} ${row.score.toFixed(2)}`).join(' · ') : '';
+      this.find('alternatives').textContent = state.prediction
+        ? 'Scores describe each listening purpose independently; compare songs within a purpose, not scores across purposes.' : '';
       this.renderInspector(this.find('attributes'), state.samples);
       this.find('diagnostics').showModal();
     } else if (event.target.closest('[data-vibe-inspect-close]')) this.find('diagnostics').close();

@@ -2,10 +2,8 @@
 
 Permanent-weight nudges are gated by the registered theme_threshold.
 """
-import math
-import time
-
 from yt_playlist.rec import mix_tuning, rec_params, scoring, transient
+from yt_playlist.rec.graduation_rules import graduation_factor, mood_contributions, migrated_lean, utc_day as _utc_day
 
 
 def feedback_axis(store, explicit_axis, reason, item):
@@ -72,30 +70,15 @@ def apply_ratings(store, states):
                                source=rec_params.get_param(store, w_param), source_label="like")
 
 
-def graduation_factor(score, threshold, *, up_factor, down_factor):
-    """Pure: does this accumulated score cross the threshold, and by what nudge factor?
-
-    Returns None when nothing graduates yet.
-    """
-    if abs(score) < threshold:
-        return None
-    return up_factor if score > 0 else down_factor
-
-
 def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -> None:
     """Accumulate one facet's signed event into the graduation ledger; when its running total
     crosses theme_threshold, graduate it (a gentle permanent weight nudge, then a smooth reset).
     `source` is the signal's registered source weight (graduation speed). `source_label` names the driving
     signal for the §1c graduation log. Model-only. NEVER suppresses."""
-    threshold = rec_params.get_param(store, "theme_threshold")
-    score = store.rec_signals.bump_theme(axis, signed * source, now)
-    factor = graduation_factor(score, threshold, up_factor=rec_params.get_param(store, "graduate_up"),
-                               down_factor=rec_params.get_param(store, "graduate_down"))
-    if factor is not None:
-        new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
-                                        now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-        store.rec_signals.discount_theme(axis, math.copysign(threshold, score))
-        store.rec_signals.log_graduation(axis, source_label, score, factor, new_weight, now)
+    from yt_playlist.controllers.graduation import Graduation
+    Graduation(store.rec_signals, store.rec_model,
+        parameter=lambda name: rec_params.get_param(store, name)).facet(
+            axis, signed, now, source=source, source_label=source_label)
 
 
 def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") -> None:
@@ -113,15 +96,9 @@ def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") ->
     facets = transient.facets_for(store, keys)
     if not facets:
         return
-    n = len(set(keys)) or 1
-    for axis, axis_keys in facets.items():
-        graduate_facet(store, axis, signed * (len(axis_keys) / n), now,
+    for axis, contribution in mood_contributions(keys, facets, signed).items():
+        graduate_facet(store, axis, contribution, now,
                        source=source, source_label=source_label)
-
-
-def _utc_day(now) -> str:
-    """UTC date string YYYY-MM-DD for a unix timestamp (held-day bucketing; deterministic for tests)."""
-    return time.strftime("%Y-%m-%d", time.gmtime(now))
 
 
 def graduate_slider_exposure(store, now) -> None:
@@ -134,30 +111,9 @@ def graduate_slider_exposure(store, now) -> None:
     # A temporary Home adjustment must not turn into a lasting preference at midnight.
     if mix_tuning.remaining(store, now) > 0:
         return
-    threshold = rec_params.get_param(store, "theme_threshold")
-    w_slider = rec_params.get_param(store, "source_w_slider")
-    today = _utc_day(now)
-    for row in store.rec_model.lean_rows():
-        axis, value, last_day = row["axis"], row["value"], row["last_graduated_day"]
-        if last_day == today:
-            continue                                          # already exposed today
-        magnitude = abs(value - 1.0)
-        store.rec_model.set_lean_graduated_day(axis, today)             # stamp the held-day either way
-        if magnitude == 0.0:
-            continue
-        signed = math.copysign(magnitude * w_slider, value - 1.0)
-        score = store.rec_signals.bump_theme(axis, signed, now)
-        factor = graduation_factor(score, threshold, up_factor=rec_params.get_param(store, "graduate_up"),
-                                   down_factor=rec_params.get_param(store, "graduate_down"))
-        if factor is not None:
-            halflife = rec_params.get_param(store, "weight_revert_halflife_d")
-            old_perm = store.rec_model.get_weights(now=now, revert_halflife_d=halflife).get(axis, 1.0)
-            new_perm = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
-                                          now=now, revert_halflife_d=halflife)
-            ratio = (new_perm / old_perm) if old_perm > 0 else 1.0
-            store.rec_model.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
-            store.rec_signals.discount_theme(axis, math.copysign(threshold, score))
-            store.rec_signals.log_graduation(axis, "slider", score, factor, new_perm, now)
+    from yt_playlist.controllers.graduation import Graduation
+    Graduation(store.rec_signals, store.rec_model,
+        parameter=lambda name: rec_params.get_param(store, name)).slider_exposure(store.rec_model.lean_rows(), now)
 
 
 def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
@@ -175,22 +131,7 @@ def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
     re-fetches the same window each run, that path re-counted and ratcheted genre weights toward
     GENRE_MAX (#46). The per-UTC-day stamp (rec_play_grad) makes re-runs idempotent by construction.
     """
-    threshold = rec_params.get_param(store, "theme_threshold")
-    w_play = rec_params.get_param(store, "source_w_play")
-    today = _utc_day(now)
     leans = transient.play_facet_leans(store, now) if prepared_leans is None else prepared_leans
-    for axis, lean in leans.items():
-        if store.rec_signals.get_play_graduated_day(axis) == today:
-            continue                                          # already exposed this axis today
-        store.rec_signals.set_play_graduated_day(axis, today)             # stamp the day either way
-        magnitude = abs(lean)
-        if magnitude == 0.0:
-            continue
-        score = store.rec_signals.bump_theme(axis, magnitude * w_play, now)    # plays only ever push up
-        factor = graduation_factor(score, threshold, up_factor=rec_params.get_param(store, "graduate_up"),
-                                   down_factor=rec_params.get_param(store, "graduate_down"))
-        if factor is not None:
-            new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
-                                            now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-            store.rec_signals.discount_theme(axis, math.copysign(threshold, score))
-            store.rec_signals.log_graduation(axis, "play", score, factor, new_weight, now)
+    from yt_playlist.controllers.graduation import Graduation
+    Graduation(store.rec_signals, store.rec_model,
+        parameter=lambda name: rec_params.get_param(store, name)).play_exposure(leans, now)

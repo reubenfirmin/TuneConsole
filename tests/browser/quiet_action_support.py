@@ -60,18 +60,18 @@ def action_evidence(page, request):
     root = Path(__file__).resolve().parents[2]
     web = root / 'src/yt_playlist/web'
     names = ('track-detail.js', 'artist-start.js', 'album-choices.js', 'app-update.js',
-             'account-growth.js', 'tv.js', 'song-actions.js', 'genre-dialog.js', 'road-trip.js',
+             'account-growth.js', 'tv.js', 'song-actions.js', 'road-trip.js',
              'enrichment-panel.js', 'library-playlists.js', 'table-controls.js',
              'app.js', 'app-navigation.js', 'read-recovery.js', 'home.js', 'playback-status.js',
              'track-detail.css', 'artist-start.css', 'album-choices.css', 'components.css')
     assets = {name: (web / 'static' / name).read_bytes() for name in names}
     files = [web / 'static' / name for name in names] + [web / 'templates' / name for name in (
         'track.html', 'artist_start.html', '_partials/album_tuner.html', '_partials/alerts.html',
-        '_partials/growth_home_choice.html', '_partials/tv.html', '_partials/genre_candidates.html',
+        '_partials/growth_home_choice.html', '_partials/tv.html',
         'actions.html', '_partials/road_trip_draft.html', 'album.html', 'playlist.html',
         '_partials/move_panel.html', '_partials/move_row.html', '_album_actions.html',
         '_partials/liked_cell.html', '_partials/error_toast.html', '_partials/song_actions.html',
-        '_partials/alternates_results.html', '_partials/pool_card.html',
+        '_partials/alternates_results.html', '_partials/pool_card.html', 'base.html',
         'playlists.html', '_partials/playlist_head.html', 'home.html', 'cleanup.html',
         '_partials/merge_body.html', '_partials/empty_row.html', '_partials/action_outcome.html')]
     files.append(web / 'routes/merge.py')

@@ -4,7 +4,8 @@ from tests.derived_rating_support import seed_dislike
 import numpy as np
 import pytest
 
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.legacy_recommendation_fixture_support import recommendations
+from tests.enrichment_support import seed_discovered_enrichment
 from tests.repos.test_typed_recommendation_publication import publish, plan
 from tests.rec.test_stored_fresh import fresh, forbid_legacy
 from tests.store_fixture_support import (
@@ -103,8 +104,9 @@ def test_real_initial_import_prepares_and_serves_home_before_modes_without_legac
 def test_unmodeled_genre_selection_reaches_complete_tail_with_bounded_pages(fresh, monkeypatch):
     from yt_playlist.rec import stored_home
     store, _ = fresh
+    for index in range(254, 260):
+        seed_discovered_enrichment(store, f'fresh-{index}', 'jazz', None)
     with store.conn:
-        store.conn.execute("UPDATE recordings SET genre='jazz' WHERE id>=257")
         store.conn.execute("INSERT INTO library_memberships SELECT entry_id,'import',5 FROM discovery_memberships")
     tracks = candidates(store)
     generation = publish_bundle(store, {'all': {'explore': tracks}, '_meta': {'unmodeled': True}})
@@ -154,10 +156,13 @@ def test_real_typed_assembly_matches_complete_legacy_opportunities_and_experimen
             vectors.append((f'fresh-{index}', np.array([np.cos(angle), np.sin(angle)], dtype=np.float32).tobytes()))
         store.rec_model.replace_rec_vectors(vectors)
         seed_dislike(store, 'one', 1000, 10)
-    store.rec_proposals.put_proposals('mode_bundles', value, 10)
     store._recommendation_files = False
     try:
-        expected = mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1, 2, 3, 4])
+        with monkeypatch.context() as legacy:
+            original_proposals = store.rec_proposals.get_proposals
+            legacy.setattr(store.rec_proposals, 'get_proposals',
+                           lambda surface: value if surface == 'mode_bundles' else original_proposals(surface))
+            expected = mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1, 2, 3, 4])
     finally:
         store._recommendation_files = True
     selected = []
@@ -200,8 +205,9 @@ def test_thin_credible_comfort_rotates_to_the_current_temporal_band(fresh, monke
 
 def test_rare_tail_and_diversity_overflow_are_reachable_in_bounded_pages(fresh, monkeypatch):
     store, _ = fresh
+    for index in range(254, 260):
+        seed_discovered_enrichment(store, f'fresh-{index}', 'jazz', None)
     with store.conn:
-        store.conn.execute("UPDATE recordings SET genre='jazz' WHERE id>=257")
         store.conn.execute("UPDATE youtube_items SET album='' ")
         store.conn.execute("UPDATE youtube_items SET artist='Repeated' WHERE recording_id<257")
     modes(store, [(1, 'jazz')])

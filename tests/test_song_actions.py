@@ -272,10 +272,13 @@ def test_metadata_loads_current_values_originals_and_genre_sources(songs, manual
     response = songs['http'].get('/songs/metadata', params={'video_id': 'owned-song'})
     assert response.status_code == 200
     data = response.json()
+    artist_id = store.artists.track_credits(tid)[0]['artist_id']
     assert data['metadata'] == {
         'track_id': tid, 'title': 'Corrected title', 'artist': 'Artist & Friends',
         'genre': manual_genre or 'Electronic', 'year': '1995',
         'orig_title': 'Owned Song', 'orig_artist': 'Artist & Friends',
+        'artist_links': [{'name': 'Artist & Friends', 'artist_id': artist_id,
+                          'href': f'/artist?artist_id={artist_id}'}],
     }
     assert data['genre_options'] == [
         {'value': 'Electronic', 'providers': ['musicbrainz']},

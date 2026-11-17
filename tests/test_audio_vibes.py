@@ -372,13 +372,18 @@ def test_replacement_provenance_and_attribute_validation(store, monkeypatch):
         assert client.post('/audio-vibes/samples', json=legacy).json()['samples'][0]['audio_attributes'] is None
 
 
+def heuristic_prediction(samples):
+    """Explicit offline baseline; production exposes independent specialists."""
+    return audio_vibe_prediction.predict(samples, use_model=False)
+
+
 def test_vibes_are_independent_cross_genre_targets_and_require_three_samples():
     club = sample(electronic=.95, House=.9, dance=.8)
     metal = sample(metal=.95, dance=.8, **{'heavy metal': .9})
-    assert audio_vibe_prediction.predict([club]) is None
-    assert audio_vibe_prediction.predict([club, metal]) is None
-    assert audio_vibe_prediction.predict([club] * 3)['ranking'] == audio_vibe_prediction.predict([metal] * 3)['ranking']
-    assert audio_vibe_prediction.predict([club] * 3)['vibes'] == ['release']
+    assert heuristic_prediction([club]) is None
+    assert heuristic_prediction([club, metal]) is None
+    assert heuristic_prediction([club] * 3)['ranking'] == heuristic_prediction([metal] * 3)['ranking']
+    assert heuristic_prediction([club] * 3)['vibes'] == ['release']
     # Positive tone selects uplift separately from energy and force.
     high_energy = []
     for tone in (2.0, 8.0):
@@ -387,7 +392,7 @@ def test_vibes_are_independent_cross_genre_targets_and_require_three_samples():
         value['traits']['valence'] = {'score': tone, 'per_patch': [tone] * 3}
         happy = .1 if tone == 2 else .9
         value['traits']['happy'] = {'score': happy, 'per_patch': [happy] * 3}
-        high_energy.append(audio_vibe_prediction.predict([value] * 3))
+        high_energy.append(heuristic_prediction([value] * 3))
     assert high_energy[0]['vibes'] == ['energize']
     assert set(high_energy[1]['vibes']) == {'energize', 'uplift'}
     for target in ('energize', 'release'):
@@ -396,17 +401,17 @@ def test_vibes_are_independent_cross_genre_targets_and_require_three_samples():
     assert high_energy[0]['dimensions']['emotional_tone']['values'][0] < high_energy[1]['dimensions']['emotional_tone']['values'][0]
     quiet = sample(relaxed=1.0, aggressive=0.0, dance=.9)
     quiet['traits']['arousal'] = {'score': 3.0, 'per_patch': [3.0] * 3}
-    prediction = audio_vibe_prediction.predict([quiet] * 3)
+    prediction = heuristic_prediction([quiet] * 3)
     assert 'relax' in prediction['vibes'] and 'release' not in prediction['vibes']
     assert prediction['calibrated'] is False
     assert {row['vibe'] for row in prediction['ranking']} == set(home_vibe.PRESETS)
     heavy = sample(aggressive=1.0)
     heavy['traits']['arousal'] = {'score': 2.0, 'per_patch': [2.0] * 3}
-    assert audio_vibe_prediction.predict([heavy] * 3)['vibes'] == ['release']
+    assert heuristic_prediction([heavy] * 3)['vibes'] == ['release']
     # Cruise has a genuine measured middle, rather than another name for calm.
     moderate = sample(relaxed=.5, aggressive=.1)
     moderate['traits']['arousal'] = {'score': 5.0, 'per_patch': [5.0] * 3}
-    prediction = audio_vibe_prediction.predict([moderate] * 3)
+    prediction = heuristic_prediction([moderate] * 3)
     assert prediction['vibes'] == ['cruise']
 
 
@@ -414,8 +419,8 @@ def test_every_complete_song_gets_a_best_guess_even_when_all_fits_are_weak():
     value = sample(relaxed=.3, aggressive=.55)
     for key, score in {'happy': .2, 'sad': .6, 'arousal': 5.8}.items():
         value['traits'][key] = {'score': score, 'per_patch': [score] * 3}
-    assert audio_vibe_prediction.predict([value] * 2) is None
-    prediction = audio_vibe_prediction.predict([value] * 3)
+    assert heuristic_prediction([value] * 2) is None
+    prediction = heuristic_prediction([value] * 3)
     assert all(row['score'] < audio_vibe_prediction.MATCH_THRESHOLD for row in prediction['ranking'])
     assert prediction['selection_method'] == 'best_available'
     assert prediction['vibe'] == prediction['ranking'][0]['vibe']
@@ -436,8 +441,8 @@ def target_score(prediction, target):
 
 def test_arc_does_not_turn_quiet_and_intense_sections_into_moderate_cruise():
     points = ('thirty', 'middle', 'two_thirds')
-    steady = audio_vibe_prediction.predict([arc_sample(point, .5) for point in points])
-    building = audio_vibe_prediction.predict([arc_sample(point, energy) for point, energy in zip(points, (0, .5, 1))])
+    steady = heuristic_prediction([arc_sample(point, .5) for point in points])
+    building = heuristic_prediction([arc_sample(point, energy) for point, energy in zip(points, (0, .5, 1))])
     # These have the same arithmetic feature means. Only the steady song has
     # observed, consistently moderate excerpts; averaging invented that fit.
     assert steady['vibe'] == 'cruise'
@@ -451,7 +456,7 @@ def test_arc_does_not_turn_quiet_and_intense_sections_into_moderate_cruise():
 
 def test_arc_distinguishes_build_fade_and_isolated_peak_with_the_same_values():
     points = ('thirty', 'middle', 'two_thirds')
-    predictions = [audio_vibe_prediction.predict([arc_sample(point, energy)
+    predictions = [heuristic_prediction([arc_sample(point, energy)
         for point, energy in zip(points, energies)])
         for energies in ((0, .5, 1), (1, .5, 0), (0, 1, 0), (1, 0, 1))]
     build, fade, peak, dip = predictions
@@ -468,7 +473,7 @@ def test_arc_distinguishes_build_fade_and_isolated_peak_with_the_same_values():
 def test_forceful_middle_passage_is_retained_without_labeling_the_song_relaxed():
     values = [arc_sample(point, energy, force) for point, energy, force in (
         ('thirty', .1, .1), ('middle', .9, .9), ('two_thirds', .1, .1))]
-    prediction = audio_vibe_prediction.predict(values)
+    prediction = heuristic_prediction(values)
     assert prediction['vibe'] == 'release'
     assert 'relax' not in prediction['vibes']
     assert prediction['dimensions']['aggression']['shape'] == 'peak'
@@ -483,8 +488,8 @@ def test_arc_uses_actual_positions_and_keeps_replacement_timing_and_excerpt_ids(
     later = arc_sample('two_thirds', .5)
     replacement = arc_sample('thirty', .9)
     replacement.update(position_seconds=215.0, capture_reason='catch_up')
-    prediction = audio_vibe_prediction.predict([replacement, later, early])
-    assert prediction == audio_vibe_prediction.predict([early, replacement, later])
+    prediction = heuristic_prediction([replacement, later, early])
+    assert prediction == heuristic_prediction([early, replacement, later])
     arc = prediction['arc']
     assert arc['scope'] == 'sampled_excerpts'
     assert [row['sample_id'] for row in arc['excerpts']] == [early['id'], later['id'], replacement['id']]
@@ -591,7 +596,7 @@ def test_previous_answer_lookup_ignores_earlier_taxonomies(store):
     assert store.audio_vibes.latest_feedback('unknown-song', exclude_run_id=current) is None
 
 
-def test_sampler_replaces_missed_points_without_seeking_and_deduplicates_reloads():
+def test_sampler_bounds_late_captures_preserves_spacing_and_deduplicates_reloads():
     node = shutil.which('node')
     if not node:
         pytest.skip('Node.js required for scheduling checks')
@@ -625,17 +630,16 @@ assert.equal(resumed.run.id,cached.id);
 assert.equal(resumed.run.duration,240);
 assert.equal(resumed.run.points.thirty,'saved','new length must not repeat a completed excerpt');
 position=30;resumed.tick();assert.equal(captures,2);
-// Seeking past two points queues two distinct replacement excerpts, one at a time.
-position=170;resumed.tick();assert.equal(captures,3);assert.equal(resumed.active.point.key,'middle');
+// A seek cannot turn distant scheduled points into clustered replacement audio.
+position=170;resumed.tick();assert.equal(captures,3);assert.equal(resumed.active.point.key,'two_thirds');
+assert.equal(resumed.run.points.middle,'missed');
 resumed.tick();assert.equal(captures,3);
-resumed.active=null;session.current=null;resumed.run.points.middle='saved';
-position=185;resumed.tick();assert.equal(captures,4);assert.equal(resumed.active.point.key,'two_thirds');
-assert.equal(resumed.active.reason,'catch_up');
 resumed.active=null;session.current=null;resumed.run.points.two_thirds='saved';
-position=239;resumed.tick();assert.equal(captures,4);
+position=185;resumed.tick();assert.equal(captures,3);
+position=239;resumed.tick();assert.equal(captures,3);
 playing={...playing,video_id:'new_song'};resumed.tick();
-assert.equal(resumed.run.points.thirty,'too_short');assert.equal(captures,4,'never capture past the end');
-position=100;resumed.run.points={};resumed.tick();assert.equal(captures,5);
+assert.equal(resumed.run.points.thirty,'too_short');assert.equal(captures,3,'never capture past the end');
+position=36;resumed.run.points={};resumed.tick();assert.equal(captures,4);
 assert.equal(resumed.active.reason,'catch_up');
 // Keep recovering beyond three failures, with backoff and no tight loop.
 const beforeRetries=captures;
@@ -651,17 +655,20 @@ const oldRun=resumed.run;
 session.current.analysing=true;
 playing={...playing,video_id:'after_analysis'};position=0;resumed.tick();
 assert.equal(resumed.active.run,oldRun);
-resumed.completed({observed_playback:{video_id:oldRun.video_id},prediction:{scores:{},bundle:{files:[]},
+resumed.completed({observed_playback:{video_id:oldRun.video_id},song_position_at_start:35,
+ prediction:{analysed_seconds:10,scores:{},bundle:{files:[]},
  moods:{traits:{},models:{}}}});
 assert.equal(collected.at(-1).run_id,oldRun.id);
 assert.notEqual(resumed.run.id,oldRun.id);
 session.current=null;
 assert.equal(samplingPoints(null).length,1);
 assert.deepEqual(samplingPoints(240).map(p=>p.seconds),[30,120,160]);
+assert.deepEqual(samplingPoints(45).map(p=>p.seconds),[30]);
+assert.deepEqual(samplingPoints(60).map(p=>p.seconds),[30,40]);
 // A continuous native media timeline is diagnostic context, not song position.
 const metadata={observed_playback:{video_id:'song'},song_position_at_start:30.25,
   source_position_at_start:1722.25,observed_position_at_start:2,
-  prediction:{scores:{},bundle:{files:[]},moods:{traits:{},models:{}}}};
+  prediction:{analysed_seconds:10,scores:{},bundle:{files:[]},moods:{traits:{},models:{}}}};
 const context={run:{id:'clock-run'},point:{key:'thirty',seconds:30},duration:195};
 const excerpt=sampleMetadata(metadata,context);
 assert.equal(excerpt.position_seconds,30.25);
@@ -683,14 +690,44 @@ for(let i=0;i<6;i++) {
 }
 assert.equal(disconnectedStarts,6);
 assert.equal(recovering.run.attempts.thirty,6);
+// The music tab can jump past a reservation before the worker sees a heartbeat.
+// Validate actual completion times too, including after restoring saved state.
+let nativePosition=0,nativeCount=0;
+const nativeResults=[];
+const nativeSession={port:{},current:null,
+ validPlaying:()=>({video_id:'native-song',position:nativePosition,duration:60}),
+ schedule(){this.current={};nativeCount++}};
+const nativeOpts={session:nativeSession,
+ playback:()=>({video_id:'native-song',position:nativePosition,duration:60}),clock:()=>now,
+ save(){},changed(){},result:value=>nativeResults.push(value)};
+let nativeSampler=new AudioVibeSampler(nativeOpts);
+nativeSampler.tick();assert.equal(nativeCount,1);
+nativeSampler.completed({...metadata,observed_playback:{video_id:'native-song'},song_position_at_start:40});
+assert.equal(nativeResults.length,1);
+nativeSampler.run.points.thirty='saved';nativeSession.current=null;
+nativePosition=45;
+nativeSampler=new AudioVibeSampler({...nativeOpts,cached:structuredClone(nativeSampler.run)});
+nativeSampler.tick();assert.equal(nativeCount,2);
+nativeSampler.completed({...metadata,observed_playback:{video_id:'native-song'},song_position_at_start:45});
+assert.equal(nativeSampler.run.points.two_thirds,'missed','overlapping actual windows are not new observations');
+assert.equal(nativeResults.length,1);
+nativeSession.current=null;nativePosition=0;
+nativeSampler=new AudioVibeSampler(nativeOpts);nativeSampler.tick();
+nativeSampler.completed({...metadata,observed_playback:{video_id:'native-song'},song_position_at_start:55});
+assert.equal(nativeSampler.run.points.thirty,'missed','late native reservations are not accepted');
+assert.equal(nativeResults.length,1);
 // Exercise the actual extension owner with durable storage and HTTP failures.
 // No app port is necessary to schedule, retain or deliver a completed sample.
 await import('./extension/worker/audio_collection.js');
 const {createAudioCollection}=globalThis.TuneConsoleAudioCollection;
 const key='tuneconsole.audio-collection.1',saved={},uploads=[],accepted=new Set();
 let offline=true,loseAcknowledgement=false,wrongReceipt=false,storageFailure=false;
+let interruptedSnapshot;
 const storage={get:async()=>structuredClone(saved),set:async value=>{
   if(storageFailure) throw Error('storage unavailable');Object.assign(saved,structuredClone(value));
+  const {run,outbox}=saved[key];
+  if(run?.points.thirty==='saving' && !outbox.length && run.excerpts?.thirty)
+    interruptedSnapshot ??= structuredClone(saved[key]);
 }};
 const settle=async()=>{for(let i=0;i<20;i++) await new Promise(resolve=>setImmediate(resolve))};
 function owner() {
@@ -734,6 +771,8 @@ let resumedOwner=owner();await resumedOwner.worker.loaded;await settle();
 assert.equal(saved[key].outbox.length,1);
 assert.deepEqual(saved[key].outbox[0],immutable);
 assert.equal(accepted.size,1);
+resumedOwner.worker.observe({...frame,position:31});await settle();
+assert.equal(resumedOwner.jobs.length,0,'a queued point with a lost acknowledgement cannot be recaptured');
 now+=60000;wrongReceipt=true;resumedOwner.worker.tick();await settle();
 assert.equal(saved[key].outbox.length,1,'a different sample receipt is insufficient');
 now+=60000;wrongReceipt=false;resumedOwner.worker.tick();await settle();
@@ -753,6 +792,29 @@ resumedOwner.capture.previewOpen=true;
 // A worker restart recovers the interrupted point, without treating it as saved.
 const interruptedOwner=owner();await interruptedOwner.worker.loaded;await settle();
 assert.equal(saved[key].run.points.middle,'interrupted');
+assert.deepEqual(saved[key].run.excerpts.thirty,{position_seconds:30,analysed_seconds:10});
+// Restore the write just before queuing. Earlier workers could already have
+// marked the point interrupted while leaving its undelivered interval behind.
+assert.deepEqual(interruptedSnapshot.run.excerpts.thirty,{position_seconds:30,analysed_seconds:10});
+for(const phase of ['saving','interrupted']) {
+  saved[key]=structuredClone(interruptedSnapshot);
+  saved[key].run.points.thirty=phase;
+  const restartedOwner=owner();await restartedOwner.worker.loaded;await settle();
+  assert.equal(saved[key].run.points.thirty,'interrupted');
+  assert.equal(saved[key].run.excerpts.thirty,undefined);
+  restartedOwner.worker.observe({...frame,position:31});await settle();
+  assert.equal(restartedOwner.jobs.length,1);
+  const replacementJob=restartedOwner.jobs[0],uploadCount=uploads.length;
+  assert.equal(replacementJob.not_before,30);
+  restartedOwner.receive({id:replacementJob.id,type:'result',result:{...metadata,song_position_at_start:31,
+    analysis_location:'youtube_tab',audio_transferred_to_app:false}});
+  await settle();
+  assert.equal(uploads.length,uploadCount+1);
+  assert.equal(uploads.at(-1).run_id,interruptedSnapshot.run.id);
+  assert.equal(uploads.at(-1).position_seconds,31);
+  assert.equal(saved[key].run.points.thirty,'saved');
+  assert.deepEqual(saved[key].run.excerpts.thirty,{position_seconds:31,analysed_seconds:10});
+}
 // Legacy app outboxes transfer only after extension storage acknowledges them.
 saved[key]={run:null,outbox:[],recent:[]};offline=true;
 const backlogOwner=owner();await backlogOwner.worker.loaded;await settle();

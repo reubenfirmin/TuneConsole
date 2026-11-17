@@ -8,11 +8,9 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.util.duration import parse_duration
-from yt_playlist.rec import measurement
-from yt_playlist.web.context import refresh_playlist_view
+from yt_playlist.util.navigation import playlist_url
 
 
 class Song(BaseModel):
@@ -55,10 +53,9 @@ def build(ctx):
     store = ctx.store
 
     def unconfirmed_result(exc, *, created):
-        playlist = next((p for p in store.playlists.get_playlists()
-                         if p.provider_playlist_id == exc.playlist_id), None)
+        playlist = ctx.library_actions().unconfirmed(exc)
         return {"status": "partial", "added": bool(exc.confirmed),
-                "url": f"/playlist/{playlist.id}" if playlist else
+                "url": playlist_url(playlist.id) if playlist else
                        "https://music.youtube.com/playlist?" + urlencode({"list": exc.playlist_id}),
                 "title": playlist.title if playlist else "Created playlist" if created else "Playlist",
                 "confirmed": len(exc.confirmed), "rejected": len(exc.skipped),
@@ -71,11 +68,8 @@ def build(ctx):
 
     @router.get("/songs/metadata")
     def metadata(video_id: str):
-        track = store.tracks.metadata_for_video(video_id)
-        provenance = store.enrichment_reports.genre_provenance(track['track_id']) if track else None
-        return {"metadata": track, "genre_options": provenance['options'] if provenance else [],
-                "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()),
-                                 key=str.casefold)}
+        from yt_playlist.web.context import Ctx
+        return Ctx.playlist_queries(ctx).metadata(video_id)
 
     @router.post("/songs/metadata")
     def edit_metadata(body: EditMetadata):
@@ -83,32 +77,22 @@ def build(ctx):
         changes = body.model_dump(exclude={'song'}, exclude_none=True)
         if not changes:
             return {"message": "Metadata saved."}
-        store.tracks.update_metadata(song.video_id, changes, observation={
+        ctx.library_actions().metadata(song.video_id, changes, observation={
             'title': song.title, 'artist': song.artist, 'album': song.album,
             'album_browse_id': song.album_browse, 'thumbnail': song.thumbnail,
             'duration_s': parse_duration(song.duration) if song.duration is not None else None,
             'created_at': ctx.now_fn(),
         })
-        ctx.rec_worker.trigger_content_update(video_ids=[song.video_id])
         return {"message": "Metadata saved."}
 
     @router.get("/songs/playlists")
     def destinations(video_id: str):
-        clients = ctx.clients() or {}
-        identities = {i.id: i.label for i in store.accounts.get_accounts()}
-        containing = store.playlists.playlist_ids_for_video(video_id)
-        playlists = [p for p in store.playlists.get_playlists()
-                     if p.provider_playlist_id not in SYSTEM_PLAYLIST_IDS and p.account_id in clients]
-        return {"playlists": [{"id": p.id, "title": p.title,
-                               "identity": identities.get(p.account_id, ""),
-                               "already_present": p.id in containing}
-                              for p in sorted(playlists, key=lambda p: (p.title.casefold(), p.id))],
-                "multiple_identities": len(clients) > 1}
+        return ctx.library_actions().destinations(video_id)
 
     @router.post("/songs/create-playlist")
     async def create_playlist(body: CreatePlaylist):
         try:
-            result = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_song,
+            result = await activity_for(ctx).to_thread(ctx.library_actions().create_song,
                                              body.name, body.song.track())
         except PlaylistAddUncertain as exc:
             return unconfirmed_result(exc, created=True)
@@ -117,17 +101,14 @@ def build(ctx):
         except Exception as exc:
             ctx.logger.exception("create playlist from song failed")
             raise HTTPException(502, "Creation was not confirmed. Check your playlists before trying again.") from exc
-        if result["added"]:
-            measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
-                                      event_id=f"song-create:{result['db_pid']}")
-        return {"url": f"/playlist/{result['db_pid']}", "title": result["title"], "added": bool(result["added"]),
+        return {"url": playlist_url(result['db_pid']), "title": result["title"], "added": bool(result["added"]),
                 "message": ("Playlist created." if result["added"] else
                             "Playlist created, but YouTube couldn't add this song.")}
 
     @router.post("/songs/add-to-playlist")
     async def add_song(body: AddSong):
         try:
-            result = await activity_for(ctx).to_thread(ctx.ops().add_song_to_playlist,
+            result = await activity_for(ctx).to_thread(ctx.library_actions().add_song,
                                              body.playlist_id, body.song.track())
             if not result.get("already_present") and not result["added"]:
                 raise ActionInputError('song_add_rejected')
@@ -138,12 +119,8 @@ def build(ctx):
         except Exception as exc:
             ctx.logger.exception("add song to playlist failed")
             raise HTTPException(502, "Couldn't add the song. Please try again.") from exc
-        playlist = store.playlists.get_playlist(body.playlist_id)
-        if result["added"] and not result.get("already_present"):
-            measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
-                                      generated=store.playlists.is_quarantined_playlist(playlist.playlist_scope_id))
-        refresh_playlist_view(ctx, playlist.provider_playlist_id)
-        return {"url": f"/playlist/{playlist.id}", "title": playlist.title,
+        playlist = result['playlist']
+        return {"url": playlist_url(playlist.id), "title": playlist.title,
                 "message": ("This song is already in the playlist." if result.get("already_present")
                             else "Song added.")}
 

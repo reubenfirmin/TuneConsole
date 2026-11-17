@@ -163,7 +163,7 @@ def test_cancelled_calculation_never_supplies_a_partial_order(queue, monkeypatch
     assert len(calculations) == 2
 
 
-@pytest.mark.parametrize('installed', [79, 94, 99, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_priority_and_continuing_writes_use_the_selected_installed_relations(installed):
     store, _ = installed
     store.settings.set_setting('enrich_caught_up_at', '100')

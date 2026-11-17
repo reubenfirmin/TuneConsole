@@ -1,5 +1,6 @@
 """SQL manifests for account workflow settings."""
 from yt_playlist.core import workflow_settings as workflows
+from yt_playlist.repos import collection_file_writes
 
 
 def documents(conn, kind, account, target=None):
@@ -32,4 +33,7 @@ def register(conn, plans):
         else:
             source, account = prepared
             conn.execute('DELETE FROM spotify_transfer_receipts WHERE source_kind=? AND captured_account_id IS ?', (source, account))
+        if reference is not None:
+            collection_file_writes.complete(conn, prepared['file_id'],
+                'playlist-gc' if kind == 'gc' else 'spotify-transfer', prepared['identity'], reference)
     return revision

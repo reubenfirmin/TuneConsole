@@ -2,6 +2,7 @@
 import asyncio
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from anyio import CancelScope
 import pytest
@@ -9,6 +10,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from yt_playlist.core.bridge import Bridge, BridgeError
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN, build
+from tests.repository_mock_support import no_database
 
 
 class Socket:
@@ -50,6 +52,33 @@ async def deliver(socket, frame):
     socket.waiting.clear()
     socket.incoming.put_nowait(frame)
     await asyncio.wait_for(socket.waiting.wait(), 2)
+
+
+@pytest.mark.usefixtures('no_database')
+def test_resource_accepts_observation_capability_without_context_or_storage(monkeypatch):
+    from yt_playlist.web.context import Ctx
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('An injected resource must not compose a replacement controller')
+
+    monkeypatch.setattr(Ctx, 'bridge_observations', forbidden)
+    observations = Mock(spec_set=['connection', 'prepare_radio', 'receive', 'retire'])
+
+    async def scenario():
+        bridge = Bridge()
+        router = build(SimpleNamespace(bridge=bridge), observations=observations)
+        endpoint = next(route.endpoint for route in router.routes if route.path == '/bridge/ws')
+        socket, task = await connect(endpoint)
+        observations.connection.assert_called_once_with()
+        frame = {'type': 'now-heartbeat', 'title': 'Song', 'videoId': 'v1', 'playlist': 'PL1'}
+        await deliver(socket, frame)
+        observations.prepare_radio.assert_called_once_with(bridge.now_playing, frame)
+        socket.incoming.put_nowait(None)
+        await asyncio.wait_for(task, 2)
+        observations.retire.assert_called_once_with()
+        assert not bridge.connected
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("stale", [
@@ -136,6 +165,72 @@ def test_cancelled_socket_finishes_radio_suspension():
             await endpoint(CancelledSocket())
         assert not bridge.connected
         assert suspensions == [True]
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_while_receiving_retires_socket_and_joins_transport_tasks():
+    async def scenario():
+        bridge, suspensions = Bridge(), []
+        endpoint = handler(bridge, lambda: suspensions.append(True))
+        socket = Socket()
+        baseline = asyncio.all_tasks()
+
+        with CancelScope() as scope:
+            async def cancel_when_receiving():
+                await socket.waiting.wait()
+                scope.cancel()
+
+            cancellation = asyncio.create_task(cancel_when_receiving())
+            await endpoint(socket)
+
+        await cancellation
+        assert not bridge.connected
+        assert suspensions == [True]
+        assert not (asyncio.all_tasks() - baseline)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures('no_database')
+def test_observation_waiting_for_provider_reply_does_not_block_socket_pump(monkeypatch):
+    from yt_playlist.core.activity import activity_for
+    from yt_playlist.library import live_plays
+    from yt_playlist.web.routes import bridge as routes
+    finished = threading.Event()
+    results = []
+
+    async def scenario():
+        bridge = Bridge()
+        ctx = SimpleNamespace(bridge=bridge, store=object(), radio=None)
+        monkeypatch.setattr(routes, '_record_connection', lambda ctx: None)
+
+        def observe(ctx, body, now):
+            # This provider read requires this same socket's receive loop.
+            reply = bridge.execute('GET', '/provider-read', None, timeout=1)
+            results.append((body['videoId'], *reply))
+            finished.set()
+
+        monkeypatch.setattr(live_plays, 'handle_play_event', observe)
+        endpoint = next(route.endpoint for route in build(ctx).routes if route.path == '/bridge/ws')
+
+        class ReplySocket(Socket):
+            async def send_json(self, frame):
+                if frame.get('url') == '/provider-read':
+                    self.incoming.put_nowait(dict(id=frame['id'], status=200, body='confirmed'))
+
+        socket = ReplySocket()
+        task = asyncio.create_task(endpoint(socket))
+        try:
+            await asyncio.wait_for(socket.waiting.wait(), 1)
+            await deliver(socket, dict(type='play', videoId='exact-upload', title='Song', brandKnown=True))
+            assert await asyncio.to_thread(finished.wait, 2), 'Observation blocked its own provider response'
+            assert results == [('exact-upload', 200, 'confirmed')]
+            assert bridge.connected
+        finally:
+            socket.incoming.put_nowait(None)
+            await asyncio.wait_for(task, 2)
+            activity_for(ctx).stop_executor()
 
     asyncio.run(scenario())
 

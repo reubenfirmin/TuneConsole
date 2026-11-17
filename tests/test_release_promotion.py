@@ -431,7 +431,8 @@ def test_prerelease_publishes_exact_version_without_touching_any_stable_destinat
 @pytest.mark.parametrize("bad_arch,failure", [(None, None), ("x86_64", "version"),
                                               ("aarch64", "version"), ("aarch64", "architecture"),
                                               ("aarch64", "signature")])
-def test_public_verification_downloads_bytes_and_checks_signed_architectures(candidate, monkeypatch, bad_arch, failure):
+def test_public_verification_downloads_bytes_and_checks_signed_architectures(
+        candidate, monkeypatch, tmp_path_factory, bad_arch, failure):
     import io
     import subprocess
     import release_services
@@ -458,6 +459,14 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
 
     commands = []
     verification_roots = set()
+    inherited_root = tmp_path_factory.mktemp('release-user')
+    inherited = {}
+    for name in ('DOCKER_CONFIG', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'):
+        directory = inherited_root / name.lower()
+        directory.mkdir()
+        (directory / 'existing-state').write_text(name)
+        inherited[name] = directory
+        monkeypatch.setenv(name, str(directory))
 
     def run(args, **kwargs):
         commands.append(args)
@@ -465,6 +474,8 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
             assert kwargs["env"]["DOCKER_CONFIG"] != str(Path.home() / ".docker")
             docker_root = Path(kwargs['env']['DOCKER_CONFIG'])
             assert docker_root.name.startswith('release-public-') and docker_root.is_dir()
+            assert docker_root != inherited['DOCKER_CONFIG']
+            assert not (docker_root / 'config.json').exists()
             verification_roots.add(docker_root)
             data = {"manifests": [
                 {"platform": {"os": "linux", "architecture": arch}, "digest": digest.split("@")[1]}
@@ -478,6 +489,8 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
         assert data_home == verification_root / 'data' and verification_root.is_dir()
         assert Path(kwargs['env']['XDG_CONFIG_HOME']) == verification_root / 'config'
         assert Path(kwargs['env']['XDG_CACHE_HOME']) == verification_root / 'cache'
+        for name in ('XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'):
+            assert Path(kwargs['env'][name]) != inherited[name]
         if args[1] == "update":
             arch = next(arg.removeprefix("--arch=") for arg in args if arg.startswith("--arch="))
             if arch == bad_arch and failure == "signature":
@@ -500,13 +513,16 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
     if bad_arch:
         with pytest.raises((ValueError, subprocess.CalledProcessError)):
             release_services.verify_public(candidate, "v1.2.3", backend)
-        assert verification_roots and not any(root.exists() for root in verification_roots)
-        return
-    release_services.verify_public(candidate, "v1.2.3", backend)
-    assert len([url for url in urls if url.startswith(base)]) == len(manifest["sha256"]) + 1
-    assert {args[-1].split(":")[-1] for args in commands if args[0] == "docker"} == {"1.2.3", "v1.2.3", "latest"}
-    assert {arg for args in commands for arg in args if arg.startswith("--arch=")} == {"--arch=x86_64", "--arch=aarch64"}
-    assert verification_roots and not any(root.exists() for root in verification_roots)
+    else:
+        release_services.verify_public(candidate, "v1.2.3", backend)
+        assert len([url for url in urls if url.startswith(base)]) == len(manifest["sha256"]) + 1
+        assert {args[-1].split(":")[-1] for args in commands if args[0] == "docker"} == {"1.2.3", "v1.2.3", "latest"}
+        assert {arg for args in commands for arg in args if arg.startswith("--arch=")} == {"--arch=x86_64", "--arch=aarch64"}
+    assert len(verification_roots) == 1
+    assert not next(iter(verification_roots)).exists()
+    for name, directory in inherited.items():
+        assert sorted(path.name for path in directory.iterdir()) == ['existing-state']
+        assert (directory / 'existing-state').read_text() == name
 
 
 def test_public_download_checksum_failure_is_visible(monkeypatch):

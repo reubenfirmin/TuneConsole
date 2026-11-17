@@ -25,7 +25,7 @@ def guard(ctx, area, *, radio=None):
         growth = getattr(request.state, 'account_growth', None)
         try:
             access.require(ctx.store, area, now=ctx.now_fn(),
-                           radio=ctx.radio.bootstrap() if radio is None else radio, growth=growth)
+                           radio=radio, growth=growth, load_radio=ctx.radio.bootstrap)
         except access.AccessDenied as exc:
             raise HTTPException(409, str(exc)) from exc
     return require

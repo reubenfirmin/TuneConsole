@@ -89,4 +89,4 @@ def test_uncertain_move_keeps_copy_and_rechecks_without_repeating_deletion(
     expect(page.locator('#navigation-error, .toast-err, .notice.err.banner:visible')).to_have_count(0)
     expect(page.locator('.notice.ok.banner')).to_contain_text(
         'The playlist still exists. No deletion was retried; the backup is saved.')
-    page.screenshot(path=action_evidence + '-move-reconciled.png')
+    page.screenshot(path=action_evidence + '-move-reconciled.png', animations='disabled')

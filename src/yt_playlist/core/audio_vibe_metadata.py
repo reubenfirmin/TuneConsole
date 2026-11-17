@@ -90,8 +90,7 @@ def read_facts(conn, video_id):
         references = []
         for source, in sources:
             if runtime:
-                revision = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (source,)).fetchone()
-                references.append({'key': source, 'revision': revision[0] if revision else None})
+                references.append(metadata_native.source_reference(conn, source))
             else:
                 observations = [dict(row) for row in conn.execute(
                     'SELECT o.*,d.raw_filename,d.raw_digest,d.raw_byte_size,d.raw_offset '

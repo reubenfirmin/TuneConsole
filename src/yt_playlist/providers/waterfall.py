@@ -18,10 +18,10 @@ from collections.abc import Mapping
 from yt_playlist.core.metadata_observations import SubjectChanged
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, activity_for
 from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz, enrichment
-from yt_playlist.providers import base, coverart
+from yt_playlist.providers import base, coverart, genres
 from yt_playlist.core import provider_queries
 from yt_playlist.providers.enrich_queue import PriorityGate
-from yt_playlist.util.thumbnails import is_placeholder_art
+from yt_playlist.util.thumbnails import needs_art
 from yt_playlist.util import net
 from yt_playlist.util.matching import identity_key
 
@@ -31,7 +31,7 @@ _gate = PriorityGate()
 
 # Plumbing a provider hands to another step rather than a finding about the track. Never logged (it
 # would pollute the field comparison UI). Retained in the full provider attempt evidence.
-_INTERNAL = ("mb_release_ids",)
+_INTERNAL = ("mb_release_ids", "artist_credits")
 
 # Providers that return a ready-to-use cover URL, in priority order. Art is deliberately NOT applied
 # per-provider like the other fields: providers run in the user's configured order (musicbrainz
@@ -106,13 +106,6 @@ def _apply(sink, track, res) -> None:
         track['mb_recording_id'] = sink.store.tracks.track_for_waterfall(track['id'])['mb_recording_id']
 
 
-def needs_art(track) -> bool:
-    """No cover worth keeping? A track dict without a `thumbnail` key predates this column in the
-    pending query, so treat it as needing art and let the fill-only sink decide."""
-    thumb = track.get("thumbnail")
-    return not thumb or is_placeholder_art(thumb)
-
-
 def _pick_art(results):
     """A cover from the highest-priority provider that found one."""
     for name in _ART_SOURCES:
@@ -123,26 +116,27 @@ def _pick_art(results):
     return None
 
 
+def artwork_plan(track, results):
+    """Detached artwork priority and archive-demand selection over acquired answers."""
+    if not needs_art(track):
+        return track.get('thumbnail'), [], 'retained'
+    return _pick_art(results), next((result.fields['mb_release_ids'] for result in results
+                                   if result.fields.get('mb_release_ids')), []), 'provider'
+
+
 def _resolve_art(sink, track, results, now_fn=time.time):
     """Give the track a cover if it has none. YouTube serves a generic grey disc rather than nothing
     when it has no art (always, for your own uploads), so a thumbnail is not proof of a cover.
 
     Cover Art Archive is the fallback only: it costs an HTTP call per candidate release, so it runs
     only when the primary found nothing AND the track actually needs art."""
-    if not needs_art(track):
-        sink.record_artwork([], coverart.CoverResult("found", track.get("thumbnail")), now_fn())
-        return
-    art = _pick_art(results)
-    release_ids = next((r.fields["mb_release_ids"] for r in results
-                        if r.fields.get("mb_release_ids")), [])
-    outcome = coverart.CoverResult("found", art) if art else coverart.CoverResult("absent")
-    if not art:
-        if release_ids:
-            with coverart.access(getattr(sink, 'store', None)):
-                outcome = coverart.lookup(release_ids)
-    sink.set_art(outcome.url, source='deezer' if art else 'coverart')
-    sink.record_artwork(release_ids, outcome, now_fn())
-    return outcome
+    from yt_playlist.controllers.artwork import resolve
+
+    def lookup(release_ids):
+        with coverart.access(getattr(sink, 'store', None)):
+            return coverart.lookup(release_ids)
+
+    return resolve(sink, artwork_plan(track, results), lookup, coverart.CoverResult, now_fn)
 
 
 def _changed_subject(store, track, on_progress, i, total):
@@ -157,15 +151,10 @@ def _changed_subject(store, track, on_progress, i, total):
 
 
 def _finish(sink, results, successful, complete):
-    conflicts = base.detect_conflicts(results)
+    conflicts, refreshed, agreeing = base.conflict_plan(results, successful, complete)
     for field, candidates in conflicts.items():
-        refreshed = {r.provider for r in results if r.provider in successful
-                     and field in r.fields and not base._empty(r.fields[field])}
-        sink.upsert_conflict(field, candidates, refreshed_providers=refreshed)
-    if complete:
-        agreeing = {field: {r.provider: r.fields[field] for r in results
-                           if field in r.fields and not base._empty(r.fields[field])}
-                    for field in base.FIELD_SPECS if field not in conflicts}
+        sink.upsert_conflict(field, candidates, refreshed_providers=refreshed[field])
+    if agreeing is not None:
         sink.retire_agreed_conflicts(agreeing)
     return len(conflicts), sink.effective_enrichment()
 
@@ -208,6 +197,8 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                      "blocked": True, "total": 0})
         return []
 
+    matching = (musicbrainz, lastfm, discogs)
+    matcher = genres.snapshot(store) if any(provider is module for provider in chosen for module in matching) else None
     cooldowns = store.enrichment_state.enrichment_cooldowns()
     names = ", ".join(m.name for m in chosen)
     on_progress({"type": "info", "text": f"Enriching {total} track(s) via {names}…", "total": total})
@@ -301,7 +292,8 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 fields = {}
                 with net.probe_errors() as errors:
                     try:
-                        res = m.probe(t, store)
+                        res = (m.probe(t, store, matcher=matcher) if any(m is module for module in matching)
+                               else m.probe(t, store))
                         if res.deferred_reason:
                             on_progress({"type": "info", "provider": m.name, "deferred": "metadata",
                                          "text": f"{labels[m.name]}: {res.deferred_reason}"})
@@ -406,26 +398,48 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
         _gate.leave(seq)
 
 
-def record_progress(ctx, job, event):
+def record_progress(logger, job, event):
     job.events.append(event)
     if event.get("warning") or event.get("deferred") or event.get("type") == "err":
-        ctx.logger.warning("Enrichment job %s: %s", job.id, event.get("text"))
+        logger.warning("Enrichment job %s: %s", job.id, event.get("text"))
 
 
-def start_enrichment_job(ctx, job, created, load_tracks, *, on_progress=None):
+def start_or_rejoin_enrichment(jobs, store, logger, start_thread, *, playlist_id=None, album_browse=None):
+    """A complete Enrichment command for a playlist or album target: reserve or
+    rejoin its deduplicated job, then run the waterfall over its tracks.
+
+    Owns job creation/dedup itself (via `jobs.create_or_rejoin_playlist`/
+    `create_or_rejoin_album`) rather than leaving it to the caller. Exactly one
+    of `playlist_id`/`album_browse` is given; `jobs`/`store`/`logger`/
+    `start_thread` are explicit capabilities, never a whole `ctx`.
+    """
+    if (playlist_id is None) == (album_browse is None):
+        raise ValueError("Give exactly one of playlist_id or album_browse")
+    if playlist_id is not None:
+        job, created = jobs.create_or_rejoin_playlist(playlist_id)
+        load_tracks = lambda: store.tracks.tracks_for_waterfall(playlist_id)
+    else:
+        job, created = jobs.create_or_rejoin_album(album_browse)
+        load_tracks = lambda: store.tracks.album_tracks_for_waterfall(album_browse)
+    return start_enrichment_job(store, logger, start_thread, job, created, load_tracks)
+
+
+def start_enrichment_job(store, logger, start_thread, job, created, load_tracks, *, on_progress=None):
     """Start the waterfall over `load_tracks()` on a background thread, recording progress/errors/
     completion on `job`, if `job` was freshly created (not rejoined). Shared by playlist, album
-    and single-track enrichment starts; the caller owns job creation/dedup. `load_tracks` is a
+    and single-track enrichment starts; `start_or_rejoin_enrichment` is the complete command for
+    the playlist/album case, which also owns job creation/dedup. A single-track lookup has no
+    dedup to speak of, so it still creates its own job and calls this directly. `load_tracks` is a
     zero-arg callable so a rejoin (not created) never queries for a track list nothing will use."""
     if not created:
         return job
-    progress = on_progress or (lambda event: record_progress(ctx, job, event))
+    progress = on_progress or (lambda event: record_progress(logger, job, event))
 
     def run():
         try:
-            run_waterfall(ctx.store, load_tracks(), enrichment.load_config(ctx.store), progress)
+            run_waterfall(store, load_tracks(), enrichment.load_config(store), progress)
         except Exception as e:  # noqa: BLE001
-            ctx.logger.exception("Enrichment job %s failed", job.id)
+            logger.exception("Enrichment job %s failed", job.id)
             detail = str(e) or type(e).__name__
             job.error = detail
             job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
@@ -433,7 +447,7 @@ def start_enrichment_job(ctx, job, created, load_tracks, *, on_progress=None):
             job.done = True
 
     try:
-        activity_for(ctx).start_thread(run)
+        start_thread(run)
     except BaseException as exc:
         job.error = str(exc) or type(exc).__name__
         job.done = True

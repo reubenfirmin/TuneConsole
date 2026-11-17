@@ -12,7 +12,7 @@ from tests.prepared_fixture_support import capture_template, coordinates, histor
 from tests.rec.test_home_prepared import service
 from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
 from yt_playlist.core import evidence_ledger, file_collection, profile_files
-from yt_playlist.core.preparation import metadata_destinations
+from yt_playlist.core.profile_paths import record_path
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_prepared, musical_profiles
 
@@ -45,8 +45,6 @@ def private_clone_sql(native_sql_calls, without_query_timing):
 
 def test_file_coordinates_keep_physical_owners_quoted_names_and_logical_paths():
     with closing(sqlite3.connect(':memory:')) as conn:
-        with pytest.raises(ValueError, match='file-backed database'):
-            metadata_destinations.directory(conn)
         conn.execute('CREATE TABLE "owner""one" (filename TEXT, cache_filename TEXT, notfilename TEXT)')
         conn.executemany('INSERT INTO "owner""one" VALUES (?,?,?)', [
             ('/source/first', 'relative/one', '/ignored'),
@@ -139,8 +137,8 @@ def test_open_prepared_consumer_keeps_private_writes_and_real_snapshot_guards(
             assert target.vibe_predictions.inputs([]) == {}
             if disk:
                 assert target.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
-                prepared_root = metadata_destinations.directory(target.conn)
-                assert prepared_root == tmp_path / 'consumer.db.preparation/metadata-deliveries'
+                prepared_root = roots(target.conn)["metadata_delivery_files"]
+                assert prepared_root == tmp_path / 'consumer.db.metadata'
                 with target.vibe_predictions.metadata.retained():
                     with file_collection.collector(prepared_root) as allowed:
                         assert not allowed
@@ -159,20 +157,6 @@ def test_open_prepared_consumer_keeps_private_writes_and_real_snapshot_guards(
         assert evidence.directory.exists() == disk
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             target.conn.execute('SELECT 1')
-
-
-@pytest.mark.parametrize('owner', ['metadata_destination_files', 'saved_preparation_files'])
-def test_disk_preparation_files_cannot_be_discarded_by_a_memory_clone(
-        tmp_path, _pristine_current_schema, store, owner):
-    def seed(source):
-        directory = roots(source.conn)[owner]
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / 'retained-input').write_bytes(b'captured preparation')
-
-    with prepared_template(_pristine_current_schema, seed,
-                           database=tmp_path / 'source.db') as template:
-        with pytest.raises(AssertionError, match=owner):
-            template.restore(store)
 
 
 def test_cloning_replaced_schema_does_not_copy_guards_for_retired_owners(
@@ -312,11 +296,11 @@ def test_restored_schema_with_added_owner_gets_real_revision_guards(
 def test_prepared_template_isolates_construction_and_restores_caller_settings(
         _pristine_current_schema, tmp_path, monkeypatch, failure, historical):
     from tests import prepared_fixture_support as fixtures
-    from yt_playlist.rec import audio_vibe_model, vibe_preparation
+    from yt_playlist.rec import audio_vibe_specialists, vibe_preparation
 
     caller = {'YT_PLAYLIST_HOME': str(tmp_path / 'caller-home'),
               'YT_PLAYLIST_AUDIO_VIBES': '1',
-              'YT_PLAYLIST_AUDIO_VIBE_MODEL': 'caller-model',
+              'YT_PLAYLIST_AUDIO_VIBE_CRUISE_MODEL': 'caller-model',
               'DEEPSEEK_API_KEY': 'fixture-test-key'}
     for key, value in caller.items():
         monkeypatch.setenv(key, value)
@@ -330,10 +314,8 @@ def test_prepared_template_isolates_construction_and_restores_caller_settings(
         assert homes[-1] != Path(caller['YT_PLAYLIST_HOME'])
         assert homes[-1].is_dir()
         assert os.environ['YT_PLAYLIST_AUDIO_VIBES'] == '0'
-        assert os.environ['YT_PLAYLIST_AUDIO_VIBE_MODEL'] == ''
-        assert audio_vibe_model.configured_path() is None
-        assert audio_vibe_model.identity() == 'heuristic'
-        assert vibe_preparation.version().endswith('/heuristic')
+        assert all(module.configured_path() is None for _, module in audio_vibe_specialists.SPECIALISTS)
+        assert vibe_preparation.version().endswith('/unavailable')
         assert 'DEEPSEEK_API_KEY' not in os.environ
 
     def build(source):
@@ -699,9 +681,11 @@ def test_measured_sounds_template_keeps_complete_private_inputs(
                 assert home['menus'] and len(home['menus'][0]['protos']) == 4
             if variant == 'browser':
                 playlists = reader.playlists.get_playlists()
-                assert len(playlists) == 1
-                assert (playlists[0].provider_playlist_id, playlists[0].title,
-                        playlists[0].track_count) == ('PLZ', 'Old Mix', 3)
+                assert {playlist.provider_playlist_id for playlist in playlists} == {'LM', 'PLZ'}
+                mix = next(playlist for playlist in playlists if playlist.provider_playlist_id == 'PLZ')
+                assert (mix.title, mix.track_count) == ('Old Mix', 3)
+                favorites = next(playlist for playlist in playlists if playlist.provider_playlist_id == 'LM')
+                assert favorites.track_count == 120
             assert reader.settings.get_setting(home_vibe.SETTING) is None
             assert reader.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
             assert reader.rec_model.get_leans() == {}
@@ -726,12 +710,14 @@ def test_measured_sounds_template_keeps_complete_private_inputs(
             copied += 1
     assert copied
 
-    publication = first.conn.execute('SELECT publication FROM recording_profile_files LIMIT 1').fetchone()[0]
-    relative = profile_files.relative('recording', publication)
-    original = (profile_files.directory(second.conn) / relative).read_bytes()
-    (profile_files.directory(first.conn) / relative).write_bytes(b'Private corrupted profile')
-    assert (profile_files.directory(second.conn) / relative).read_bytes() == original
-    assert (profile_files.directory(template.source.conn) / relative).read_bytes() == original
+    owned = [profile_files.directory(target.conn) / record_path('recording',
+                target.conn.execute('SELECT file_id FROM recording_profile_files '
+                    'ORDER BY recording_id LIMIT 1').fetchone()[0])
+             for target in (first, second, template.source)]
+    original = owned[1].read_bytes()
+    owned[0].write_bytes(b'Private corrupted profile')
+    assert owned[1].read_bytes() == original
+    assert owned[2].read_bytes() == original
     first.settings.set_setting('private_sound_fixture', 'first consumer')
     first._fixture_bundle_payload['_vibes']['pools']['relax']['fresh'][0]['musical']['dimensions']['intensity']['value'] = -1
     for target in (template.source, second):

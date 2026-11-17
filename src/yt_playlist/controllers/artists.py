@@ -1,14 +1,14 @@
 """Choose artist identity evidence while the repository stores its rows."""
 import json
+from itertools import islice
 from yt_playlist.core import artist_credits, artist_policy
 from yt_playlist.core.metadata_contract import clock
 
 
 class Artists:
-    def __init__(self, repository, state, reconcile_discovery, originals):
+    def __init__(self, repository, state, reconcile_discovery):
         self.repository = repository
         self.state, self.reconcile_discovery = state, reconcile_discovery
-        self.originals = originals
 
     def ensure_artist(self, name, *, provider=None, provider_id=None, previous=None):
         verified = bool(provider and provider_id)
@@ -66,10 +66,6 @@ class Artists:
         if not identity['exists'] or not identity['provisional']:
             return previous
         if inputs['other_albums'] or inputs['other_entries']:
-            self.originals.retain('artist', 'ambiguous_album_artist', str(previous), json.dumps({
-                'artist_id': previous, 'album_id': album_id, 'other_albums': inputs['other_albums'],
-                'other_entries': inputs['other_entries']}),
-                'exact release identifies only its own unresolved credit; shared-name state remains ambiguous')
             self.repository.mark_ambiguity(previous)
             return None
         return None if identity['ambiguous'] else previous
@@ -84,8 +80,7 @@ class Artists:
             credit = artist_credits.normalize_credit(value, structured, 'user_correction')
             identity = self.ensure_artist(value, provider='user_correction')
             credit = artist_credits.bind_credit(credit, [identity])
-            self.repository.store_credit(current['entry_id'], credit, structured,
-                                         'user_correction', clock(now), typed=current['typed'])
+            self.repository.store_credit(current['entry_id'], credit, 'user_correction', clock(now))
 
     def observe(self, entry_id, credit, credits=None, *, browse_id=None, source='youtube', now=None,
                 delivery_key=None, metadata_delivery_id=None):
@@ -104,11 +99,67 @@ class Artists:
             provider_id=member.get('id') or member.get('browseId'),
             previous=self.credit_subject(existing, member['name'])) for member in structured]
         value = artist_credits.bind_credit(value, identities)
-        self.repository.store_credit(inputs['entry_id'], value, structured, source, clock(now),
-            typed=inputs['typed'], delivery_key=delivery_key, metadata_delivery_id=metadata_delivery_id)
+        self.repository.store_credit(inputs['entry_id'], value, source, clock(now),
+            delivery_key=delivery_key, metadata_delivery_id=metadata_delivery_id)
 
     def resolve(self, value):
         return self.resolve_many([value])[value]
+
+    def enrich_credit(self, entry_id, structured, source, *, now=None, delivery_key=None,
+                      metadata_delivery_id=None):
+        """Refine a matched recording using explicit provider entities, never split its label.
+
+        Existing collaborators must all survive. A name identifies a cross-provider
+        subject only within this recording's current credit; conflicting provider
+        identities are retained separately rather than merged by name.
+        """
+        with self.repository.transaction():
+            self._enrich_credit(entry_id, structured, source, now=now, delivery_key=delivery_key,
+                                metadata_delivery_id=metadata_delivery_id)
+
+    def _enrich_credit(self, entry_id, structured, source, *, now, delivery_key, metadata_delivery_id):
+        value = artist_credits.normalize_credit('', structured, source)
+        if any(not member.provider or not (member.raw_id or member.raw_browse_id) for member in value.members):
+            return
+        provider_ids = [(member.provider, member.raw_id or member.raw_browse_id) for member in value.members]
+        if len(set(provider_ids)) != len(provider_ids):
+            return
+        inputs = self.repository.credit_observation_inputs(entry_id)
+        existing = inputs['credits']
+        resolved = []
+        for member in value.members:
+            previous = self.credit_subject(existing, member.credit_text)
+            known = self.repository.provider_id(member.provider, member.raw_id or member.raw_browse_id)
+            if previous is not None and known is not None and previous != known:
+                return
+            if previous is not None and known is None:
+                if (self.repository.identity_inputs(previous)['ambiguous']
+                        or member.provider in self.repository.identity_providers(previous)):
+                    return
+            resolved.append((member, previous, known))
+        # A primary-only provider cannot erase YouTube's structured collaboration.
+        covered = {previous or known for _, previous, known in resolved}
+        if len(existing) > 1 and not {row['artist_id'] for row in existing} <= covered:
+            return
+        if len(existing) == len(resolved) == 1 and existing[0]['artist_id'] not in covered:
+            return
+        identities = []
+        for member, previous, known in resolved:
+            if previous is not None and known is None:
+                # The exact matched recording and its unique credited subject
+                # supply context, rather than a global name lookup.
+                self.repository.add_provider(previous, member.provider, member.raw_id or member.raw_browse_id)
+                self.repository.promote(previous)
+                identity = previous
+            else:
+                identity = known or self.ensure_artist(member.credit_text, provider=member.provider,
+                    provider_id=member.raw_id or member.raw_browse_id)
+            self.repository.add_alias(identity, member.credit_text, source)
+            identities.append(identity)
+        display = ' & '.join(member.credit_text for member in value.members)
+        value = artist_credits.bind_credit(artist_credits.Credit(display, value.members), identities)
+        self.repository.store_credit(inputs['entry_id'], value, source, clock(now),
+            delivery_key=delivery_key, metadata_delivery_id=metadata_delivery_id)
 
     def resolve_exact(self, value):
         return self.resolve_many([value], exact=True)[value]
@@ -162,6 +213,35 @@ class Artists:
     def track_credits(self, entry_id):
         return self.repository.track_credits(entry_id)
 
+    def provider_identity(self, browse):
+        return self.repository.provider_id('youtube', browse)
+
+    def navigation(self, *, name='', identity=None, browse=None, video=None, album=None, credits=()):
+        """Use the credited subject, never a provider search for a display name."""
+        if identity is not None:
+            artist = self.get_artist(f'@artist:{identity}')
+            return [{'name': name or artist['name'], 'artist_id': artist['id']}] if artist else []
+        stored = (self.album_credits(album) if album else
+                  self.repository.video_credits(video) if video else [])
+        if stored:
+            return [{'name': name if len(stored) == 1 and name else row['credit'] or row['name'],
+                     'artist_id': row['artist_id']} for row in stored]
+        if credits:
+            return [{'name': label, 'artist_id': self.provider_identity(channel) if channel else None,
+                     'browse': channel} for label, channel in credits]
+        if browse:
+            identity = self.provider_identity(browse)
+            return [{'name': name, 'artist_id': identity, 'browse': browse}]
+        return []
+
     def track_keys(self, *, library=False, keys=None):
         return {key: {artist_policy.token(identity) for identity in identities} for key, identities
                 in self.repository.track_artist_ids(library=library, keys=keys).items()}
+
+    def credited_pages(self, rows, *, size=128):
+        """Resolve a compact rank stream without retaining its full catalog."""
+        rows = iter(rows)
+        while batch := list(islice(rows, size)):
+            identities = self.track_keys(keys=[row['key'] for row in batch])
+            for row in batch:
+                yield {**row, 'artist_ids': sorted(identities.get(row['key'], ()))}

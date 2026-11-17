@@ -31,12 +31,15 @@ def present(edition):
 
 
 def prepare(data, repo, now):
+    """Compatibility acquisition boundary; selection itself accepts detached inputs."""
+    return select(data, now, previous=repo.prepared('listening_edition') or {},
+                  views=repo.impressions(), pool=candidates(data))
+
+
+def select(data, now, *, previous, views, pool):
     key = edition_day(now, data['timezone'])
-    previous = repo.prepared('listening_edition') or {}
-    pool = candidates(data)
     valid = {item['id']: item for item in pool}
     prior = previous.get('stories', [])
-    views = repo.impressions()
     recent_families = {s['family'] for s in pool if now-views.get(s['id'], -float('inf')) < 3*86400}
     recent_families.update(s['family'] for s in pool
                           if now-views.get('family:' + s['family'], -float('inf')) < 3*86400)

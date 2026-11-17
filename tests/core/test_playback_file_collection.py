@@ -10,7 +10,6 @@ import time
 import pytest
 
 from yt_playlist.core import fao, playback_feedback
-from yt_playlist.core.preparation import managed_files
 from tests.playback_feedback_support import event
 from tests.store_fixture_support import bounded_consumer_schema
 
@@ -29,7 +28,7 @@ def _pristine_current_schema():
 @pytest.fixture(autouse=True)
 def close_collection(file_backed_store):
     yield
-    managed_files.close(file_backed_store.retention.database)
+    file_backed_store.retention.managed.close()
 
 
 def collect(store, now):
@@ -63,7 +62,9 @@ def test_observation_orphans_collect_while_pending_capture_replays_once(file_bac
                 "WHEN NEW.observed_at=101 BEGIN SELECT RAISE(ABORT,'controlled insert failure'); END")
         with pytest.raises(sqlite3.IntegrityError, match='controlled insert failure'):
             queue.capture('player', account, event(99), 101)
-        orphan, = set((p for p in file_collection.walk_entries(queue.directory) if p is not None)) - before
+        # SQL reservation fails before file access starts.
+        assert set(p for p in file_collection.walk_entries(queue.directory) if p is not None) == before
+        orphan = None
         expected = 0
     else:
         orphan = Path(queue.next()['filename'])
@@ -83,10 +84,10 @@ def test_observation_orphans_collect_while_pending_capture_replays_once(file_bac
     abandoned = queue.directory / '.fao-pending-abandoned'
     abandoned.write_bytes(b'incomplete private stream')
     collect(store, time.time())
-    assert orphan.exists() and abandoned.exists()
-    managed_files.close(store.retention.database)
+    assert (orphan is None or orphan.exists()) and abandoned.exists()
+    store.retention.managed.close()
     collect(store, time.time() + 31 * 86400)
-    assert not orphan.exists() and not abandoned.exists()
+    assert (orphan is None or not orphan.exists()) and not abandoned.exists()
     assert fao.read(pending['filename']).bytes == encoded
     assert queue.pending() == 1
     assert playback_feedback.drain(store) == 1
@@ -126,6 +127,6 @@ def test_collection_cannot_remove_active_capture_before_inbox_insert(file_backed
                 capture.result(timeout=10)
         else:
             capture.result(timeout=10)
-    managed_files.close(store.retention.database)
+    store.retention.managed.close()
     collect(store, time.time() + 31 * 86400)
     assert paths[0].exists() is not rollback

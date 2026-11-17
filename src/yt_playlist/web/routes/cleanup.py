@@ -5,8 +5,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response
 
 from yt_playlist.core.activity import activity_for
-from yt_playlist.library import analysis
-from yt_playlist.rec.actions import cleanup_page, mute_other_overlaps as _mute_other_overlaps
+from yt_playlist.web.context import Ctx
 
 
 def build(ctx) -> APIRouter:
@@ -20,7 +19,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/cleanup")
     def cleanup(request: Request):
-        result = cleanup_page(store, now_fn())
+        result, identities = Ctx.cleanup(ctx).page()
         prefs = result.analysis.preferences
         ci, ignored_ytm = prefs.ignored, prefs.ignored_ytm
         groups, near_pairs, overlaps = result.groups, result.near_pairs, result.overlaps
@@ -44,7 +43,6 @@ def build(ctx) -> APIRouter:
                            "titles": [pl_by_ytm[y].title for y in m["members"] if y in pl_by_ytm]}
                           for m in prefs.merges]
         ignored_merges = [m for m in ignored_merges if len(m["titles"]) > 1]   # need 2+ live members
-        identities = store.accounts.get_accounts()
         return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_pairs": near_pairs, "overlaps": overlaps,
             "empties": empties, "tiny": tiny, "kinds": kinds,
@@ -61,22 +59,22 @@ def build(ctx) -> APIRouter:
 
     @router.post("/overlaps/ignore")
     def ignore_overlap(ytm: str = Form(...)):
-        store.overlaps.ignore_overlap_playlist(ytm, now_fn())
+        Ctx.cleanup(ctx).change('ignore_overlap_playlist', ytm)
         return _refresh()
 
     @router.post("/overlaps/unignore")
     def unignore_overlap(ytm: str = Form(...)):
-        store.overlaps.unignore_overlap_playlist(ytm)
+        Ctx.cleanup(ctx).change('unignore_overlap_playlist', ytm)
         return _refresh()   # restore: recompute so the comparison reappears in its section
 
     @router.post("/overlaps/mute-others")
     def mute_other_overlaps(a: str = Form(...), b: str = Form(...)):
-        _mute_other_overlaps(store, a, b, now_fn())
+        Ctx.cleanup(ctx).mute_others(a, b)
         return _refresh()
 
     @router.post("/overlaps/suppress")
     def suppress_overlap(a: str = Form(...), b: str = Form(...)):
-        store.overlaps.suppress_overlap(a, b, now_fn())
+        Ctx.cleanup(ctx).change('suppress_overlap', a, b)
         return _refresh()   # the pair moves to the "Hidden overlaps" section
 
     def _suppress_many(raw):
@@ -84,7 +82,7 @@ def build(ctx) -> APIRouter:
             pairs = json.loads(raw)
         except (ValueError, TypeError):
             pairs = []
-        store.overlaps.suppress_overlaps(pairs, now_fn())
+        Ctx.cleanup(ctx).change('suppress_overlaps', pairs)
 
     @router.post("/overlaps/suppress-many")
     async def suppress_many(request: Request):
@@ -95,18 +93,18 @@ def build(ctx) -> APIRouter:
 
     @router.post("/overlaps/unsuppress")
     def unsuppress_overlap(a: str = Form(...), b: str = Form(...)):
-        store.overlaps.unsuppress_overlap(a, b)
+        Ctx.cleanup(ctx).change('unsuppress_overlap', a, b)
         return _refresh()   # restore: recompute so the comparison reappears in its section
 
     # --- category-scoped cleanup ignores (Empty / Tiny per playlist; Exact / Near per merge) ------
     @router.post("/cleanup/ignore")
     def cleanup_ignore(ytm: str = Form(...), category: str = Form(...)):
-        store.overlaps.ignore_cleanup(ytm, category, now_fn())
+        Ctx.cleanup(ctx).change('ignore_cleanup', ytm, category)
         return _refresh()
 
     @router.post("/cleanup/unignore")
     def cleanup_unignore(ytm: str = Form(...), category: str = Form(...)):
-        store.overlaps.unignore_cleanup(ytm, category)
+        Ctx.cleanup(ctx).change('unignore_cleanup', ytm, category)
         return _refresh()
 
     @router.post("/cleanup/ignore-merge")
@@ -114,12 +112,12 @@ def build(ctx) -> APIRouter:
         # `members` is the group's member ytm ids, comma-joined. The signature is membership-only,
         # so the dismissal sticks to THIS set of playlists and no other relationship they're in.
         ytms = [y for y in members.split(",") if y]
-        store.overlaps.ignore_merge(analysis.merge_signature(ytms), ytms, now_fn())
+        Ctx.cleanup(ctx).ignore_merge(ytms)
         return _refresh()
 
     @router.post("/cleanup/unignore-merge")
     def cleanup_unignore_merge(signature: str = Form(...)):
-        store.overlaps.unignore_merge(signature)
+        Ctx.cleanup(ctx).change('unignore_merge', signature)
         return _refresh()
 
     return router

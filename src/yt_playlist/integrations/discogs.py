@@ -15,7 +15,6 @@ from hashlib import sha256
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_cancellable_work
 from yt_playlist.integrations.base import Availability, IntegrationUnavailable, RateLimiter
-from yt_playlist.providers import credentials
 from yt_playlist.util import net
 
 API = 'https://api.discogs.com'
@@ -42,24 +41,23 @@ class DiscogsIAO:
         self._waits = OrderedDict()
 
     @contextmanager
-    def context(self, store=None):
-        token = self._scope.set(store) if store is not None else None
+    def context(self, state=None):
+        # `state` is a narrow CredentialedAccessState (see integrations/base.py),
+        # never a Store: it carries exactly the cooldown and settings reads below.
+        token = self._scope.set(state) if state is not None else None
         try:
             yield self
         finally:
             if token is not None:
                 self._scope.reset(token)
 
-    def token(self, store=None, config_path=None):
-        return credentials.resolve(env_name='DISCOGS_TOKEN', setting_name='discogs_token',
-            store=store if store is not None else self._scope.get(), config_path=config_path)
-
-    def _state(self):
-        return getattr(self._scope.get(), 'enrichment_state', None)
+    def token(self):
+        state = self._scope.get()
+        return state.credential() if state is not None and hasattr(state, 'credential') else None
 
     def availability(self):
         with self._lock:
-            state = self._state()
+            state = self._scope.get()
             saved = state.integration_cooldown('discogs') if state else None
             if saved and saved['retry_at'] > self._availability.retry_at:
                 return Availability(saved['retry_at'], saved['error'])
@@ -146,8 +144,8 @@ class DiscogsIAO:
         check_cancellable_work()
         with self._lock:
             check_cancellable_work()
-            scoped = hasattr(self._scope.get(), 'settings')
-            configured = self.token() if scoped else tok or self.token()
+            scoped = hasattr(self._scope.get(), 'credential')
+            configured = self.token() if scoped else tok
             digest = sha256(configured.encode()).digest() if configured else None
             auth_wait = self._waits.get(('credential', digest), (Availability(), False))[0]
             # A known bad optional token must not prevent unrelated public reads.
@@ -213,7 +211,7 @@ class DiscogsIAO:
                     raise error from exc
             self._failures = 0
             self._availability = Availability()
-            state = self._state()
+            state = self._scope.get()
             if state:
                 state.clear_integration_cooldown('discogs', availability.retry_at)
             self._waits.pop(key, None)
@@ -238,7 +236,7 @@ class DiscogsIAO:
         if outage:
             self._failures += 1
             retry_at = max(retry_at, now + min(3600, 30 * 2 ** min(self._failures - 1, 7)))
-            state = self._state()
+            state = self._scope.get()
             if state:
                 retry_at = state.defer_integration('discogs', now=now,
                     retry_after=retry_at, error=message)['retry_at']

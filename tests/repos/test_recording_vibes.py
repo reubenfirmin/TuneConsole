@@ -11,7 +11,9 @@ import pytest
 
 from tests.prepared_fixture_support import capture_template
 from tests.genre_catalog_support import bound_catalog
-from tests.rec.test_vibe_prediction import capture, drain, fits, individual_model_rollout, track
+from tests.rec.test_vibe_prediction import (
+    capture, controlled_measurements, drain, fits, individual_model_rollout, track,
+)
 from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer,
     install_numbered_input, mock_snapshot_coordinator, native_sql_calls, without_query_timing,
@@ -25,6 +27,8 @@ from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
 from yt_playlist.rec import vibe_preparation
 from yt_playlist.rec import home_vibe
+from yt_playlist.rec import vibe_recording_rules
+from yt_playlist.core.audio_vibe_contract import serving_compatible
 from yt_playlist.rec.progressive import Preparation
 
 
@@ -37,11 +41,13 @@ def disable_periodic_library_sync():
     yield
 
 
-def test_sample_json_is_external_immutable_and_durable_before_reference(store, monkeypatch):
+def test_sample_json_is_external_immutable_and_retains_interrupted_reservations(store, monkeypatch):
     value = sample()
     store.audio_vibes.save_sample(value, 12)
     row = store.conn.execute('SELECT * FROM sample_attributes').fetchone()
     assert sample_files.read(row['filename']) == value
+    assert Path(row['filename']).stem == value['id']
+    assert row['file_status'] == 'ready'
     assert row['captured_at'] == 12
     assert not {'payload', 'attributes', 'tags', 'traits'} & set(row.keys())
     assert store.audio_vibes.samples(value['run_id']) == [value]
@@ -56,11 +62,13 @@ def test_sample_json_is_external_immutable_and_durable_before_reference(store, m
     assert store.conn.execute('SELECT captured_at FROM sample_attributes').fetchone()[0] == 12
     def unavailable(*args):
         raise OSError('disk unavailable')
-    monkeypatch.setattr(sample_files, 'publish', unavailable)
+    monkeypatch.setattr(store.audio_vibes.sample_files, 'publish_reserved', unavailable)
     fresh = sample()
     with pytest.raises(OSError, match='disk unavailable'):
         store.audio_vibes.save_sample(fresh, 102)
-    assert store.conn.execute('SELECT COUNT(*) FROM sample_attributes').fetchone()[0] == 1
+    incomplete = store.conn.execute('SELECT * FROM sample_attributes WHERE id=?', (fresh['id'],)).fetchone()
+    assert incomplete['file_status'] == 'pending' and not Path(incomplete['filename']).exists()
+    assert store.audio_vibes.sample_receipts(fresh['run_id']) == []
 
 
 @pytest.fixture(scope='module')
@@ -181,7 +189,7 @@ def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versio
     drain(store)
     for table, rows in before.items():
         assert list(map(tuple, store.conn.execute(f'SELECT * FROM {table}'))) == rows
-    monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'new-model')
+    monkeypatch.setattr(vibe_preparation.audio_vibe_specialists, 'identity', lambda: 'new-model')
     drain(store)
     expected_version = vibe_preparation.version()
     assert store.conn.execute('SELECT COUNT(*) FROM measurements').fetchone()[0] > len(before['measurements'])
@@ -207,6 +215,44 @@ def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versio
     plan = ' '.join(str(tuple(row)) for row in store.conn.execute(
         "EXPLAIN QUERY PLAN SELECT recording_id,score FROM recording_vibes WHERE vibe='relax' ORDER BY score DESC,recording_id LIMIT 10"))
     assert 'idx_recording_vibe_rank' in plan and 'TEMP B-TREE' not in plan
+
+
+def test_shared_scores_are_excluded_until_bounded_specialist_refresh(versioned_store, monkeypatch):
+    store = versioned_store
+    _tid, original = track(store, 'original')
+    _tid, target = track(store, 'target')
+    samples = capture(store, 'original')
+    retired = 'recording-vibes-1/measured-vibes-2/subgenres-only-1/shared-classifier'
+    with monkeypatch.context() as patch:
+        patch.setattr(vibe_recording_rules, 'version', lambda: retired)
+        patch.setattr(vibe_preparation, 'version', lambda: retired)
+        drain(store, batch=1)
+    before = {row[0] for row in store.conn.execute('SELECT id FROM measurements')}
+    receipts = store.audio_vibes.sample_receipts(samples[0]['run_id'])
+    assert before
+    assert not store.vibe_predictions.fit_scores([original, target], 'relax')
+    assert not store.vibe_predictions.ranked('relax')
+    embedded = {original: {'dimensions': {'kept': True},
+        'vibes': {'inputs_version': retired, 'fits': {'relax': {'score': 1}}}}}
+    assert store.vibe_predictions.overlay(embedded) == {original: {'dimensions': {'kept': True}}}
+    assert not store.vibe_predictions.joint_inputs('relax', 32)
+    group = json.dumps(['artist', '["Shared artist"]', None], separators=(',', ':'))
+    assert store.vibe_predictions.groups([group])[group] == {'stats': {}, 'inputs': {}}
+
+    # The ordinary bounded worker replaces current outputs, retaining captures
+    # and immutable measurements. There is no migration or eager catalog scan.
+    drain(store, batch=1)
+    assert store.vibe_predictions.fit_scores([original, target], 'relax').keys() == {original, target}
+    profiles = store.vibe_predictions.overlay({original: {}, target: {}})
+    for profile in profiles.values():
+        assert serving_compatible(profile['vibes']['inputs_version'])
+        assert set(profile['vibes']['intensity_fits']) == {'release', 'energize'}
+    assert profiles[original]['vibes']['fits']['relax']['source'] == 'audio_measurement'
+    assert profiles[target]['vibes']['fits']['relax']['source'] == 'artist_genre'
+    assert before < {row[0] for row in store.conn.execute('SELECT id FROM measurements')}
+    assert store.audio_vibes.sample_receipts(samples[0]['run_id']) == receipts
+    assert store.vibe_predictions.joint_inputs('relax', 32)
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_relations_reject_wrong_recording_wrong_vibe_and_duplicate_source_votes(store):
@@ -279,79 +325,6 @@ def test_exact_video_reassociation_retracts_old_vote_and_preserves_history(store
                                   'WHERE r.identity_key=?', (original,)).fetchone()
     assert fits(store, canonical)['relax']['source'] == 'audio_measurement'
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-
-
-def legacy(path):
-    store = Store(path)
-    try:
-        migrate(store.conn, registry=MIGRATIONS[:60])
-        with store.conn:
-            # Populate the frozen predecessor directly; current catalog writers
-            # require the current mood and identity relations.
-            key = 'known|artist'
-            rid = store.conn.execute('INSERT INTO recordings(identity_key,title,artist,created_at) '
-                                     "VALUES (?,'Known','Artist',1)", (key,)).lastrowid
-            store.conn.execute("INSERT INTO youtube_items(video_id,recording_id,title,artist) "
-                               "VALUES ('known',?,'Known','Artist')", (rid,))
-            store.conn.execute("INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,'known')", (rid,))
-            value = sample()
-            value['video_id'] = 'known'
-            store.conn.execute('INSERT INTO audio_vibe_samples VALUES (?,?,?,?,?)',
-                               (value['id'], value['run_id'], value['point'], json.dumps(value), 10))
-            evidence = {'source': 'audio_measurement', 'sample_ids': [value['id']], 'fits': {'relax': {'score': .8, 'support': 1.}}}
-            store.conn.execute('INSERT INTO rec_vibe_tracks VALUES (?,?,?,?,?)', (key, None, 'psybient', json.dumps(evidence), 'old-model'))
-            profile = {'vibes': {'fits': {'relax': {'score': .8, 'support': 1., 'source': 'audio_measurement'}}}}
-            store.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?)', (key, json.dumps(profile), 'old', 'digest', 20))
-            store.conn.execute('INSERT INTO audio_session_labels VALUES (?,?,?,?,?,?)',
-                               (value['run_id'], 'retained-taxonomy', json.dumps([value['id']]), 'null', '["relax"]', 11))
-        return store, value
-    except BaseException:
-        store.conn.close()
-        raise
-
-
-@pytest.fixture(scope='module')
-def recording_vibe_predecessor():
-    """Retain a genuine populated v60 prefix; each upgrade owns private files."""
-    with ExitStack() as resources:
-        directory = Path(resources.enter_context(TemporaryDirectory(prefix='recording-vibe-v60-')))
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv('YT_PLAYLIST_HOME', str(directory / 'app-home'))
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-            patch.delenv('DEEPSEEK_API_KEY', raising=False)
-            # The populated predecessor contains only Psybient. Run every
-            # genuine historical migration without repeating unrelated
-            # vocabulary curation beneath externalization and lineage checks.
-            bound_catalog(patch, entries=(('psybient', 'Psybient'),))
-            source, value = legacy(directory / 'source.db')
-            resources.callback(source.conn.close)
-            template = capture_template(source, value)
-        yield template
-
-
-def test_externalization_failure_rolls_back_database_and_can_resume(tmp_path, monkeypatch, recording_vibe_predecessor):
-    store = Store(tmp_path / 'legacy.db')
-    value = recording_vibe_predecessor.restore(store)
-    before = list(store.conn.iterdump())
-    original = sample_files.publish
-    def fail_after_publication(*args):
-        original(*args)
-        raise OSError('interrupted externalization')
-    with monkeypatch.context() as patch:
-        patch.setattr(sample_files, 'publish', fail_after_publication)
-        with pytest.raises(MigrationError, match='interrupted externalization'):
-            migrate(store.conn,registry=MIGRATIONS[:61])
-    assert list(store.conn.iterdump()) == before
-    # This failure belongs to v61. The populated upgrade/reopen case above
-    # owns the complete suffix and current application admission.
-    migrate(store.conn,registry=MIGRATIONS[:61])
-    validate_version(store.conn, 61)
-    store._bind_repositories()
-    assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 61
-    assert store.audio_vibes.samples(value['run_id']) == [value]
-    assert len(list((tmp_path / 'sample-attributes').glob('*/*.json'))) == 1
-    store.conn.close()
 
 
 @pytest.fixture

@@ -7,6 +7,7 @@ import pytest
 from tests.conftest import FakeClient
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.library import live_plays, player_events, ratings, sync
+from yt_playlist.controllers import library_synchronization as acquisition
 from yt_playlist.rec import rec_params
 
 
@@ -138,7 +139,7 @@ def test_unavailable_account_contributions_remain_until_authoritatively_withdraw
             raise BridgeError('offline')
 
         client.get_library_playlists = offline
-        monkeypatch.setattr(sync, 'with_retry', lambda fn, **kwargs: fn())
+        monkeypatch.setattr(acquisition, 'with_retry', lambda fn, **kwargs: fn())
         sync.sync_identity(store, first, client, now=20)
     else:
         with store.conn:

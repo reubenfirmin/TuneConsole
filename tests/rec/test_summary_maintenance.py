@@ -15,10 +15,11 @@ from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
     without_query_timing,
 )
+from yt_playlist.controllers import trend_preparation
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.library import analysis
-from yt_playlist.rec import actions, maintenance, trend_rollups
+from yt_playlist.rec import actions, maintenance
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -157,17 +158,21 @@ def test_conflicting_publication_retries_with_backoff_and_keeps_last_good(store,
     saved = store.rec_proposals.get_proposals(surface)
     worker.projections.completed.pop(kind)
     worker.projections.retry_at.clear()
-    owner, name = (trend_rollups, '_calculate') if kind == 'trends' else (analysis, 'cleanup_summary')
+    owner, name = (trend_preparation, 'calculate') if kind == 'trends' else (analysis, 'prepare_cleanup')
     original = getattr(owner, name)
+    conflicts = []
 
     def conflict(reader, *args):
-        assert reader.conn is not store.conn
+        connection = reader.trends.repository.conn if kind == 'trends' else reader.conn
+        assert connection is not store.conn
         result = original(reader, *args)
         store.playlists.upsert_playlist(iid, 'race', 'Changed during calculation', 0, '', now[0])
+        conflicts.append(reader)
         return result
 
     monkeypatch.setattr(owner, name, conflict)
     tick(worker)
+    assert len(conflicts) == 1
     assert store.rec_proposals.get_proposals(surface) == saved
     assert worker.projections.failures[kind] == 1
     assert worker.projections.retry_at[kind] > maintenance.time.monotonic()

@@ -8,7 +8,7 @@ from yt_playlist.core import metadata
 from yt_playlist.core.store import Store
 
 
-@pytest.mark.parametrize('version', [79, 94, 107])
+@pytest.mark.parametrize('version', [107])
 @pytest.mark.parametrize('correction', ['choice', 'selection', 'reset'])
 def test_changed_query_resumes_its_retry_across_installed_formats(
         tmp_path, _pristine_installed_schema, version, correction):

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.core.activity import Activity, WorkClosing, check_stopping
 from yt_playlist.core.priority import RequestPriority
-from yt_playlist.core.update_lifecycle import acquire_restart_locks
+from yt_playlist.library.update_composition import acquire_shutdown as acquire_restart_locks
 from yt_playlist.library import playlist_generated
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app

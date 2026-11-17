@@ -1,22 +1,22 @@
 """Mutable, reloadable app state: lets the server start unconfigured and reload after setup."""
 import logging
-import os
 import threading
 from pathlib import Path
 
-from yt_playlist.core.config import load_accounts, validate_accounts
+from yt_playlist.core.config import parse_accounts
+from yt_playlist.core.config_files import ConfigFiles
 from yt_playlist.core.identities import build_client
-from yt_playlist.core.setup import (write_config, prepared_config,
-                                    restore_config, BROWSER_CREDENTIAL_FILENAME)
+from yt_playlist.core.setup import serialize_config, BROWSER_CREDENTIAL_FILENAME
 
 logger = logging.getLogger(__name__)
 
 
 class Runtime:
-    def __init__(self, store, config_path, creds_dir):
+    def __init__(self, store, config_path, creds_dir, *, files=None):
         self.store = store
         self.config_path = Path(config_path)
         self.creds_dir = Path(creds_dir)
+        self.files = ConfigFiles() if files is None else files
         self._provider = None
         self._configured = False
         self._lock = threading.RLock()
@@ -53,13 +53,13 @@ class Runtime:
         Startup failures leave setup available; reload failures retain the last usable state.
         """
         with self._lock:
-            if not self.config_path.exists():
+            if not self.files.exists(self.config_path):
                 self._provision_default()
-            if not self.config_path.exists():
+            if not self.files.exists(self.config_path):
                 return
             try:
-                cfgs = load_accounts(self.config_path)
-                content = self.config_path.read_bytes()
+                content = self.files.read(self.config_path)
+                cfgs = parse_accounts(content.decode('utf-8'))
                 self._validate_clients(cfgs)
                 if self.store.activity_paused:
                     ids = self.store.accounts.configured_ids(cfgs)
@@ -68,7 +68,7 @@ class Runtime:
                 provider = self._provider_for(cfgs, ids)
             except Exception as e:
                 if self._last_config is not None:
-                    restore_config(self._last_config, self.config_path)
+                    self.files.restore(self._last_config, self.config_path)
                 logger.warning("config not usable; retaining previous runtime: %s", e)
                 return
             self._provider, self._configured, self._last_config = provider, True, content
@@ -79,10 +79,12 @@ class Runtime:
         (no "Save an identity" gate) and the /setup wizard is only for people who actually have
         multiple (brand) identities. Best-effort: never let provisioning crash startup."""
         try:
-            self.creds_dir.mkdir(parents=True, exist_ok=True)
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            write_config([{"label": "main", "is_master": True,
-                           "credential_ref": BROWSER_CREDENTIAL_FILENAME}], self.config_path)
+            self.files.mkdir(self.creds_dir)
+            self.files.mkdir(self.config_path.parent)
+            content = serialize_config([{"label": "main", "is_master": True,
+                                        "credential_ref": BROWSER_CREDENTIAL_FILENAME}]).encode('utf-8')
+            with self.files.stage(self.config_path, content) as staged:
+                self.files.publish(staged, self.config_path)
         except Exception:                       # noqa: BLE001 - app still works via /setup
             logger.warning("could not provision default identity", exc_info=True)
 
@@ -94,20 +96,21 @@ class Runtime:
         credentials_present / bridge_paired), so identities can be saved on their own even before
         pairing completes.
         """
-        validate_accounts(identities)
-        self.creds_dir.mkdir(parents=True, exist_ok=True)
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        cfgs = parse_accounts(serialize_config(identities))
+        self.files.mkdir(self.creds_dir)
+        self.files.mkdir(self.config_path.parent)
         with self._lock:
             try:
-                with prepared_config(identities, self.config_path) as (_, cfgs):
-                    self._validate_clients(cfgs)
+                self._validate_clients(cfgs)
+                with self.files.stage(self.config_path, serialize_config(identities).encode('utf-8')):
                     ids = self.store.accounts.replace_accounts(cfgs)
                     rows = [{"id": ids[c.label], "label": c.label, "credential_ref": c.credential_ref,
                              "brand_account_id": c.brand_account_id, "is_master": c.is_master} for c in cfgs]
-                    with prepared_config(rows, self.config_path) as (staged, final_cfgs):
-                        content = staged.read_bytes()
-                        os.replace(staged, self.config_path)
-                        provider = self._provider_for(final_cfgs, ids)
+                    content = serialize_config(rows).encode('utf-8')
+                    final_cfgs = parse_accounts(content.decode('utf-8'))
+                    with self.files.stage(self.config_path, content) as staged:
+                        self.files.publish(staged, self.config_path)
+                    provider = self._provider_for(final_cfgs, ids)
                 self._provider, self._configured, self._last_config = provider, True, content
             except BaseException as error:
                 if not isinstance(error, Exception):

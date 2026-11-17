@@ -1,5 +1,6 @@
 """Playlist waterfalls reserve their scope before concurrent requests can rejoin."""
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -28,6 +29,7 @@ def test_concurrent_playlist_requests_share_a_fully_initialized_job(monkeypatch)
                         lambda store, tracks, config, on_progress=None, **kw: waterfalls.append(tracks))
     registry = jobs.SyncJobs()
     ctx = SimpleNamespace(jobs=registry, work=SimpleNamespace(start_thread=workers.append),
+        logger=logging.getLogger(__name__),
         store=SimpleNamespace(tracks=SimpleNamespace(tracks_for_waterfall=lambda pid: [pid])))
 
     def second_request():
@@ -63,7 +65,8 @@ def test_concurrent_playlist_requests_share_a_fully_initialized_job(monkeypatch)
 def test_failed_worker_admission_releases_playlist_reservation():
     work = Activity()
     work.close_admission()
-    ctx = SimpleNamespace(jobs=jobs.SyncJobs(), work=work)
+    ctx = SimpleNamespace(jobs=jobs.SyncJobs(), work=work, store=SimpleNamespace(),
+                          logger=logging.getLogger(__name__))
     with pytest.raises(WorkClosing):
         jobs.start_playlist_enrichment(ctx, 7)
     assert not ctx.jobs.has_active()

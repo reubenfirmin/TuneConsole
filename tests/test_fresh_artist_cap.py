@@ -63,6 +63,15 @@ def test_an_accented_spelling_does_not_get_its_own_allowance():
     assert sum(1 for _, r in got if "eubauten" in r["artist"]) == 2
 
 
+def test_collaborators_share_the_cap_and_identified_homonyms_remain_distinct():
+    pool = _scored([(str(i), 'Same name') for i in range(15)])
+    for index, (_, row) in enumerate(pool):
+        row['artist_ids'] = [f'@artist:{index + 1}'] + (['@artist:100'] if index < 4 else [])
+    picked = [row for _, row in _cap_per_artist(pool, 2)[:12]]
+    assert len(picked) == 12
+    assert sum('@artist:100' in row['artist_ids'] for row in picked) == 2
+
+
 def test_the_cap_is_tunable_and_defaults_to_two(no_database):
     s = repository_store(settings={'get_setting': None})
     assert rec_params.get_param(s, "fresh_artist_cap") == 2

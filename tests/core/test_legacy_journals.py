@@ -6,7 +6,6 @@ import pytest
 
 from yt_playlist.core import fao, file_map, legacy_evidence, legacy_journals as owner
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.preparation import legacy_journals
 from yt_playlist.core.store import Store
 
 
@@ -23,7 +22,8 @@ def test_insert_once_rollback_snapshots_expiry_and_independent_restore(store, tm
     with store.read_view() as snapshot:
         before = owner.head(snapshot.conn,'catalog')
         for _ in range(40):
-            store.retention.expire_legacy_diagnostics(10**10)
+            with atomic_write(store):
+                owner.maintain(store.conn,10**10)
         assert owner.head(snapshot.conn,'catalog') == before
         assert legacy_evidence.original(snapshot.conn,'catalog','library','128') == ' {"old": 128} '
         assert owner.collect(store.conn,10**10) == 0
@@ -49,34 +49,6 @@ def test_insert_once_rollback_snapshots_expiry_and_independent_restore(store, tm
             legacy_evidence.original(restored.conn,'catalog','library','128')
     finally:
         restored.conn.close()
-
-
-def test_old_receipt_conversion_failure_and_explicit_verified_retirement(store, monkeypatch):
-    with monkeypatch.context() as patch:
-        patch.setattr(owner,'available',lambda conn:False)
-        with atomic_write(store):
-            legacy_evidence.retain_many(store.conn,'album',[
-                ('album_tracklists','old','\n {"tracks": [1, 2]} ','original conversion')])
-    with monkeypatch.context() as patch:
-        patch.setattr(fao,'write',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
-        with pytest.raises(OSError,match='disk full'):
-            legacy_journals.prepare(store)
-    assert store.conn.execute('SELECT count(*) FROM album_identity_evidence').fetchone()[0] == 1
-    assert legacy_journals.prepare(store) == 1
-    assert legacy_journals.prepare(store) == 0
-    exact = legacy_evidence.original(store.conn,'album','album_tracklists','old')
-    assert exact == '\n {"tracks": [1, 2]} '
-    verified = owner.head(store.conn,'album')
-    with atomic_write(store):
-        with pytest.raises(ValueError,match='independently verified'):
-            owner.retire_verified(store.conn,'album','0'*64,0)
-        owner.retire_verified(store.conn,'album',verified,0)
-    assert not store.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='album_identity_evidence'").fetchone()
-    store.init_schema()
-    assert legacy_evidence.original(store.conn,'album','album_tracklists','old') == exact
-    with atomic_write(store):
-        legacy_evidence.retain_many(store.conn,'album',[('album_tracklists','new','new original','continued reconciliation')])
-    assert legacy_evidence.original(store.conn,'album','album_tracklists','new') == 'new original'
 
 
 def test_trie_seek_is_bounded_and_missing_required_pages_fail(tmp_path, monkeypatch):

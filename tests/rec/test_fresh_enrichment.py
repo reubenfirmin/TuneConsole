@@ -17,7 +17,7 @@ from tests.store_fixture_support import (
 from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.library import playlist_generated
-from yt_playlist.rec import content_model, embedding_training as training, embedding_vectors as embed, fresh_pool, mode_selection, mode_surfaces, model_refresh, ppr, recipes, surfaces, vibe_pools
+from yt_playlist.rec import content_model, embedding_training as training, embedding_vectors as embed, fresh_pool, mode_inputs, mode_selection, mode_surfaces, model_refresh, ppr, recipes, surfaces, vibe_pools
 from yt_playlist.rec.scoring import PlaylistTaste
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -194,10 +194,10 @@ def unrelated_recommendation_inputs(monkeypatch):
     monkeypatch.setattr(vibe_pools, 'prepare', lambda *args, **kwargs: None)
     monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {})
 
-    def no_temporal_pool(store, payload, *args, **kwargs):
+    def no_temporal_pool(payload, *args, **kwargs):
         payload['all']['temporal'] = []
 
-    monkeypatch.setattr(mode_surfaces, '_build_temporal', no_temporal_pool)
+    monkeypatch.setattr(mode_inputs, '_build_temporal', no_temporal_pool)
 
 
 def _forbid_retraining(monkeypatch):

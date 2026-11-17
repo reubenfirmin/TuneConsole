@@ -5,7 +5,7 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.playback_feedback import PlaybackFeedback
-from yt_playlist.core.playback_inbox import Inbox
+from yt_playlist.controllers.playback_inbox import PlaybackInbox
 from yt_playlist.repos.playback_feedback import PlaybackFeedbackRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -16,7 +16,7 @@ def feedback():
     repository = create_autospec(PlaybackFeedbackRepo, instance=True, spec_set=True)
     repository.try_access.return_value.__enter__.return_value = True
     repository.has_receipt.return_value = False
-    queue = create_autospec(Inbox, instance=True)
+    queue = create_autospec(PlaybackInbox, instance=True)
     queue.replaying = Mock()
     return PlaybackFeedback(repository, queue, SimpleNamespace(activity_paused=False))
 

@@ -6,6 +6,12 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 
 
+def deletion_accounts(store):
+    with store.conn:
+        store.conn.executemany('INSERT INTO accounts(id,label,credential_ref) VALUES (?,?,?)',
+                              [(7, 'Seven', 'seven.json'), (8, 'Eight', 'eight.json')])
+
+
 def test_record_get_update(store):
     aid = store.actions.record_action("merge", "{}", "[]", "planned", "{}", 1.0)
     a = store.actions.get_action(aid)
@@ -24,13 +30,30 @@ def test_get_actions_newest_first(store):
     assert [a.id for a in store.actions.get_actions()] == [a2, a1]   # ORDER BY id DESC
 
 
+def test_versions_filter_headers_without_materializing_action_documents(store, monkeypatch):
+    first = store.actions.record_action('merge', '{}', '[]', 'planned', '{}', 1.)
+    second = store.actions.record_action('merge', '{}', '[]', 'planned', '{}', 1.)
+    store.actions.record_action('move', '{}', '[]', 'executed', '{}', 1.)
+    before = store.actions.versions('merge')
+    assert list(before.items()) == [(second, 'planned'), (first, 'planned')]
+    store.actions.update_action(first, 'executed', 1.)
+
+    def no_documents(*args):
+        raise AssertionError('Header inspection must not load action bodies')
+
+    monkeypatch.setattr(store.actions.documents, 'action', no_documents)
+    assert store.actions.versions('merge') == {second: 'planned', first: 'executed'}
+    assert store.actions.versions('unknown-kind') == {}
+
+
 def test_get_action_missing_returns_none(store):
     assert store.actions.get_action(999) is None
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_pending_deletion_matches_account_and_playlist_in_the_same_entry(installed):
     store, _ = installed
+    deletion_accounts(store)
     def record(entries, status="delete_pending"):
         return store.actions.record_action("apply_merge", "{}", "{}", status,
                                            json.dumps({"deletions": entries}), 1)
@@ -54,17 +77,15 @@ def test_pending_deletion_matches_account_and_playlist_in_the_same_entry(install
     assert store.actions.get_pending_deletion(7, "SOURCE").id == fresh
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_pending_deletion_excludes_completed_payloads_and_only_materializes_match(installed, monkeypatch):
-    # This checks the installed JSON owner and its partial index. Native v98
-    # admission has separate required fields and typed-target query coverage.
     store, _ = installed
+    deletion_accounts(store)
     from yt_playlist.controllers import action_documents as actions
 
-    with store.conn:
-        store.conn.executemany(
-            "INSERT INTO actions(kind,status,undo_json) VALUES ('merge','executed',?)",
-            [("unrelated historical payload" * 100,)] * 500)
+    for _ in range(500):
+        store.actions.record_action('merge', '{}', '[]', 'executed',
+            json.dumps({'unrelated': 'historical payload' * 100}), 1)
     undo = json.dumps({"deletions": [{"identity": 7, "ytm": "SOURCE"}]})
     expected = store.actions.record_action("delete_playlist", "{}", "{}", "delete_pending", undo, 1)
     store.actions.record_action("delete_playlist", "{}", "{}", "delete_pending", "{}", 2)
@@ -83,14 +104,15 @@ def test_pending_deletion_excludes_completed_payloads_and_only_materializes_matc
     finally:
         store.conn.set_trace_callback(None)
     assert constructed == [expected]
-    query, = [sql for sql in queries if sql.startswith("SELECT a.* FROM actions")]
+    query, = [sql for sql in queries if 'SELECT MAX(s.action_id)' in sql]
     plan = store.conn.execute("EXPLAIN QUERY PLAN " + query).fetchall()
-    assert any("ix_actions_delete_pending" in row[3] for row in plan)
+    assert any('SEARCH t USING' in row[3] for row in plan), [row[3] for row in plan]
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_failed_deletion_lookup_matches_one_entry_and_preserves_manual_pending_lookup(installed):
     store, _ = installed
+    deletion_accounts(store)
     def record(entries, status="delete_failed"):
         return store.actions.record_action("gc_generated", "{}", "{}", status,
                                            json.dumps({"deletions": entries}), 1)
@@ -104,5 +126,6 @@ def test_failed_deletion_lookup_matches_one_entry_and_preserves_manual_pending_l
     assert store.actions.get_failed_deletion(7, "SOURCE").id == newest
     assert store.actions.get_pending_deletion(7, "SOURCE") is None
     assert store.actions.get_failed_deletion(9, "SOURCE") is None
-    store.actions.update_action(newest, "undone", 2)
+    store.actions.update_action(newest, "undoing", 2)
+    store.actions.update_action(newest, "undone", 3)
     assert store.actions.get_failed_deletion(7, "SOURCE").id == older

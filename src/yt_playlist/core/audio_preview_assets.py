@@ -11,5 +11,17 @@ ASSETS = frozenset({
      for name in ('model.json', 'group1-shard1of1.bin', 'metadata.json')})
 
 
-def available(model_dir=MODEL, assets=ASSETS) -> bool:
-    return all((model_dir / name).is_file() for name in assets)
+class PreviewFiles:
+    def __init__(self, root):
+        self.root = root
+
+    def installed(self, names):
+        return {name for name in names if (self.root / name).is_file()}
+
+
+def capability(required, installed):
+    return set(required) <= set(installed)
+
+
+def available(model_dir=MODEL, assets=ASSETS, *, files=None) -> bool:
+    return capability(assets, (files or PreviewFiles(model_dir)).installed(assets))

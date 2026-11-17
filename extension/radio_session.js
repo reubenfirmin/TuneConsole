@@ -1,7 +1,7 @@
 // MAIN-world companion for saved-playlist Radio Sessions.
 // Ask Music to fetch the saved playlist; never supply playback items ourselves.
 (() => {
-  const VERSION = 8;
+  const VERSION = 9;
   if (window.__tcRadioSession?.version === VERSION) {
     window.__tcPlaylistPoc = window.__tcRadioSession;
     return;
@@ -35,11 +35,20 @@
     try { state = queue?.store?.store?.getState?.()?.queue; } catch (_) {}
     if (!Array.isArray(state?.items)) return {available: false};
     const items = state.items.map(renderer);
+    const selectedIndex = state.selectedItemIndex;
+    const selected = Number.isSafeInteger(selectedIndex) && selectedIndex >= 0 ? state.items[selectedIndex] : null;
+    const primary = renderer(selected);
+    const endpoint = primary?.navigationEndpoint?.watchEndpoint;
     return {
       available: true,
       videoIds: items.map(item => item?.videoId || ""),
       playlistIds: [...new Set(items.map(item => item?.navigationEndpoint?.watchEndpoint?.playlistId).filter(Boolean))],
       selectedIndex: state.selectedItemIndex ?? null,
+      selectedItem: primary ? {
+        videoId: primary.videoId, playlist: endpoint?.playlistId, index: endpoint?.index,
+        counterparts: (selected?.playlistPanelVideoWrapperRenderer?.counterpart || [])
+          .map(item => item?.counterpartRenderer?.playlistPanelVideoRenderer?.videoId).filter(Boolean),
+      } : null,
       autoplay: typeof state.autoplay === "boolean" ? state.autoplay : null,
       autoPlaying: typeof queue.autoPlaying === "boolean" ? queue.autoPlaying : null,
       automixVideoIds: (state.automixItems || []).map(item => renderer(item)?.videoId).filter(Boolean),
@@ -138,7 +147,7 @@
       refreshError = null;
       return "confirmed";
     }
-    if (!expected.videoIds.includes(current.video_id)) return "current song is not in saved playlist";
+    if (!savedSlot(current, nativePlayback())) return "current song is not in saved playlist";
     const app = document.querySelector("ytmusic-app")?.polymerController;
     if (typeof app?.handleQueueUpdateCommand !== "function") return "native playlist refresh unavailable";
     let endpoint;
@@ -178,16 +187,34 @@
     }
   }
 
+  function savedSlot(current, native) {
+    const item = native.selectedItem;
+    if (!expected || current.playlist_ytm_id !== expected.playlist || !native.available ||
+        item?.playlist !== expected.playlist || !current.video_id ||
+        (item.videoId !== current.video_id && !item.counterparts.includes(current.video_id))) return null;
+    // A wrapper proves only this selected occurrence, never recording identity.
+    // Use its original saved index for repeats; a trimmed native queue has its
+    // own selected index. Older endpoints without an index must be unambiguous.
+    const ids = expected.videoIds;
+    const savedId = ids.includes(item.videoId) ? item.videoId : current.video_id;
+    let savedIndex = item.index;
+    if (savedIndex === undefined) {
+      savedIndex = ids.indexOf(savedId);
+      if (savedIndex < 0 || ids.lastIndexOf(savedId) !== savedIndex) return null;
+    } else if (!Number.isSafeInteger(savedIndex) || savedIndex < 0 || ids[savedIndex] !== savedId) return null;
+    return {savedIndex, loadedIndex: native.selectedIndex};
+  }
+
   function playbackMatches() {
     if (!expected) return false;
     const current = player();
     if (current.playlist_ytm_id !== expected.playlist) return false;
-    const savedIndex = expected.videoIds.indexOf(current.video_id);
     const native = nativePlayback();
     if (!native.available) return false;
     if (native.playlistIds.length && !native.playlistIds.includes(expected.playlist)) return false;
-    const loadedIndex = native.videoIds.indexOf(current.video_id);
-    if (savedIndex < 0 || loadedIndex < 0) return false;
+    const slot = savedSlot(current, native);
+    if (!slot) return false;
+    const {savedIndex, loadedIndex} = slot;
     const saved = expected.videoIds.slice(savedIndex + 1);
     const loaded = native.videoIds.slice(loadedIndex + 1);
     return saved.length === loaded.length && saved.every((id, index) => id === loaded[index]);

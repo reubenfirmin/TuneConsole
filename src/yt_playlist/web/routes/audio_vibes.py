@@ -229,6 +229,7 @@ async def parse(request, schema):
 
 
 def build(ctx):
+    from yt_playlist.web.context import Ctx
     router = APIRouter()
     ctx.templates.env.globals['audio_vibes_enabled'] = audio_vibes_enabled
     choices = {
@@ -240,22 +241,21 @@ def build(ctx):
     ctx.templates.env.globals['audio_vibe_taxonomy_version'] = audio_vibe_prediction.TAXONOMY_VERSION
 
     def state(run_id, video_id=None):
-        return audio_vibe_session.state(ctx.store, run_id, video_id, choices=choices)
+        return Ctx.audio_capture(ctx, choices=choices).state(run_id, video_id)
 
-    def persist_audio(run_id, save):
+    def persist_audio(command, *args):
         # Admission survives HTTP cancellation through Activity.to_thread. Keep
         # publication, response reads/prediction and encoding in the same worker.
         try:
-            save()
+            result = command(*args)
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
-        return JSONResponse(state(run_id))
+        return JSONResponse(result)
 
     @router.post('/audio-vibes/runs')
     async def started(request: Request):
         value = await parse(request, Playback)
-        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
-            lambda: ctx.store.audio_vibes.save_playback(**value, now=ctx.now()))
+        return await activity_for(ctx).to_thread(persist_audio, Ctx.audio_capture(ctx, choices=choices).started, value)
 
     @router.get('/audio-vibes/runs/{run_id}')
     def run(run_id: str, video_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None):
@@ -268,16 +268,14 @@ def build(ctx):
     @router.post('/audio-vibes/samples')
     async def sample(request: Request):
         value = await parse(request, Sample)
-        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
-            lambda: ctx.store.audio_vibes.save_sample(value, ctx.now()))
+        return await activity_for(ctx).to_thread(persist_audio, Ctx.audio_capture(ctx, choices=choices).sample, value)
 
     @router.post('/audio-vibes/feedback')
     async def feedback(request: Request):
         require_enabled()
         value = await parse(request, Feedback)
-        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
-            lambda: audio_vibe_feedback.save(ctx.store, value['run_id'], value['sample_ids'], value['vibes'],
-                                           value['taxonomy_version'], ctx.now()))
+        return await activity_for(ctx).to_thread(persist_audio, Ctx.audio_capture(ctx, choices=choices).feedback,
+            value['run_id'], value['sample_ids'], value['vibes'], value['taxonomy_version'])
 
     @router.post('/audio-vibes/failures')
     async def failure(request: Request):

@@ -10,6 +10,9 @@ class Charts:
     def album_labels(self):
         return {key: title or 'Album' for key, title in self.repository.album_labels().items()}
 
+    def artist_labels(self):
+        return self.repository.artist_labels()
+
     def playlist_labels(self):
         return {key: title or 'Playlist' for key, title in self.repository.playlist_labels().items()}
 

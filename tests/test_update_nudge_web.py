@@ -20,13 +20,12 @@ class FakeStore:
 
 
 def _home_app(store):
-    # The router constructs its recommendation service with a logger even though these
-    # dismissal endpoints only use settings. Keep the context's required dependencies explicit.
-    from yt_playlist.web.routes import home
+    # Dismissal belongs to the onboarding router and only needs settings.
+    from yt_playlist.web.routes import home_onboarding
     app = FastAPI()
     ctx = SimpleNamespace(store=store, client_provider=lambda: {}, now_fn=lambda: 1000.0, templates=None,
                           logger=logging.getLogger(__name__))
-    app.include_router(home.build(ctx))
+    app.include_router(home_onboarding.build(ctx))
     return app
 
 

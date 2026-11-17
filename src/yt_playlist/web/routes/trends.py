@@ -9,25 +9,22 @@ from fastapi import APIRouter, HTTPException, Request
 
 from yt_playlist.rec.recap_story import listening_summary
 from yt_playlist.rec.recap_details import slides
-from yt_playlist.rec.trend_rollups import mark_viewed
+from yt_playlist.library.analytics_composition import stories
 from yt_playlist.web import theme
 
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
-    store, templates = ctx.store, ctx.templates
+    templates, commands = ctx.templates, stories(ctx)
 
     @router.get("/trends/story/{month}")
     def trends_story(request: Request, month: str):
         """The reel for one month. Serves the newest baked story; a mismatched month 404s (past months
         become available once the archive/recompute path lands -- see the design doc)."""
-        story = (store.rec_proposals.get_proposals("trend_rollups") or {}).get("story")
-        if not story or story.get("month") != month:
+        story = commands.story(month)
+        if not story:
             raise HTTPException(status_code=404, detail="no recap for that month")
-        grouped = any('groups' in beat for beat in story['beats'])
         story = {**story, 'beats': slides(story['beats'])}
-        if grouped and ctx.rec_worker:
-            ctx.rec_worker.trigger_trends_refresh()
         # The personality/closing beats' aura hue is a presentation token: recap_story stays
         # detached from web/theme and only bakes in the neutral genre family (top_family, on the
         # personality beat the closing beat's aura is copied from); fill the colour in here.
@@ -47,8 +44,7 @@ def build(ctx) -> APIRouter:
                 for b in story["beats"]
             ]}
         response = templates.TemplateResponse(request, "story_reel.html", {"story": story})
-        if not getattr(store, 'activity_paused', False):
-            mark_viewed(store, month)
+        commands.viewed(month)
         return response
 
     return router

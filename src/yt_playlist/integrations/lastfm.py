@@ -20,7 +20,6 @@ from hashlib import sha256
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_cancellable_work
 from yt_playlist.integrations.base import Availability, IntegrationUnavailable, RateLimiter
-from yt_playlist.providers import credentials
 from yt_playlist.util import net
 
 API = 'https://ws.audioscrobbler.com/2.0/'
@@ -60,21 +59,19 @@ class LastFmIAO:
         self._cache = {scope: OrderedDict() for scope in self._locks}
 
     @contextmanager
-    def context(self, store=None):
-        token = self._scope.set(store) if store is not None else None
+    def context(self, state=None):
+        # `state` is a narrow CredentialedAccessState (see integrations/base.py),
+        # never a Store: it carries exactly the cooldown and settings reads below.
+        token = self._scope.set(state) if state is not None else None
         try:
             yield self
         finally:
             if token is not None:
                 self._scope.reset(token)
 
-    def api_key(self, store=None, config_path=None):
-        return credentials.resolve(env_name='LASTFM_API_KEY', setting_name='lastfm_api_key',
-                                   store=store if store is not None else self._scope.get(),
-                                   config_path=config_path)
-
-    def _state(self):
-        return getattr(self._scope.get(), 'enrichment_state', None)
+    def api_key(self):
+        state = self._scope.get()
+        return state.credential() if state is not None and hasattr(state, 'credential') else None
 
     @staticmethod
     def _provider(scope):
@@ -82,7 +79,7 @@ class LastFmIAO:
 
     def availability(self, scope='api'):
         with self._locks[scope]:
-            state = self._state()
+            state = self._scope.get()
             saved = state.integration_cooldown(self._provider(scope)) if state else None
             current = self._availability[scope]
             if saved and saved['retry_at'] > current.retry_at:
@@ -153,8 +150,8 @@ class LastFmIAO:
         explicit_key = params.pop('api_key', None)
         # A worker may have resolved its key before the user edited Setup. In an
         # application scope, resolve the current credential at every admission.
-        store = self._scope.get()
-        key = self.api_key() if hasattr(store, 'settings') else explicit_key or self.api_key()
+        state = self._scope.get()
+        key = self.api_key() if hasattr(state, 'credential') else explicit_key
         method = str(params.get('method', '')).lower()
         if not key or method not in _ENVELOPES:
             error = IntegrationUnavailable('lastfm', 'Last.fm API key or method is missing',
@@ -233,7 +230,7 @@ class LastFmIAO:
                     cache.move_to_end(key)
                     return deepcopy(cached[0])
                 raise error
-            if credential and hasattr(self._scope.get(), 'settings'):
+            if credential and hasattr(self._scope.get(), 'credential'):
                 current = self.api_key()
                 if not current or sha256(current.encode()).digest() != credential:
                     # Setup can change while pacing; the queued caller's old key
@@ -259,7 +256,7 @@ class LastFmIAO:
                     raise error from exc
             self._failures[scope] = 0
             self._availability[scope] = Availability()
-            state = self._state()
+            state = self._scope.get()
             if state:
                 state.clear_integration_cooldown(self._provider(scope), availability.retry_at)
             waits.pop(key, None)
@@ -298,7 +295,7 @@ class LastFmIAO:
                 or isinstance(exc, urllib.error.HTTPError) and exc.code == 429)
         wait = Availability(retry_at, message)
         if shared:
-            state = self._state()
+            state = self._scope.get()
             if state:
                 saved = state.defer_integration(self._provider(scope), now=now,
                                                retry_after=retry_at, error=message)

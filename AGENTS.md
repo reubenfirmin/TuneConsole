@@ -52,6 +52,13 @@
   and progress reports out of source. Detailed run evidence belongs in ignored
   artifacts; preserve hash-bound protocols without appending narrative history.
 
+# Model visualization
+
+- Any adjustment to a model or its dependencies must update the `/model-admin`
+  visualization in the same change. Keep the definitions and connections in
+  `src/yt_playlist/model_catalog/` accurate, including what each model predicts,
+  its input data, maintenance, time horizon and the features that use it.
+
 # Error handling in the UI
 
 - Technical error popups, toasts, banners and modal alerts are forbidden. Keep
@@ -72,10 +79,13 @@
 
 # Command approvals
 
+- Do not use shell redirection. Use the command's output-file option instead;
+  ticket reads and listings support `--output PATH`.
 - Do not prefix `uv` commands with environment variable assignments; they defeat
   command whitelisting. Run `uv` normally.
 - Before running pytest, check the whitelisted command form and use that
-  invocation.
+  invocation. Run `uv run pytest <paths>` directly, without redirects, wrappers
+  or environment-variable prefixes that bypass command whitelisting.
 
 # Schema changes
 

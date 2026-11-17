@@ -10,7 +10,7 @@ import pytest
 from tests.home_fixture_support import browser_store, publish_menu
 from yt_playlist.core import activity
 from yt_playlist.rec import home_cache, home_cards, home_vibe, mix_tuning
-from yt_playlist.rec.vibe_requests import VibeRequests
+from yt_playlist.library.vibe_composition import requests as VibeRequests
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def setup(browser_store, monkeypatch):
 
 
 def wait_done(requests):
-    assert requests.ctx.work.wait(5)
+    assert requests.work.wait(5)
     return requests.state()
 
 

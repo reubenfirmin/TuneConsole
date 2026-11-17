@@ -84,6 +84,8 @@ def test_cached_display_falls_back_after_file_damage_and_follows_republication(f
     assert [p['experiment_id'] for p in fallback['menus'][0]['protos']] == [
         p['experiment_id'] for p in baseline['menus'][0]['protos']]
     assert home_prepared._load_surface(store, 'home_tuned', display_only=True) is None
+    store.rec_proposals.put_proposals('home_tuned', tailored, 1000)
+    assert cards(store, home_prepared.load(store, 1000, display_only=True)).protos == cards(store, tailored).protos
     replacement = publish_menu(store, prefix='replacement', surface='home_tuned')
     assert cards(store, home_prepared.load(store, 1000, display_only=True)).protos == cards(store, replacement).protos
 
@@ -103,8 +105,7 @@ def test_display_restores_only_selected_menu_and_preserves_the_same_assignment(f
                 track['serving_context'] = {'checkpoint': index, 'observations': list(range(300))}
     # Use both installed plain JSON and the shared-profile representation.
     encoded = json_cache.encode(payload) if compressed else json.dumps(payload)
-    with store.conn.atomic():
-        store.rec_proposals.publish_prepared_home(encoded, 1000)
+    store.rec_proposals.publish_prepared_home(encoded, 1000)
     expected = cards(store, payload)
     restored_menus = []
     original = json_cache._restore_profiles

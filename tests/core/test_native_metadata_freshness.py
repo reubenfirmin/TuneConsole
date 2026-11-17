@@ -1,5 +1,6 @@
 """Accepted deliveries advance independently of native model-input revisions."""
 from dataclasses import replace
+from contextlib import contextmanager
 import json
 
 import pytest
@@ -198,18 +199,33 @@ def test_failed_publication_rolls_back_freshness_and_allows_retry(runtime_store,
     track, _ = entry(store)
     record(store, track, [observation()], 'first', 10)
     record(store, track, [observation()], 'newest', 30)
-    before = list(store.conn.iterdump())
-    publish = store.enrichment_state.files.publish
+    tables = ('metadata_native_delivery_heads', 'rec_musical_sources', 'rec_musical_pending',
+              'rec_content_pending', 'metadata_file_references')
+    def selected():
+        return {table: list(map(tuple, store.conn.execute('SELECT * FROM '+table))) for table in tables}
+    before = selected()
+    publish = store.enrichment_state.files.write_reserved
+    interrupted = []
 
+    @contextmanager
     def interrupt(*args, **kwargs):
-        publish(*args, **kwargs)
-        raise RuntimeError('interrupted publication')
+        assert not store.conn.in_transaction
+        with publish(*args, **kwargs):
+            interrupted.extend(args[0])
+            raise RuntimeError('interrupted publication')
+            yield
 
-    monkeypatch.setattr(store.enrichment_state.files, 'publish', interrupt)
+    monkeypatch.setattr(store.enrichment_state.files, 'write_reserved', interrupt)
     with pytest.raises(RuntimeError, match='interrupted publication'):
         record(store, track, [observation(.2)], 'failed', 40)
-    assert list(store.conn.iterdump()) == before
-    monkeypatch.setattr(store.enrichment_state.files, 'publish', publish)
+    assert selected() == before
+    assert inputs(store)['mood_party']['value'] == .8
+    assert not store.conn.in_transaction
+    assert len(interrupted) == 1
+    pending = store.conn.execute('SELECT file_status FROM metadata_file_writes WHERE id=?',
+                                 (interrupted[0]['file_id'],)).fetchone()
+    assert tuple(pending) == ('pending',)
+    monkeypatch.setattr(store.enrichment_state.files, 'write_reserved', publish)
     record(store, track, [observation(.3)], 'retry', 40)
     record(store, track, [observation(.1)], 'late', 35)
     assert inputs(store)['mood_party']['value'] == .3

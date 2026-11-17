@@ -68,7 +68,7 @@ def test_failed_flush_preserves_complete_previous_file(tmp_path, monkeypatch):
     previous = path.read_bytes()
     def fail(fd):
         raise OSError("disk write failed")
-    monkeypatch.setattr(setup_mod.os, "fsync", fail)
+    monkeypatch.setattr('yt_playlist.core.config_files.os.fsync', fail)
     with pytest.raises(OSError, match="disk write"):
         setup_mod.write_config([{**rows[0], "label": "new"}], path)
     assert path.read_bytes() == previous

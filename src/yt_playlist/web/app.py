@@ -26,13 +26,13 @@ from yt_playlist.core import updatecheck
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.core.storage_maintenance import StorageMaintenance, StorageCompacting
 from yt_playlist.core.work_diagnostics import CpuDiagnostics
-from yt_playlist.core.update_lifecycle import acquire_restart_locks
+from yt_playlist.library.update_composition import acquire_shutdown
 from yt_playlist.rec.journeys import JOURNEY_LABELS
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.provider_links import provider_search_url
-from yt_playlist.web.track_links import track_url
+from yt_playlist.util.navigation import LINK_CONFIG, album_url, artist_url, playlist_url, track_url
 from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGINS, build as build_bridge_route
@@ -107,7 +107,7 @@ def _install_idle_shutdown(app, templates):
             # Missing beacons expire slowly enough to tolerate background timer throttling.
             if presence.idle():
                 if ctx is not None:
-                    acquired, _ = acquire_restart_locks(ctx, reason="idle")
+                    acquired, _ = acquire_shutdown(ctx, reason="idle")
                     if acquired is None:
                         continue
                     # A returning UI can cancel an idle drain while the last job is finishing.
@@ -159,8 +159,7 @@ def _maybe_check_update(ctx):
     so a failed check can't stop future update checks."""
     try:
         now = ctx.now_fn()
-        updatecheck.schedule_first_check(ctx.store, now)
-        updatecheck.check_latest(ctx.store, now)
+        ctx.update_checks().tick(now)
     except Exception:  # noqa: BLE001 - update check must never crash the daemon
         ctx.logger.warning("update check tick failed", exc_info=True)
 
@@ -187,7 +186,8 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
     keeps automatic work from overlapping a manual POST /sync.
     """
     stop = stop or threading.Event()
-    last_connection = None
+    from yt_playlist.library.sync_composition import commands
+    sync = commands(ctx)
     if wake is not None:
         wake.set()                     # also handle an extension connected before worker startup
     while True:
@@ -200,38 +200,13 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
             if stop.is_set():
                 return
         try:
-            release = ctx.work.admit("automatic sync")
+            sync.tick(configured=setup is None or setup.configured,
+                connected=bridge is not None and bridge.connected,
+                connection=getattr(bridge, 'connection_id', None), max_age_s=max_age_s)
         except WorkClosing:
             return
-        try:
-            if getattr(ctx.store, '_recommendation_retirement_pending', False):
-                continue
-            if setup is not None and not setup.configured:
-                continue
-            if not (bridge is not None and bridge.connected):
-                continue                       # no live extension -> nothing to reach YouTube with
-            connection = getattr(bridge, "connection_id", None)
-            retry_now = connection is not None and connection != last_connection
-            from yt_playlist.library.sync_outcomes import sync_due
-            if not sync_due(ctx.store, ctx.now_fn(), max_age_s, retry_now=retry_now):
-                last_connection = connection
-                continue                       # synced recently enough
-            if not ctx.sync_lock.acquire(blocking=False):
-                continue                       # a manual sync is already running; try next tick
-            # Run through a job so the automatic sync streams to the dashboard's live console too
-            # (not just manual POST /sync). The console discovers it via GET /sync/active.
-            job = ctx.jobs.create(kind="library")
-            try:
-                from yt_playlist.web.jobs import run_library_sync
-                with ctx.work.entered(release):
-                    last_connection = connection
-                    run_library_sync(ctx, job, automatic=True, retry_now=retry_now, max_age_s=max_age_s)
-            finally:
-                ctx.sync_lock.release()
         except Exception:  # noqa: BLE001 - a sync failure must never crash the daemon
             ctx.logger.warning("background library sync tick failed", exc_info=True)
-        finally:
-            release()
 
 
 def create_app(store, client_provider, *, now_fn=time.time,
@@ -357,6 +332,12 @@ def create_app(store, client_provider, *, now_fn=time.time,
     templates.env.filters["linkify"] = _linkify
     templates.env.globals["provider_search_url"] = provider_search_url
     templates.env.globals["track_url"] = track_url
+    from yt_playlist.util.music_catalog import SEARCH_SECTIONS
+    templates.env.globals['music_search_sections'] = SEARCH_SECTIONS
+    templates.env.globals.update(album_url=album_url, artist_url=artist_url, playlist_url=playlist_url,
+                                 detail_link_config=LINK_CONFIG)
+    from yt_playlist.web.artist_links import navigation
+    templates.env.globals['artist_links'] = navigation(store.artists)
 
     @app.middleware("http")
     async def guard_state_changes(request: Request, call_next):
@@ -443,6 +424,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge)
     ctx.radio = PlaylistRadio(ctx)
+    from yt_playlist.web.first_sounds import FirstSounds
+    ctx.first_sounds = FirstSounds(ctx)
     if updater is None and updatecheck.install_kind() == "flatpak":
         from yt_playlist.core.flatpak_update import FlatpakUpdater
         updater = FlatpakUpdater()
@@ -462,6 +445,11 @@ def create_app(store, client_provider, *, now_fn=time.time,
             status['banner_message'] = 'Preparing library data. Features will appear as they are ready.'
         return status
     templates.env.globals['storage_maintenance_status'] = maintenance_notice
+    templates.env.globals['early_adopter_notice'] = lambda: store.settings.get_setting('early_adopter_notice')
+
+    @app.post('/early-adopter-notice/dismiss', status_code=204)
+    def dismiss_early_adopter_notice():
+        store.settings.set_setting('early_adopter_notice', '')
 
     @app.get('/storage-maintenance/status')
     def storage_maintenance_status():
@@ -480,13 +468,16 @@ def create_app(store, client_provider, *, now_fn=time.time,
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx, enabled=background_work)
-    from yt_playlist.rec.vibe_requests import VibeRequests
+    from yt_playlist.library.vibe_composition import requests as VibeRequests
     ctx.vibe_requests = VibeRequests(ctx)
     from yt_playlist.enrich.enrich_worker import EnrichWorker
     ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
     from yt_playlist.rec import onboarding
-    templates.env.globals["initial_setup_pending"] = lambda: onboarding.initial_setup_pending(store, now_fn())
+    templates.env.globals["initial_setup_pending"] = lambda: (
+        onboarding.initial_setup_pending(store, now_fn()) or
+        store.settings.get_setting('last_sync_at') is None and bool(ctx.jobs.find_active_library()))
+    templates.env.globals['player_tour_dismissed'] = lambda: store.settings.get_setting('onboard_player_tour_dismissed') == '1'
     templates.env.globals["has_multiple_identities"] = (
         lambda: len(store.accounts.get_accounts()) > 1
     )

@@ -1,6 +1,7 @@
 from yt_playlist.library.sync import sync_identity, sync_all
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library import sync as sync_mod
+from yt_playlist.controllers import library_synchronization as sync_acquisition
 from yt_playlist.library import playlist_generated
 from tests.conftest import FakeClient, _track
 from tests.store_fixture_support import bounded_consumer_schema
@@ -51,7 +52,7 @@ def test_sync_identity_soft_skips_on_bridge_disconnect(store, monkeypatch):
     from yt_playlist.core.bridge import BridgeError
     from yt_playlist.util.retry import with_retry
     waits = []
-    monkeypatch.setattr(sync_mod, 'with_retry', lambda fn, **kwargs:
+    monkeypatch.setattr(sync_acquisition, 'with_retry', lambda fn, **kwargs:
                         with_retry(fn, sleep=waits.append, **kwargs))
     iid = store.accounts.upsert_account("main", "cred", None, True)
 
@@ -254,7 +255,7 @@ def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(
     import logging
     from yt_playlist.util.retry import with_retry
     # Exercise all retry attempts without waiting for backoff in this test.
-    monkeypatch.setattr(sync_mod, "with_retry", lambda fn, **kwargs:
+    monkeypatch.setattr(sync_acquisition, "with_retry", lambda fn, **kwargs:
                         with_retry(fn, sleep=lambda _: None, **kwargs))
     iid = store.accounts.upsert_account("brand", "cred", "brand-id", True)
     cached = store.playlists.upsert_playlist(iid, "PL_BAD", "Unavailable", 1, "old-hash", 100)
@@ -296,7 +297,7 @@ def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(stor
     from yt_playlist.util.retry import with_retry
     from yt_playlist.library.sync_outcomes import sync_due
 
-    monkeypatch.setattr(sync_mod, "with_retry", lambda fn, **kwargs:
+    monkeypatch.setattr(sync_acquisition, "with_retry", lambda fn, **kwargs:
                         with_retry(fn, sleep=lambda _: None, **kwargs))
     iid = store.accounts.upsert_account("main", "cred", None, True)
     listing = [{"playlistId": "LM", "title": "Liked Music", "count": 400},
@@ -326,7 +327,8 @@ def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(stor
     result = sync_all(store, {iid: client}, now=1000, automatic=True)
     assert client.reads == ["SMALL", "LARGE", "BAD", "EMPTY", "LM"]
     resources = result["accounts"][str(iid)]["resources"]
-    assert resources["playlist_listing"]["entries"] == listing
+    assert sorted(resources["playlist_listing"]["entries"], key=lambda row: row['playlistId']) == sorted(
+        listing, key=lambda row: row['playlistId'])
     assert resources["playlists"]["items"]["LM"]["status"] == "partial"
     assert resources["playlists"]["items"]["BAD"]["status"] == "failed"
     assert result["status"] == "partial"
@@ -339,6 +341,6 @@ def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(stor
     # The durable retry repairs only missing resources, with the normal retry count.
     client.reads.clear()
     sync_all(store, {iid: client}, now=1300, automatic=True)
-    assert client.reads == ["LM", "BAD", "BAD", "BAD"]
+    assert client.reads == ["BAD", "BAD", "BAD", "LM"]
     state = sync_state.state(store)
     assert state["accounts"][str(iid)]["resources"]["playlists"]["items"]["SMALL"]["last_success_at"] == 1000

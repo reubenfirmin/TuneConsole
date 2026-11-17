@@ -85,7 +85,7 @@ def live_road_trip_app(monkeypatch, unlocked_home_controls, store):
 
 def _journey_report(request):
     return Path(os.environ.get('TUNECONSOLE_BROWSER_JOURNEY_REPORT',
-        str(Path(request.config.getoption('output')) / 'road-trip-diagnostics' / request.node.name)))
+        str(Path('build/test-reports/road-trip-diagnostics') / request.node.name)))
 
 
 
@@ -114,8 +114,7 @@ def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
     pending = []
 
     def progress(route):
-        response = route.fetch()
-        pending.append((route, response.body()))
+        pending.append((route, route.fetch()))
 
     page.route('**/road_trip/draft/*/progress', progress)
     page.goto(f'{base_url}/road_trip')
@@ -137,8 +136,12 @@ def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
     def request_progress():
         count = len(pending)
         with page.expect_request(f'**/road_trip/draft/{rid}/progress'):
-            page.evaluate("""rid => { htmx.ajax('GET', '/road_trip/draft/' + rid + '/progress',
-              {target: '#road-trip-body', swap: 'innerHTML'}); }""", rid)
+            page.evaluate("""rid => {
+              window.progressFinished = false;
+              htmx.ajax('GET', '/road_trip/draft/' + rid + '/progress',
+                {target: '#road-trip-body', swap: 'innerHTML'})
+                .then(() => { window.progressFinished = true; });
+            }""", rid)
         # The request event precedes the route's response body, especially when
         # a current-owner snapshot must be opened. Wait for that exact capture.
         deadline = time.monotonic() + 10
@@ -147,7 +150,12 @@ def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
         assert len(pending) == count + 1
         return pending[-1]
 
-    poll, old_body = request_progress()
+    def finish_progress(poll, response):
+        assert response.status == 200
+        poll.fulfill(response=response)
+        page.wait_for_function('window.progressFinished')
+
+    poll, old_response = request_progress()
     if edit in ('duration', 'slider'):
         mix = page.locator('.rt-step').filter(has=page.locator('summary strong', has_text='Shape the mix'))
         if not mix.evaluate('el => el.open'):
@@ -170,26 +178,25 @@ def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
     else:
         page.get_by_role('button', name='Rename', exact=True).click()
         page.get_by_role('textbox', name='Route name', exact=True).fill('An unfinished new name')
-    poll.fulfill(body=old_body, content_type='text/html')
-    page.wait_for_timeout(50)
+    finish_progress(poll, old_response)
     assert page.evaluate('form => form.isConnected', form)
     assert store.road_trip.get_road_trip_recipe(rid)['name'] == 'Pending edits'
 
     # A second old poll must also stay obsolete after the save's new editor is mounted.
-    stale_poll, stale_body = request_progress()
+    stale_poll, stale_response = request_progress()
     if edit == 'name':
         page.get_by_role('button', name='Save name', exact=True).click()
     else:
         if edit == 'slider':
             page.locator('#rt-familiarity').dispatch_event('change')
+        # Keep automatic polls paused through the final controlled response.
+        # An automatic poll can supersede that response at the shared target.
         page.evaluate("""() => {
-          window.setTimeout = realTimeout;
           queuedSteers.splice(0).forEach(run => run());
         }""")
     page.wait_for_function('form => !form.isConnected', arg=form)
     saved_form = page.locator('.rt-form').element_handle()
-    stale_poll.fulfill(body=stale_body, content_type='text/html')
-    page.wait_for_timeout(50)
+    finish_progress(stale_poll, stale_response)
     assert page.evaluate('form => form.isConnected', saved_form)
     recipe = store.road_trip.get_road_trip_recipe(rid)
     if edit == 'genre':
@@ -200,9 +207,9 @@ def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
         assert recipe['familiarity_pct'] == 80
     else:
         assert recipe['name'] == 'An unfinished new name'
-    fresh_poll, fresh_body = request_progress()
-    fresh_poll.fulfill(body=fresh_body, content_type='text/html')
-    page.wait_for_function('form => !form.isConnected', arg=saved_form)
+    fresh_poll, fresh_response = request_progress()
+    finish_progress(fresh_poll, fresh_response)
+    assert not page.evaluate('form => form.isConnected', saved_form)
 
 
 def test_build_curate_then_save_road_trip_recipe(request, browser_name):
@@ -334,7 +341,8 @@ def _build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monkeypat
     expected_videos = rows.evaluate_all("rows => rows.map(row => row.dataset.vid)")
 
     saving, release = threading.Event(), threading.Event()
-    create_playlist = road_trip_route.playlist_generated.create_generated_playlist
+    from yt_playlist.library import playlist_generated
+    create_playlist = playlist_generated.create_generated_playlist
     clients = []
 
     def slow_save(*args, **kwargs):
@@ -344,7 +352,7 @@ def _build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monkeypat
         assert release.wait(15), "test did not release the YouTube save"
         return create_playlist(*args, **kwargs)
 
-    monkeypatch.setattr(road_trip_route.playlist_generated, "create_generated_playlist", slow_save)
+    monkeypatch.setattr(playlist_generated, "create_generated_playlist", slow_save)
     try:
         road_trip_journey('open loading popup while provider save is held')
         with page.expect_popup() as opened:
@@ -401,7 +409,8 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
         assert release.wait(15), "test did not release the YouTube save"
         raise RuntimeError("YouTube unavailable")
 
-    monkeypatch.setattr(road_trip_route.playlist_generated, "create_generated_playlist", failed_save)
+    from yt_playlist.library import playlist_generated
+    monkeypatch.setattr(playlist_generated, "create_generated_playlist", failed_save)
     page.goto(f"{base_url}/road_trip")
     try:
         with page.expect_popup() as opened:
@@ -518,7 +527,8 @@ def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app,
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
     if legacy_backend:
-        monkeypatch.setattr(road_trip_rec, "normalized", lambda s, *args: s)
+        from yt_playlist.controllers.road_trip_transitions import RoadTripTransitions
+        monkeypatch.setattr(RoadTripTransitions, "normalize", lambda self, state, now: state)
         page.route("**/tilt/v2", lambda route: route.fulfill(status=404, body="Not Found"))
     page.goto(f"{base_url}/road_trip")
     passenger = page.locator(".rt-step").filter(has=page.locator("summary strong", has_text="Passenger music"))

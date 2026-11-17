@@ -134,11 +134,17 @@ def finish():
             custody.restore_files(connection, json.loads((root / 'exports.json').read_text()),
                                   release=lambda name: shutil.rmtree(root / 'exports' / name))
         verify(connection)
+        sample_columns = {row[1] for row in connection.execute('PRAGMA main.table_info(sample_attributes)')}
+        pending_samples = ({row[0] for row in connection.execute(
+            "SELECT filename FROM sample_attributes WHERE file_status='pending'")}
+            if 'file_status' in sample_columns else set())
         for table, column, value in coordinates(connection):
             if (table.strip('"'), column.strip('"')) == ('action_backups', 'filename'):
                 continue  # Human export name, not a physical file coordinate.
             path = Path(value)
-            if not path.is_absolute() or not path.resolve().is_relative_to(root) or not path.is_file():
+            incomplete = table.strip('"') == 'sample_attributes' and value in pending_samples
+            if (not path.is_absolute() or not path.resolve().is_relative_to(root)
+                    or not incomplete and not path.is_file()):
                 raise ValueError(f'Unisolated library file coordinate: {table}.{column}: {value}')
         connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         connection.execute('PRAGMA journal_mode=DELETE')

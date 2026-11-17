@@ -8,7 +8,7 @@ import pytest
 from tests.web_support import _client
 from tests.test_saved_album_snapshot import SnapshotBridge
 from yt_playlist.core.identities import build_client
-from yt_playlist.web.routes import playlists
+from yt_playlist.controllers import playlist_queries
 
 
 def test_liked_music_report_without_cached_playlist_selects_explicit_account(store, monkeypatch):
@@ -21,7 +21,7 @@ def test_liked_music_report_without_cached_playlist_selects_explicit_account(sto
         calls.append((client, playlist_id))
         return {'ordinary': {'advertised': 51, 'returned': 47}}
 
-    monkeypatch.setattr(playlists, 'playlist_read_report', report)
+    monkeypatch.setattr(playlist_queries, 'playlist_read_report', report)
     response = _client(store, lambda: clients).get(f'/liked-music/{other}/snapshot-report')
 
     assert response.status_code == 200
@@ -43,7 +43,7 @@ def test_liked_music_report_never_falls_back_to_another_account(store, monkeypat
     def forbidden(*args):
         pytest.fail('An unavailable account must not issue a remote read')
 
-    monkeypatch.setattr(playlists, 'playlist_read_report', forbidden)
+    monkeypatch.setattr(playlist_queries, 'playlist_read_report', forbidden)
     response = _client(store, lambda: clients).get(f'/liked-music/{other}/snapshot-report')
 
     assert response.status_code == 409

@@ -8,13 +8,19 @@ from yt_playlist.core import group_documents, policy_documents, profile_files
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
 from yt_playlist.repos.group_retention_queries import GroupRetentionRepo
 from yt_playlist.repos.group_queries import canonical_version
+from yt_playlist.controllers.policies import Policies
+from yt_playlist.core.policy_files import PolicyFiles
+from yt_playlist.core import file_paths
+from yt_playlist.repos.policies import PolicyRepo
 
 
 def service(store):
     return CompactTasteGroups(CompactTasteGroupsRepo(store), group_documents.GroupFiles(
         group_documents.directory(store.conn), policy_documents.directory(store.conn)),
         profile_files.ProfileFiles(profile_files.directory(store.conn)),
-        GroupRetention(GroupRetentionRepo(store), lambda: store.read_snapshot()))
+        GroupRetention(GroupRetentionRepo(store), lambda: store.read_snapshot()),
+        Policies(PolicyRepo(store), PolicyFiles(policy_documents.directory(store.conn),
+            file_paths.directory(store.conn, 'policy-history')), lambda: store._lock))
 
 
 def _reader(conn):
@@ -66,15 +72,16 @@ def legacy_versions(conn):
 
 
 def retention_plan(conn):
-    from yt_playlist.core import group_retention_policy
+    from yt_playlist.controllers.group_retention import plan
     from yt_playlist.repos import group_publication
     repository = GroupRetentionRepo(SimpleNamespace(conn=conn, _lock=RLock(), _read_only=True))
-    return group_retention_policy.plan(repository, batch=group_publication.BATCH_ROWS)
+    return plan(repository, batch=group_publication.BATCH_ROWS)
 
 
 def retention_closure(conn):
+    from yt_playlist.controllers.group_retention import closure
     from yt_playlist.core import group_retention_policy
     repository = GroupRetentionRepo(SimpleNamespace(conn=conn, _lock=RLock(), _read_only=True))
     state = repository.retention_state()
     roots = group_retention_policy.roots(recommendations=state['recommendations'], checkpoint=state['checkpoint'])
-    return group_retention_policy.closure(repository, roots)
+    return closure(repository, roots)

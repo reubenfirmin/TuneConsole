@@ -94,6 +94,11 @@ def _resolve_in_target(target_client, key, title, artist, source_vid, source_dur
     if source_vid:
         return Resolution(key, source_vid, source_vid, "reuse")
     results = with_retry(lambda: target_client.search(f"{title} {artist}", "songs")) or []
+    return resolve_search(key, title, artist, source_vid, source_dur, fuzzy_threshold, results)
+
+
+def resolve_search(key, title, artist, source_vid, source_dur, fuzzy_threshold, results):
+    """Choose a recording from detached search facts, preserving exact upload identity."""
     want = normalize(f"{title} {artist}")
     best = None  # (within3s: bool, score: float, video_id)
     for r in results:
@@ -190,22 +195,12 @@ def _reconcile(client, provider_playlist_id, desired_video_ids):
     detail = _remote_snapshot(client, provider_playlist_id)
     tracks = detail["tracks"]
     prior = [t.get("videoId") for t in tracks if t.get("videoId")]
-    desired = list(dict.fromkeys(v for v in desired_video_ids if v))   # de-dupe, keep order
-    desired_set = set(desired)
-    current = set(prior)
-    to_add = [v for v in desired if v not in current]
-    to_remove, kept = [], set()
-    for track in tracks:
-        video = track["videoId"]
-        if video not in desired_set or video in kept:
-            if video in desired_set and video in kept and not track.get("setVideoId"):
-                raise ValueError("YouTube has not exposed the repeated item's removal handle.")
-            to_remove.append(track)
-        kept.add(video)
+    from yt_playlist.library.playlist_policy import unique_reconciliation
+    to_add, to_remove, retained = unique_reconciliation(tracks, desired_video_ids)
     added, skipped = _add_items(client, provider_playlist_id, to_add, prior_tracks=tracks)
     if to_remove:
         client.remove_playlist_items(provider_playlist_id, to_remove)
-    expected = list(dict.fromkeys(v for v in prior if v in desired_set)) + [v for v in to_add if v not in skipped]
+    expected = retained + [v for v in to_add if v not in skipped]
     return added, len(to_remove), prior, skipped, expected
 
 def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, reviewed_draft=None) -> dict:

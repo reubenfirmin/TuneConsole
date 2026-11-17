@@ -1,0 +1,7 @@
+<dialog class="onboarding-welcome" aria-labelledby="onboarding-welcome-title"
+        x-data="onboardingWelcome()" @cancel.prevent="dismiss()">
+  <h2 id="onboarding-welcome-title">A better way to listen to music.</h2>
+  <p>Explore your festival map. More places to listen unlock as TuneConsole learns your preferences.</p>
+  <p x-text="connected ? 'We’re bringing in your YouTube Music library. You can listen while we get things ready.' : 'Connect the extension and open YouTube Music to bring in your library and start listening.'"></p>
+  <button type="button" class="btn btn-primary" @click="dismiss()">Explore my festival</button>
+</dialog>

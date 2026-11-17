@@ -126,8 +126,9 @@ class RadioLaunch:
         for track in changed:
             radio_rotation.issue(track)
         seeds = resolved
-        result = playlist_generated.create_generated_playlist(
-            self.store, s.title, seeds, s.client, self.now_fn(), s.identity)
+        from yt_playlist.library.generated_composition import commands
+        result = commands(self.store, self.now_fn()).create(s.title, seeds,
+            client=s.client, account_id=s.identity)
         with self.lock:
             s.playlist, s.local_id = result["new_ytm"], result["pid"]
             s.initial_handles = result.get("added_handles", {})

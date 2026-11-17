@@ -23,6 +23,61 @@ def nodes(state):
     return {node['id']: node for node in state['nodes']}
 
 
+def test_integration_recommendations_start_one_and_two_days_after_live_listening(store, monkeypatch):
+    monkeypatch.setattr(account_growth.lastfm, 'api_key', lambda _store: None)
+    account = store.accounts.upsert_account('main', 'credential', None, True)
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='song')
+    store.settings.set_setting('last_sync_at', '-1000000')
+    store.history.import_play_events(account, [('song|artist', 'song', -100000)], source='spotify')
+
+    def read(now):
+        return nodes(account_growth.view(store, now, mixes_ready=False, albums_ready=False, radio={}))
+
+    before = read(3 * 86400)
+    assert before['lastfm']['recommendation_at'] is None
+    assert before['takeout']['recommendation_at'] is None
+    assert before['lastfm']['href'] == '/setup?tab=enrichment#setup-lastfm'
+    assert before['takeout']['href'] == '/setup?tab=import#setup-takeout'
+    first = 120
+    store.history.record_play_event(account, 'song|artist', 'song', first)
+    for elapsed, lastfm_due, takeout_due in (
+            (0, False, False), (86400 - 1, False, False), (86400, True, False),
+            (2 * 86400 - 1, True, False), (2 * 86400, True, True)):
+        state = read(first + elapsed)
+        assert state['lastfm']['recommendation_at'] == (first + 86400 if lastfm_due else None)
+        assert state['takeout']['recommendation_at'] == (first + 2 * 86400 if takeout_due else None)
+        # A recommendation does not claim the integration has been completed.
+        assert all(state[name]['unlocked'] and not state[name]['ready'] for name in ('lastfm', 'takeout'))
+
+
+def test_integrations_stop_recommending_after_connection_or_import(store, monkeypatch):
+    monkeypatch.setattr(account_growth.lastfm, 'api_key',
+                        lambda source: source.settings.get_setting('lastfm_api_key') or None)
+    account = store.accounts.upsert_account('main', 'credential', None, True)
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='song')
+    store.history.record_play_event(account, 'song|artist', 'song', 120)
+    now = 120 + 2 * 86400
+
+    def read():
+        return nodes(account_growth.view(store, now, mixes_ready=False, albums_ready=False, radio={}))
+
+    assert all(read()[name]['recommendation_at'] is not None for name in ('lastfm', 'takeout'))
+    store.settings.set_setting('lastfm_api_key', 'controlled-key')
+    state = read()
+    assert state['lastfm']['connected'] and not state['lastfm']['ready']
+    assert state['lastfm']['recommendation_at'] is None
+    # An empty upload remains actionable; actual imported history retires the recommendation.
+    store.history.record_takeout_import('empty-upload', account, now, [], 0)
+    assert read()['takeout']['recommendation_at'] is not None
+    # Existing successful-import state also works without the qualifying map evidence.
+    store.settings.set_setting('takeout_imported_at', str(now))
+    assert read()['takeout']['recommendation_at'] is None
+    store.settings.delete_setting('takeout_imported_at')
+    assert read()['takeout']['recommendation_at'] is not None
+    store.history.import_play_events(account, [('song|artist', 'song', 60)], source='takeout')
+    assert read()['takeout']['recommendation_at'] is None
+
+
 def test_guidance_follows_artist_picks_then_owned_music_without_demanding_more_listens(store):
     from yt_playlist.library.playlist_generated import create_generated_playlist
     from yt_playlist.rec import artist_start
@@ -51,7 +106,8 @@ def test_guidance_follows_artist_picks_then_owned_music_without_demanding_more_l
     seed_catalog_track(store, 'owned|artist', 'Owned song', 'Artist', video_id='owned')
     owned = guidance()
     for identity in ('foundation', 'albums', 'discover', 'listening', 'radio'):
-        assert 'saved playlists and albums' in owned[identity]['how_to']
+        assert ('saved playlists and albums' in owned[identity]['how_to'] or
+                'syncing your playlists, listening history, and preferences' in owned[identity]['how_to'])
         assert 'Play your first set' not in owned[identity]['how_to']
         assert 'Choose 3 artists' not in owned[identity]['how_to']
     assert 'Keep TuneConsole open' in owned['albums']['how_to']

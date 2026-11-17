@@ -17,6 +17,10 @@ class RecCandidatesRepo(Repo):
         without an exact event. Membership in a generated playlist has no effect.
         Twenty recorded plays gives a song the longer, six-month rest.
         """
+        return self._quiet_favorites(criteria, maximum_duration=maximum_duration, keys=keys,
+                                     order='COALESCE(h.plays,0),h.last_played,n.key', limit=limit)
+
+    def _quiet_favorites(self, criteria, *, maximum_duration, keys, order, limit):
         params = {'month': criteria.month, 'half_year': criteria.half_year, 'limit': limit,
                   'repeated_plays': criteria.repeated_plays, 'long_rest_plays': criteria.long_rest_plays}
         restriction = ''
@@ -54,28 +58,14 @@ class RecCandidatesRepo(Repo):
             'LEFT JOIN totals h ON h.identity_key=n.key '
             'WHERE (n.liked=1 OR h.plays>=:repeated_plays) AND (h.last_played IS NULL OR '
             'h.last_played<=CASE WHEN h.plays>=:long_rest_plays THEN :half_year ELSE :month END) '
-            'ORDER BY COALESCE(h.plays,0),h.last_played,n.key LIMIT :limit', params).fetchall()
+            f'ORDER BY {order} LIMIT :limit', params).fetchall()
         return [dict(row) for row in rows]
 
     @snapshot_read
-    def comfort_candidates(self, now, *, min_plays, full_seconds, maximum_duration, order, limit=50) -> list[dict]:
-        """High-rotation favorites, demoted by how recently they were heard."""
-        rows = self.conn.execute(
-            "WITH plays AS (SELECT hi.identity_key,COUNT(*) c,MAX(hi.day_ts) last "
-            "  FROM listening_days hi "
-            "  GROUP BY hi.identity_key), "
-            "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, "
-            "               MIN(album) album, MIN(video_id) vid, MIN(thumbnail) thumb "
-            f"              FROM playable_library_tracks WHERE {duration_clause('duration_s', maximum_duration)} GROUP BY identity_key) "
-            "SELECT n.identity_key k, n.title, n.artist, n.album, n.vid, n.thumb, "
-            "       p.c plays, p.last last "
-            "FROM names n JOIN plays p ON p.identity_key=n.identity_key "
-            "WHERE n.title <> '' AND p.c >= :min_plays "
-            f'ORDER BY {order} LIMIT :limit',
-            {"min_plays": min_plays, "now": now, "full_secs": full_seconds, "limit": limit}).fetchall()
-        return [{"key": r["k"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
-                 "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
-                 "last_played": r["last"]} for r in rows]
+    def comfort_candidates(self, criteria, *, maximum_duration, order, keys=None, limit=50) -> list[dict]:
+        """Liked or repeatedly heard favorites with no listening during their rest."""
+        return self._quiet_favorites(criteria, maximum_duration=maximum_duration,
+                                     keys=keys, order=order, limit=limit)
 
     @snapshot_read
     def more_like_rotation(self, *, seed_limit, limit, maximum_plays, maximum_duration, order,

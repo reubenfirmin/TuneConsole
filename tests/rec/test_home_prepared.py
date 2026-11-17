@@ -25,8 +25,10 @@ from tests.store_fixture_support import (_file_consumer_store, bounded_consumer_
                                          mock_snapshot_coordinator, reuse_reporting_reader,
                                          without_query_timing)
 from yt_playlist.core import schema_inspection
+from yt_playlist.library import mode_composition
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
+from yt_playlist.rec import mode_inputs
 from yt_playlist.rec import candidate_refresh, home_cache, home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, rec_params, surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
@@ -582,7 +584,7 @@ def test_new_skip_keeps_the_prepared_menu_and_the_heart(store, cached_menu):
 def test_initial_import_can_offer_catalog_mix_before_tags_or_models(catalog_import, monkeypatch, one_menu_per_attempt):
     store = catalog_import
     entry_id = store.tracks.track_ids_for_videos(['import-0'])['import-0']
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def enrich_during_calculation(reader, now, policies):
         result = calculate(reader, now, policies)
@@ -590,7 +592,7 @@ def test_initial_import_can_offer_catalog_mix_before_tags_or_models(catalog_impo
             {'genre': 'House'}, providers=['musicbrainz'])
         return result
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', enrich_during_calculation)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', enrich_during_calculation)
     bundles = mode_surfaces.prepare_bundles(store, 1000)
     assert bundles and bundles['all']['explore']
     assert not store.modes.list_modes(active_only=True)
@@ -621,7 +623,7 @@ def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_t
     assert len(entries) == 4
     assert mode_surfaces.prepare_bundles(store, 1000)
     before = {surface: store.recommendations.head(surface)['id'] for surface in ('home', 'fresh')}
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def choose_during_calculation(reader, now, policies):
         result = calculate(reader, now, policies)
@@ -629,7 +631,7 @@ def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_t
             catalog.choose_field(store.conn, entries[0], 'genre', 'House', 'user', now=now)
         return result
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', choose_during_calculation)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', choose_during_calculation)
     assert mode_surfaces.prepare_bundles(store, 1001) is not None
     assert {surface: store.recommendations.head(surface)['id'] for surface in ('home', 'fresh')} != before
     assert store.tracks.track_detail('import-0')['genre'] == 'House'
@@ -1373,7 +1375,7 @@ def test_failed_menu_file_replacement_preserves_last_good_publication(
     def fail(*args, **kwargs):
         raise OSError('Controlled output-volume failure')
 
-    monkeypatch.setattr(store.home_cache.files, 'write_cache', fail)
+    monkeypatch.setattr(store.home_cache.files, 'publish_reserved', fail)
     with pytest.raises(OSError, match='output-volume'):
         home_prepared.prepare_mixes(store, 1001)
     assert home_cache.encoded(store, home_prepared.SURFACE) == original
@@ -1409,7 +1411,8 @@ def test_automatic_refreshes_share_backoff_and_retry_without_another_request(sto
                                        now_fn=lambda: 1000), debounce_s=0)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     monkeypatch.setattr(home_prepared, 'prepare_mixes', lambda *a: None)
-    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', lambda *a: {})
+    monkeypatch.setattr(mode_composition, 'preparation', lambda owner:
+        SimpleNamespace(prepare=lambda now: {}))
     worker.trigger_home_refresh()
     worker._run_pending()
     assert worker.jobs.retry['home'].dirty and not worker.jobs.has('home')

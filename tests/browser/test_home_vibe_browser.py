@@ -193,7 +193,7 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(prepared_vibe_ap
     assert not errors
 
 
-@pytest.mark.parametrize('width,height', [(1440, 1000)])
+@pytest.mark.parametrize('width,height', [(1440, 1000), (1920, 1080)])
 def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(
         live_app, store, page, width, height, published_vibe_controls):
     page.set_viewport_size({'width': width, 'height': height})
@@ -203,6 +203,7 @@ def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(
     page.goto(live_app)
     page.get_by_role('button', name='Tune these mixes', exact=True).click()
     dialog = page.get_by_role('dialog', name='Tune these mixes', exact=True)
+    capture(page, path=f'build/test-reports/home-discovery-browser/vibe-controls-{width}.png')
     dialog.get_by_role('radio', name='Relax', exact=True).check()
     expect(dialog).not_to_be_visible()
     feedback = page.locator('#home-vibe-feedback')
@@ -233,6 +234,7 @@ def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(
     card.get_by_role('button', name='Back to all mixes', exact=True).click()
     expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', 'relax')
     expect(feedback).to_have_attribute('data-state', 'ready')
+    capture(page, path=f'build/test-reports/home-discovery-browser/home-ready-{width}.png')
 
 
 

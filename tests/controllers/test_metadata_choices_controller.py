@@ -16,19 +16,38 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def metadata():
     repo = create_autospec(MetadataChoiceRepo, instance=True, spec_set=True)
+    writing = False
 
     @contextmanager
     def transaction():
-        yield
+        nonlocal writing
+        assert not writing
+        writing = True
+        try:
+            yield
+        finally:
+            writing = False
 
     repo.transaction.side_effect = transaction
+    repo.reservation.side_effect = transaction
     repo.input.return_value = {'track': {'id': 7, 'recording_id': 8, 'video_id': 'video',
                                        'title': 'Song', 'artist': 'Artist'},
                                'layout': 'runtime', 'choice': None}
+    repo.selection_input.side_effect = lambda entry: repo.input.return_value
     repo.reserve_identity.return_value = 12
+    repo.reserve_file.return_value = 257
     repo.query_identity.return_value = (8, 'Song', 'Artist')
     repo.genre_matches.return_value = {'jazz': {}}
-    return MetadataChoices(repo, create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True),
+    files = create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True)
+
+    @contextmanager
+    def write_reserved(records):
+        assert not writing, 'Metadata file publication must follow the committed reservation'
+        yield
+        assert not writing, 'Metadata file lease must outlive the head transaction'
+
+    files.write_reserved.side_effect = write_reserved
+    return MetadataChoices(repo, files,
                            create_autospec(MetadataDeliveries, instance=True, spec_set=True))
 
 
@@ -79,13 +98,23 @@ def test_equivalent_recording_reuses_only_genuinely_missing_base_fields(metadata
 def test_runtime_choice_publishes_file_before_installing_sql_head(metadata):
     events = []
     metadata.repository.reserve_identity.side_effect = lambda: events.append('identity') or 12
-    metadata.files.publish.side_effect = lambda *args, **kwargs: events.append('file')
+    metadata.repository.reserve_file.side_effect = lambda record: events.append('reserve file') or 257
+
+    @contextmanager
+    def write_reserved(records):
+        events.append('file')
+        yield
+        events.append('release file')
+
+    metadata.files.write_reserved.side_effect = write_reserved
     metadata.repository.store.side_effect = lambda *args, **kwargs: events.append('head') or 12
     assert metadata.choose(7, 'title', 'Edited', now=10) == 12
-    assert events == ['identity', 'file', 'head']
-    metadata.files.publish.assert_called_once_with('choices', (12,), 1, {
+    assert events == ['identity', 'reserve file', 'file', 'head', 'release file']
+    record, = metadata.files.write_reserved.call_args.args[0]
+    assert (record['kind'], record['owner'], record['revision'], record['file_id']) == ('choices', (12,), 1, 257)
+    assert record['data'] == {
         'entry_id': 7, 'recording_id': 8, 'input_video_id': 'video', 'field': 'title',
-        'value': 'Edited', 'withdrawn': False, 'source': 'user', 'at': 10}, current_revision=None)
+        'value': 'Edited', 'withdrawn': False, 'source': 'user', 'at': 10}
     metadata.deliveries.capture_state.assert_not_called()
 
 
@@ -93,13 +122,13 @@ def test_existing_choice_keeps_identity_and_advances_file_revision(metadata):
     metadata.repository.input.return_value['choice'] = {'id': 12, 'revision': 3}
     metadata.choose(7, 'bpm', None, now=10)
     metadata.repository.reserve_identity.assert_not_called()
-    assert metadata.files.publish.call_args.args[1:3] == ((12,), 4)
-    assert metadata.files.publish.call_args.kwargs == {'current_revision': 3}
+    record, = metadata.files.write_reserved.call_args.args[0]
+    assert (record['owner'], record['revision']) == ((12,), 4)
     assert metadata.repository.store.call_args.args[3].kind == 'null'
 
 
 def test_file_failure_does_not_publish_choice_head(metadata):
-    metadata.files.publish.side_effect = OSError('full')
+    metadata.files.write_reserved.side_effect = OSError('full')
     with pytest.raises(OSError, match='full'):
         metadata.choose(7, 'title', 'Edited', now=10)
     metadata.repository.store.assert_not_called()
@@ -153,12 +182,12 @@ def test_predecessor_capture_commits_before_the_selection_repository_transaction
 
     metadata.repository.transaction.side_effect = transaction
     metadata.deliveries.capture_state.side_effect = lambda *args, **kwargs: events.append('capture') or 15
-    metadata.repository.store_base.side_effect = lambda *args, **kwargs: events.append('select')
+    metadata.repository.store_bases.side_effect = lambda *args, **kwargs: events.append('select')
     metadata.select(7, 'title', 'Original', 'youtube', now=10)
     assert events == ['capture', 'begin selection', 'select', 'commit selection']
     metadata.deliveries.capture_state.assert_called_once_with(7, 'youtube', 'selected-field:title',
         {'format': 'catalog-field-capture-1', 'field': 'title', 'value': 'Original'}, now=10)
-    assert metadata.repository.store_base.call_args.kwargs == {'delivery_id': 15, 'observation_id': None}
+    assert metadata.repository.store_bases.call_args.kwargs == {'deliveries': {'title': 15}, 'observations': {'title': None}}
 
 
 def test_failed_predecessor_capture_keeps_existing_selection(metadata):
@@ -216,7 +245,7 @@ def test_supplied_observation_does_not_capture_another_delivery(metadata):
     metadata.repository.input.return_value['layout'] = 'evidence'
     metadata.select(7, 'title', 'Original', 'youtube', observation_id=20, now=10)
     metadata.deliveries.capture_state.assert_not_called()
-    assert metadata.repository.store_base.call_args.kwargs == {'delivery_id': None, 'observation_id': 20}
+    assert metadata.repository.store_bases.call_args.kwargs == {'deliveries': {}, 'observations': {'title': 20}}
 
 
 def test_capture_fields_validates_before_publishing_and_stores_typed_observations_afterwards(metadata):

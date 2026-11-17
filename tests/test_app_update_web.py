@@ -12,6 +12,7 @@ from starlette.testclient import TestClient
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.routes import app_update
 from yt_playlist.core.activity import Activity, WorkClosing
+from yt_playlist.library.update_composition import desktop
 
 
 class FakeUpdater:
@@ -63,7 +64,8 @@ def update_app(monkeypatch):
         await ctx.pending_restart.close()
 
     app = FastAPI(lifespan=lifespan)
-    app.include_router(app_update.build(ctx))
+    ctx.update_commands = desktop(ctx, stop)
+    app.include_router(app_update.build(ctx, commands=ctx.update_commands))
     with TestClient(app, base_url="http://127.0.0.1:9123") as client:
         yield client, ctx, stopped
 
@@ -136,7 +138,8 @@ def test_restart_launches_before_graceful_shutdown_and_cannot_repeat(update_app)
 
 def test_failed_launch_keeps_current_server_and_releases_work_locks(update_app):
     client, ctx, stopped = update_app
-    ctx.updater = FakeUpdater(phase="ready", fail_restart=True)
+    ctx.updater.phase = "ready"
+    ctx.updater.fail_restart = True
     assert client.post("/app-update/restart").status_code == 202
     wait_for(lambda: ctx.pending_restart.phase is None)
     state = client.get("/app-update/status").json()
@@ -301,7 +304,7 @@ def test_unexpected_drain_failure_recovers_admission_and_all_work_locks(update_a
 
 def test_development_install_has_no_update_operations(update_app):
     client, ctx, stopped = update_app
-    ctx.updater = None
+    ctx.update_commands.updater = None
     assert client.post("/app-update/install").status_code == 404
     assert client.post("/app-update/restart").status_code == 404
     assert not stopped

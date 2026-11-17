@@ -10,6 +10,7 @@ import zipfile
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize, audio_vibe_focus as focus
+from yt_playlist.rec import audio_vibe_arc
 from ..support.external_experiment import digest, save, stamp
 from .focus_experiment import inside
 from .focus_export import captures
@@ -25,15 +26,21 @@ def check(directory, wheel):
 
 def check_installed(directory, wheel, installed):
     root = Path(focus.__file__).resolve().parents[1]
-    names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_prediction.py',
+    names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_specialists.py', 'rec/audio_vibe_arc.py', 'rec/audio_vibe_prediction.py',
+             'rec/audio_vibe_values.py',
              'rec/vibe_preparation.py', 'rec/musical_character.py', 'repos/vibe_predictions.py',
-             'core/audio_vibe_contract.py', 'rec/data/emotify-vibes.json']
+             'core/audio_vibe_contract.py', 'rec/vibe_intensity.py',
+             'controllers/vibe_prediction.py', 'library/vibe_composition.py']
     for name in ('cruise', 'release', 'relax', 'uplift', 'energize', 'focus'):
         names.extend([f'rec/audio_vibe_{name}.py', f'rec/data/{name}-vibes.json'])
         notice = f'rec/data/{name}-vibes.NOTICE.md'
         if (root / notice).exists():
             names.append(notice)
     with zipfile.ZipFile(wheel) as archive:
+        retired = {'yt_playlist/rec/audio_vibe_model.py', 'yt_playlist/rec/audio_vibe_external.py',
+                   'yt_playlist/rec/data/emotify-vibes.json'}
+        if retired & set(archive.namelist()) or any(name.startswith('experiments/') for name in archive.namelist()):
+            raise ValueError('Wheel includes retired research code or artifacts')
         for name in names:
             if archive.read('yt_playlist/' + name) != (root / name).read_bytes():
                 raise ValueError('Wheel omitted or changed a production file: ' + name)
@@ -44,39 +51,10 @@ def check_installed(directory, wheel, installed):
     save(input_file, cases)
     modules = {'cruise': cruise, 'release': release, 'relax': relax, 'uplift': uplift,
                'energize': energize, 'concentrate': focus}
-    expected = [{vibe: {**module.score(module.load(module.DEFAULT_PATH),
-                    [s['embedding']['values'] for s in case]), 'mode': 'active'}
+    expected = [{vibe: {**audio_vibe_arc.specialist(case, module.load(module.DEFAULT_PATH), module.score, vibe), 'mode': 'active'}
                  for vibe, module in modules.items()} for case in cases]
-    program = '''import json, os, socket, sys
-sys.path.insert(0, sys.argv[1])
-os.environ['YT_PLAYLIST_HOME'] = sys.argv[3]
-from yt_playlist.core import features
-features.LOCAL_ENV = features.LOCAL_ENV.with_name('absent-focus-check.env')
-from yt_playlist.rec import audio_vibe_focus as f, audio_vibe_energize as n, audio_vibe_uplift as u, audio_vibe_relax as r
-from yt_playlist.rec import audio_vibe_release as e, audio_vibe_cruise as c, audio_vibe_model as m
-from yt_playlist.rec import audio_vibe_prediction as p
-for module in (f, n, u, r, e, c, m):
-    os.environ.pop(module.ENVIRONMENT_KEY, None)
-for module in (f, n, u, r, e, c):
-    os.environ.pop(module.MODE_KEY, None)
-def forbidden(*args, **kwargs):
-    raise AssertionError('Installed inference attempted network access')
-socket.socket.connect = forbidden
-with open(sys.argv[2]) as stream:
-    cases = json.load(stream)
-predictions = []
-for rows in cases:
-    result = p.predict(rows, require_complete=False)
-    assert set(result['individual_models']) == {'cruise', 'release', 'relax', 'uplift', 'energize', 'concentrate'}
-    for vibe, candidate in result['individual_models'].items():
-        assert result['suitability'][vibe] == candidate['score']
-    predictions.append(result['individual_models'])
-assert f.__file__.startswith(sys.argv[1])
-assert not hasattr(c, 'route') and not hasattr(c, 'route_samples')
-assert not any(k == 'experiments' or k.startswith('experiments.') for k in sys.modules)
-print(json.dumps({'module': f.__file__, 'sha256': result['individual_models']['concentrate']['sha256'], 'predictions': predictions}))
-'''
-    result = subprocess.run([sys.executable, '-I', '-c', program, str(installed), str(input_file),
+    probe = Path(__file__).with_name('installed_specialists_check.py')
+    result = subprocess.run([sys.executable, '-I', str(probe), str(installed), str(input_file),
                              str(directory / 'app-home')], cwd=installed, capture_output=True, text=True, check=True)
     observed = json.loads(result.stdout)
     if observed.pop('predictions') != expected:

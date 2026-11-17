@@ -5,9 +5,15 @@ import json
 from yt_playlist.core import recipe_memberships
 from yt_playlist.core.artist_keys import canonical_id
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
+from yt_playlist.repos import collection_file_writes
 
 
 class RoadTripRepo(Repo):
+    @synchronized
+    def reserve_draft_file(self, owner, integrity):
+        with self.conn.atomic():
+            return collection_file_writes.reserve(self.conn, 'road-trip-draft', owner, integrity)
+
     @contextmanager
     def transaction(self):
         with self._lock:
@@ -133,38 +139,26 @@ class RoadTripRepo(Repo):
                 'selections':list(map(tuple, self.conn.execute(
                     'SELECT selection_state,video_id FROM road_trip_draft_entries '
                     'WHERE draft_id=? ORDER BY selection_state,position', (row['id'],))))}
-        from yt_playlist.core.preparation import draft_publication
-        from yt_playlist.core.preparation import road_trip_drafts as prepared_drafts
-        owner = draft_publication.OWNER
-        stage = owner.selected(self.conn)
-        columns = 'd.recipe_id' + (',d.state' if stage is None or include_raw else '')
+        columns = 'd.recipe_id,d.state'
         row = self.conn.execute('SELECT '+columns+' FROM road_trip_drafts d '
             'JOIN road_trip_recipes r ON r.id=d.recipe_id ORDER BY d.updated_at DESC LIMIT 1' if latest else
             'SELECT '+columns+' FROM road_trip_drafts d WHERE recipe_id=?',
             () if latest else (recipe_id,)).fetchone()
         if row is None:
             return None
-        facts = {'recipe_id':row['recipe_id']}
-        if 'state' in row.keys():
-            facts['raw'] = row['state']
-        if stage is not None:
-            header = owner.capture(self.conn, stage, row['recipe_id'])
-            facts['prepared'] = dict(header) if header else None
-            facts['parts'] = list(map(tuple, self.conn.execute('SELECT position,filename,digest,byte_size FROM '+
-                prepared_drafts.PARTS+' WHERE recipe_id=? AND generation=? ORDER BY position LIMIT ?',
-                (row['recipe_id'], header['generation'], prepared_drafts.MAX_PARTS+1)))) if header else []
-        return facts
+        return {'recipe_id':row['recipe_id'], 'raw':row['state']}
 
     @synchronized
     def save_draft(self, recipe_id, owner, account_id, revision, status, reference, selections, now,
-                   *, expected_revision=None, conditional=False):
-        with self.conn.atomic(join=True):
+                   *, file_id, expected_revision=None, conditional=False):
+        with self.conn.atomic():
             self.conn.execute('UPDATE road_trip_drafts SET revision=revision WHERE 0')
             current = self.draft_owner(recipe_id)
             if conditional and (current is None or current['revision'] != expected_revision):
                 return False
             if current is not None and current['id'] != owner:
                 return False
+            collection_file_writes.complete(self.conn, file_id, 'road-trip-draft', owner, reference)
             self.conn.execute('INSERT INTO road_trip_drafts(id,recipe_id,account_id,legacy_author_unknown,revision,state,'
                 'recovery_filename,recovery_digest,recovery_bytes,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(recipe_id) DO UPDATE SET revision=excluded.revision,state=excluded.state,'
@@ -192,11 +186,14 @@ class RoadTripRepo(Repo):
         return dict(self.conn.execute('SELECT recipe_id,updated_at FROM road_trip_drafts'))
 
     @synchronized
-    def rekey_draft_reference(self, identity, expected_revision, revision, reference):
-        with self.conn.atomic(join=True):
-            return bool(self.conn.execute('UPDATE road_trip_drafts SET revision=?,recovery_filename=?,'
+    def rekey_draft_reference(self, identity, expected_revision, revision, reference, *, file_id):
+        with self.conn.atomic():
+            changed = bool(self.conn.execute('UPDATE road_trip_drafts SET revision=?,recovery_filename=?,'
                 'recovery_digest=?,recovery_bytes=? WHERE id=? AND revision=?',
                 (revision, *reference, identity, expected_revision)).rowcount)
+            if changed:
+                collection_file_writes.complete(self.conn, file_id, 'road-trip-draft', identity, reference)
+            return changed
 
     @synchronized
     def delete_road_trip_draft(self, recipe_id):
@@ -209,18 +206,14 @@ class RoadTripRepo(Repo):
         self.conn.commit()
 
     def _recipe_columns(self):
-        from yt_playlist.core.preparation import recipe_publication
         columns = 'id,name,own_pct,target_minutes,familiarity_pct,last_playlist_id,created_at,updated_at'
-        if not recipe_memberships.available(self.conn) and recipe_publication.OWNER.selected(self.conn) is None:
+        if not recipe_memberships.available(self.conn):
             columns += ',artists,genres,blacklist_genres'
         return columns
 
     def _recipe(self, row):
-        from yt_playlist.core.preparation import recipe_publication
         if recipe_memberships.available(self.conn):
             selections = recipe_memberships.read(self.conn, row['id'])
         else:
-            selections = recipe_publication.read(self.conn, row['id'])
-            if selections is None:
-                selections = {field:json.loads(row[field]) for field in ('artists', 'genres', 'blacklist_genres')}
+            selections = {field:json.loads(row[field]) for field in ('artists', 'genres', 'blacklist_genres')}
         return {**dict(row), **selections}

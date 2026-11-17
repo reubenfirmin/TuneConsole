@@ -13,6 +13,7 @@ from yt_playlist.core.activity import Activity
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.core import sync_state
 from yt_playlist.library import sync
+from yt_playlist.controllers import library_synchronization as acquisition
 from yt_playlist.library.sync_outcomes import sync_due
 from yt_playlist.rec.actions import sync_status
 from yt_playlist.web.app import create_app, _background_sync_loop as automatic_sync
@@ -64,7 +65,7 @@ class Client(FakeClient):
 
 @pytest.fixture(autouse=True)
 def no_retry_backoff(monkeypatch):
-    monkeypatch.setattr(sync, "with_retry", lambda fn, **kwargs: fn())
+    monkeypatch.setattr(acquisition, "with_retry", lambda fn, **kwargs: fn())
 
 
 def test_disconnect_preserves_success_and_reconnect_is_due_immediately(store):
@@ -239,7 +240,7 @@ def test_manual_and_automatic_failures_publish_error_before_terminal_and_retry(
             raise RuntimeError("provider unavailable")
         return {iid: Client()}
 
-    real_sync = sync.sync_all
+    real_sync = acquisition.sync_all
 
     def execute(*args, **kwargs):
         calls.append(True)
@@ -248,7 +249,7 @@ def test_manual_and_automatic_failures_publish_error_before_terminal_and_retry(
             raise RuntimeError("sync interrupted")
         return real_sync(*args, **kwargs)
 
-    monkeypatch.setattr(sync, "sync_all", execute)
+    monkeypatch.setattr(acquisition, "sync_all", execute)
     monkeypatch.setattr("yt_playlist.web.app._maybe_check_update", lambda ctx: None)
     clock = [200]
     app = create_app(store, provider, now_fn=lambda: clock[0], background_work=False)
@@ -314,7 +315,7 @@ def test_automatic_loop_waits_until_partial_resource_retry_is_due(store, monkeyp
 def test_shutdown_stops_automatic_sync_after_inflight_disconnect(store, monkeypatch):
     from yt_playlist.util.retry import with_retry
 
-    monkeypatch.setattr(sync, "with_retry", with_retry)
+    monkeypatch.setattr(acquisition, "with_retry", with_retry)
     monkeypatch.setattr("yt_playlist.web.app._maybe_check_update", lambda ctx: None)
     entered, release = threading.Event(), threading.Event()
     reads = []

@@ -23,10 +23,6 @@ def statements():
            'BEGIN DELETE FROM taste_mode_retired_payloads WHERE mode_id=OLD.mode_id; END')
 
 
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='taste_mode_retention'").fetchone() is not None
-
-
 def install(conn, context=None):
     for sql in statements():
         conn.execute(sql)
@@ -50,8 +46,6 @@ def validate(conn):
 def step(conn, now, *, activate=False):
     if not conn.in_transaction:
         raise RuntimeError('Mode retirement requires an outer transaction')
-    if not available(conn):
-        return False
     from .artist_credits import _clock
     _clock(now)
     enabled, cursor, next_scan = conn.execute('SELECT enabled,cursor,next_scan_at FROM taste_mode_retention WHERE id=1').fetchone()

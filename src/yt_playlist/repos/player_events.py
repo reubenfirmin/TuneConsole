@@ -1,7 +1,6 @@
 """#91 PlayerEventsRepo: the raw player/curation event stream. Append-only; every judgment about
 these rows (skip vs completion, sessions) is a read-time derivation, never persisted here."""
 from yt_playlist.core.db_revisions import keyed_reads
-from yt_playlist.core import entity_names
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -9,16 +8,15 @@ class PlayerEventsRepo(Repo):
     @synchronized
     def record_player_event(self, account_id, kind, video_id, position, duration,
                             playlist_ytm_id, payload, at, *, capture_id=None) -> int:
-        events = entity_names.owner(self.conn, 'player_events')
         if capture_id is not None:
             existing = self.conn.execute(
-                f'SELECT id FROM {events.table} WHERE {events.column("account_id")}=? AND at=? '
+                'SELECT id FROM player_events WHERE account_id=? AND at=? '
                 "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.capture_id') END=? LIMIT 1",
                 (account_id, at, capture_id)).fetchone()
             if existing is not None:
                 return existing[0]
         cur = self.conn.execute(
-            f'INSERT INTO {events.table}({events.column("account_id")}, kind, video_id, position, duration, '
+            'INSERT INTO player_events(account_id, kind, video_id, position, duration, '
             "playlist_ytm_id, payload, at) VALUES (?,?,?,?,?,?,?,?)",
             (account_id, kind, video_id, position, duration, playlist_ytm_id, payload, at))
         self.conn.commit()

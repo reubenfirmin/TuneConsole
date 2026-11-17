@@ -53,40 +53,6 @@ function authBanner(initial) {
     add(label) { if (label && !this.labels.includes(label)) this.labels.push(label); },
   };
 }
-// Navbar omnisearch dropdown: open/close + keyboard nav over the HTMX-rendered result rows.
-// Visibility is driven by results arriving (htmx:afterSwap, wired in x-init on the form) and by
-// focus; we never build markup here. The server owns the dropdown body.
-function omniSearch() {
-  return {
-    open: false,
-    active: -1,
-    rows() { return Array.from(this.$root.querySelectorAll('.omni-row')); },
-    onResults() {
-      this.active = -1;
-      this.rows().forEach(r => r.classList.remove('active'));
-      this.open = this.rows().length > 0;
-    },
-    close() {
-      this.open = false;
-      this.active = -1;
-      this.rows().forEach(r => r.classList.remove('active'));
-    },
-    move(dir) {
-      const rows = this.rows();
-      if (!rows.length) { return; }
-      this.open = true;
-      this.active = (this.active + dir + rows.length) % rows.length;
-      rows.forEach((r, i) => r.classList.toggle('active', i === this.active));
-      rows[this.active].scrollIntoView({ block: 'nearest' });
-    },
-    choose() {
-      const rows = this.rows();
-      const row = rows[this.active] || rows[0];
-      if (row) { row.click(); this.close(); }
-    },
-  };
-}
-
 // One owner for deferred hx-confirm requests. Native modality makes the background inert;
 // the owner also contains Tab/shortcuts and releases the request if its invoker disappears.
 let pendingConfirmation = null;

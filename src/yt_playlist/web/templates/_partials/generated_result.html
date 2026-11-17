@@ -47,6 +47,6 @@
   }
   window.addEventListener('pagehide', complete, {once: true});
   window.addEventListener('app-page-changed', complete, {once: true});
-  window.location.assign({{ (playlist_url|default('/playlist/' ~ pid))|tojson }});
+  window.location.assign({{ (destination_url|default(playlist_url(pid)))|tojson }});
 })();</script>
 {% endif %}

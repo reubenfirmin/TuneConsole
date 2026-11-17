@@ -90,21 +90,21 @@ def test_album_overrides_expire_without_changing_shared_taste(store):
         'values': {'novelty': .75}, 'genres': ['jazz'], 'remaining': 899}
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_installed_album_controls_decode_legacy_values_and_ignore_malformed_genres(installed):
+@pytest.mark.parametrize('installed', [107], indirect=True)
+def test_installed_album_controls_decode_legacy_values_and_reject_malformed_genres(installed):
     store, _ = installed
-    assert not store.conn.execute(
+    assert store.conn.execute(
         "SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone()
     defaults = album_tuning.defaults(store)
     malformed = json.dumps({'until': 1000, 'values': defaults, 'genres': 'jazz'})
-    store.settings.set_setting(album_tuning.SETTING, malformed)
-    assert store.settings.get_setting(album_tuning.SETTING) == malformed
+    with pytest.raises(ValueError, match='album control selections'):
+        store.settings.set_setting(album_tuning.SETTING, malformed)
+    assert store.settings.get_setting(album_tuning.SETTING) is None
     assert album_tuning.state(store, 101) == {
         'values': defaults, 'genres': [], 'remaining': 0}
     legacy = json.dumps({'until': 1000, 'values': {
         'discovery': .75, 'stretch': .2, 'variety': .4, 'recency': .5}, 'genres': ['jazz']})
     store.settings.set_setting(album_tuning.SETTING, legacy)
-    assert store.settings.get_setting(album_tuning.SETTING) == legacy
     assert album_tuning.state(store, 101) == {
         'values': {'novelty': .75}, 'genres': ['jazz'], 'remaining': 899}
     assert album_tuning.state(store, 1000) == {

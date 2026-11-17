@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import collection_recovery, discovery_provenance as provenance
+from yt_playlist.library.retention_composition import collect_collections
 from yt_playlist.core.migrations import current
 from yt_playlist.core.store import Store
 from tests.store_fixture_support import native_sql_calls, without_query_timing
@@ -108,6 +109,8 @@ def test_account_and_import_withdrawal_preserves_independent_sources_and_lifetim
 
 def test_candidate_output_backup_restore_and_orphan_cleanup(
         tmp_path, consumer_store, native_sql_calls, without_query_timing):
+    from tests.file_custody_support import expire_file
+
     store = consumer_store(tmp_path/'source.db')
     try:
         store.discovery.upsert_discovered_artist('Candidate',1,['Anchor'],['Playlist'],None,1)
@@ -122,12 +125,17 @@ def test_candidate_output_backup_restore_and_orphan_cleanup(
             collection_recovery.restore(copied.conn,manifest)
             copied.init_schema()
             assert copied.discovery.get_discovered_artists()[0]['fits']==['Playlist']
+            for row in collection_recovery.references(copied.conn):
+                expire_file(row[3])
             copied.discovery.upsert_discovered_artist('Candidate',2,['Other'],[],None,2)
-            assert collection_recovery.collect_orphans(copied.conn)==1
+            assert collect_collections(copied.conn)==1
             assert copied.discovery.get_discovered_artists()[0]['because']==['Other']
             with copied.conn:
                 copied.conn.execute('DELETE FROM discovered_artists')
-            assert collection_recovery.collect_orphans(copied.conn)==1
+            assert collect_collections(copied.conn)==0
+            for filename in collection_recovery.directory(copied.conn).glob('by-id/*/*.json'):
+                expire_file(filename)
+            assert collect_collections(copied.conn)==1
         finally:
             copied.conn.close()
     finally:

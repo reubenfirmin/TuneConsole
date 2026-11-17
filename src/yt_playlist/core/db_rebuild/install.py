@@ -5,6 +5,7 @@ request already waiting for that lock must never see a closed Store connection.
 """
 from contextlib import closing, contextmanager
 import hashlib
+from itertools import batched
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ import time
 from .. import db_handles, policy_documents
 from .sqlite_checks import verify
 from ..evidence_ledger import _sync_directory
-from . import files, installed_format
+from . import files, installed_format, references
 
 
 def digest(path):
@@ -52,23 +53,16 @@ def _open_store(store, internal):
     try:
         store.conn._policy_memory_key = store._evidence_key
         store._configure_connection()
-        from ..migrations import current
-        from ..migrations.registry import MIGRATIONS
-        from ..migrations.runner import history
-        version = history(store.conn, MIGRATIONS)
-        store._schema_compatibility = version < current.VERSION
-        store._rebuild_source_version = 64 if version == 64 else None
-        if not store._rebuild_source_version:
-            store.conn.execute('PRAGMA journal_mode=WAL')
+        installed_format.validate(store.conn)
+        store._schema_compatibility = False
+        store._rebuild_source_version = None
+        store.conn.execute('PRAGMA journal_mode=WAL')
         store._bind_repositories()
         from ...rec.choice_evidence import STORAGE_PENDING
         store._evidence_recovery_pending = store.settings.get_setting(STORAGE_PENDING) == '1'
         store._snapshot_revisions = Revisions(store.conn)
         store._read_memo = ReadMemo()
         store._foreground_read_memo = ReadMemo()
-        if store._rebuild_source_version:
-            store.conn.execute('PRAGMA query_only=ON')
-            store.conn._storage_compacting = True
     except BaseException:
         store.conn.close()
         raise
@@ -204,7 +198,9 @@ def recover(database):
                 verify(conn)
                 installed_format.validate(conn)
                 if not pending.get('analytics_pending'):
-                    files.verify(conn)
+                    selected = (reference for _, _, owned in references.owners(conn) for reference in owned)
+                    for batch in batched(selected, 1024):
+                        files.verify_references(batch)
             pending.update(phase='complete', recovered=True)
             save(database, pending)
         elif pending['phase'] in {'closing', 'original_moved', 'reopening', 'rollback'}:

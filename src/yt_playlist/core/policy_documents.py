@@ -11,11 +11,12 @@ import tempfile
 from .evidence_ledger import canonical
 from .file_collection import retained_reader
 from .policy_config import BASE_FIELD
-from . import fao
+from .policy_paths import record_id
+from . import fao, file_pack
 from .fao import _try_file_lock
 
 FORMAT = 'recommendation-policy-1'
-MAX_BYTES = 8 * 1024 * 1024
+MAX_BYTES = file_pack.MAX_BYTES
 PACK_BYTES = 256 * 1024
 PACK_HEADER = b'TuneConsole recommendation policies 1\n'
 OWNERS = ('recommendation_policy_bodies', 'recommendation_policies')
@@ -72,34 +73,20 @@ def pack_header(header, age):
 
 
 def pack_encoded(root, records, *, header, pack_bytes, age=None):
-    """Publish validated records lazily, admitting one record above the pack target."""
+    """Publish bounded packs; paths and custody remain this owner's concern."""
     header = pack_header(header, age)
-    pending, size = [], len(header)
-
-    def sealed():
-        encoded = header + b''.join(pending)
-        filename = _publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
-        offset = len(header)
-        for record in pending:
-            yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
-            offset += len(record)
-
-    for record in records:
-        if pending and size + len(record) > pack_bytes:
-            yield from sealed()
-            pending, size = [], len(header)
-        pending.append(record)
-        size += len(record)
-    if pending:
-        yield from sealed()
+    for pack in file_pack.encode(records, header=header, target_bytes=pack_bytes, max_bytes=MAX_BYTES):
+        filename = _publish_encoded(root, pack.raw, hashlib.sha256(pack.raw).hexdigest(), age=age)
+        for record in pack.records:
+            yield filename, record.digest, record.size, record.offset
 
 
 def publish_many(root, configurations, *, age=None):
     """Pack small configurations without allocating a filesystem block per leaf.
 
     Rows own the filename, offset, byte size and digest of their exact record.
-    Packs are immutable and contain at most PACK_BYTES, apart from one admitted
-    larger record. No file index or shared artifact owner is needed.
+    Packs contain at most 128 records and target PACK_BYTES, admitting one larger
+    record within MAX_BYTES including framing. No mutable file index is needed.
     """
     def encoded_records():
         for configuration in configurations:
@@ -130,9 +117,8 @@ def _range(offset,size):
         raise ValueError('Invalid recommendation policy file range')
 
 
-def _decoded(path,digest,encoded,offset,size):
-    if (len(encoded) > MAX_BYTES or size is not None and len(encoded) != size
-            or hashlib.sha256(encoded).hexdigest() != digest or not offset and path.stem != digest):
+def _decoded(path,digest,encoded,offset):
+    if not offset and path.stem != digest and record_id(path) is None:
         raise ValueError('Recommendation policy file does not match its digest')
     document = json.loads(encoded)
     if (not isinstance(document, dict) or set(document) != {'format', 'configuration'}
@@ -148,15 +134,11 @@ def read(filename, digest, *, offset=0, size=None, with_age=False):
     _range(offset,size)
     with fao.read(path) as stream:
         age = stream.info
-        if offset:
-            if (size is None or offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER
-                    or len(path.stem) != 64 or any(c not in '0123456789abcdef' for c in path.stem)):
-                raise ValueError('Invalid recommendation policy pack reference')
-            stream.seek(offset)
-            encoded = stream.read(size)
-        else:
-            encoded = stream.read(MAX_BYTES + 1)
-    value = _decoded(path,digest,encoded,offset,size)
+        if offset and (len(path.stem) != 64 or any(c not in '0123456789abcdef' for c in path.stem)):
+            raise ValueError('Invalid recommendation policy pack reference')
+        encoded = file_pack.PackReader(stream, header=PACK_HEADER, max_bytes=MAX_BYTES,
+                                      max_pack_bytes=MAX_BYTES).read(offset, size, digest)
+    value = _decoded(path,digest,encoded,offset)
     return (value,age) if with_age else value
 
 
@@ -170,22 +152,13 @@ def read_many(references, *, with_age=False):
     for filename,records in groupby(references,key=lambda reference:reference[0]):
         path = Path(filename)
         with fao.read(path) as stream:
-            header = None
+            pack = file_pack.PackReader(stream, header=PACK_HEADER, max_bytes=MAX_BYTES, max_pack_bytes=MAX_BYTES)
             for _,digest,offset,size in records:
                 _range(offset,size)
-                if offset:
-                    if header is None:
-                        stream.seek(0)
-                        header = stream.read(len(PACK_HEADER))
-                    if (size is None or offset<len(PACK_HEADER) or header!=PACK_HEADER
-                            or len(path.stem)!=64 or any(c not in '0123456789abcdef' for c in path.stem)):
-                        raise ValueError('Invalid recommendation policy pack reference')
-                    stream.seek(offset)
-                    encoded = stream.read(size)
-                else:
-                    stream.seek(0)
-                    encoded = stream.read(MAX_BYTES+1)
-                value = _decoded(path,digest,encoded,offset,size)
+                if offset and (len(path.stem) != 64 or any(c not in '0123456789abcdef' for c in path.stem)):
+                    raise ValueError('Invalid recommendation policy pack reference')
+                encoded = pack.read(offset, size, digest)
+                value = _decoded(path,digest,encoded,offset)
                 yield (value,stream.info) if with_age else value
 
 

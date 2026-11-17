@@ -146,7 +146,10 @@ class RecommendationPublications:
                 files = []
                 for output in pending:
                     check_cancellable_work()
-                    files.append((output, self.files.publish(output.encoded)))
+                    integrity = self.files.describe(output.encoded)
+                    identity = self.repository.reserve_file(build, output.surface, output.chunk_key, integrity)
+                    reference = self.files.publish_reserved(identity, output.encoded, expected=integrity)
+                    files.append((output, reference, identity))
                 self.repository.record_outputs(plan, build, files)
         if still_current is not None and not still_current():
             return False
@@ -230,12 +233,14 @@ class RecommendationPublications:
         keys = [row['identity_key'] for row in rows]
         owned = self.query.group_candidates(keys) if keys else {}
         discovered = self.discovery.discovered_tracks_by_keys(keys, available_only=True) if keys else {}
+        identities = self.query.artist_memberships([key for key in discovered if key not in owned]) if discovered else {}
         tracks = []
         for row in rows:
             key = row['identity_key']
             current = owned.get(key) or discovered.get(key)
             if current and current.get('video_id'):
                 tracks.append({**current, 'key': key, 'recording_id': row['id'],
+                    'artist_ids': current.get('artist_ids') or sorted(identities.get(key, ())),
                     'serving_context': {'recommendation_generation_id': generation}})
         return {'generation': generation, 'after': rows[-1]['id'] if rows else after,
                 'exhausted': generation is None or len(rows) < limit, 'tracks': tracks}
@@ -274,6 +279,7 @@ class RecommendationPublications:
         missing = [key for key in keys if cache is None or key not in cache]
         owned = self.query.group_candidates(missing) if missing else {}
         discovered = self.discovery.candidate_tracks_by_keys(missing) if missing else {}
+        identities = self.query.artist_memberships(missing) if discovered else {}
         videos = list(dict.fromkeys(current['video_id'] for key in missing
             if (current := owned.get(key) or discovered.get(key)) and current.get('video_id')))
         details = self.repository.candidate_details(videos) if videos else {}
@@ -288,6 +294,7 @@ class RecommendationPublications:
                 if isinstance(year, str):
                     year = int(year[:4]) if len(year) >= 4 and year[:4].isascii() and year[:4].isdigit() else None
                 track = {name: current.get(name) for name in ('title', 'artist', 'album', 'video_id', 'thumbnail', 'genre')}
+                track['artist_ids'] = current.get('artist_ids') or sorted(identities.get(key, ()))
                 track.update(details.get(current['video_id'], {}))
                 track.update(key=key, year=year, plays=plays.get(key, 0), _radio_fresh=key not in owned)
             facts[key] = track

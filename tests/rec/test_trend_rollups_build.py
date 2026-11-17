@@ -45,13 +45,12 @@ def test_backfill_and_reset_still_rebuild_first_play(store):
     assert store.settings.get_setting("trend_first_play_takeout_seen") == "12345"
 
 
-def test_month_statistics_keep_streak_discovery_diversity_and_calendar(monkeypatch):
-    from yt_playlist.util import genre_map
-    monkeypatch.setattr(genre_map, "family", lambda g: g)
-    monkeypatch.setattr(genre_map, "family_distance", lambda a, b: .3)
+def test_month_statistics_keep_streak_discovery_diversity_and_calendar():
     rows = [(2, "a", 2), (3, "a", 1), (4, "b", 2), (31, "b", 1)]
     meta = {"a": ("Known", "house"), "b": ("Fresh", "techno")}
-    jan, feb = stats.compute_months(rows, meta, {"Known": 2, "Fresh": 4}, {"Known"})
+    jan, feb = stats.compute_months(rows, meta, {"Known": 2, "Fresh": 4}, {"Known"},
+        genre_axes={'house': ('house', None), 'techno': ('techno', None)},
+        family_adjacency={'house': {'techno': .3}})
     assert (jan["plays"], jan["listen_days"], jan["longest_streak"], jan["new_artist_plays"]) == (5, 3, 3, 2)
     assert jan["diversity"] == pytest.approx(2 * .6 * .4 * .3)
     assert feb["new_artist_plays"] == 0

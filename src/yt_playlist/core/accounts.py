@@ -27,18 +27,28 @@ def select_remaining_master(accounts):
 
 
 def client_for(store, clients, *, account_id=None, playlist_id=None):
-    playlist = None
-    if playlist_id is not None:
-        playlist = store.playlists.get_playlist(playlist_id)
-        if playlist is None:
-            raise ActionInputError('playlist_missing')
-    accounts = store.accounts.get_accounts()
-    account_id = select_account_id(playlist=playlist, accounts=accounts, account_id=account_id)
-    active = {account.id for account in accounts}
-    client = (clients or {}).get(account_id)
-    if account_id not in active or client is None:
-        raise ActionInputError('account_disconnected')
-    return account_id, client
+    return AccountAccess(store.accounts, store.playlists, clients).resolve(
+        account_id=account_id, playlist_id=playlist_id)
+
+
+class AccountAccess:
+    """Resolve the exact write capability once from account and playlist facts."""
+    def __init__(self, accounts, playlists, clients):
+        self.accounts, self.playlists, self.clients = accounts, playlists, clients or {}
+
+    def resolve(self, *, account_id=None, playlist_id=None):
+        playlist = None
+        if playlist_id is not None:
+            playlist = self.playlists.get_playlist(playlist_id)
+            if playlist is None:
+                raise ActionInputError('playlist_missing')
+        accounts = self.accounts.get_accounts()
+        account_id = select_account_id(playlist=playlist, accounts=accounts, account_id=account_id)
+        clients = self.clients() if callable(self.clients) else self.clients
+        client = clients.get(account_id)
+        if account_id not in {account.id for account in accounts} or client is None:
+            raise ActionInputError('account_disconnected')
+        return account_id, client
 
 
 def main_client(store, clients):

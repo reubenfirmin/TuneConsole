@@ -9,6 +9,7 @@ import json
 import pytest
 
 from yt_playlist.library import live_plays, player_events, sync
+from yt_playlist.controllers import library_synchronization as acquisition
 from yt_playlist.rec import rec_params
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -98,7 +99,7 @@ def test_missing_rating_context_preserves_feedback_until_complete_sync(store, mo
             raise RuntimeError("liked context unavailable")
         return fetch(pid, limit=limit)
 
-    monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
+    monkeypatch.setattr(acquisition, "with_retry", lambda fn, **kw: fn())
     monkeypatch.setattr(client, "get_playlist", unavailable)
     sync.sync_identity(store, iid, client, now=2000.0)
     assert _item_rating(store, iid) == (status, 1000.0)
@@ -123,7 +124,7 @@ def test_missing_rating_context_preserves_feedback_until_complete_sync(store, mo
 def test_partial_sync_still_accepts_explicit_ratings(store, monkeypatch, status):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     client = _client("indifferent_last")
-    monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
+    monkeypatch.setattr(acquisition, "with_retry", lambda fn, **kw: fn())
 
     def partial(pid, limit=None):
         if pid == "A":

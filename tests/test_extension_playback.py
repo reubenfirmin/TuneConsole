@@ -195,12 +195,18 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
     return;
   }
   if (scenario==='native_upload') {
+    const queueItem = {videoId:'planned',playlist:'PL',index:6};
     await report(2,{type:'play',title:'Uploader title',videoId:'native-known',
-      metadataVerified:false,videoVerified:true,brandKnown:true,brandId:'brand-A',paused:false});
+      metadataVerified:false,videoVerified:true,brandKnown:true,brandId:'brand-A',paused:false,queueItem});
+    assert.deepEqual(frames.at(-1).queueItem,queueItem);
     assert.equal(frames.at(-1).type,'play');
     assert.equal(frames.at(-1).metadataVerified,false);
     assert.equal(frames.at(-1).videoVerified,true);
     assert.equal(frames.at(-1).brandKnown,true);
+    await report(2,{type:'now-heartbeat',title:'Uploader title',videoId:'native-known',
+      metadataVerified:false,videoVerified:true,brandKnown:true,brandId:'brand-A',paused:false,queueItem});
+    assert.deepEqual(frames.at(-1).queueItem,queueItem);
+    assert.equal(frames.at(-1).type,'now-heartbeat');
     old.mutedInfo={muted:true};
     await report(2,{type:'play',title:'Next native title',videoId:'native-next',
       metadataVerified:false,videoVerified:true,brandKnown:true,brandId:'brand-A',paused:false});

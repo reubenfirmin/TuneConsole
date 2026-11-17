@@ -301,7 +301,7 @@ function radioHome(initial = {}) {
     get recoveryTitle() { return this.recoverySong?.title || 'Your Radio Session'; },
     get recoveryArtist() { return this.recoverySong?.artist || (this.recoveryFromPlaylist ? 'Radio from your playlist' : ''); },
     get recoveryUrl() {
-      if (this.recoveryFromPlaylist) return '/playlist/' + this.recoverySong.id;
+      if (this.recoveryFromPlaylist) return playlistUrl(this.recoverySong.id);
       return 'https://music.youtube.com/watch?v=' + encodeURIComponent(this.recoverySong?.video_id || '');
     },
     get recoveryMessage() {

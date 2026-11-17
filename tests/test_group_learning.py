@@ -2,6 +2,7 @@ from tests.file_content_support import age_file
 from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import replace
+import sqlite3
 
 import pytest
 
@@ -29,6 +30,15 @@ def learning_schema():
 
 @pytest.fixture
 def store(tmp_path, learning_schema, monkeypatch):
+    connect = sqlite3.connect
+
+    def cached_connection(*args, **kwargs):
+        # Retain genuine fresh preparation snapshots and their guards. Reusing
+        # SQLite's parsed statements changes neither reader nor artifact lifetime.
+        kwargs['cached_statements'] = 512
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, 'connect', cached_connection)
     with _file_consumer_store(tmp_path, learning_schema) as database:
         # Learning owns immutable definitions and frozen contributions. Reuse
         # committed reporting SQL below those synchronous consumers. File
@@ -57,10 +67,11 @@ def menu(store, head, ids, *, at=1100, oid='groups'):
 
 
 def compiled(store, head, now):
+    from yt_playlist.library.choice_composition import learning
     ledger = store.rec_ledger.evidence()
     offers = {row['id']: row for row in ledger.records('opportunity')}
     responses = sorted(ledger.records('response'), key=lambda row: (row['observed_at'], row['id']))
-    result = group_learning.compile(store, offers, responses, now, head)
+    result = learning(store).groups(offers, responses, now, head)
     return result, {row['group_id']: row for row in result['rows']}
 
 

@@ -111,7 +111,7 @@ def test_album_operation_rejects_overlapping_report_deletion_or_replacement(stor
 
 @pytest.mark.parametrize("operation", ["find-album-candidates", "resolve-album"])
 def test_failed_album_operation_releases_report_owner(store, monkeypatch, operation):
-    from yt_playlist.library import spotify_library
+    from yt_playlist.controllers import spotify_library
 
     waits = []
     monkeypatch.setattr(spotify_library, 'with_retry',
@@ -161,10 +161,13 @@ def test_status_poll_preserves_report_completed_or_replaced_during_its_read(stor
     other = TestClient(app, base_url="http://127.0.0.1:8123")
     preview = _prepare_library(web, store, first, payload=album_zip("One"), indices=())
     selection, _ = _select_library(other, album_zip("Two"))
+    from yt_playlist.library.spotify_transfer_composition import commands
+    reports = commands(app.state.ctx).reports
     original_load = spotify_import.load_job
+    owner_load = reports.load
 
-    def delayed_read(current_store):
-        captured = original_load(current_store)
+    def delayed_read():
+        captured = owner_load()
         if captured and captured.get("status") in spotify_import.ACTIVE_STATUSES and not poll_read.is_set():
             poll_read.set()
             assert finish_poll.wait(5), "The test did not release the status poll"
@@ -174,7 +177,7 @@ def test_status_poll_preserves_report_completed_or_replaced_during_its_read(stor
                     follow_redirects=False).status_code == 303
     try:
         assert provider_entered.wait(3), "The import did not reach the album save"
-        monkeypatch.setattr(spotify_import, "load_job", delayed_read)
+        monkeypatch.setattr(reports, 'load', delayed_read)
         with ThreadPoolExecutor(max_workers=1) as pool:
             polling = pool.submit(other.get, "/import/spotify-library/status")
             try:

@@ -45,28 +45,23 @@ def images(store, name):
 
 def prepare(store, client, names, now):
     """One artist per slice; publish the playable pool before optional image I/O."""
-    cache = store.rec_proposals.get_proposals(SURFACE) or {}
-    requests = store.rec_proposals.get_proposals(REQUESTS) or {}
-    pending = [name for name in dict.fromkeys([*requests.values(), *names])
-               if now >= cache.get(search_squash(name), {}).get('retry_at', 0)]
-    if not pending:
-        return False
-    name = pending[0]
-    key = search_squash(name)
-    observation = store.tv.artwork_observation(key)
-    photos, _ = images(store, name)
-    failed = False
+    from yt_playlist.controllers.tv_artwork import TVArtwork
+    return TVArtwork(store.rec_proposals, store.tv, images=lambda name: images(store, name),
+        search=lambda name: _search(client, name), vendor=lambda name, at: _vendor(store, name, at)).prepare(names, now)
+
+
+def _search(client, name):
     try:
         check_cancellable_work()
-        for artist in (client.search(name, filter='artists') or [])[:5]:
-            if (search_squash(artist.get('artist') or artist.get('title') or '') == search_squash(name)
-                    and artist.get('resultType') in (None, 'artist')):
-                if image := best_thumb(artist.get('thumbnails')):
-                    photos.append(image)
+        return client.search(name, filter='artists') or [], False
     except (WorkClosing, WorkBudgetExceeded):
         raise
     except Exception:
-        failed = True
+        return [], True
+
+
+def _vendor(store, name, now):
+    photos, failed = [], False
     vendor_retry_at = 0
     with wikipedia.access(store), net.probe_errors() as errors:
         try:
@@ -80,7 +75,4 @@ def prepare(store, client, names, now):
             vendor_retry_at = getattr(exc, 'retry_at', 0)
     failed = failed or bool(errors)
     vendor_retry_at = max([vendor_retry_at, *(net.retry_after(error, now) for error in errors)])
-    value = {'images': list(dict.fromkeys(photos))[:6],
-        'retry_at': max(now + (60 if failed else 86400), vendor_retry_at), 'at': now}
-    published = store.tv.publish_artwork(key, value, now, observation, complete=not failed)
-    return len(pending) > 1 or not published
+    return photos, failed, vendor_retry_at

@@ -6,8 +6,12 @@ function accountGrowth(initial) {
     growthPanel: location.hash.slice(1), twinkling: false, hovered: null, mapPanned: false,
     destinationPopup: null, destroyed: false, choiceVersion: 0,
     get newNodes() {
-      return this.growth.nodes.filter(node => node.ready && !node.bonus
-        && node.id !== 'first' && !this.seen.includes(node.id));
+      const unseen = this.growth.nodes.filter(node => !this.seen.includes(node.id));
+      return [
+        ...unseen.filter(node => node.recommendation_at != null)
+          .sort((a, b) => a.recommendation_at - b.recommendation_at),
+        ...unseen.filter(node => node.ready && !node.bonus && node.id !== 'first'),
+      ];
     },
     get notice() { return this.newNodes[0] || null; },
     get choiceInvite() { return this.growth.home_choice_available && !this.later; },

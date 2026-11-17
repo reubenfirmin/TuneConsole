@@ -2,7 +2,7 @@
 from pathlib import Path
 import hashlib
 
-from . import fao, recommendation_outputs, policy_documents
+from . import fao, recommendation_content, policy_documents
 
 
 def decode_display(chunks, ranks, surface):
@@ -16,20 +16,29 @@ class RecommendationFiles:
     def retained(self):
         return policy_documents.retained_reader(self.root)
 
-    def publish(self, encoded):
-        return recommendation_outputs.publish(self.root, encoded)
+    def describe(self, encoded):
+        return recommendation_content.describe(encoded)
+
+    def publish_reserved(self, identity, encoded, *, expected, age=None):
+        integrity = self.describe(encoded)
+        if integrity != expected:
+            raise ValueError('Recommendation output changed after reservation')
+        path = recommendation_content.record_path(self.root, identity)
+        fao.write(path, fao.Content(encoded, max_bytes=recommendation_content.MAX_BYTES, metadata=age))
+        return str(path), *integrity
+
+    def publish_original(self, encoded):
+        """Retain the historical codec during an explicit offline import."""
+        digest, size = self.describe(encoded)
+        path = Path(self.root) / digest[:2] / (digest + '.json')
+        fao.write(path, fao.Content(encoded, max_bytes=recommendation_content.MAX_BYTES))
+        return str(path), digest, size
 
     def exists(self, filename):
         return Path(filename).is_file()
 
-    def write_cache(self, encoded):
-        digest = hashlib.sha256(encoded).hexdigest()
-        path = self.root / digest[:2] / (digest + '.json')
-        fao.write(path, encoded)
-        return str(path), digest, len(encoded)
-
     def read(self, reference, *, surface, chunk_key):
-        return recommendation_outputs.read(reference['filename'], reference['content_digest'],
+        return recommendation_content.read(reference['filename'], reference['content_digest'],
             reference['byte_size'], surface=surface, chunk_key=chunk_key)
 
     def read_original(self, reference):

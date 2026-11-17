@@ -28,7 +28,7 @@ def inference_hashes():
     return {str(path): digest(path) for path in sorted([
         Path(__file__), source_path('local_reserved.py'), *TOOLS.rglob('external_*.py'),
         *TOOLS.rglob('__init__.py'),
-        ROOT / 'src/yt_playlist/rec/audio_vibe_external.py'])}
+        ROOT / 'experiments/audio_lab_tools/legacy/audio_vibe_external.py'])}
 
 
 def completed_receipts(state):
@@ -47,7 +47,7 @@ def completed_receipts(state):
 
 def models():
     core = 'checkpoint530__' + '+'.join(CORE)
-    result = {'checkpoint': ROOT / 'src/yt_playlist/rec/data/emotify-vibes.json',
+    result = {'checkpoint': ROOT / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json',
               'core_consensus': OUT / f'models/consensus-{core}.json',
               'core_selected_learners': OUT / f'models/consensus-{core}__native-selected_learner__calibrator-selected_learner.json',
               'core_rankings': OUT / f'models/vibe-ranking-{core}.json',
@@ -155,7 +155,7 @@ def freeze():
 def candidate_predictions(artifact, x, *, shared_model=None):
     kind = artifact['format']
     if kind == 'audio-vibe-emotify-1':
-        from yt_playlist.rec.audio_vibe_external import validate
+        from experiments.audio_lab_tools.legacy.audio_vibe_external import validate
         validate(artifact)
         native = replay({**artifact['native'], 'medians': artifact['native']['mean']}, x)
         return {'prediction': probabilities(replay({**artifact['calibration'], 'medians': artifact['calibration']['mean']}, native))}

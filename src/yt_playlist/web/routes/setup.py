@@ -1,46 +1,52 @@
 """Setup wizard: identities, provider configuration, and local import connections."""
-from contextlib import contextmanager
+import logging
 
 from yt_playlist.core.activity import activity_for
-from yt_playlist.core.accounts import client_for, select_remaining_master
+from yt_playlist.controllers.account_configuration import AccountConfiguration, IdentityMissing, LastIdentity
+from yt_playlist.controllers.enrichment_configuration import EnrichmentConfiguration
+from yt_playlist.controllers.description_configuration import DescriptionConfiguration
+from yt_playlist.controllers.identity_checks import IdentityChecks
 from urllib.parse import quote
 from html import escape
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
 from yt_playlist.library.takeout import TakeoutFormatError
 from yt_playlist.library.spotify_data import SpotifyDataFormatError
-from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
-                                                  SPOTIFY_REPORT_SCHEMA,
-                                                  find_album_candidates,
-                                                  import_spotify_library,
-                                                  load_spotify_library,
-                                                  prepare_spotify_library,
-                                                  save_selected_album)
+from yt_playlist.library.spotify_library import SpotifyLibraryFormatError
+from yt_playlist.library.spotify_transfer_composition import commands as transfer_commands
+from yt_playlist.controllers.spotify_transfer import TransferRejected
 from yt_playlist.providers import enrichment, lastfm, spotify
 from yt_playlist.rec import album_descriptions
-from yt_playlist.web.identity_checks import check_identities
+from yt_playlist.web.identity_checks import build as identity_check_routes
 from yt_playlist.web.history_imports import HistoryImports
-from yt_playlist.web.spotify_import import (ACTIVE_STATUSES, JOB_KEY, TransferPreviews, current_job,
-                                            estimate, save_job)
+from yt_playlist.library.spotify_transfer_policy import ACTIVE_STATUSES
 
 
-def build(ctx) -> APIRouter:
+def build(ctx, *, identity_checks=None) -> APIRouter:
     router = APIRouter()
     store, templates, setup = ctx.store, ctx.templates, ctx.setup
-    previews = TransferPreviews()
+    transfer = transfer_commands(ctx)
     history_imports = HistoryImports(ctx)
+    accounts = AccountConfiguration(store.accounts, setup, ctx.clear_auth_expired, lambda: ctx.auth_expired)
+    identity_checks = identity_checks if identity_checks is not None else IdentityChecks(
+        store.accounts, lambda: ctx.clients(), ctx.clear_auth_expired, logging.getLogger(__name__))
+    router.include_router(identity_check_routes(identity_checks, lambda: list(ctx.auth_expired.values())))
+    enrichment_config = EnrichmentConfiguration(store.settings, store.genres,
+        wake=lambda: ctx.enrich_worker.trigger() if ctx.enrich_worker else None)
+    description_config = DescriptionConfiguration(store.settings, store.album_notes,
+        lambda now: album_descriptions.settings(store, now), now=ctx.now_fn,
+        refresh=lambda: ctx.rec_worker.trigger_home_refresh() if ctx.rec_worker else None)
 
-    @contextmanager
-    def _spotify_report_operation():
-        if not ctx.spotify_import_lock.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="Wait for the current Spotify import or album operation to finish")
+    def command(target, *args, **kwargs):
         try:
-            yield
-        finally:
-            ctx.spotify_import_lock.release()
+            return target(*args, **kwargs)
+        except TransferRejected as exc:
+            status = {'busy': 409, 'expired': 410, 'invalid': 400, 'missing': 404,
+                      'resolved': 409, 'unavailable': 409}[exc.reason]
+            raise HTTPException(status_code=status, detail=exc.detail) from exc
 
     def _saved_identities():
         return [{"id": i.id, "label": i.label, "brand": i.brand_account_id or "",
@@ -57,10 +63,10 @@ def build(ctx) -> APIRouter:
             "configured": (setup.configured if setup else True),
             "home_format": home_format,
             "flash": request.query_params.get("flash"),
-            "enrichment": enrichment.load_config(store),
+            "enrichment": enrichment_config.query(),
             "lastfm_configured": lastfm.api_key(store) is not None,
             "deepseek": album_descriptions.settings(store, ctx.now_fn()),
-            "spotify_library_job": current_job(ctx),
+            "spotify_library_job": transfer.reports.current(),
             "spotify_history": store.history.spotify_history_stats(),
             "spotify_legacy_unattributed": store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1',
         }, status_code=status_code)
@@ -76,36 +82,24 @@ def build(ctx) -> APIRouter:
             rows, master_idx = [{"id": None, "label": "main", "brand": ""}], 0
         return _setup_context(request, rows=rows, master_idx=master_idx)
 
-    @router.get("/setup/identities/check")
-    def setup_identity_checks(account_id: int | None = Query(None,alias='identity_id')):
-        # A sync route runs in a worker thread: bridge calls must leave the WebSocket loop free.
-        return {"checks": check_identities(ctx, account_id), "auth_labels": list(ctx.auth_expired.values())}
-
     @router.post("/setup/identities/{account_id}/remove")
     def setup_remove_identity(account_id: int):
         if setup is None:
             raise HTTPException(status_code=404, detail="setup not available")
-        identities = store.accounts.get_accounts()
-        removed = next((i for i in identities if i.id == account_id), None)
-        if removed is None:
-            raise HTTPException(status_code=404, detail="Account no longer exists.")
-        remaining = [i for i in identities if i.id != account_id]
-        if not remaining:
-            raise HTTPException(status_code=409, detail="Keep at least one identity.")
-        main = select_remaining_master(remaining)
         try:
-            setup.apply_setup([{"id": i.id, "label": i.label, "credential_ref": i.credential_ref,
-                                "brand_account_id": i.brand_account_id, "is_master": i.id == main.id}
-                               for i in remaining])
+            result = accounts.remove(account_id)
+        except IdentityMissing as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LastIdentity as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        ctx.clear_auth_expired(account_id)
-        return {"message": f'Removed identity "{removed.label}".', "main_identity_id": main.id,
-                "identity_count": len(remaining), "auth_labels": list(ctx.auth_expired.values())}
+        label = result.pop('label')
+        return {**result, 'message': f'Removed identity "{label}".'}
 
     def _enrichment_panel(request):
         return templates.TemplateResponse(request, "_partials/enrichment_panel.html", {
-            "enrichment": enrichment.load_config(store),
+            "enrichment": enrichment_config.query(),
             "lastfm_configured": lastfm.api_key(store) is not None,
             'deepseek': album_descriptions.settings(store, ctx.now_fn())})
 
@@ -118,56 +112,36 @@ def build(ctx) -> APIRouter:
         order = form.getlist("order")
         on = set(form.getlist("enabled"))
         try:
-            enrichment.save_config(store, [{"name": n, "enabled": n in on} for n in order])
+            enrichment_config.save([{"name": n, "enabled": n in on} for n in order])
         except ValueError:
             pass
-        else:
-            if ctx.enrich_worker:
-                ctx.enrich_worker.trigger()
         return _enrichment_panel(request)
 
     @router.post('/settings/deepseek-key')
     async def deepseek_key(request: Request):
-        import re
         key = str((await request.form()).get('key') or '').strip()
-        if not re.fullmatch(r'sk-[A-Za-z0-9_-]{8,240}', key):
+        try:
+            description_config.save(key=key, key_only=True)
+        except ValueError:
             return Response(status_code=400)
-        store.settings.set_setting('deepseek_api_key', key)
-        store.album_notes.wake(ctx.now_fn())
-        if ctx.rec_worker:
-            ctx.rec_worker.trigger_home_refresh()
         return Response(status_code=204)
 
     @router.post('/settings/deepseek')
     async def deepseek_settings(request: Request):
-        import re
         form = await request.form()
         error, message = None, None
-        if form.get('action') == 'disconnect':
-            store.settings.set_values({'deepseek_api_key': '', 'deepseek_album_descriptions_enabled': '0'})
-            message = 'Generation paused and the saved key removed. Existing descriptions are kept.'
-        else:
-            key = str(form.get('key') or '').strip()
-            try:
-                limit = int(form.get('daily_limit', ''))
-                if not 0 <= limit <= album_descriptions.MAX_DAILY_LIMIT:
-                    raise ValueError
-            except (TypeError, ValueError):
-                error = 'Choose a daily request limit between 0 and 100.'
-            if key and not re.fullmatch(r'sk-[A-Za-z0-9_-]{8,240}', key):
-                error = 'Enter a valid DeepSeek API key.'
-            if not error:
-                values = {'deepseek_daily_limit': str(limit),
-                          'deepseek_album_descriptions_enabled': '1' if form.get('enabled') == 'on' else '0'}
-                if key:
-                    values['deepseek_api_key'] = key
-                store.settings.set_values(values)
-                store.album_notes.wake(ctx.now_fn())
-                if ctx.rec_worker:
-                    ctx.rec_worker.trigger_home_refresh()
-                message = 'Album description settings saved.'
+        try:
+            disconnect = form.get('action') == 'disconnect'
+            configuration = description_config.save(key=str(form.get('key') or ''),
+                daily_limit=form.get('daily_limit', ''), enabled=form.get('enabled') == 'on',
+                disconnect=disconnect)
+            message = ('Generation paused and the saved key removed. Existing descriptions are kept.'
+                       if disconnect else 'Album description settings saved.')
+        except ValueError as exc:
+            error = str(exc)
+            configuration = description_config.query(ctx.now_fn())
         return templates.TemplateResponse(request, '_partials/album_description_settings.html', {
-            'deepseek': album_descriptions.settings(store, ctx.now_fn()),
+            'deepseek': configuration,
             'description_error': error, 'description_message': message}, status_code=200)
 
     @router.post("/setup")
@@ -194,7 +168,7 @@ def build(ctx) -> APIRouter:
             for row in identities:
                 row["id"] = int(row["id"]) if row["id"] else None
             # The credential is the live extension pairing now, so no capture is passed here.
-            setup.apply_setup(identities)
+            accounts.save(identities)
         except ValueError as e:
             if wants_json:
                 return JSONResponse({"error": str(e)}, status_code=400)
@@ -207,10 +181,6 @@ def build(ctx) -> APIRouter:
                                   error=str(e), status_code=400)
         # Saving definitions does not authenticate them. The Identities tab checks live access and
         # clears expired-session flags only for identities whose checks actually succeed.
-        active = {i.id for i in store.accounts.get_accounts()}
-        for account_id in list(ctx.auth_expired):
-            if account_id not in active:
-                ctx.clear_auth_expired(account_id)
         if wants_json:
             return {"identities": _saved_identities(), "auth_labels": list(ctx.auth_expired.values())}
         n = len(identities)
@@ -278,7 +248,7 @@ def build(ctx) -> APIRouter:
             up = form.get("file")
             if up is None or not hasattr(up, "read"):
                 return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
-            existing = current_job(ctx)
+            existing = transfer.reports.current()
             if existing and existing.get("status") in ACTIVE_STATUSES:
                 return templates.TemplateResponse(
                     request, "_partials/spotify_library_status.html", {"job": existing},
@@ -289,7 +259,7 @@ def build(ctx) -> APIRouter:
                     '<p class="section-note">Connect the extension and configure an identity first.</p>')
             raw = await up.read()
         try:
-            parsed = await activity_for(ctx).to_thread(load_spotify_library, raw)
+            selection = await activity_for(ctx).to_thread(transfer.select, raw)
         except SpotifyLibraryFormatError:
             return HTMLResponse(
                 '<p class="section-note">Could not find Spotify playlists or saved albums. '
@@ -297,145 +267,43 @@ def build(ctx) -> APIRouter:
                 'YourLibrary JSON files—not Extended Streaming History or Technical Log Information.</p>')
         return templates.TemplateResponse(
             request, "_partials/spotify_library_select.html", {
-                "parsed": parsed, "identities": identities,
-                "selection_token": previews.put({"stage": "selection", "parsed": parsed}, ctx.now_fn()),
+                **selection,
             }, headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
-
-    def _destination(value):
-        try:
-            account_id = int(value)
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="Choose a destination identity") from None
-        identity = next((i for i in store.accounts.get_accounts() if i.id == account_id), None)
-        try:
-            _,client = client_for(store,ctx.client_provider(),account_id=account_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail="Connect the selected YouTube Music identity") from exc
-        return identity, client
-
-    def _snapshot(token, stage, *, consume=False):
-        value = previews.get(token, ctx.now_fn(), consume=consume)
-        if value is None or value["stage"] != stage:
-            raise HTTPException(status_code=410, detail="Preview expired or already used. Upload the ZIP again.")
-        return value
 
     @router.post("/import/spotify-library/prepare")
     async def spotify_library_prepare(request: Request):
         form = await request.form()
-        snapshot = _snapshot(form.get("selection_token"), "selection")
-        identity, client = _destination(form.get("identity_id"))
-        parsed = snapshot["parsed"]
-        try:
-            indices = sorted({int(value) for value in form.getlist("playlist_index")})
-            if any(index < 0 or index >= len(parsed["playlists"]) for index in indices):
-                raise ValueError
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="Invalid playlist selection") from None
-        selected = {"playlists": [parsed["playlists"][index] for index in indices],
-                    "albums": parsed["albums"] if form.get("include_albums") == "on" else []}
-        if not selected["playlists"] and not selected["albums"]:
-            raise HTTPException(status_code=400, detail="Select at least one playlist or saved albums")
-        if not ctx.spotify_import_lock.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="Another Spotify import is running")
-
-        def prepare():
-            try:
-                prepared = prepare_spotify_library(selected, client, store=store, account_id=identity.id)
-                token = previews.put({"stage": "ready", "prepared": prepared,
-                                      "account_id": identity.id}, ctx.now_fn())
-                save_job(store, {**job, "status": "preview", "preview_token": token})
-            except Exception:
-                ctx.logger.exception("Spotify import preview failed")
-                save_job(store, {**job, "status": "error", "error": "Could not prepare the preview. Upload the ZIP again."})
-            finally:
-                ctx.spotify_import_lock.release()
-
-        try:
-            _snapshot(form.get("selection_token"), "selection", consume=True)
-            job = {"status": "running", "phase": "preview", "started_at": ctx.now_fn(),
-                   "account_id": identity.id, "identity_label": identity.label,
-                   "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(selected)}
-            save_job(store, job)
-            activity_for(ctx).start_thread(prepare, name="spotify-library-preview")
-        except BaseException:
-            # Until scheduling succeeds, no worker owns the release above.
-            ctx.spotify_import_lock.release()
-            raise
+        job = command(transfer.prepare, form.get('selection_token'), form.get('identity_id'),
+                      form.getlist('playlist_index'), form.get('include_albums') == 'on')
         return templates.TemplateResponse(
-            request, "_partials/spotify_library_status.html", {"job": current_job(ctx)},
+            request, "_partials/spotify_library_status.html", {"job": job},
             headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
 
     @router.get("/import/spotify-library/preview/{token}")
     def spotify_library_preview(request: Request, token: str):
-        snapshot = _snapshot(token, "ready")
-        identity, _ = _destination(snapshot["account_id"])
-        return templates.TemplateResponse(request, "spotify_library_preview.html", {
-            "prepared": snapshot["prepared"], "identity": identity, "preview_token": token})
+        return templates.TemplateResponse(request, "spotify_library_preview.html",
+                                          command(transfer.preview, token))
 
     @router.post("/import/spotify-library/confirm")
     async def spotify_library_confirm(request: Request):
         form = await request.form()
         token = form.get("preview_token")
-        snapshot = _snapshot(token, "ready")
-        identity, client = _destination(snapshot["account_id"])
-        albums = []
-        for index, source in enumerate(snapshot["prepared"]["albums"]):
-            resolution = source["resolution"]
-            action = form.get(f"album_action_{index}", "save")
-            if action not in ("save", "playlist", "skip"):
-                raise HTTPException(status_code=400, detail="Invalid album action")
-            selected = form.get(f"album_choice_{index}")
-            match = resolution["match"] if selected is None else next(
-                (candidate for candidate in resolution["candidates"] if candidate["browse_id"] == selected), None)
-            if selected and match is None:
-                raise HTTPException(status_code=400, detail="Choose an album from this preview")
-            if action == "playlist" and match is None:
-                raise HTTPException(status_code=400, detail="Choose a release to create as a playlist")
-            albums.append({**source, "action": action, "resolution": {**resolution, "match": match}})
-        prepared = {**snapshot["prepared"], "albums": albums}
-        if not ctx.spotify_import_lock.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="Another Spotify import is running")
-
-        def run_import():
-            try:
-                report = import_spotify_library(store, None, client, identity.id, ctx.now_fn(),
-                                                 prepared=prepared)
-                if report["tracks_imported"] or report["albums_imported"]:
-                    store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
-                save_job(store, {**job, "status": "done", "finished_at": ctx.now_fn(), "report": report})
-            except Exception:
-                ctx.logger.exception("Spotify library import failed")
-                save_job(store, {**job, "status": "error", "finished_at": ctx.now_fn(),
-                                 "error": "The import stopped. Upload the same ZIP to resume recorded transfers."})
-            finally:
-                ctx.spotify_import_lock.release()
-
-        try:
-            snapshot = _snapshot(token, "ready", consume=True)
-            job = {"status": "running", "phase": "import", "started_at": ctx.now_fn(),
-                   "account_id": identity.id, "identity_label": identity.label,
-                   "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(prepared)}
-            save_job(store, job)
-            activity_for(ctx).start_thread(run_import, name="spotify-library-import")
-        except BaseException:
-            ctx.spotify_import_lock.release()
-            raise
+        snapshot = command(transfer.snapshot, token, 'ready')
+        actions = [(form.get(f'album_action_{i}', 'save'), form.get(f'album_choice_{i}'))
+                   for i in range(len(snapshot['prepared']['albums']))]
+        command(transfer.confirm, token, actions)
         return RedirectResponse("/#notices", status_code=303)
 
     @router.post("/import/spotify-library/cancel")
     async def spotify_library_cancel(request: Request):
         form = await request.form()
         token = form.get("preview_token")
-        with _spotify_report_operation():
-            _snapshot(token, "ready", consume=True)
-            job = current_job(ctx)
-            if job and job.get("preview_token") == token:
-                store.settings.delete_setting(JOB_KEY)
+        command(transfer.cancel, token)
         return RedirectResponse("/setup?tab=import", status_code=303)
 
     @router.get("/import/spotify-library/status")
     def spotify_library_status(request: Request):
-        job = current_job(ctx)
+        job = transfer.reports.current()
         if not job:
             return Response(status_code=204)
         redirect = (f"/import/spotify-library/preview/{job['preview_token']}" if job["status"] == "preview"
@@ -446,7 +314,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/import/spotify-library/notice")
     def spotify_library_notice(request: Request):
-        job = current_job(ctx)
+        job = transfer.reports.current()
         if not job:
             return Response(status_code=204)
         return templates.TemplateResponse(
@@ -454,7 +322,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/import/spotify-library/report")
     def spotify_library_report(request: Request):
-        job = current_job(ctx)
+        job = transfer.reports.current()
         if not job or job.get("status") != "done" or not isinstance(job.get("report"), dict):
             return RedirectResponse("/setup?tab=import", status_code=303)
         details = job["report"].get("details") or {}
@@ -474,85 +342,24 @@ def build(ctx) -> APIRouter:
             "spotify_error": request.query_params.get("spotify_error"),
         })
 
-    def _report_album(job, index):
-        try:
-            position = int(index)
-            if position < 0:
-                raise IndexError
-            albums = job["report"]["details"]["albums"]
-            item = albums[position]
-        except (KeyError, IndexError, TypeError, ValueError):
-            raise HTTPException(status_code=404, detail="album outcome not found") from None
-        if item.get("status") != "unmatched":
-            raise HTTPException(status_code=409, detail="album outcome is already resolved")
-        return item
-
-    def _spotify_destination(job):
-        if job and job.get("account_id") is not None:
-            identity,remote = _destination(job["account_id"])
-            return identity.id,remote
-        try:
-            return client_for(store,ctx.client_provider())
-        except ValueError as exc:
-            raise HTTPException(status_code=409,detail=str(exc)) from exc
-
     @router.post("/import/spotify-library/find-album-candidates")
     async def spotify_library_find_candidates(request: Request):
         form = await request.form()
         album_index = form.get('album_index')
 
-        def find_candidates():
-            # Provider work and publication have one admitted owner. Cancelling
-            # the awaiting request cannot release the report halfway through.
-            with _spotify_report_operation():
-                job = current_job(ctx)
-                if not job or job.get("status") != "done":
-                    raise HTTPException(status_code=404, detail="report not found")
-                item = _report_album(job, album_index)
-                try:
-                    item["candidates"] = find_album_candidates(_spotify_destination(job)[1], item)
-                    save_job(store, job)
-                except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
-                    ctx.logger.exception("Spotify import candidate lookup failed")
-                    message = quote("YouTube Music could not search for candidates. Try again when connected.")
-                    return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-            return RedirectResponse(
-                f"/import/spotify-library/report#album-{album_index}", status_code=303)
-
-        return await activity_for(ctx).to_thread(find_candidates)
+        error = await activity_for(ctx).to_thread(command, transfer.find, album_index)
+        target = (f'/import/spotify-library/report?spotify_error={quote(error)}' if error else
+                  f'/import/spotify-library/report#album-{album_index}')
+        return RedirectResponse(target, status_code=303)
 
     @router.post("/import/spotify-library/resolve-album")
     async def spotify_library_resolve_album(request: Request):
         form = await request.form()
         album_index, browse_id = form.get('album_index'), (form.get('browse_id') or '').strip()
 
-        def resolve_album():
-            with _spotify_report_operation():
-                job = current_job(ctx)
-                if not job or job.get("status") != "done":
-                    raise HTTPException(status_code=404, detail="report not found")
-                item = _report_album(job, album_index)
-                try:
-                    account_id,remote = _spotify_destination(job)
-                    outcome = save_selected_album(store, remote, item, browse_id, account_id=account_id)
-                except (ValueError, HTTPException) as exc:
-                    message = quote(str(exc.detail if isinstance(exc, HTTPException) else exc))
-                    return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-                except Exception:  # noqa: BLE001 - preserve the report and surface a usable failure
-                    ctx.logger.exception("Spotify import selected-album save failed")
-                    message = quote("YouTube Music could not save that album. Try again when connected.")
-                    return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
-                report = job["report"]
-                item.update(outcome)
-                item.pop("candidates", None)
-                report["albums_unmatched"] = max(0, report["albums_unmatched"] - 1)
-                report["albums_imported" if outcome["status"] == "imported" else "albums_skipped"] += 1
-                save_job(store, {**job, "report": report})
-                if outcome["status"] == "imported":
-                    store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
-            return RedirectResponse("/import/spotify-library/report", status_code=303)
-
-        return await activity_for(ctx).to_thread(resolve_album)
+        error = await activity_for(ctx).to_thread(command, transfer.resolve, album_index, browse_id)
+        target = f'/import/spotify-library/report?spotify_error={quote(error)}' if error else '/import/spotify-library/report'
+        return RedirectResponse(target, status_code=303)
 
     @router.get("/import/spotify-library/spotify-thumbnail")
     def spotify_library_thumbnail(url: str):
@@ -565,19 +372,12 @@ def build(ctx) -> APIRouter:
 
     @router.post("/import/spotify-library/dismiss")
     def dismiss_spotify_library_notice():
-        with _spotify_report_operation():
-            job = current_job(ctx)
-            if not job or job.get("status") not in ACTIVE_STATUSES:
-                if job:
-                    save_job(store, {**job, "dismissed": True})
-                else:
-                    store.settings.delete_setting(JOB_KEY)
+        command(transfer.dismiss)
         return Response(status_code=200)
 
     @router.post("/import/spotify-library/delete-report")
     def delete_spotify_library_report():
-        with _spotify_report_operation():
-            store.settings.delete_setting(JOB_KEY)
+        command(transfer.delete)
         return RedirectResponse("/setup?tab=import", status_code=303)
 
     @router.post("/import/takeout")

@@ -5,11 +5,17 @@ from contextlib import nullcontext
 
 from yt_playlist.core import listening_outputs
 from yt_playlist.repos.base import Repo, lookup_read, synchronized, snapshot_read
+from . import recommendation_file_writes
 
 BATCH_SIZE = 256
 
 
 class ListeningAnalyticsRepo(Repo):
+    @synchronized
+    def reserve_file(self, surface, chunk_key, integrity):
+        with self.conn.atomic():
+            return recommendation_file_writes.reserve(self.conn, 'listening_output_files', surface, chunk_key, integrity)
+
     def _batches(self, sql, args=()):
         if not getattr(self._store, '_read_only', False):
             raise RuntimeError('Listening analytics requires a private worker snapshot')
@@ -97,8 +103,13 @@ class ListeningAnalyticsRepo(Repo):
         return listening_outputs.available(self.conn)
 
     @synchronized
-    def publish_files(self, publication, durable, *, keep_previous, timezone=None):
+    def publish_files(self, publication, durable, *, keep_previous, timezone=None, file_ids):
         with nullcontext() if self.conn.in_transaction else self.conn.atomic():
+            if len(file_ids) != len(durable):
+                raise ValueError('Listening files require their pending SQL identities')
+            for identity, (surface, key, filename, digest, size, _) in zip(file_ids, durable):
+                recommendation_file_writes.complete(self.conn, identity, 'listening_output_files', surface, key,
+                                                     (filename, digest, size))
             identity = listening_outputs.register(self.conn, publication, durable, keep_previous=keep_previous)
             if timezone is not None:
                 self.conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('listening_timezone',?)", (timezone,))
@@ -119,13 +130,6 @@ class ListeningAnalyticsRepo(Repo):
 
     @snapshot_read
     def output(self, surface, file_surface, chunk_key):
-        from yt_playlist.core.preparation import listening_publication
-        with keyed_reads(self._store, 'rec_proposals', (surface,)):
-            owner = listening_publication.OWNER
-            identity = owner.selected(self.conn)
-            if identity is not None:
-                header = owner.capture(self.conn, identity, surface)
-                return {'source': 'prepared', 'header': dict(header) if header is not None else None}
         if self._store._listening_files:
             row = self.conn.execute('SELECT f.filename,f.content_digest,f.byte_size FROM listening_output_heads h '
                 'JOIN listening_output_files f ON f.publication_id=h.publication_id '

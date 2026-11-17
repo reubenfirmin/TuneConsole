@@ -1,5 +1,5 @@
 """Capture identity and file reuse decisions use mocked SQL facts."""
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 import hashlib
 import sqlite3
 from unittest.mock import create_autospec
@@ -19,26 +19,50 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def captures():
     repo = create_autospec(MetadataDeliveryRepo, instance=True, spec_set=True)
     files = create_autospec(MetadataDeliveryFiles, instance=True, spec_set=True)
-    repo.transaction.side_effect = nullcontext
+    writing = False
+
+    @contextmanager
+    def transaction():
+        nonlocal writing
+        writing = True
+        try:
+            yield
+        finally:
+            writing = False
+
+    repo.transaction.side_effect = transaction
     files.retained.side_effect = nullcontext
     repo.subject.return_value = {'recording_id': 8, 'video_id': 'video', 'source_ref': None}
     repo.capture_head.return_value = None
     repo.by_contract.return_value = None
     repo.response_reference.return_value = None
     repo.insert.return_value = 10
+    repo.reserve_response.return_value = 257
     files.encode.return_value = b'encoded'
     files.publish.return_value = ('file', hashlib.sha256(b'encoded').hexdigest(), 7, 100)
+    @contextmanager
+    def write_reserved(identity, encoded):
+        assert not writing
+        yield files.publish.return_value
+        assert not writing
+
+    files.write_reserved.side_effect = write_reserved
+    def read_encoded(reference):
+        assert not writing
+        return files.read_encoded.return_value
+    files.read_encoded.side_effect = read_encoded
     return MetadataDeliveries(repo, files)
 
 
 def test_capture_publishes_file_then_row_then_head(captures):
     events = []
     reference = captures.files.publish.return_value
-    captures.files.publish.side_effect = lambda *args: events.append('file') or reference
+    captures.repository.reserve_response.side_effect = lambda *args: events.append('reserve') or 257
+    captures.files.write_reserved.side_effect = lambda *args: events.append('file') or nullcontext(reference)
     captures.repository.insert.side_effect = lambda *args: events.append('row') or 10
     captures.repository.set_capture_head.side_effect = lambda *args: events.append('head')
     assert captures.capture_state(7, 'youtube', 'catalog-input', {'value': 1}, now=10) == 10
-    assert events == ['file', 'row', 'head']
+    assert events == ['reserve', 'file', 'row', 'head']
     values, = captures.repository.insert.call_args.args
     assert values[:2] == ('youtube', 'capture')
     assert values[5:9] == (7, 8, 'video', 10)
@@ -74,10 +98,30 @@ def test_digest_equality_requires_matching_bytes(captures):
 
 
 def test_failed_publication_cannot_advance_sql_capture_head(captures):
-    captures.files.publish.side_effect = OSError('full')
+    captures.files.write_reserved.side_effect = OSError('full')
     with pytest.raises(OSError, match='full'):
         captures.capture_state(7, 'youtube', 'catalog-input', {}, now=20)
     captures.repository.insert.assert_not_called()
+    captures.repository.set_capture_head.assert_not_called()
+
+
+@pytest.mark.parametrize('changed', ['subject', 'capture', 'contract'])
+def test_changes_during_publication_leave_the_capture_unselected(captures, changed):
+    @contextmanager
+    def changed_inputs(*args):
+        if changed == 'subject':
+            captures.repository.subject.return_value['recording_id'] = 9
+        elif changed == 'capture':
+            captures.repository.capture_head.return_value = {'id': 99}
+        else:
+            captures.repository.by_contract.return_value = {'id': 99}
+        yield captures.files.publish.return_value
+
+    captures.files.write_reserved.side_effect = changed_inputs
+    with pytest.raises(ValueError, match='changed'):
+        captures.capture_state(7, 'youtube', 'catalog-input', {}, now=20)
+    captures.repository.insert.assert_not_called()
+    captures.repository.complete_response.assert_not_called()
     captures.repository.set_capture_head.assert_not_called()
 
 
@@ -112,7 +156,7 @@ def test_delivery_without_a_response_does_not_read_files(captures):
 def test_provider_delivery_commits_only_after_its_response_is_published(captures):
     events = []
     reference = captures.files.publish.return_value
-    captures.files.publish.side_effect = lambda encoded: events.append('file') or reference
+    captures.files.write_reserved.side_effect = lambda *args: events.append('file') or nullcontext(reference)
     captures.repository.insert.side_effect = lambda values: events.append('row') or 10
     delivery = Delivery('provider', 'result:run', 'item', 'video', 20, 7, 8, 'video', response={'bpm': 120})
     assert captures.record(delivery) == 10

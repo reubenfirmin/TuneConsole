@@ -274,6 +274,8 @@ def test_radio_refreshes_metadata_for_current_and_played_table_rows(poc, monkeyp
     # Use the production catalog refresh against the fixture's deterministic sampler.
     s.candidates.store = c.ctx.store
     s.candidates.read_store = c.ctx.store
+    from yt_playlist.controllers.radio_inputs import inputs_for
+    s.candidates.inputs = inputs_for(c.ctx.store)
     s.candidates.affinities = {}
     monkeypatch.setattr(s.candidates, "_rotation_facts",
                         lambda tracks: RadioCandidates._rotation_facts(s.candidates, tracks), raising=False)

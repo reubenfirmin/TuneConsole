@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 
-from yt_playlist.core.update_lifecycle import acquire_restart_locks
+from yt_playlist.library.update_composition import acquire_shutdown
 
 RESUME_KEY = "TuneConsoleUpdateResume"
 
@@ -89,7 +89,7 @@ class MacOSUpdater:
                 return
             # Cocoa owns this quit, including Sparkle's install-and-relaunch handoff.
             # Our own busy flag must not prevent the server's work from draining.
-            locks, message = acquire_restart_locks(
+            locks, message = acquire_shutdown(
                 self.server.config.app.state.ctx, wait_for_update=False)
             if locks is None:
                 self.message = message

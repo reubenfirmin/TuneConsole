@@ -19,7 +19,7 @@ SQL fell from 2,752,774,144 to 1,221,394,432 bytes (55.6%); 19,700 files added
 checks passed, but the roughly 1.72 GB logical result missed the few-hundred-MB
 goal. This established a retained baseline for owner-specific studies; native-app
 startup, continued writes and installation were separate outstanding checks.
-Evidence: `backups/658-restore-experiment-20261031/RESULTS.md`; reproducer: [run.py](run.py).
+Evidence: `backups/658-restore-experiment-20261031/RESULTS.md`; reproducer: [released run.py](https://github.com/reubenfirmin/TuneConsole/blob/v0.1.19/experiments/retained_copy/run.py).
 
 ## 1 November 2026: runtime metadata
 
@@ -33,7 +33,7 @@ and preserved manual override/reset after reopening. The result favored compact
 current SQL with owned files, while retaining explicit activation and independent
 recovery verification; schema opening was measured separately from app startup.
 Evidence: `backups/681-682-runtime-experiment-20261101-final/`;
-reproducer: [runtime_metadata.py](runtime_metadata.py).
+reproducer: [released runtime_metadata.py](https://github.com/reubenfirmin/TuneConsole/blob/v0.1.19/experiments/retained_copy/runtime_metadata.py).
 
 ## 1 November 2026: served facts
 
@@ -55,7 +55,7 @@ late and repeated writes worked. There were 183 descriptors sharing 163 genre
 sets and 13 legacy options with incomplete provenance, excluded from preference
 learning. This supported releasing obsolete group roots after projection without
 inventing track-level precision. Evidence: `backups/688-mix-choices-report.json`;
-reproducer: [mix_choices.py](mix_choices.py).
+reproducer: [released mix_choices.py](https://github.com/reubenfirmin/TuneConsole/blob/v0.1.19/experiments/retained_copy/mix_choices.py).
 
 ## 1 November 2026: credit and mode history
 
@@ -67,11 +67,11 @@ modes remained byte-identical, selected artist projections matched, and PPR rank
 matched for 2,800 items. Replay after expiry preserved original outcomes; 2,172
 inactive mode payloads retired. This supported bounded explicit retention rather
 than another cold archive. Evidence: `backups/691-698-runtime-history-report.json`;
-reproducer: [runtime_history.py](runtime_history.py).
+reproducer: [released runtime_history.py](https://github.com/reubenfirmin/TuneConsole/blob/v0.1.19/experiments/retained_copy/runtime_history.py).
 
 ## Vibe version normalization
 
-The companion [vibe_storage.py](vibe_storage.py) study isolates normalization of
+The companion [released vibe_storage.py](https://github.com/reubenfirmin/TuneConsole/blob/v0.1.19/experiments/retained_copy/vibe_storage.py) study isolates normalization of
 three repeated version strings into immutable IDs, retaining exact decoded
 versions, original measurements, samples and current outputs. Its protocol also
 separates 180-day superseded-summary retention from 30-day contributor details.
@@ -80,7 +80,8 @@ no additional savings or runtime acceptance is claimed here.
 
 ## Reproducing a study
 
-For owner studies, run `uv run python -m experiments.retained_copy.MODULE
+The pre-release converters have been retired. Use the v0.1.19 source linked above
+to reproduce those studies. From that checkout, run `uv run python -m experiments.retained_copy.MODULE
 SOURCE.db NEW_REPORT.json`; `runtime_metadata` instead takes a new output
 directory. Inspect the selected module's `--help` first. Use isolated sources
 with their owned files available and new report destinations.

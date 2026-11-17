@@ -80,10 +80,10 @@ Only a top-level page on the configured app origin/port can open an observing ap
 
 | Behavior | Contract |
 | --- | --- |
-| Scheduled excerpts | Ten seconds at 30 seconds, halfway and two-thirds through playback. Only the first point is available until matching full-duration metadata arrives. |
+| Scheduled excerpts | Ten seconds at 30 seconds, halfway and two-thirds through playback, as an explicit heuristic. Omit points before the 30-second cutoff and overlapping nominal windows. Only the first point is available until matching full-duration metadata arrives. |
 | Clock | Wait in the music tab against the native per-song clock; missing/stale clocks do not authorize capture. No seeking or padded audio. |
 | Interruptions | Pause, seek, source/track changes and deadlines cancel unfinished capture. Completed recordings may finish inference after a track change. |
-| Retry | Replace missed points as playback permits; retry failures after 5, 10, 20 and at most 30 seconds, without duplicating saved points. |
+| Retry | Retry failures after 5, 10, 20 and at most 30 seconds while playback remains within ten seconds of the nominal start. Later points stay on their original schedule; expired points remain missed. Validate actual start times and reject overlapping captures, including after worker restart. Partial playback remains partial evidence. |
 | Preview | One capture owner across collection and preview. Preview cancels unfinished collection work; completed excerpts finish durable delivery first. Collection resumes after the last preview disconnects. |
 | Durable delivery | Store up to 12 immutable metadata payloads before posting; back off 5–60 seconds. Only a matching sample UUID receipt removes one. Restarts/lost replies resend idempotently. Full or rejected queues retain data and pause capture. |
 | Upgrade | Import older app outboxes before removing them, only after extension storage acknowledges. |

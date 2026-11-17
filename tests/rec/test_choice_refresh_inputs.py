@@ -155,36 +155,3 @@ def test_tracked_refresh_rechecks_replacement_choice_publications(file_backed_st
     assert candidate_refresh.preferences(store, now) == offers, 'Repeated logging is not a new exposure'
     store.rec_ledger.bump_card_view('cards', now)
     assert candidate_refresh.preferences(store, now) != offers
-
-
-@pytest.mark.parametrize('installed', [92], indirect=True)
-def test_refresh_uses_legacy_and_selected_preparation_owners(installed):
-    from tests.core.test_choice_learning_preparation import finish
-    from tests.core.test_choice_publication import publish
-    from yt_playlist.core.preparation import choice_learning as preparation, choice_publication
-
-    store, _ = installed
-    values = ({'interest_version': 'old', 'contexts': [
-                  {'format': 'albums', 'at': 100, 'days': 2, 'episode_support': .5,
-                   'feature': [.25], 'keys': ['unknown|artist']}]},
-              {'state_version': 'old-bandit', 'expires_at': 3600})
-    for surface, value in zip(('choice_interests', 'choice_bandit'), values):
-        store.rec_proposals.put_proposals(surface, value, 100)
-    assert store.rec_proposals.choice_refresh_inputs() == values
-    preparation.JOB.install(store.conn)
-    finish(store.conn)
-    publish(store.conn)
-    assert choice_publication.selected(store.conn) is not None
-    assert not store._choice_learning
-    # Selected relations must serve the fallback even when original payloads are denied.
-    def authorize(action, table, column, *rest):
-        if action == sqlite3.SQLITE_READ and (table == 'rec_proposals' and column == 'payload'
-                or table == 'prepared_choice_learning_original_parts'):
-            return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
-    with store.read_view() as reader:
-        reader.conn.set_authorizer(authorize)
-        try:
-            assert reader.rec_proposals.choice_refresh_inputs() == values
-        finally:
-            reader.conn.set_authorizer(None)

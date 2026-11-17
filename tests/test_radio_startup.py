@@ -11,7 +11,7 @@ from tests.test_radio_start_overlap import poc as owned_poc, radio_schema
 from tests.store_fixture_support import reuse_reporting_reader, use_native_sql_calls, without_query_timing
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from yt_playlist.web.radio_session import PlaylistRadio
-from yt_playlist.library import playlist_generated
+from yt_playlist.library import generated_acquisition
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing', 'controlled_radio_checkpoints')
@@ -40,7 +40,7 @@ def owned_playback(owned_poc, monkeypatch):
 
 def test_newer_direct_play_survives_older_radio_creation(owned_playback, monkeypatch):
     controller, remote, frames, bridge = owned_playback
-    create = playlist_generated.create_generated_playlist
+    create = generated_acquisition.create_generated_playlist
     direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
 
     def create_after_direct(*args, **kwargs):
@@ -48,7 +48,7 @@ def test_newer_direct_play_survives_older_radio_creation(owned_playback, monkeyp
         assert bridge.send_control(direct, intent=bridge.begin_playback_intent())
         return result
 
-    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_after_direct)
+    monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create_after_direct)
     assert controller.start()['ok']
     assert remote.ids
     assert controller.ctx.store.playlists.get_playlist(controller.session.local_id)
@@ -244,18 +244,18 @@ def test_launch_adopts_proven_playback_upload_and_skips_an_omitted_song(poc, mon
     c.ctx.store.tracks.upsert_track(requested['video_id'], requested['title'], requested['artist'], '', 326)
     c.ctx.store.tracks.update_metadata(requested['video_id'],
         {'title': requested['title'], 'artist': requested['artist']}, observation={})
-    create = playlist_generated.create_generated_playlist
+    create = generated_acquisition.create_generated_playlist
 
-    def create_with_receipts(*args):
-        result = create(*args)
+    def create_with_receipts(*args, **kwargs):
+        result = create(*args, **kwargs)
         return {**result, 'added_handles': {requested['video_id']: 'owned-occurrence'}}
 
-    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_with_receipts)
+    monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create_with_receipts)
     substitute = {'videoId': 'v31', 'setVideoId': 'owned-occurrence',
                   'title': requested['title'], 'artists': [{'name': 'Dubfire'}], 'duration_seconds': 326}
     if proof == 'saved_identity':
         substitute['playlistVideoId'] = requested['video_id']
-        monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create)
+        monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create)
     rows = [substitute, {'videoId': 'v3'}] if replace_seed else [{'videoId': 'v1'}, substitute]
     monkeypatch.setattr(remote, 'get_playlist', lambda *args, **kwargs: {'tracks': rows, 'trackCount': 2})
     assert c.start()['starting'] and not frames

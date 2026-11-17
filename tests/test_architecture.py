@@ -287,7 +287,8 @@ def _repository_methods():
     # This guard needs repository declarations and Store's own API, rather
     # than an eagerly parsed index of every application implementation.
     repositories = [_source_tree(path) for path in (SOURCE / 'yt_playlist' / 'repos').rglob('*.py')]
-    store = _source_tree(SOURCE / 'yt_playlist' / 'core' / 'store.py')
+    construction = [_source_tree(SOURCE / 'yt_playlist' / path) for path in
+                    ('core/store.py', 'core/sqlite_database.py', 'library/store_composition.py')]
     methods = {node.name for tree in repositories
                for cls in tree.body if isinstance(cls, ast.ClassDef) and cls.name.endswith('Repo')
                for node in cls.body if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
@@ -295,10 +296,10 @@ def _repository_methods():
                            for decorator in node.decorator_list)}
     # Store's own lifetime and connection API is not a forwarded repository
     # method merely because a repository has a method with the same name.
-    methods -= {node.name for cls in store.body
-                if isinstance(cls, ast.ClassDef) and cls.name == 'Store'
+    methods -= {node.name for tree in construction[:2] for cls in tree.body
+                if isinstance(cls, ast.ClassDef) and cls.name in {'Store', 'SQLiteDatabase'}
                 for node in cls.body if isinstance(node, ast.FunctionDef)}
-    methods -= {target.attr for node in ast.walk(store)
+    methods -= {target.attr for tree in construction for node in ast.walk(tree)
                 if isinstance(node, (ast.Assign, ast.AnnAssign))
                 for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
                 if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)

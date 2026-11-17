@@ -1,20 +1,20 @@
 """Frozen Cruise suitability, composed with five other vibe specialists.
 
 It reads bundled coefficients, never annotations or experiment files.
-Individual suitability is used only within a selected vibe; overall six-way
-classification continues to use the shared model's comparable scores.
+Individual suitability ranks recordings within this purpose; the independent
+specialists do not select an overall six-way winner.
 """
 import base64
 import binascii
-from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
 from statistics import mean
 import zlib
 
-from yt_playlist.core import audio_embedding, fao
+from yt_playlist.core import audio_embedding
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
+from yt_playlist.core.audio_model_files import artifact_loader
 from yt_playlist.rec import audio_vibe_runtime as bounded
 
 FORMAT = 'audio-vibe-cruise-1'
@@ -80,15 +80,7 @@ def _unpack(artifact):
     return {'header': artifact, 'experts': payload}
 
 
-@lru_cache(maxsize=2)
-def _load(path, modified, size):
-    return bounded.read_artifact(path, size, MAX_BYTES, _unpack, exact_size=False)
-
-
-def load(path):
-    path = Path(path)
-    info = fao.read(path).info
-    return _load(str(path.resolve()), info.identity, info.logical_bytes)
+load = artifact_loader(_unpack, MAX_BYTES, exact_size=False)
 
 
 def score(model, values):

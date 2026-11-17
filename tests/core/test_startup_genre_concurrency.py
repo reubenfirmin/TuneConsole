@@ -11,14 +11,15 @@ from yt_playlist.repos.rec_query import RecQueryRepo
 from yt_playlist.util.matching import identity_key
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('consumer', ['facets', 'home_filter', 'home_options'])
 def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, monkeypatch, consumer):
     store, _ = installed
     entry = store.tracks.upsert_track('genre-concurrency', 'Owned genre', 'Artist', None, 200)
     store.tracks.set_track_genre(entry, 'Synth Pop')
-    store.genres.rename_genre('synth pop', 'Renamed Synth')
-    store.genres.set_genre_family('synth pop', 'jazz')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET name='Renamed Synth',family_key='jazz',"
+                           "family_source='custom' WHERE key='synth pop'")
     key = identity_key('Owned genre', 'Artist')
     track = {'key': key, 'video_id': 'genre-concurrency', 'genre': 'Renamed Synth'}
     original = genre_identity.axis_match_rows
@@ -91,7 +92,7 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
         assert store.conn.execute("SELECT family_key FROM genre_catalog WHERE key='synth pop'").fetchone()[0] == 'pop'
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_startup_genres_reuse_an_owned_uncommitted_transaction(installed):
     store, _ = installed
     entry = store.tracks.upsert_track('owned-genre', 'Owned genre', 'Artist', None, 200)

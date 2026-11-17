@@ -43,14 +43,14 @@ def test_profile_repository_reads_detach_references_without_files_or_begin(store
 
 def test_profile_files_are_written_before_the_repository_transaction(store, monkeypatch):
     source = seed_source(store)
-    write, published = fao.write, []
+    prepare, published = fao.prepare, []
 
     def outside_transaction(path, *args, **kwargs):
         assert not store.conn.in_transaction
         published.append(path)
-        return write(path, *args, **kwargs)
+        return prepare(path, *args, **kwargs)
 
-    monkeypatch.setattr(fao, 'write', outside_transaction)
+    monkeypatch.setattr(fao, 'prepare', outside_transaction)
     assert musical_preparation.source_step(store, 30)
     assert not store.conn.execute('SELECT 1 FROM rec_musical_pending WHERE source_key=?', (source,)).fetchone()
     body = '{"version":"v","dimensions":{}}'

@@ -6,6 +6,10 @@ RESULT_SETTING = "rec_autotune_result"
 
 def last_result(store) -> dict | None:
     raw = store.settings.get_setting(RESULT_SETTING)
+    return decode_report(raw)
+
+
+def decode_report(raw):
     if not raw:
         return None
     try:

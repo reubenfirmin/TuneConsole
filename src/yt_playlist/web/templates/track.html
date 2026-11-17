@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_partials/song_menu_button.html" import song_menu %}
+{% from '_partials/artist_links.html' import artist_credit with context %}
 {% block title %}{{ track.title }} · TuneConsole{% endblock %}
 {% block page_class %}page-track{% endblock %}
 {% block body %}
@@ -12,13 +13,13 @@
     </span>
     <div class="pl-headmain">
     <div class="track-detail-heading">
-      {% if track.artist %}<a class="track-detail-artist" href="/artist?name={{ track.artist|urlencode }}">{{ track.artist }}</a>{% endif %}
+      {% if track.artist %}{{ artist_credit(track, 'track-detail-artist') }}{% endif %}
       <h1>{{ track.title }}</h1>
       {% if track.album or track.album_browse %}
       <div class="track-album">
         <span class="muted">From the album</span>
         {% if track.album_browse %}
-          <a class="track-album-name" href="/album?browse={{ track.album_browse|urlencode }}">{{ track.album or 'Open album' }}</a>
+          <a class="track-album-name" href="{{ album_url(track.album_browse) }}">{{ track.album or 'Open album' }}</a>
           {% if is_upload %}<span class="track-album-status muted">In your uploaded collection</span>
           {% elif saved %}<span class="track-album-status muted">Saved to collection</span>
           {% else %}<form hx-post="/collection/save-album" hx-swap="none"><input type="hidden" name="browse_id" value="{{ track.album_browse }}"><button class="btn-ghost track-text-action" type="submit">Save album to collection</button></form>{% endif %}
@@ -58,7 +59,7 @@
     <section class="track-detail-section" aria-labelledby="track-playlists-title">
       <div class="track-section-head"><h2 id="track-playlists-title">In playlists{% if track.playlists %} <span class="count">{{ track.playlists|length }}</span>{% endif %}</h2></div>
       {% if track.playlists %}<ul class="track-memberships">{% for playlist in track.playlists %}
-        <li><a href="/playlist/{{ playlist.id }}">{{ playlist.title }}</a></li>
+        <li><a href="{{ playlist_url(playlist.id) }}">{{ playlist.title }}</a></li>
       {% endfor %}</ul>{% else %}<p class="muted">This upload is not in any synced playlists.</p>{% endif %}
       <div class="track-detail-actions">
         <button type="button" class="btn-ghost track-text-action" data-song='{{ track|tojson }}' data-song-action="create" data-song-context='{"refresh_on_save":true}'>Create playlist with song</button>
@@ -69,7 +70,7 @@
   <section class="track-detail-section" aria-labelledby="track-alternates-title">
     <h2 id="track-alternates-title">Playback alternatives</h2>
     <ul class="track-memberships">{% for alternate in track.playback_alternates %}
-      <li><a href="/track/{{ alternate.video_id|urlencode }}">{{ alternate.title }}</a><span class="muted">{{ alternate.artist }}</span></li>
+      <li><a href="{{ track_url(alternate.video_id) }}">{{ alternate.title }}</a><span class="muted">{{ alternate.artist }}</span></li>
     {% endfor %}</ul>
   </section>
   {% endif %}

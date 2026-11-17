@@ -15,7 +15,7 @@ from threadpoolctl import threadpool_limits
 
 from experiments.audio_lab_tools import source_path
 from experiments.audio_lab_tools.studies import test_candidate_followup_review as independent
-from yt_playlist.rec import audio_vibe_external
+from experiments.audio_lab_tools.legacy import audio_vibe_external
 
 
 EXPERIMENTS = Path(__file__).resolve().parents[2]
@@ -90,7 +90,7 @@ def test_frozen_baselines_reconcile_all_pairs_and_product_scalar_replay(tmp_path
         for relative, expected in plan['code'].items():
             read(DIRECTORY / 'source' / relative, expected)
         product_path = Path(audio_vibe_external.__file__).resolve()
-        assert product_path == EXPERIMENTS.parent / 'src/yt_playlist/rec/audio_vibe_external.py'
+        assert product_path == EXPERIMENTS / 'audio_lab_tools/legacy/audio_vibe_external.py'
         read(product_path, plan['code']['product/audio_vibe_external.py'])
         read(Path(__file__))
         read(Path(independent.__file__))

@@ -32,13 +32,13 @@ def quiet_enrichment(store, monkeypatch, canonical_genre_matcher):
     monkeypatch.setattr(musicbrainz, 'enrich_full',
         lambda *_args, **_kwargs: ('rock', '2001', None, [], []))
 
-    def controlled_probe(track, owner):
+    def controlled_probe(track, owner, *, matcher=None):
         if track['video_id'] == 'quiet-0':
             if case.fault == 'provider':
                 raise RuntimeError(case.diagnostic)
             if case.fault == 'deferred':
                 return base.EnrichmentResult('musicbrainz', deferred_reason=case.diagnostic)
-        return probe(track, owner)
+        return probe(track, owner, matcher=matcher)
 
     def controlled_art(sink, track, results, now_fn):
         if case.fault == 'artwork' and track['video_id'] == 'quiet-0':

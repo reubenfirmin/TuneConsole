@@ -86,13 +86,6 @@ class RecProposalsRepo(Repo):
     def group_checkpoint(self):
         """Small serving identity without decoding the prepared candidate lists."""
         from yt_playlist.core.db_revisions import keyed_reads
-        from yt_playlist.core.preparation import home_publication
-
-        with keyed_reads(self._store, 'rec_proposals', ('adaptive_group_preview',)):
-            handled, header = home_publication.header(self.conn, 'adaptive_group_preview')
-            if handled:
-                return dict(zip(('schema', 'generation', 'mix_regions'),
-                    (header['schema_version'], header['edition_key'], header['mix_regions']))) if header is not None else None
         if self._store._home_display_files:
             return home_outputs.checkpoint(self.conn)
         with keyed_reads(self._store, 'rec_proposals', ('adaptive_group_preview',)):

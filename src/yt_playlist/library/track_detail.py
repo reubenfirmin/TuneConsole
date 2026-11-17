@@ -12,7 +12,7 @@ def detail(store, client_provider, video_id, hints, logger=None):
     known = track is not None
     if track is None:
         track = {field: (hints.get(field) or '')[:1000] for field in
-                 ('title', 'artist', 'album', 'album_browse', 'thumbnail', 'duration')}
+                 ('title', 'artist', 'album', 'album_browse', 'artist_browse', 'thumbnail', 'duration')}
         # Most discovery links already carry their preview. A bare shared URL can
         # still resolve live without acquiring library or discovery membership.
         if not track['title']:
@@ -20,6 +20,7 @@ def detail(store, client_provider, video_id, hints, logger=None):
                 client = catalog_client(client_provider())
                 details = (client.get_song(video_id) if client else {}).get('videoDetails') or {}
                 track.update(title=details.get('title') or '', artist=details.get('author') or '',
+                             artist_browse=details.get('channelId') or '',
                              duration=details.get('lengthSeconds'),
                              thumbnail=best_thumb((details.get('thumbnail') or {}).get('thumbnails')))
             except Exception:

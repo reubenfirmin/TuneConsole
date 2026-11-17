@@ -1,10 +1,12 @@
 """Clicked temporal pools consume cut points and recheck current feedback."""
+from unittest.mock import Mock
+
 import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import library_pool, mode_surfaces
+from yt_playlist.rec import library_pool, library_pool_inputs
 from yt_playlist.util.matching import identity_key
 
 
@@ -25,7 +27,8 @@ def _pristine_current_schema():
 def test_temporal_pool_keeps_its_date_band_and_live_feedback(store, monkeypatch):
     # Cut points are completed lower-model input. The real pool publication,
     # catalog metadata, feedback write and post-publication filter stay real.
-    monkeypatch.setattr(mode_surfaces, 'bundle_metadata', lambda _: {'year_cuts': [1990, 2010]})
+    metadata = Mock(return_value={'year_cuts': [1990, 2010]})
+    monkeypatch.setattr(library_pool_inputs.mode_surfaces, 'bundle_metadata', metadata)
     keys = []
     with atomic_write(store):
         for i, year in enumerate([1960, 1980, 1995, 2005, 2010, 2020]):
@@ -35,5 +38,7 @@ def test_temporal_pool_keeps_its_date_band_and_live_feedback(store, monkeypatch)
             keys.append(key)
     parameters = {'lane': 'temporal', 'epoch': 1, 'include_genres': ['jazz'], 'avoid_genres': []}
     library_pool.prepare(store, 1, parameters)
+    assert [track['year'] for track in library_pool.pick(store, 1, parameters)] == [1995, 2005, 2010]
+    metadata.assert_called_once_with(store)
     store.rec_model.record_feedback('for_you', keys[3], 'dismiss', now=2)
     assert [track['year'] for track in library_pool.pick(store, 3, parameters)] == [1995, 2010]

@@ -10,8 +10,8 @@ import numpy as np
 from threadpoolctl import threadpool_limits
 
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
-from yt_playlist.rec import audio_vibe_external as runtime
-from yt_playlist.rec.audio_vibe_model import DEFAULT_PATH, _load
+from experiments.audio_lab_tools.legacy import audio_vibe_external as runtime
+from experiments.audio_lab_tools.legacy.audio_vibe_model import DEFAULT_PATH, _load
 
 from ..support.external_experiment import OUT, digest, save, stamp
 from ..evaluation.external_export_check import replay

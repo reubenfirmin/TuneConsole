@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block page_class %}page-album{% endblock %}{% block body %}
+{% from '_partials/artist_links.html' import artist_credit with context %}
 {% if not album %}
 <div class="page-head">
   <h1>Album unavailable</h1>
@@ -27,7 +28,7 @@
     <p class="pl-stats">
       {# A compilation upload has no single album artist, so YouTube returns none: an empty amber
          pill in the header is worse than no pill. #}
-      {% if album.artist %}<a class="album-artist" href="/artist?name={{ album.artist|urlencode }}">{{ album.artist }}</a>{% endif %}
+      {% if album.artist %}{{ artist_credit(dict(album, browse=browse_id), 'album-artist', album=true) }}{% endif %}
       {% if album.year %}<span class="stat">{{ album.year }}</span>{% endif %}
       <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
     </p>
@@ -114,8 +115,7 @@
 </div>
 {% endif %}
 
-{% include '_partials/album_tracks.html' %}
-<datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
+<div id="album-tracks">{% include '_partials/album_tracks.html' %}</div>
 
 {% if companion %}
 <details class="album-page-companion" data-choice-opportunity="{{ companion_recipe.opportunity_id }}" data-choice-option="companion">

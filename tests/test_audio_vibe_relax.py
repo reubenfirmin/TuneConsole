@@ -10,7 +10,8 @@ from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
+from yt_playlist.rec import audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
@@ -48,13 +49,12 @@ def test_relax_preserves_both_specialists_shared_classification_and_input(count,
     rows = samples()[:count]
     untouched = deepcopy(rows)
     before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
-    assert {k: v for k, v in before.items() if k not in ('suitability', 'individual_models')} == {
-        k: v for k, v in after.items() if k not in ('suitability', 'individual_models')}
+    assert after['arc'] == before['arc']
     for vibe in ('cruise', 'release'):
         assert after['individual_models'][vibe] == before['individual_models'][vibe]
     assert after['individual_models']['relax']['sample_count'] == count
-    assert after['suitability']['relax'] != before['suitability']['relax']
-    for vibe in shared.LABELS:
+    assert 'relax' not in before['suitability']
+    for vibe in before['suitability']:
         if vibe != 'relax':
             assert after['suitability'][vibe] == before['suitability'][vibe]
     assert cruise.apply(rows, after) == release.apply(rows, after) == after
@@ -130,14 +130,14 @@ def test_optional_failure_preserves_both_specialists_and_shared(failure, tmp_pat
 def test_provenance_and_excerpt_bounds(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert predictor.predict(rows)['suitability'] == {}
     model = relax.load(relax.DEFAULT_PATH)
     for values in ([], [[.2] * 200] * 129, [[float('nan')] * 200], [[1e7] * 200], [[.2] * 199]):
         with pytest.raises(ValueError):
             relax.score(model, values)
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert set(predictor.predict(rows)['suitability']) == {'cruise', 'release', 'relax'}
 
 
 def test_default_active_and_local_rollback_change_preparation_identity(monkeypatch):

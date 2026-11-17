@@ -23,7 +23,7 @@ def artist_cache(monkeypatch):
             open_fn=open_request, pacer=SimpleNamespace(wait=lambda: None))
         monkeypatch.setattr(musicbrainz, '_iao', iao)
         monkeypatch.setattr(musicbrainz, '_top_label',
-                            lambda data: (data.get('genres') or [{}])[0].get('name'))
+                            lambda data, matcher=None: (data.get('genres') or [{}])[0].get('name'))
         return iao, clock
     return install
 

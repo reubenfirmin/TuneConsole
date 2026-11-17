@@ -11,18 +11,16 @@ actually is). JSON stays the recommended path -- it carries real ISO timestamps 
 but the HTML export is no longer a dead end: it is parsed English-locale-first, with honest
 reporting (never silently lossy) of any entries whose date text could not be parsed."""
 import datetime
-import hashlib
 import io
 import json
 import re
 import time
 import zipfile
-from collections import Counter
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
-from yt_playlist.util.matching import identity_key
+from yt_playlist.controllers.history_loading import TakeoutHistory, seed_takeout
 
 
 class TakeoutFormatError(ValueError):
@@ -384,36 +382,10 @@ def import_takeout(store, raw, *, on_progress=None) -> dict:
 
     Returns {"error": "no identity configured"} when no identity exists yet (mirrors live_plays'
     None-means-nothing-to-attribute-to semantics; there is nothing sensible to import into)."""
-    ident = resolve_identity(store, "")
-    if ident is None:
-        return {"error": "no identity configured"}
-    progress = on_progress or (lambda text: None)
-    progress('Reading Takeout history…')
-    parsed, unparsed_dates = load_watch_history(raw)   # the .zip Takeout serves works as-is; JSON
-                                                        # or the default HTML export, either way
-    progress(f'Matching {len(parsed):,} history entries to your library…')
-    owned = set(store.rec_query.library_keys())
-    matched_rows, unmatched = [], Counter()
-    for p in parsed:
-        key = store.tracks.identity_key_for_video(p["video_id"]) if p["video_id"] else None
-        if key is None and not p["video_id"]:
-            key = store.tracks.match_recording(p["title"], p["artist"])
-        if key not in owned:
-            unmatched[p["artist"] or "?"] += 1
-            continue
-        matched_rows.append((key, p["video_id"], p["ts"]))
-    progress(f'Saving {len(matched_rows):,} matched plays…')
-    plays_added,events_added = store.history.import_listening_events(ident,matched_rows)
-    data = raw.encode() if isinstance(raw, str) else raw
-    import_id = store.history.record_takeout_import(
-        hashlib.sha256(data).hexdigest(), ident, time.time(), parsed, unparsed_dates)
-    span_days = 0
-    if parsed:
-        span_days = int((parsed[-1]["ts"] - parsed[0]["ts"]) // 86400)
-    return {"matched": len(matched_rows), "unmatched": sum(unmatched.values()),
-            "plays_added": plays_added, "events_added": events_added,
-            "span_days": span_days, "unmatched_artists": dict(unmatched),
-            "unparsed_dates": unparsed_dates, "import_id": import_id}
+    return TakeoutHistory(identity=lambda: resolve_identity(store, ''), parse=load_watch_history,
+        library_keys=store.rec_query.library_keys, video_key=store.tracks.identity_key_for_video,
+        match_recording=store.tracks.match_recording, history=store.history,
+        now=time.time).run(raw, on_progress=on_progress)
 
 
 def seed_discovery_from_unmatched(store, unmatched_artists, now, min_plays=3) -> int:
@@ -439,14 +411,4 @@ def seed_discovery_from_unmatched(store, unmatched_artists, now, min_plays=3) ->
     even for existing suggestions, so removing another import cannot discard this contribution.
 
     Returns how many artists were seeded."""
-    existing = {a.get("artist", "") for a in (store.discovery.get_discovered_artists() or [])}
-    seeded = 0
-    for artist, plays in unmatched_artists.items():
-        if plays < min_plays:
-            continue
-        if artist in existing:
-            store.discovery.retain_discovered_artist(artist, float(plays))
-        else:
-            store.discovery.upsert_discovered_artist(artist, float(plays), None, None, None, now)
-            seeded += 1
-    return seeded
+    return seed_takeout(store.discovery, unmatched_artists, now, min_plays)

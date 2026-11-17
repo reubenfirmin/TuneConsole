@@ -1,10 +1,12 @@
 """Home Radio and saved-playlist session endpoints."""
+from functools import wraps
 import logging
 
 from fastapi import APIRouter, Body, HTTPException, Request
 
-from yt_playlist.core.activity import cancellable_work, WorkClosing
-from yt_playlist.rec import access, onboarding, radio_tuning
+from yt_playlist.rec import access
+from yt_playlist.web.context import Ctx
+from yt_playlist.web.artist_links import radio_navigation
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +15,23 @@ def build(ctx):
     router = APIRouter()
     radio = ctx.radio
 
+    def present(state):
+        if not state.get('directions'):
+            return state
+        with ctx.store.read_view() as reader:
+            return radio_navigation(state, reader.artists)
+
+    async def present_command(command, *args, **kwargs):
+        @wraps(command)
+        def run():
+            return present(command(*args, **kwargs))
+
+        return await radio.work.to_thread(run)
+
     @router.get("/radio/status")
     def status():
         radio.prepare()
-        return radio.state()
+        return present(radio.state())
 
     @router.get("/radio/seeds")
     async def seeds():
@@ -35,7 +50,7 @@ def build(ctx):
         fields = ('playlist_id', 'video_id', 'episode_id')
         if any(not isinstance(data.get(key), str) or not data[key] for key in fields):
             return {'ok': False}
-        intent = ctx.bridge.begin_playback_intent()
+        intent = Ctx.radio_commands(ctx).admit_resume()
         return await radio.work.to_thread(radio.resume_playback,
             data['playlist_id'], data['video_id'], data['episode_id'], intent=intent)
 
@@ -55,34 +70,11 @@ def build(ctx):
         if playlist_id is not None and (type(playlist_id) is not int or not 0 < playlist_id < 2**63 or data.get("video_id")):
             return {"ok": False, "reason": "Choose a playlist to start radio."}
         try:
-            with radio.launch_request(data.get('launch_id')) as cancelled:
-                if cancelled.is_set():
-                    return {'ok': False, 'reason': 'Stopped during start.'}
-                intent = ctx.bridge.begin_playback_intent()
-
-                def launch():
-                    # Preflight is disposable; admitted remote writes keep their
-                    # existing confirmation and reconciliation protocol.
-                    try:
-                        with cancellable_work(cancelled.is_set):
-                            if cancelled.is_set():
-                                raise WorkClosing('Radio launch stopped')
-                            bootstrap = radio.bootstrap()
-                            starter = (not onboarding.setup_completed(ctx.store)
-                                       and ctx.store.settings.get_setting('onboard_listening_format') == 'radio'
-                                       and playlist_id is None and data.get('menu_id') == bootstrap.get('seedMenu')
-                                       and any(track.get('video_id') == data.get('video_id') for track in bootstrap['seeds']))
-                            if not starter and not bootstrap['state'].get('active'):
-                                try:
-                                    access.require(ctx.store, 'radio', now=ctx.now_fn(), radio=bootstrap)
-                                except access.AccessDenied as exc:
-                                    raise HTTPException(409, str(exc)) from exc
-                    except WorkClosing:
-                        return {'ok': False, 'reason': 'Stopped during start.'}
-                    return radio.start(data.get("video_id"), data.get("local_date"), data.get("menu_id"),
-                                       playlist_id=playlist_id, intent=intent, cancelled=cancelled)
-
-                return await radio.work.to_thread(launch)
+            commands = Ctx.radio_commands(ctx)
+            with commands.admit_start(data) as (intent, cancelled):
+                return await present_command(commands.start, data, intent, cancelled)
+        except access.AccessDenied as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
 
@@ -91,7 +83,7 @@ def build(ctx):
         launch_id = (data or {}).get('launch_id')
         if launch_id is not None and (not isinstance(launch_id, str) or not 1 <= len(launch_id) <= 64):
             return {'ok': False}
-        return radio.stop(launch_id=launch_id)
+        return present(radio.stop(launch_id=launch_id))
 
     @router.post("/radio/select")
     async def select(request: Request):
@@ -102,36 +94,23 @@ def build(ctx):
             video_id = data.get('video_id')
             if 'video_id' in data and (not isinstance(video_id, str) or not video_id.strip()):
                 raise ValueError("Choose a current song from the stream.")
-            intent = ctx.bridge.begin_playback_intent() if video_id else None
-            return await radio.work.to_thread(radio.select, data["proposal_id"], data["menu_id"], video_id,
-                                              intent=intent)
+            intent = Ctx.radio_commands(ctx).admit_select(video_id)
+            return await present_command(radio.select, data["proposal_id"], data["menu_id"], video_id, intent=intent)
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
 
     @router.post("/radio/tune")
     async def tune(request: Request):
         try:
-            values = radio_tuning.controls(await request.json())
+            commands = Ctx.radio_commands(ctx)
+            values, serial = commands.admit_tuning(await request.json())
         except (ValueError, TypeError):
             logger.info("Radio tuning refused: reason=invalid_controls")
             return {"ok": False, "tune_reason": "invalid_controls"}
-        serial = radio.reserve_tuning()
         logger.info("Radio tuning requested: serial=%d values=%s client=%r", serial, values,
                     request.headers.get('x-radio-tuning-client', 'unknown')[:64])
 
-        def apply_tuning():
-            try:
-                # Use the access projection directly. Building the entire Home
-                # journey here adds unrelated preparation to an explicit Apply.
-                if values['energy'] != .5:
-                    access.require(ctx.store, 'vibes', now=ctx.now_fn())
-            except access.AccessDenied:
-                logger.info("Radio tuning refused: reason=energy_locked values=%s", values)
-                return {"ok": False, "tune_reason": "energy_locked"}
-            logger.info("Radio tuning admitted: values=%s", values)
-            return radio.tune(values, serial=serial)
-
-        return await radio.work.to_thread(apply_tuning)
+        return await present_command(commands.tune, values, serial)
 
     @router.post("/radio/seen")
     async def seen(request: Request):
@@ -139,7 +118,7 @@ def build(ctx):
             data = await request.json()
             if not isinstance(data, dict) or not isinstance(data.get("menu_id"), str):
                 return {"ok": False}
-            return await radio.work.to_thread(radio.seen, data["menu_id"])
+            return await present_command(radio.seen, data["menu_id"])
         except ValueError:
             return {"ok": False}
 

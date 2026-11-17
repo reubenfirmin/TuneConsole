@@ -5,6 +5,7 @@ import time
 import pytest
 
 from yt_playlist.core import collection_recovery as recovery, collection_recovery_epoch
+from yt_playlist.controllers.collection_retention import CollectionCollector
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.store import Store
@@ -67,7 +68,7 @@ def owner_history(owner_schema, tmp_path_factory):
         store._snapshot_revisions = Revisions(store.conn)
         yield store
     finally:
-        recovery.close(store)
+        store.retention.collections.close()
         store.conn.close()
 
 
@@ -113,7 +114,7 @@ def test_large_unindexed_owner_history_makes_progress(owner_history, record_prop
             writer.conn.execute('PRAGMA synchronous=NORMAL')
         for turn in range(12):
             started = time.monotonic()
-            recovery.maintain(store)
+            store.retention.collections.maintain()
             turns.append(time.monotonic() - started)
             assert not store.conn.in_transaction
             writer.settings.set_setting('between scale cleanup turns', str(turn))
@@ -124,11 +125,11 @@ def test_large_unindexed_owner_history_makes_progress(owner_history, record_prop
         record_property('turn_count', len(turns))
         record_property('collector_total_seconds', sum(turns))
         record_property('maximum_turn_seconds', max(turns))
-        assert recovery.OrphanCollector.BUDGET_S == .05
+        assert CollectionCollector.BUDGET_S == .05
     finally:
         if external:
             writer.conn.close()
-        recovery.close(store)
+        store.retention.collections.close()
 
 
 @pytest.mark.parametrize('external', [False, True])
@@ -138,23 +139,24 @@ def test_new_reference_invalidates_partial_scan(file_backed_store, monkeypatch, 
         store.playlist_recipes.set_recipe(f'earlier-{index}', {'value': index}, 1)
     filename, digest, size = recovery.publish(store.conn, 'playlist-recipe', 1, {'keep': True})
     orphan = Path(filename)
-    monkeypatch.setattr(recovery.OrphanCollector, 'OWNER_PAGE', 2)
-    check = recovery.check_cancellable_work
+    monkeypatch.setattr(CollectionCollector, 'OWNER_PAGE', 2)
+    from yt_playlist.repos import collection_retention
+    check = collection_retention.check_cancellable_work
 
     def interrupt_after_first_page():
-        collector = store._collection_orphans
-        if (collector._table_index < len(collector._tables)
-                and collector._tables[collector._table_index][0] == 'rec_recipes'
-                and collector._after is not None):
+        collector = store.retention.database._collection_orphans
+        if (collector.owners._table_index < len(collector.owners._tables)
+                and collector.owners._tables[collector.owners._table_index][0] == 'rec_recipes'
+                and collector.owners._after is not None):
             raise WorkBudgetExceeded('Pause after a completed owner page')
         check()
 
     with monkeypatch.context() as interrupted:
-        interrupted.setattr(recovery, 'check_cancellable_work', interrupt_after_first_page)
+        interrupted.setattr(collection_retention, 'check_cancellable_work', interrupt_after_first_page)
         for _ in range(30):
-            recovery.maintain(store)
-            collector = store._collection_orphans
-            if collector._after is not None:
+            store.retention.collections.maintain()
+            collector = store.retention.database._collection_orphans
+            if collector.owners._after is not None:
                 break
         else:
             pytest.fail('Did not reach the partial owner scan')
@@ -168,12 +170,12 @@ def test_new_reference_invalidates_partial_scan(file_backed_store, monkeypatch, 
                 recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE id=1''',
                 ('1' * 32, filename, digest, size))
         for _ in range(100):
-            recovery.maintain(store)
-            if not recovery.pending(store):
+            store.retention.collections.maintain()
+            if not store.retention.collections.pending():
                 break
-        assert not recovery.pending(store)
+        assert not store.retention.collections.pending()
         assert orphan.exists()
     finally:
         if external:
             writer.conn.close()
-        recovery.close(store)
+        store.retention.collections.close()

@@ -1,45 +1,25 @@
 """Bounded opaque output files owned directly by recommendation publications."""
 import hashlib
 import json
-import math
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 import tempfile
-from collections import OrderedDict
+import time
 from contextlib import contextmanager
-from threading import Lock
 
-from . import policy_documents, fao
+from . import policy_documents, fao, file_collection
 from .activity import check_cancellable_work
 from .evidence_ledger import canonical, _sync_directory
+from .recommendation_content import (
+    FORMAT, MAX_BYTES, decode as _decode, decode_json, encode, read,
+    read_encoded as _read, record_id, record_path,
+)
 
-FORMAT = 'prepared-recommendation-output-1'
 BACKUP_FORMAT = 'prepared-recommendation-backup-1'
-MAX_BYTES = 1024 * 1024
 MANIFEST_BYTES = 8 * 1024 * 1024
 OUTPUT_OWNERS = ('prepared_outputs', 'album_note_outputs', 'listening_output_files', 'home_display_files',
                  'recommendation_report_files', 'model_pair_files', 'radio_seed_output', 'model_autotune_output')
-_HOME_SURFACES = frozenset({'home_prepared', 'home_tuned', 'home_choice'})
-_HOME_CACHE_BYTES = 16 * 1024 * 1024
-_home_parts = OrderedDict()
-_home_parts_lock = Lock()
-
-
-def _file_identity(filename):
-    observed = Path(filename).stat()
-    return (observed.st_dev, observed.st_ino, observed.st_size,
-            observed.st_mtime_ns, observed.st_ctime_ns)
-
-
-def decode_json(raw):
-    """Validate opaque JSON without silently admitting non-finite numbers."""
-    def invalid(value):
-        raise ValueError('Non-finite number in prepared output')
-    def number(value):
-        parsed = float(value)
-        return parsed if math.isfinite(parsed) else invalid(value)
-    return json.loads(raw, parse_float=number, parse_constant=invalid)
 
 
 def root_for_database(path, memory_key):
@@ -54,16 +34,6 @@ def directory(conn):
     return root_for_database(path, getattr(conn, '_policy_memory_key', str(id(conn))))
 
 
-def encode(surface, chunk_key, value):
-    if (not isinstance(surface, str) or not surface or len(surface.encode()) > 1024
-            or not isinstance(chunk_key, str) or len(chunk_key.encode()) > 1024):
-        raise ValueError('Invalid prepared output owner')
-    encoded = canonical({'format': FORMAT, 'surface': surface, 'chunk_key': chunk_key, 'output': value})
-    if len(encoded) > MAX_BYTES:
-        raise ValueError('Prepared output exceeds its chunk byte budget')
-    return encoded
-
-
 def publish(root, encoded, *, age=None):
     if not isinstance(encoded, bytes) or len(encoded) > MAX_BYTES:
         raise ValueError('Invalid prepared output bytes')
@@ -71,61 +41,6 @@ def publish(root, encoded, *, age=None):
     # Validate the exact bytes before exposing a durable path to an SQL owner.
     _decode(encoded)
     return policy_documents._publish_encoded(root, encoded, digest, age=age), digest, len(encoded)
-
-
-def _decode(encoded, surface=None, chunk_key=None):
-    document = json.loads(encoded)
-    if (not isinstance(document, dict) or set(document) != {'format', 'surface', 'chunk_key', 'output'}
-            or document['format'] != FORMAT or not isinstance(document['surface'], str) or not document['surface']
-            or not isinstance(document['chunk_key'], str) or canonical(document) != encoded
-            or surface is not None and document['surface'] != surface
-            or chunk_key is not None and document['chunk_key'] != chunk_key):
-        raise ValueError('Unsupported prepared output document or owner')
-    return document
-
-
-def _read(filename, digest, size, *, surface=None, chunk_key=None, with_age=False, validate_document=True):
-    if type(size) is not int or not 0 < size <= MAX_BYTES:
-        raise ValueError('Invalid prepared output byte range')
-    path = Path(filename)
-    with fao.read(path) as stream:
-        age = stream.info
-        encoded = stream.read(size + 1)
-    if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
-        raise ValueError('Prepared output does not match its digest')
-    if validate_document:
-        _decode(encoded, surface, chunk_key)
-    return (encoded, age) if with_age else encoded
-
-
-def _read_output(filename, digest, size, *, surface, chunk_key):
-    encoded = _read(filename, digest, size, surface=surface, chunk_key=chunk_key, validate_document=False)
-    return _decode(encoded, surface, chunk_key)['output']
-
-
-def read(filename, digest, size, *, surface, chunk_key):
-    # Home parts are immutable strings, revisited by readiness and rendering.
-    # Retain validated bytes only while the physical file and exact SQL owner
-    # still match. Never retain a live readiness or eligibility decision.
-    if type(size) is not int or not 0 < size <= MAX_BYTES:
-        raise ValueError('Invalid prepared output byte range')
-    if surface not in _HOME_SURFACES:
-        return _read_output(filename, digest, size, surface=surface, chunk_key=chunk_key)
-    identity = _file_identity(filename)
-    key = (str(filename), digest, size, surface, chunk_key, identity)
-    with _home_parts_lock:
-        cached = _home_parts.get(key)
-        if cached is not None:
-            _home_parts.move_to_end(key)
-            return cached[0]
-    value = _read_output(filename, digest, size, surface=surface, chunk_key=chunk_key)
-    if isinstance(value, str) and _file_identity(filename) == identity:
-        with _home_parts_lock:
-            _home_parts[key] = (value, len(value.encode()))
-            while (len(_home_parts) > 128
-                    or sum(item[1] for item in _home_parts.values()) > _HOME_CACHE_BYTES):
-                _home_parts.popitem(last=False)
-    return value
 
 
 def references(conn):
@@ -236,16 +151,32 @@ def _restore(conn, manifest, *, directory, references, owners, relocate):
         raise ValueError('Prepared output restore requires an idle connection')
     conn.execute('BEGIN IMMEDIATE')
     try:
-        actual = {(row[0], row[1]): (row[2], row[3], row[5], row[6]) for row in references(conn)}
+        retained = list(references(conn))
+        actual = {(row[0], row[1]): (row[2], row[3], row[5], row[6]) for row in retained}
         expected = {key: (entry['surface'], entry['chunk_key'], entry['digest'], entry['byte_size'])
                     for key, entry in entries.items()}
         if actual != expected:
             raise ValueError('Prepared output backup does not match database owners')
+        identities = {}
+        for owner, identity, surface, key, filename, digest, size in retained:
+            file_id = record_id(filename)
+            if file_id is not None:
+                row = conn.execute('SELECT output_owner,surface,chunk_key,content_digest,byte_size,file_status '
+                    'FROM recommendation_file_writes WHERE id=?', (file_id,)).fetchone()
+                if row is None or tuple(row) != (owner, surface, key, digest, size, 'ready'):
+                    raise ValueError('Prepared output backup has an inconsistent file identity')
+                identities[owner, identity] = file_id
         files = {}
+        from .recommendation_files import RecommendationFiles
+        destination = RecommendationFiles(directory(conn))
         for key, entry in entries.items():
             encoded, age = _read(root / entry['relative_filename'], entry['digest'], entry['byte_size'],
                                 surface=entry['surface'], chunk_key=entry['chunk_key'], with_age=True)
-            files[key] = publish(directory(conn), encoded, age=age)[0]
+            if key in identities:
+                files[key] = destination.publish_reserved(identities[key], encoded,
+                    expected=(entry['digest'], entry['byte_size']), age=age)[0]
+            else:
+                files[key] = publish(destination.root, encoded, age=age)[0]
         # All files are durable before any owner is relocated.
         relocate(conn, files)
         conn.commit()
@@ -274,8 +205,9 @@ class OrphanCollector:
     def __init__(self, root, *, owners=None):
         self.root = Path(root)
         self.owners = tuple((owner, 'filename') for owner in OUTPUT_OWNERS) if owners is None else tuple(owners)
-        self.paths = (path for path in self.root.glob('*/*.json'))
+        self.paths = file_collection.walk_entries(self.root, max_depth=2)
         self.batch = None
+        self._batch_entries = 0
         self.removed = self.byte_size = 0
         self._collecting = False
         self._batch_limit = 128
@@ -283,6 +215,7 @@ class OrphanCollector:
     def close(self):
         self.paths.close()
         self.batch = None
+        self._batch_entries = 0
 
     @contextmanager
     def candidates(self, *, limit=128):
@@ -290,8 +223,10 @@ class OrphanCollector:
             raise ValueError('Invalid prepared output collection batch')
         self._batch_limit = limit
         if self.batch is None:
-            self.batch = list(islice(self.paths, limit))
-        if not self.batch:
+            entries = list(islice(self.paths, limit))
+            self._batch_entries = len(entries)
+            self.batch = [path for path in entries if path is not None and path.suffix == '.json']
+        if not self._batch_entries:
             yield []
             return
         with (self.root / '.readers.lock').open('a+b') as stream:
@@ -307,7 +242,7 @@ class OrphanCollector:
                 unlock()
 
     def remove_unowned(self, owned):
-        if not self.batch:
+        if not self._batch_entries:
             self.close()
             return CollectionProgress()
         if not self._collecting:
@@ -318,7 +253,10 @@ class OrphanCollector:
                 check_cancellable_work()
                 if str(path) not in owned:
                     try:
-                        length = fao.read(path).info.compressed_bytes
+                        info = fao.read(path).info
+                        if record_id(path) is not None and info.ctime_ns / 1e9 > time.time() - 30 * 86400:
+                            continue
+                        length = info.compressed_bytes
                         if not fao.delete(path, missing_ok=True):
                             continue
                     except FileNotFoundError:
@@ -329,8 +267,9 @@ class OrphanCollector:
         finally:
             for parent in changed:
                 _sync_directory(parent)
-        checked = len(self.batch)
+        checked = self._batch_entries
         self.batch = None
+        self._batch_entries = 0
         pending = checked == self._batch_limit
         if not pending:
             self.close()

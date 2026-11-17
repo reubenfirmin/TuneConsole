@@ -6,6 +6,103 @@ from yt_playlist.rec.onboarding_outputs import MIN_MIXES, prepared_mixes_ready, 
 from yt_playlist.util.duration import parse_duration
 
 SETUP_COMPLETE = 'onboard_setup_complete'
+LASTFM_NUDGE_SNOOZE_S = 30 * 86400
+TAKEOUT_NAG_SNOOZE_S = 90 * 86400
+INTEGRATION_REMINDER_DELAY_S = 7 * 86400
+
+
+def reminder_due(*, eligible, dismissed_at, now, snooze):
+    if not eligible:
+        return False
+    try:
+        return now - float(dismissed_at) >= snooze
+    except (ValueError, TypeError):
+        return True
+
+
+def integration_reminder_due(*, recommendation_at, dismissed_at, now, snooze):
+    """Follow an eligible unlock recommendation one week later, retaining its snooze."""
+    return reminder_due(eligible=recommendation_at is not None
+                        and now >= recommendation_at + INTEGRATION_REMINDER_DELAY_S,
+                        dismissed_at=dismissed_at, now=now, snooze=snooze)
+
+
+def lastfm_nudge_due(store, now):
+    from yt_playlist.rec import account_growth
+    node = next(node for node in account_growth.view(store, now)['nodes'] if node['id'] == 'lastfm')
+    return integration_reminder_due(recommendation_at=node['recommendation_at'],
+        dismissed_at=store.settings.get_setting('lastfm_nudge_dismissed_at'),
+        now=now, snooze=LASTFM_NUDGE_SNOOZE_S)
+
+
+def takeout_nag_due(store, now):
+    from yt_playlist.rec import account_growth
+    node = next(node for node in account_growth.view(store, now)['nodes'] if node['id'] == 'takeout')
+    return integration_reminder_due(recommendation_at=node['recommendation_at'],
+        dismissed_at=store.settings.get_setting('takeout_nag_dismissed_at'),
+        now=now, snooze=TAKEOUT_NAG_SNOOZE_S)
+
+
+def completion(*, artists_required, remembered, mixes_ready, albums_ready, imported):
+    complete = not artists_required and (remembered or _setup_complete(
+        mixes_ready=mixes_ready, albums_ready=albums_ready))
+    return complete, 'artists' if artists_required else 'ready' if complete else 'import' if not imported else 'learn'
+
+
+def starter(store, radio, now):
+    """Complete starter query, including local facts used to build its listening offer."""
+    from yt_playlist.rec import home_cards, artist_start
+    result = starter_kind(store, radio.bootstrap)
+    if result['kind'] == 'artists':
+        return {**result, 'artist_choices': store.discovery.starter_artists(),
+                'song_choices': artist_start.saved_songs(store),
+                'minimum_artists': artist_start.MIN_ARTISTS}
+    if result['kind'] == 'albums':
+        return {**result, 'album': starter_album(store)}
+    if result['kind'] == 'radio':
+        return {**result, 'radio_bootstrap': result['bootstrap'],
+                'radio_tracks': radio.history_tracks(result['bootstrap']['state'])}
+    tracks = library_sample(store, n=home_cards.PROTO_SIZE)
+    # A one-song import is not a ready listening session. Once the actual import
+    # has finished, a genuinely small collection can still be played.
+    if len(tracks) < 3 and store.settings.get_setting('last_sync_at') is None:
+        tracks = []
+    return {**result, 'proto': home_cards._proto(store, 'onboard_library', 'First sounds', tracks, now)
+            if tracks else None}
+
+
+def sample(store, kind, clients, now):
+    from yt_playlist.core.accounts import main_client
+    from yt_playlist.rec import home_cards
+    tracks = (radio_sample(store, main_client(store, clients()), now, n=home_cards.PROTO_SIZE)
+              if kind == 'onboard_radio' else library_sample(store, n=home_cards.PROTO_SIZE))
+    return home_cards._proto(store, kind, 'Something to listen to', tracks, now) if tracks else None
+
+
+def status(store, now, jobs, worker):
+    from yt_playlist.rec import home_preferences
+    result = arrival_status(store, now)
+    result['setup']['listening_format'] = home_preferences.default_format(store)
+    result['setup'].update({key: value for key, value in import_progress(store, jobs, worker).items()
+                            if key != 'complete'})
+    return result
+
+
+def import_progress(store, jobs, worker):
+    """Cheap import evidence must remain available while readiness is computing."""
+    job = jobs.find_active_library()
+    events = job.events.since(0)[1] if job else []
+    progress = next((event for _, event in reversed(events) if event.get('stage')), {})
+    activity = progress.get('stage')
+    current = progress.get('i', progress.get('index'))
+    target = progress.get('total', progress.get('count'))
+    completed = progress.get('completed', max(0, (current or 1) - 1))
+    imported = store.settings.get_setting('last_sync_at') is not None
+    return dict(running=bool(job), training=bool(worker and worker.busy),
+        complete=store.settings.get_setting(SETUP_COMPLETE) == '1',
+        imported=imported,
+        step=next((event.get('text', '') for _, event in reversed(events) if event.get('text')), ''),
+        activity=activity, current=current, target=target, completed=completed)
 
 
 def starter_kind(store, radio_bootstrap):
@@ -17,14 +114,24 @@ def starter_kind(store, radio_bootstrap):
     from yt_playlist.rec import artist_start, home_preferences
 
     if artist_start.required(store):
-        return {'kind': 'artists'}
+        return select_starter(artists_required=True)
     preference = home_preferences.default_format(store)
     if preference == 'albums':
-        return {'kind': 'albums'}
+        return select_starter(preference=preference)
     if preference == 'radio':
         bootstrap = radio_bootstrap()
-        if (bootstrap['seeds'] and bootstrap.get('seedMenu')) or bootstrap['state'].get('active'):
-            return {'kind': 'radio', 'bootstrap': bootstrap}
+        return select_starter(preference=preference, bootstrap=bootstrap)
+    return select_starter(preference=preference)
+
+
+def select_starter(*, artists_required=False, preference='mixes', bootstrap=None):
+    if artists_required:
+        return {'kind': 'artists'}
+    if preference == 'albums':
+        return {'kind': 'albums'}
+    if preference == 'radio' and bootstrap and (
+            bootstrap['seeds'] and bootstrap.get('seedMenu') or bootstrap['state'].get('active')):
+        return {'kind': 'radio', 'bootstrap': bootstrap}
     return {'kind': 'library', 'radio_fallback': preference == 'radio'}
 
 
@@ -75,18 +182,23 @@ def setup_completed(store) -> bool:
             continue
         if not isinstance(shown, dict):
             continue
-        if surface == 'home_shown':
-            signatures = shown.get('signatures')
-            if isinstance(signatures, list) and any(isinstance(value, str) and value for value in signatures):
-                return True
-        elif isinstance(shown.get('opportunity_id'), str) and shown['opportunity_id']:
-            if surface == 'choice_window:mixes':
-                from yt_playlist.rec import choice_evidence
-                offer = choice_evidence.opportunity(store, shown['opportunity_id'])
-                if offer is not None and len(offer.get('options', [])) < MIN_MIXES:
-                    continue
+        offer = None
+        if surface == 'choice_window:mixes' and isinstance(shown.get('opportunity_id'), str) and shown['opportunity_id']:
+            from yt_playlist.rec import choice_evidence
+            offer = choice_evidence.opportunity(store, shown['opportunity_id'])
+        if presented_offer(surface, shown, offer):
             return True
     return False
+
+
+def presented_offer(surface, shown, offer=None):
+    """An actual presented offer graduates setup; fitted/imported state alone cannot."""
+    if surface == 'home_shown':
+        signatures = shown.get('signatures')
+        return isinstance(signatures, list) and any(isinstance(value, str) and value for value in signatures)
+    identity = shown.get('opportunity_id')
+    return bool(isinstance(identity, str) and identity and not (
+        surface == 'choice_window:mixes' and offer is not None and len(offer.get('options', [])) < MIN_MIXES))
 
 
 def _remember_completion(store, complete):
@@ -127,9 +239,9 @@ def arrival_status(store, now=None) -> dict:
         mixes_ready = growth['ready_formats']['mixes']
         albums_ready = growth['ready_formats']['albums']
         artists_required = artist_start.required(reader)
-        complete = not artists_required and (setup_completed(reader) or _setup_complete(
-            mixes_ready=mixes_ready, albums_ready=albums_ready))
-        phase = "artists" if artists_required else "ready" if complete else "import" if not imported else "learn"
+        complete, phase = completion(artists_required=artists_required,
+            remembered=not artists_required and setup_completed(reader), mixes_ready=mixes_ready,
+            albums_ready=albums_ready, imported=imported)
         result = {"songs": songs, "playlists": len(reader.playlists.get_playlists()),
                 "albums": len(reader.collection.get_saved_albums()),
                 "covers": list(dict.fromkeys(row["thumbnail"] or
@@ -191,29 +303,8 @@ def onboarding_active(store, now) -> bool:
 def library_sample(store, n=12) -> list[dict]:
     """A genre-diverse sample of owned tracks: round-robin across genre families, so ratings teach
     breadth. Falls back to any owned tracks when genres are sparse."""
-    rows = store.readiness.library_sample(n)
-    if not rows:
-        return []
-    by_fam = {}
-    rng = random.Random()       # fresh draw each visit, so the user doesn't see the same 12 tracks for days
-    for r in rows:
-        by_fam.setdefault(r["genre"] or "", []).append(r)
-    for fam in by_fam.values():
-        rng.shuffle(fam)
-    out, fams = [], [f for f in by_fam.values()]
-    rng.shuffle(fams)
-    i = 0
-    while len(out) < n and any(fams):
-        f = fams[i % len(fams)]
-        if f:
-            r = f.pop()
-            out.append({"video_id": r["vid"], "title": r["title"], "artist": r["artist"],
-                        "album": r["album"] or "", "thumbnail": r["thumb"], "key": r["k"],
-                        "duration": r["duration"]})
-        i += 1
-        if not any(fams):
-            break
-    return out
+    from yt_playlist.controllers.growth_readiness import OnboardingSamples
+    return OnboardingSamples(store.readiness, random.Random()).sample(n)
 
 
 def _home_tracks(store, client, n):

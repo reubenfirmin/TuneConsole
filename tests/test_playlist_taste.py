@@ -2,29 +2,20 @@ import numpy as np
 import pytest
 
 from yt_playlist.rec import embedding_vectors as embed, scoring
-from tests import model_support
 from tests.repository_mock_support import no_database, repository_store
 
 
-def test_playlist_taste_weights_by_play_and_scores(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    techno = [store.tracks.upsert_track(f"t{i}", f"T{i}", "TechnoBand", None, None) for i in range(8)]
-    folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "FolkBand", None, None) for i in range(8)]
-    pt = store.playlists.upsert_playlist(iid, "PT", "Techno Nights", 8, "h", 0.0)
-    pf = store.playlists.upsert_playlist(iid, "PF", "Dad Vacation", 8, "h2", 0.0)
-    store.playlists.set_playlist_tracks(pt, techno)
-    store.playlists.set_playlist_tracks(pf, folk)
-    for _ in range(5):                                    # you live in the techno playlist
-        store.history.record_history_plays(iid, 1.0, ["t0|technoband"], source_timezone="UTC")
-    store.history.record_history_plays(iid, 1.0, ["f0|folkband"], source_timezone="UTC")
-    model_support.build_track_model(store, dim=4)
-
-    pt_model = scoring.playlist_taste(store)
+def test_playlist_taste_weights_by_play_and_scores(no_database):
+    V = np.array([[1., 0.], [1., .1], [0., 1.], [.1, 1.]])
+    pt_model = scoring._centroids_from_playlist_rows(V,
+        [('Techno Nights', 1, [0, 1]), ('Dad Vacation', 2, [2, 3])],
+        {1: (1., 5), 2: (1., 1)})
     assert pt_model                                       # non-empty
-    keys, V, idx = embed.load_vectors(store)
-    scores, _ = scoring.score_with_traces(store, pt_model, keys, V, idx, now=1.)
-    assert scores["t1|technoband"] > scores["f1|folkband"]
-    contributions = pt_model.context_contributions(V[idx["t1|technoband"]])
+    assert pt_model.weights == pytest.approx([5 / 6, 1 / 6])
+    assert np.linalg.norm(pt_model.centroids, axis=1) == pytest.approx([1., 1.])
+    scores = pt_model.allocated_scores(V)
+    assert scores[1] > scores[3]
+    contributions = pt_model.context_contributions(V[1])
     assert pt_model.titles[contributions.argmax()] == "Techno Nights"
 
 

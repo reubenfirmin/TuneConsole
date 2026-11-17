@@ -20,6 +20,7 @@ class PreparedVibes:
     markers: list = field(default_factory=list)
     roots: list = field(default_factory=list)
     generations: list = field(default_factory=list)
+    file_records: list = field(default_factory=list)
 
     def close(self):
         for publication in self.staged:

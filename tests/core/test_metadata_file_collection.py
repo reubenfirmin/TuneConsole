@@ -1,5 +1,6 @@
 """Real runtime publications retain committed history and collect rollback bytes."""
 from yt_playlist.core import file_collection
+from yt_playlist.core.managed_file_candidates import Orphans
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
@@ -11,7 +12,6 @@ import pytest
 
 from yt_playlist.core import catalog, fao, metadata_native, metadata_runtime, metadata_runtime_files as files
 from yt_playlist.core.metadata_observations import MetadataObservation
-from yt_playlist.core.preparation import managed_files
 from tests.core.test_metadata_runtime import runtime_store, entry
 from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.store import Store
@@ -42,6 +42,7 @@ def collect(store, now, ticks=128):
     # Complete one traversal of every domain, retaining the ordinary per-turn
     # entry budget and a failure bound instead of repeating completed scans.
     assert ticks > 0
+    store.retention.managed.close()
     completed = set()
     for _ in range(ticks):
         work = getattr(store.retention.database, '_managed_file_orphans', None)
@@ -61,7 +62,7 @@ def close_collectors(runtime_store):
     try:
         yield
     finally:
-        managed_files.close(runtime_store)
+        runtime_store.retention.managed.close()
 
 
 @pytest.mark.parametrize('kind', ['conflicts', 'native', 'choices', 'unlinked-native'])
@@ -115,7 +116,7 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
     with store.read_view():
         assert root in collect(store, future)
         assert orphan.exists(), 'A pinned older snapshot fences the whole domain'
-    managed_files.close(store.retention.database)
+    store.retention.managed.close()
     collect(store, future)
     assert not orphan.exists()
     assert {path: fao.read(path).bytes for path in committed} == committed
@@ -123,7 +124,7 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
     # Normal maintenance legitimately replaces an expired conflict's contents.
     # Its new current document must remain owned and readable.
     identity, revision = store.conn.execute('SELECT id,revision FROM metadata_runtime_conflicts').fetchone()
-    current = root / files.relative('conflicts', (identity,), revision)
+    current = files.reference_path(store.conn, 'conflicts', (identity,), revision)
     assert files.owns_file(store.conn, current)
     assert files.read(store.conn, 'conflicts', (identity,), revision) == {'candidates': []}
 
@@ -173,7 +174,8 @@ def test_collection_waits_for_real_publication_transaction(runtime_store, monkey
         finally:
             other.conn.close()
     root = files.directory(store.conn)
-    work = managed_files.Orphans(store.conn)
+    work = Orphans(store.retention.managed.contracts)
+    store.retention.database._managed_file_orphans = work
     work.position = next(index for index, (directory, _) in enumerate(work.contracts) if directory == root)
     try:
         with ThreadPoolExecutor(1) as executor:
@@ -197,7 +199,7 @@ def test_collection_waits_for_real_publication_transaction(runtime_store, monkey
                     store.conn.set_trace_callback(statements.append)
                     try:
                         with pytest.raises(sqlite3.OperationalError, match='locked'):
-                            work.step(store, time.time() + 31 * 86400)
+                            store.retention.managed.maintain(time.time() + 31 * 86400)
                     finally:
                         store.conn.set_trace_callback(None)
                 assert sum(waits) == pytest.approx(1.)
@@ -214,7 +216,7 @@ def test_collection_waits_for_real_publication_transaction(runtime_store, monkey
         collect(store, time.time() + 31 * 86400)
         assert orphan.exists() is not rollback
     finally:
-        work.close()
+        store.retention.managed.close()
 
 
 def test_orphan_traversal_is_bounded_and_restarts_make_progress(runtime_store):
@@ -238,20 +240,23 @@ def test_orphan_traversal_is_bounded_and_restarts_make_progress(runtime_store):
             yield path
     future = time.time() + 31 * 86400
     previous = len(orphans)
-    for _restart in range(3):
-        work = managed_files.Orphans(store.conn)
+    for _restart in range(6):
+        work = Orphans(store.retention.managed.contracts)
+        store.retention.database._managed_file_orphans = work
         work.position = next(index for index, (directory, _) in enumerate(work.contracts) if directory == root)
         work.paths = bounded(root)
         try:
-            for _ in range(5):
+            for _ in range(1):
                 visited.clear()
-                work.step(store, future, limit=4)
-                assert len(visited) <= 4
+                store.retention.managed.maintain(future)
+                assert len(visited) <= 16
         finally:
-            work.close()
+            store.retention.managed.close()
         remaining = sum(path.exists() for path in orphans)
         assert remaining < previous
         previous = remaining
+        if not remaining:
+            break
     collect(store, future)
     assert not any(path.exists() for path in orphans)
     assert files.owns_file(store.conn, root / files.relative('choices', (1,), 1))

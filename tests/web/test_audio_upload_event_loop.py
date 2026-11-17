@@ -34,7 +34,7 @@ def test_audio_upload_waits_and_response_preparation_keep_serving(
     value = _upload(store, endpoint)
     store.settings.set_setting('audio-upload-probe', 'committed')
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
-    entered, release = threading.Event(), threading.Event()
+    release = threading.Event()
 
     @app.get('/_test/event-loop')
     async def probe():
@@ -44,63 +44,80 @@ def test_audio_upload_waits_and_response_preparation_keep_serving(
     def committed():
         return {'value': store.settings.get_setting('audio-upload-probe')}
 
-    def wait():
-        entered.set()
-        assert release.wait(5), 'The test did not release the audio publication'
-
-    holder = None
-    if phase == 'lock':
-        def hold():
-            with store._lock:
-                wait()
-        holder = threading.Thread(target=hold)
-        holder.start()
-        assert entered.wait(1)
-    else:
-        owner, name = ((audio_vibe_prediction, 'predict') if phase == 'response' else
-                       (store.audio_vibes.annotation_files if endpoint == 'feedback'
-                        else store.audio_vibes.sample_files, 'write'))
-        original = getattr(owner, name)
-
-        def delayed(*args, **kwargs):
-            wait()
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(owner, name, delayed)
-
     async def exercise():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                     base_url='http://127.0.0.1') as client:
-            request = asyncio.create_task(client.post('/audio-vibes/' + endpoint, json=value))
-            try:
-                if phase == 'lock':
-                    await asyncio.sleep(.05)
-                else:
-                    assert await asyncio.to_thread(entered.wait, 1)
-                started = time.monotonic()
-                for path in ('/_test/event-loop', '/bridge/status', '/_test/committed-read', '/static/app.css'):
-                    requested = time.monotonic()
-                    response = await client.get(path)
-                    assert response.status_code == 200, (path, response.text)
-                    assert time.monotonic() - requested < 1, path
-                    if path == '/_test/committed-read':
-                        assert response.json() == {'value': 'committed'}
-                assert time.monotonic() - started < 1
-                assert not request.done(), 'The upload did not exercise the blocked worker'
-                assert 'persist_audio' in app.state.ctx.work.active
-            finally:
-                release.set()
-                response = await asyncio.wait_for(request, 5)
-            assert response.status_code == 200, response.text
-            assert response.json()['run_id'] == value['run_id']
+        loop = asyncio.get_running_loop()
+        entered = loop.create_future()
+        gate_expired = threading.Event()
 
-    try:
-        asyncio.run(exercise())
-    finally:
-        release.set()
-        if holder is not None:
-            holder.join(1)
-            assert not holder.is_alive()
+        def signal_entry():
+            if not entered.done():
+                entered.set_result(None)
+
+        def wait():
+            loop.call_soon_threadsafe(signal_entry)
+            if not release.wait(5):
+                gate_expired.set()
+
+        holder = None
+        if phase == 'lock':
+            def hold():
+                with store._lock:
+                    wait()
+
+            holder = threading.Thread(target=hold)
+            holder.start()
+        else:
+            owner, name = ((audio_vibe_prediction, 'predict') if phase == 'response' else
+                           (store.audio_vibes.annotation_files if endpoint == 'feedback'
+                            else store.audio_vibes.sample_files,
+                            'write_reserved' if endpoint == 'feedback' else 'publish_reserved'))
+            original = getattr(owner, name)
+
+            def delayed(*args, **kwargs):
+                wait()
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(owner, name, delayed)
+
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url='http://127.0.0.1') as client:
+                if holder is not None:
+                    await asyncio.wait((entered,), timeout=10)
+                    assert entered.done(), 'The store lock was not held'
+                request = asyncio.create_task(client.post('/audio-vibes/' + endpoint, json=value))
+                try:
+                    if holder is not None:
+                        await asyncio.sleep(.05)
+                    else:
+                        # Admission can take time. Start measuring only after the
+                        # publication or predictor reaches its hold.
+                        await asyncio.wait((entered, request), timeout=10, return_when=asyncio.FIRST_COMPLETED)
+                        assert entered.done(), f'The upload did not reach {phase}'
+                    started = time.monotonic()
+                    for path in ('/_test/event-loop', '/bridge/status', '/_test/committed-read', '/static/app.css'):
+                        requested = time.monotonic()
+                        response = await asyncio.wait_for(client.get(path), 1)
+                        assert response.status_code == 200, (path, response.text)
+                        assert time.monotonic() - requested < 1, path
+                        if path == '/_test/committed-read':
+                            assert response.json() == {'value': 'committed'}
+                    assert time.monotonic() - started < 1
+                    assert not gate_expired.is_set(), 'The probes must finish while the audio work is held'
+                    assert not request.done(), 'The upload did not exercise the blocked worker'
+                    assert 'persist_audio' in app.state.ctx.work.active
+                finally:
+                    release.set()
+                    response = await asyncio.wait_for(request, 5)
+                assert response.status_code == 200, response.text
+                assert response.json()['run_id'] == value['run_id']
+        finally:
+            release.set()
+            if holder is not None:
+                holder.join(1)
+                assert not holder.is_alive()
+
+    asyncio.run(exercise())
     assert not app.state.ctx.work.active
 
 
@@ -112,14 +129,15 @@ def test_cancelled_audio_upload_remains_tracked_and_retry_is_idempotent(file_bac
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     entered, release = threading.Event(), threading.Event()
     owner = store.audio_vibes.annotation_files if endpoint == 'feedback' else store.audio_vibes.sample_files
-    publish = owner.write
+    name = 'write_reserved' if endpoint == 'feedback' else 'publish_reserved'
+    publish = getattr(owner, name)
 
     def delayed(*args, **kwargs):
         entered.set()
         assert release.wait(5)
         return publish(*args, **kwargs)
 
-    monkeypatch.setattr(owner, 'write', delayed)
+    monkeypatch.setattr(owner, name, delayed)
 
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),

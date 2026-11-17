@@ -205,10 +205,10 @@ def _rotation(store, report, destination, monkeypatch):
 def _launch_rotation(store, report, monkeypatch, now):
     """Keep creation/readback and generated starts in the real launch workflow."""
     from tests.radio_session_support import radio_controller, play
-    from yt_playlist.library import playlist_generated
+    from yt_playlist.library import generated_acquisition
     from yt_playlist.web import radio_session as session_module
 
-    create = playlist_generated.create_generated_playlist
+    create = generated_acquisition.create_generated_playlist
     evidence = report['launch'] = {'issued': [], 'branches': {}}
     with monkeypatch.context() as controlled, radio_controller(controlled, store, []) as (c, remote, _, _, _):
         controlled.setattr(session_module, 'RadioCandidates', RadioCandidates)
@@ -216,16 +216,16 @@ def _launch_rotation(store, report, monkeypatch, now):
         remote.get_song = lambda video: {'videoDetails': {'lengthSeconds': '200'}}
         c.ctx.now_fn = lambda: now
 
-        def issued(store, title, tracks, client, at, account):
+        def issued(store, title, tracks, client, at, account, *, recipe=None):
             facts = store.radio_catalog.rotation_facts(t['key'] for t in tracks)
             for track in tracks:
                 fact = facts[track['key']]
                 expected = 'familiar' if fact['heard'] else 'unplayed' if fact['owned'] else 'new'
                 assert track['_radio_rotation_slot'] == expected
                 evidence['issued'].append({'key': track['key'], 'kind': expected})
-            return create(store, title, tracks, client, at, account)
+            return create(store, title, tracks, client, at, account, recipe=recipe)
 
-        controlled.setattr(playlist_generated, 'create_generated_playlist', issued)
+        controlled.setattr(generated_acquisition, 'create_generated_playlist', issued)
         result = c.start()
         assert result['ok'], result
         assert [t['_radio_rotation_slot'] for t in c.session.tracks] == [t['kind'] for t in evidence['issued']]

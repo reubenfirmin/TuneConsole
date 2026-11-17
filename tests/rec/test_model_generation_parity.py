@@ -11,7 +11,7 @@ from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
-from yt_playlist.rec import model_refresh, mode_surfaces, rec_params
+from yt_playlist.rec import model_refresh, mode_inputs, mode_surfaces, rec_params
 
 
 GENRES = (('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'))
@@ -168,7 +168,7 @@ def real_rankings(store):
     with store.read_snapshot() as snapshot:
         limit = max(len(snapshot.store.rec_query.library_keys()),
                     int(rec_params.get_param(snapshot.store, 'modes_pool_limit')))
-        return mode_surfaces._rank_pools(snapshot.store, 2000, limit)
+        return mode_inputs._rank_pools(snapshot.store, 2000, limit)
 
 
 def test_established_surface_rankers_return_real_playable_candidates(established_rankings):
@@ -194,7 +194,7 @@ def capture_plan(store, rankings):
         return 'publication-owned-below'
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(mode_surfaces, '_rank_pools', completed_rankings)
+        patch.setattr(mode_inputs, '_rank_pools', completed_rankings)
         patch.setattr(mode_surfaces._DeferredBundles, 'publish', completed_publication)
         result = mode_surfaces.prepare_bundles(store, 2000)
     assert len(captured) == 1 and captured[0].payload is result

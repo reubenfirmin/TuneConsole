@@ -119,8 +119,10 @@ def test_unavailable_cache_is_a_miss_and_can_be_rewritten(store, damage):
     assert home_cache.read(store, 'home_tuned') is None
     home_cache.put(store, 'home_tuned', {'menu': 'useful'}, 2)
     assert home_cache.read(store, 'home_tuned') == {'menu': 'useful'}
-    # The general proposal producer also coalesces identical publications. It
-    # must still repair damaged content-addressed files before doing so.
+    # Replacement owns a new record file. Damage its current head before the
+    # proposal producer coalesces another identical publication.
+    _, manifest = store.home_cache.document('home_tuned')
+    path = Path(manifest[2][0][1])
     path.unlink()
     store.rec_proposals.put_proposals('home_tuned', {'menu': 'useful'}, 3)
     assert home_cache.read(store, 'home_tuned') == {'menu': 'useful'}
@@ -146,11 +148,19 @@ def test_response_reuse_returns_detached_values_and_reopens_on_next_request(file
 
 
 def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roots(file_backed_store, monkeypatch):
-    from tests.core.test_home_publication import real_roots
+    from tests.recommendation_support import seed_compact_group_history
+    from tests.repos.test_typed_recommendation_publication import plan, publish
     from yt_playlist.controllers import group_evidence
+    from yt_playlist.core import group_evidence as evidence, recommendation_custody
 
     store = file_backed_store
-    real_roots(store)
+    seed_compact_group_history(store)
+    published = publish(store, plan(store))
+    with store.conn.atomic():
+        evidence.retain(store.conn, 'prepared', 'proposal:home_prepared:context',
+                        {'group_generation': 'first'}, 1000)
+        recommendation_custody.retain(store.conn, 'prepared',
+            'proposal:home_prepared:recommendations', published.generation_id)
     group = store.conn.execute('SELECT external_key FROM group_generations LIMIT 1').fetchone()[0]
     generation = store.conn.execute('SELECT generation_id FROM recommendation_generation_refs LIMIT 1').fetchone()[0]
     store.rec_ledger.evidence().put('artifact', 'home-context', {'group_generation': group})
@@ -171,19 +181,3 @@ def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roo
     assert store.conn.execute('SELECT 1 FROM home_display_recommendation_roots WHERE generation_id=?',
                               (generation,)).fetchone()
     assert home_cache.read(store, 'home_prepared') == value
-
-
-@pytest.mark.parametrize('installed', [79, 90], indirect=True)
-def test_prepared_legacy_selection_and_continuing_writes_keep_working(installed):
-    from tests.core.test_home_publication import ready, real_roots, seed
-    from yt_playlist.core.preparation import home_publication
-
-    store, _ = installed
-    seed(store)
-    real_roots(store)
-    home_publication.OWNER.publish(store.conn, stage=ready(store.conn))
-    assert home_cache.read(store, 'home_prepared') == store.rec_proposals.get_proposals('home_prepared')
-    assert home_cache.read(store, 'home_tuned') is None
-    home_cache.put(store, 'home_prepared', {'menu': 'continuing write'}, 2000)
-    assert home_publication.OWNER.selected(store.conn) is None
-    assert home_cache.read(store, 'home_prepared') == {'menu': 'continuing write'}

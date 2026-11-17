@@ -14,7 +14,7 @@ from ..evaluation.external_transfer import SNAPSHOT, VIBES
 
 def teacher_training_provenance(measurement_rows):
     """Resolve known local-fit dependencies separately from measurement lineage."""
-    product_path = ROOT / 'src/yt_playlist/rec/data/emotify-vibes.json'
+    product_path = ROOT / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'
     product = json.loads(product_path.read_text())
     historical = json.loads(SNAPSHOT.read_text())
     if product['provenance']['snapshot_sha256'] != digest(SNAPSHOT):

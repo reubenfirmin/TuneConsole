@@ -7,10 +7,10 @@ import threading
 
 import pytest
 
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.legacy_recommendation_fixture_support import recommendations
 from tests.repos.test_typed_recommendation_publication import plan, publish
 from tests.test_mode_refresh_worker import scheduled
-from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
+from yt_playlist.core import file_collection, recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.rec import choice_evidence, group_roots, rec_worker
 from yt_playlist.rec.worker_queue import Job
@@ -86,7 +86,8 @@ def test_file_batches_resume_after_a_retained_reader_and_keep_build_outputs(reco
             assert progress.blocked and progress.pending
             assert all(path.exists() for path in [*stale, *kept])
         removed = byte_size = 0
-        for _ in range(10):
+        entries = sum(1 for _ in file_collection.walk_entries(collector.root, max_depth=2))
+        for _ in range(entries + 1):
             progress = collector.step(store.conn, limit=1)
             assert progress.checked <= 1
             removed += progress.files
@@ -121,7 +122,9 @@ def test_group_budget_cannot_starve_recommendations_or_file_collection(recommend
     monkeypatch.setattr(GroupRetention, 'step', blocked)
     result = group_roots.maintain_retention(store)
     assert result['pending'] and result['generations'] == 1 and result['pools'] == 1
-    assert result['output_files'] == 2 and result['output_bytes'] > 0
+    # Fresh native files retain their expiry grace; the legacy orphan is free
+    # to retire immediately even when group traversal cannot finish this turn.
+    assert result['output_files'] == 1 and result['output_bytes'] > 0
     assert not stale.exists()
     assert not store.conn.execute('SELECT 1 FROM recommendation_pools WHERE id=?', (identity,)).fetchone()
     assert store.recommendations.output('home', 'framing') == {'title': 'second'}

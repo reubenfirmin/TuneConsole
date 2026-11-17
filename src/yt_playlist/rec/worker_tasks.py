@@ -21,7 +21,8 @@ class ServingTasks:
         return keys
 
     def home(self):
-        from yt_playlist.rec import album_choices, album_notes, album_tuning, choice_evidence, graduation, home_prepared, measurement
+        from yt_playlist.rec import album_choices, choice_evidence, graduation, home_prepared, measurement
+        from yt_playlist.library.home_album_composition import note_preparation
         now = self.ctx.now_fn()
         requested = self._home_requested
         prepare_mixes = (requested != self._home_prepared
@@ -40,18 +41,9 @@ class ServingTasks:
         # Reporting has its own retryable publication. A failed report must not
         # prevent missing playable collections from being prepared first.
         self.stage("listening choices", choice_evidence.refresh_report, self.ctx.store, now)
-        tuning = album_tuning.state(self.ctx.store, now)
-        from yt_playlist.rec.home_cards import _epoch
-        epoch = _epoch(self.ctx.store, 'album_choices')
-        excluded = album_choices.excluded_from_refresh(self.ctx.store, epoch)
-        playing = getattr(getattr(self.ctx, 'bridge', None), 'now_playing', None) or {}
-        current = album_choices.current_browse_id(self.ctx.store, playing)
-        _, menu, _ = album_choices.selection(self.ctx.store, (albums or {}).get('items', []), now,
-                                            tuning['values'], epoch, tuning['genres'],
-                                            exclude=excluded, current=current)
-        from yt_playlist.core.accounts import catalog_client
-        notes_pending = self.stage("Album sleeve notes", album_notes.prepare, self.ctx.store, now, menu,
-                                   client=catalog_client(self.ctx.client_provider()), now_fn=self.ctx.now_fn)
+        notes_pending = note_preparation(self.ctx.store,
+            now_playing=lambda: getattr(getattr(self.ctx, 'bridge', None), 'now_playing', None) or {},
+            clients=self.ctx.client_provider, now=self.ctx.now_fn, stage=self.stage).prepare(albums, now)
         if prepare_mixes and result is None:
             self.ctx.logger.debug("Home preparation deferred; retrying after preparation backoff")
             return True

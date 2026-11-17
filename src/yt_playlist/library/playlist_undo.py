@@ -2,10 +2,10 @@
 import json
 from contextlib import ExitStack
 from collections import Counter
-from pathlib import Path
 from uuid import uuid4
 
-from yt_playlist.core import fao
+from yt_playlist.core.playlist_backup_files import PlaylistBackupFiles
+from yt_playlist.core import paths
 
 from yt_playlist.library.action_claim import claim_action, claim_deletion_target
 from yt_playlist.library.sync import refresh_playlist
@@ -41,7 +41,7 @@ def _refresh(store, client, identity, playlist_id, title, now, *, created_at=Non
                      expected_revision=expected_revision, created_at=created_at)
 
 
-def _steps(undo, action_id):
+def recovery_steps(undo, markers):
     steps = []
     backups = list(undo.get("backups", []))
     if undo.get("backup"):
@@ -49,7 +49,7 @@ def _steps(undo, action_id):
     # Restore deleted sources before removing transferred songs from keepers or a move destination.
     for index, backup in enumerate(dict.fromkeys(backups)):
         steps.append({"kind": "backup", "backup": backup, "phase": "pending",
-                      "marker": f"TuneConsole undo {action_id}/{index}/{uuid4().hex}"})
+                      "marker": markers[index]})
     steps.extend({"kind": "keeper", "entry": entry, "phase": "pending"}
                  for entry in undo.get("restored", []))
     if undo.get("new_ytm") is not None:
@@ -59,12 +59,19 @@ def _steps(undo, action_id):
     return steps
 
 
-def _verify_restored_sources(clients, steps):
+def _steps(undo, action_id):
+    backups = list(undo.get('backups', [])) + ([undo['backup']] if undo.get('backup') else [])
+    markers = [f'TuneConsole undo {action_id}/{index}/{uuid4().hex}'
+               for index in range(len(dict.fromkeys(backups)))]
+    return recovery_steps(undo, markers)
+
+
+def _verify_restored_sources(clients, steps, files):
     """Recheck durable completed steps before taking away another remote copy on a retry."""
     for step in steps:
         if step["kind"] != "backup":
             continue
-        payload = json.loads(fao.read(step["backup"]).bytes)
+        payload = files.load(step['backup'])
         client = _client(clients, payload.get("identity_id"))
         detail = _existing(client, step["created_id"])
         required = Counter(t["video_id"] for t in payload.get("tracks", []))
@@ -129,8 +136,8 @@ def _find_created(client, marker):
                      f"'{marker}'. A second playlist will not be created automatically.")
 
 
-def _restore_backup(store, clients, step, now, save):
-    payload = json.loads(fao.read(step["backup"]).bytes)
+def _restore_backup(store, clients, step, now, save, files):
+    payload = files.load(step['backup'])
     if payload.get('snapshot_version', 1) not in (1, 2):
         raise ValueError('Unsupported playlist backup version. Review it before recovering manually.')
     identity = payload.get("identity_id")
@@ -193,7 +200,7 @@ def _restore_backup(store, clients, step, now, save):
              created_at=step.get("created_at"))
 
 
-def _delete_copy(store, clients, step, save, now):
+def _delete_copy(store, clients, step, save, now, files):
     client = _client(clients, step["identity"])
     detail = _existing(client, step["ytm"])
     if detail is not None:
@@ -204,7 +211,7 @@ def _delete_copy(store, clients, step, save, now):
         if store.actions.has_durable_targets() and not step.get('deletion_backup'):
             from yt_playlist.library.playlist_backups import backup_remote_playlist
             step['deletion_backup'] = backup_remote_playlist(
-                store,step['identity'],step['ytm'],detail.get('title'),now,detail)
+                store,step['identity'],step['ytm'],detail.get('title'),now,detail,files=files)
         step["phase"] = "deleting"
         save()
         error = None
@@ -226,7 +233,8 @@ def _delete_copy(store, clients, step, save, now):
             store.playlists.remove_playlist(pl.id)
 
 
-def undo_action(store, action_id, clients, now):
+def undo_action(store, action_id, clients, now, *, files=None):
+    files = files or PlaylistBackupFiles(paths.backups_dir())
     with claim_action(store, action_id), ExitStack() as claims:
         action = store.actions.get_action(action_id)
         if action is not None and action.status in ("delete_pending", "delete_failed"):
@@ -265,7 +273,7 @@ def undo_action(store, action_id, clients, now):
                 if step["phase"] == "complete":
                     continue
                 if step["kind"] in ("keeper", "copy") and not sources_verified:
-                    _verify_restored_sources(clients, recovery["steps"])
+                    _verify_restored_sources(clients, recovery["steps"], files)
                     sources_verified = True
                 if step["kind"] == "keeper":
                     entry = step["entry"]
@@ -287,9 +295,9 @@ def undo_action(store, action_id, clients, now):
                         _restore(client, entry["ytm"], target, step, save)
                     _refresh(store, client, entry["identity"], entry["ytm"], pl.title if pl else None, now)
                 elif step["kind"] == "backup":
-                    _restore_backup(store, clients, step, now, save)
+                    _restore_backup(store, clients, step, now, save, files)
                 elif step["kind"] == "copy":
-                    _delete_copy(store, clients, step, save, now)
+                    _delete_copy(store, clients, step, save, now, files)
                 else:
                     raise ValueError("Unsupported recovery step. Review this action before continuing.")
                 step["phase"] = "complete"

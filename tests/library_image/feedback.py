@@ -40,9 +40,11 @@ def capture(queue, target, report):
         if 'filename' in columns:
             with copied:
                 for row in rows:
-                    playback_inbox.Inbox.body(row)  # Verify owner and content before relocation.
                     relative = Path(row['content_digest'][:2]) / (row['content_digest'] + '.json')
-                    fao.write(observations / relative, fao.read(row['filename'], max_bytes=row['byte_size'], digest=row['content_digest']))
+                    incomplete = 'file_status' in columns and row['file_status'] == 'pending'
+                    if not incomplete or Path(row['filename']).exists():
+                        playback_inbox.Inbox.body(row)  # Verify owner and content before relocation.
+                        fao.write(observations / relative, fao.read(row['filename'], max_bytes=row['byte_size'], digest=row['content_digest']))
                     logical = Path('/library') / observations.name / relative
                     copied.execute('UPDATE playback_feedback_inbox SET filename=? WHERE sequence=?',
                                    (str(logical), row['sequence']))
@@ -63,8 +65,11 @@ def verify(root):
         connection.row_factory = sqlite3.Row
         columns = {row[1] for row in connection.execute('PRAGMA table_info(playback_feedback_inbox)')}
         if 'filename' not in columns:
-            return  # The normal private Inbox.connect() retains its legacy conversion.
+            return  # Installed inline captures continue reading and writing without conversion.
         for row in connection.execute('SELECT * FROM playback_feedback_inbox'):
             if not Path(row['filename']).resolve().is_relative_to(root):
                 raise ValueError('Unisolated playback observation coordinate')
+            if ('file_status' in columns and row['file_status'] == 'pending'
+                    and not Path(row['filename']).exists()):
+                continue
             Inbox.body(row)

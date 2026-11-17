@@ -2,11 +2,126 @@
 from contextlib import contextmanager
 
 from yt_playlist.core import action_work, playlist_scopes
-from yt_playlist.core.preparation import action_publication, action_ledger
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos import action_backup_writes, collection_file_writes
 
 
 class ActionRepo(Repo):
+    @synchronized
+    def reserve_backup_file(self, action, position, integrity):
+        with self.conn.atomic():
+            return action_backup_writes.reserve(self.conn, action, position, integrity)
+
+    @synchronized
+    def reserve_file(self, kind, owner, integrity, *, new_owner=False):
+        with self.conn.atomic():
+            if new_owner:
+                table = 'actions' if kind == 'action' else 'action_steps'
+                if owner != self._next_identity(table):
+                    raise ValueError('Action identity was reserved by another worker')
+            return collection_file_writes.reserve(self.conn, kind, owner, integrity,
+                                                   identity=owner if new_owner else None)
+
+    def _complete_file(self, kind, owner, publication):
+        identity, reference = publication
+        collection_file_writes.complete(self.conn, identity, kind, owner, reference)
+        return reference
+
+    @synchronized
+    def publish_record(self, prepared):
+        with self.conn.atomic():
+            return self._publish_record(prepared)
+
+    def _publish_record(self, prepared):
+        prior = self.prior_intent(prepared['idempotency_key'])
+        if prior is not None:
+            if prior['intent_digest'] != prepared['intent_digest']:
+                raise ValueError('Idempotency key belongs to another action intent')
+            return prior['id']
+        if 'reuse' in prepared:
+            raise ValueError('The reused action no longer exists')
+        reviewed = prepared['reviewed']
+        if reviewed is not None:
+            self.reviewed_draft(reviewed['id'], reviewed['revision'])
+        identity = prepared['identity']
+        reference = self._complete_file('action', identity, prepared['publication'])
+        self.insert_action(prepared['kind'], None, None, prepared['status'], None, prepared['created_at'],
+            identity=identity, revision=prepared['revision'], idempotency_key=prepared['idempotency_key'],
+            intent_digest=prepared['intent_digest'], undo_of=prepared['undo_of'], mode=prepared['mode'],
+            reference=reference, reviewed=reviewed)
+        if prepared['draft'] is not None:
+            reference = self._complete_file('action-draft', identity, prepared['draft'])
+            self.store_draft(identity, prepared['signature'], prepared['revision'], prepared['created_at'], reference)
+        else:
+            self._store_progress(identity, prepared['progress'])
+        return identity
+
+    @synchronized
+    def publish_update(self, prepared, *, execution_token=None, require_execution=False):
+        with self.conn.atomic():
+            self._publish_update(prepared, execution_token=execution_token, require_execution=require_execution)
+
+    def _publish_update(self, prepared, *, execution_token=None, require_execution=False):
+        identity = prepared['identity']
+        if require_execution:
+            self.require_execution(identity, execution_token)
+        for target, token in prepared['target_claims']:
+            self.require_claim(target, token)
+        header = self.header(identity)
+        if header is None or header['revision'] != prepared['previous_revision']:
+            raise ValueError('Action was updated by another worker')
+        self._store_progress(identity, prepared['progress'])
+        reference = self._complete_file('action', identity, prepared['publication'])
+        self.update_action(identity, prepared['status'], prepared['executed_at'],
+                           revision=prepared['revision'], reference=reference)
+
+    @synchronized
+    def publish_draft(self, identity, previous_revision, revision, publication):
+        with self.conn.atomic():
+            row = self.header(identity)
+            if (row is None or row['revision'] != previous_revision
+                    or row['status'] != 'draft' or row['kind'] != 'merge_draft'):
+                raise ValueError('Merge draft is no longer editable')
+            reference = self._complete_file('action-draft', identity, publication)
+            self.update_draft(identity, None, revision, None, reference)
+
+    @synchronized
+    def finish_undo(self, prepared, history, execution_token):
+        with self.conn.atomic():
+            self._publish_update(prepared, execution_token=execution_token, require_execution=True)
+            self.clear_execution(prepared['identity'])
+            self._publish_record(history)
+
+    def _store_progress(self, identity, prepared):
+        if self.backups(identity) != prepared['previous_backups']:
+            raise ValueError('Action backups changed before progress was committed')
+        for position, reference, publication in prepared['backups']:
+            retained = None
+            if publication is not None:
+                file_id, durable = publication
+                action_backup_writes.complete(self.conn, file_id, identity, position, durable)
+                retained = durable[0]
+            self.store_backup(identity, position, reference, retained)
+        targets = {(role, position): self.store_target(identity, role, position, **request)
+                   for role, position, request in prepared['targets']}
+        if prepared['placement'] is not None:
+            self.store_placement(identity, targets['placement', 0], *prepared['placement'])
+        self.store_resolutions(identity, prepared['resolutions'])
+        for step in prepared['steps']:
+            prior = self.conn.execute('SELECT * FROM action_steps WHERE action_id=? AND position=?',
+                                      (identity, step['position'])).fetchone()
+            prior = dict(prior) if prior else None
+            if prior != step['prior']:
+                raise ValueError('Action recovery step changed before progress was committed')
+            if prior is None and self.conn.execute('SELECT 1 FROM action_steps WHERE id=?', (step['id'],)).fetchone():
+                raise ValueError('Action recovery identity was used by another worker')
+            target = targets[step['target']] if step['target'] is not None else None
+            if prior and (prior['operation'] != step['operation'] or prior['target_id'] != target):
+                raise ValueError('A committed recovery step cannot change its operation or target')
+            reference = self._complete_file('action-step', step['id'], step['publication'])
+            self.store_step(step['id'], identity, target, step['position'], step['operation'], step['value'],
+                            *step['state'], step['backup'], reference, prepared['now'])
+
     @contextmanager
     def transaction(self):
         with self._lock, self.conn.atomic(join=True):
@@ -15,36 +130,6 @@ class ActionRepo(Repo):
     @synchronized
     def has_durable_targets(self):
         return action_work.available(self.conn)
-
-    def _members(self, header, suffix, order):
-        return [dict(row) for row in action_publication.members(self.conn, header, suffix, order)]
-
-    def _prepared(self, header):
-        return dict(layout='prepared', row=dict(header),
-            backups=self._members(header, 'backups', 'position'), steps=self._members(header, 'steps', 'position'))
-
-    def _legacy_action(self, row):
-        prepared = None
-        owner = action_publication.OWNER
-        if self.conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (owner.table('head'),)).fetchone():
-            header = self.conn.execute('SELECT g.* FROM '+owner.table('head')+' h JOIN '+owner.table('map')+
-                ' m ON m.stage=h.revision AND m.source=? JOIN '+owner.header+
-                ' g ON g.source=m.source AND g.preparation_revision=m.generation WHERE h.name=?',
-                (str(row['id']), owner.name)).fetchone()
-            if header and header['kind'] == row['kind'] and header['created_at'] == row['created_at']:
-                prepared = self._prepared(header)
-        return dict(layout='legacy', row=dict(row), prepared=prepared)
-
-    def _prepared_records(self, where='', values=(), *, order='action_id DESC', limit=None):
-        owner = action_publication.OWNER
-        selected = owner.selected(self.conn)
-        if selected is None:
-            return None
-        headers = self.conn.execute('SELECT g.* FROM '+owner.table('map')+' m JOIN '+owner.header+
-            ' g ON g.source=m.source AND g.preparation_revision=m.generation WHERE m.stage=?'+
-            (' AND ('+where+')' if where else '')+' ORDER BY '+order+(' LIMIT ?' if limit is not None else ''),
-            (selected, *values, *((limit,) if limit is not None else ()))).fetchall()
-        return [self._prepared(header) for header in headers]
 
     def _owned_records(self, where='', values=(), *, order='id DESC'):
         rows = self.conn.execute('SELECT * FROM actions '+where+' ORDER BY '+order, values).fetchall()
@@ -65,60 +150,34 @@ class ActionRepo(Repo):
 
     @synchronized
     def get_action(self, action_id):
-        if self.has_durable_targets():
-            rows = self._owned_records('WHERE id=?', (action_id,))
-        else:
-            rows = self._prepared_records('action_id=?', (action_id,))
-            if rows is None:
-                row = self.conn.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone()
-                return self._legacy_action(row) if row else None
+        rows = self._owned_records('WHERE id=?', (action_id,))
         return rows[0] if rows else None
 
     @synchronized
     def get_actions(self):
-        if self.has_durable_targets():
-            return self._owned_records()
-        rows = self._prepared_records()
-        return rows if rows is not None else [self._legacy_action(row) for row in self.conn.execute('SELECT * FROM actions ORDER BY id DESC')]
+        return self._owned_records()
+
+    @synchronized
+    def versions(self, kind):
+        """Small action headers for detecting writes across an external read."""
+        return dict(self.conn.execute('SELECT id,status FROM actions WHERE kind=? ORDER BY id DESC', (kind,)))
 
     @synchronized
     def get_draft(self, signature):
-        if self.has_durable_targets():
-            rows = self._owned_records('WHERE id IN (SELECT id FROM action_drafts WHERE signature=?)', (signature,))
-        else:
-            rows = self._prepared_records("kind='merge_draft' AND draft_signature=?", (signature,), order='action_id', limit=1)
-            if rows is None:
-                row = self.conn.execute("SELECT * FROM actions WHERE kind='merge_draft' AND plan_json=?", (signature,)).fetchone()
-                return self._legacy_action(row) if row else None
+        rows = self._owned_records('WHERE id IN (SELECT id FROM action_drafts WHERE signature=?)', (signature,))
         return rows[0] if rows else None
 
     @synchronized
     def deletion_owner(self, account, remote, status):
-        if self.has_durable_targets():
-            rows = self._owned_records('WHERE status=? AND id=(SELECT MAX(s.action_id) FROM action_targets t '
-                'JOIN action_steps s ON s.target_id=t.id JOIN actions a ON a.id=s.action_id '
-                "WHERE t.account_id=? AND t.provider_playlist_id_snapshot=? AND s.operation='delete_playlist' AND a.status=?)",
-                (status, account, remote, status))
-        else:
-            rows = self._prepared_records('status=? AND EXISTS (SELECT 1 FROM '+action_ledger.table('targets')+
-                " t WHERE t.source=g.source AND t.preparation_revision=g.preparation_revision AND t.role='deletion' "
-                'AND COALESCE(t.account_id,t.unresolved_account_id)=? AND t.provider_playlist_id_snapshot=?)',
-                (status, account, remote), limit=1)
-            if rows is None:
-                row = self.conn.execute('SELECT a.* FROM actions a WHERE a.status=? AND EXISTS ('
-                    "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d "
-                    "WHERE json_extract(d.value,'$.identity')=? AND json_extract(d.value,'$.ytm')=?) "
-                    'ORDER BY a.id DESC LIMIT 1', (status, account, remote)).fetchone()
-                return self._legacy_action(row) if row else None
+        rows = self._owned_records('WHERE status=? AND id=(SELECT MAX(s.action_id) FROM action_targets t '
+            'JOIN action_steps s ON s.target_id=t.id JOIN actions a ON a.id=s.action_id '
+            "WHERE t.account_id=? AND t.provider_playlist_id_snapshot=? AND s.operation='delete_playlist' AND a.status=?)",
+            (status, account, remote, status))
         return rows[0] if rows else None
 
     @synchronized
     def pending_actions(self, kind):
-        if self.has_durable_targets():
-            return self._owned_records("WHERE kind=? AND status='pending'", (kind,), order='id')
-        rows = self._prepared_records("kind=? AND status='pending'", (kind,), order='action_id')
-        return rows if rows is not None else [self._legacy_action(row) for row in self.conn.execute(
-            "SELECT * FROM actions WHERE kind=? AND status='pending' ORDER BY id", (kind,))]
+        return self._owned_records("WHERE kind=? AND status='pending'", (kind,), order='id')
 
     @synchronized
     def pending_placements(self, membership):
@@ -137,8 +196,13 @@ class ActionRepo(Repo):
 
     @synchronized
     def next_action_id(self):
-        return self.conn.execute("SELECT MAX(COALESCE((SELECT MAX(id) FROM actions),0),"
-            "COALESCE((SELECT seq FROM sqlite_sequence WHERE name='actions'),0))+1").fetchone()[0]
+        return self._next_identity('actions')
+
+    def _next_identity(self, table):
+        return self.conn.execute(f'SELECT MAX(COALESCE((SELECT MAX(id) FROM {table}),0),'
+            'COALESCE((SELECT seq FROM sqlite_sequence WHERE name=?),0),'
+            "COALESCE((SELECT seq FROM sqlite_sequence WHERE name='collection_file_writes'),0))+1",
+            (table,)).fetchone()[0]
 
     @synchronized
     def reviewed_draft(self, identity, revision):
@@ -232,7 +296,7 @@ class ActionRepo(Repo):
     @synchronized
     def step_input(self, action, position):
         row = self.conn.execute('SELECT * FROM action_steps WHERE action_id=? AND position=?', (action,position)).fetchone()
-        identity = row['id'] if row else self.conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM action_steps').fetchone()[0]
+        identity = row['id'] if row else self._next_identity('action_steps')
         return identity, dict(row) if row else None
 
     @synchronized

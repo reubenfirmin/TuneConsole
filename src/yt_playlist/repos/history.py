@@ -1,7 +1,7 @@
 """Listening days, exact plays, and retained source evidence."""
 from contextlib import contextmanager
-from yt_playlist.core import catalog_keys, entity_names, first_play, listening, listening_summaries
-from yt_playlist.core.preparation import listening_views
+from yt_playlist.core import catalog_keys, first_play, listening
+from yt_playlist.core import listening_views
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
@@ -31,41 +31,35 @@ class HistoryRepo(Repo):
 
     @synchronized
     def calendar_facts(self, account_id):
-        owner = entity_names.owner(self.conn, 'listening_calendars')
-        row = self.conn.execute(f'SELECT timezone,confirmed FROM {owner.table} '
-            f'WHERE {owner.column("account_id")}=?', (account_id,)).fetchone()
+        row = self.conn.execute('SELECT timezone,confirmed FROM listening_calendars '
+            'WHERE account_id=?', (account_id,)).fetchone()
         return dict(row) if row else None
 
     @synchronized
     def set_calendar(self, account_id, name, *, confirmed, event_days=None):
-        owner = entity_names.owner(self.conn, 'listening_calendars')
         with self.conn.atomic():
-            self.conn.execute(f'INSERT INTO {owner.table} VALUES (?,?,?) '
-                f'ON CONFLICT({owner.column("account_id")}) DO UPDATE SET '
+            self.conn.execute('INSERT INTO listening_calendars VALUES (?,?,?) '
+                'ON CONFLICT(account_id) DO UPDATE SET '
                 'timezone=excluded.timezone,confirmed=excluded.confirmed', (account_id, name, int(confirmed)))
             if event_days is not None:
                 self.conn.executemany('INSERT INTO play_event_calendar(event_id,day,timezone) VALUES (?,?,?) '
                     'ON CONFLICT(event_id) DO UPDATE SET day=excluded.day,timezone=excluded.timezone', event_days)
-                observations = entity_names.owner(self.conn, 'listening_observations')
-                self.conn.execute(f'UPDATE {observations.table} SET day=CASE WHEN timezone=? THEN source_day END '
-                    f"WHERE {observations.column('account_id')}=? AND precision='calendar_day'", (name, account_id))
+                self.conn.execute('UPDATE listening_observations SET day=CASE WHEN timezone=? THEN source_day END '
+                    "WHERE account_id=? AND precision='calendar_day'", (name, account_id))
                 first_play.invalidate(self.conn)
 
     @synchronized
     def record_days(self, account_id, taken_at, observations, timezone):
         """Persist prepared subjects and calendar-day projections."""
         with self.conn.atomic():
-            owner = entity_names.owner(self.conn, 'listening_observations')
-            typed = listening_summaries.available(self.conn)
-            column = 'unresolved_subject_key' if typed else 'identity_key'
             for key, subject, recording, source_day, day, source in observations:
-                self.conn.execute(f'INSERT INTO {owner.table}({owner.column("account_id")},raw_identity_key,{column},recording_id,'
+                self.conn.execute('INSERT INTO main.listening_observations(account_id,raw_identity_key,unresolved_subject_key,recording_id,'
                     'source_day,day,source,timezone,precision,first_observed_at,last_observed_at) '
                     "VALUES (?,?,?,?,?,?,?,?,'calendar_day',?,?) "
-                    f'ON CONFLICT({owner.column("account_id")},raw_identity_key,source_day,source,timezone) DO UPDATE SET '
+                    'ON CONFLICT(account_id,raw_identity_key,source_day,source,timezone) DO UPDATE SET '
                     'first_observed_at=min(first_observed_at,excluded.first_observed_at),'
                     'last_observed_at=max(last_observed_at,excluded.last_observed_at)',
-                    (account_id, key, None if typed and recording else subject, recording,
+                    (account_id, key, None if recording else subject, recording,
                      source_day, day, source, timezone, taken_at, taken_at))
             first_play.invalidate(self.conn)
 
@@ -77,14 +71,12 @@ class HistoryRepo(Repo):
         listening days; a history-window reset does not delete timestamped evidence.
         """
         with self.conn:
-            observations = entity_names.owner(self.conn, 'listening_observations')
-            receipts = entity_names.owner(self.conn, 'listening_capture_receipts')
             if account_id is None:
-                self.conn.execute(f'DELETE FROM {observations.table}')
-                self.conn.execute(f'DELETE FROM {receipts.table}')
+                self.conn.execute('DELETE FROM listening_observations')
+                self.conn.execute('DELETE FROM listening_capture_receipts')
             else:
-                self.conn.execute(f'DELETE FROM {observations.table} WHERE {observations.column("account_id")}=?',(account_id,))
-                self.conn.execute(f'DELETE FROM {receipts.table} WHERE {receipts.column("account_id")}=?', (account_id,))
+                self.conn.execute('DELETE FROM listening_observations WHERE account_id=?',(account_id,))
+                self.conn.execute('DELETE FROM listening_capture_receipts WHERE account_id=?', (account_id,))
             first_play.invalidate(self.conn)
 
     @synchronized
@@ -201,25 +193,18 @@ class HistoryRepo(Repo):
     @synchronized
     def append_event(self, account, key, timestamp, *, subject, recording, video_id=None,
                      playlist_ytm_id=None, like_status=None, is_generated=None):
-        events = entity_names.owner(self.conn, 'play_events')
-        if not listening_summaries.available(self.conn):
-            # Installed triggers retain the original key and resolve its subject.
-            return self.conn.execute(f'INSERT INTO {events.table}({events.column("account_id")},identity_key,'
-                'video_id,played_at,playlist_ytm_id,like_status,is_generated) VALUES (?,?,?,?,?,?,?)',
-                (account,key,video_id,timestamp,playlist_ytm_id,like_status,is_generated)).lastrowid
-        return self.conn.execute(f'INSERT INTO {events.table}({events.column("account_id")},raw_identity_key,'
+        return self.conn.execute('INSERT INTO play_events(account_id,raw_identity_key,'
             'recording_id,unresolved_subject_key,video_id,played_at,playlist_ytm_id,like_status,is_generated,membership_ref_id) '
             'VALUES (?,?,?,?,?,?,?,?,?,?)', (account,key,recording,None if recording else subject,video_id,timestamp,
                 playlist_ytm_id,like_status,is_generated,listening.membership_reference(self.conn,account,playlist_ytm_id))).lastrowid
 
     @synchronized
     def update_event(self, event, account, video, playlist, rating, generated):
-        typed = listening_summaries.available(self.conn)
-        membership_sql = ('membership_ref_id=CASE WHEN playlist_ytm_id IS NULL AND ? IS NOT NULL '
-                          'THEN ? ELSE membership_ref_id END,') if typed else ''
-        membership_args = (playlist, listening.membership_reference(self.conn, account, playlist)) if typed else ()
+        membership_args = (playlist, listening.membership_reference(self.conn, account, playlist))
         self.conn.execute('UPDATE main.play_events SET like_status=COALESCE(?,like_status),'
-            "video_id=COALESCE(NULLIF(trim(video_id),''),?)," + membership_sql +
+            "video_id=COALESCE(NULLIF(trim(video_id),''),?),"
+            'membership_ref_id=CASE WHEN playlist_ytm_id IS NULL AND ? IS NOT NULL '
+            'THEN ? ELSE membership_ref_id END,'
             'is_generated=CASE WHEN playlist_ytm_id IS NULL AND ? IS NOT NULL '
             'THEN ? ELSE is_generated END,playlist_ytm_id=COALESCE(playlist_ytm_id,?) WHERE id=?',
             (rating, video, *membership_args, playlist, generated, playlist, event))
@@ -233,9 +218,8 @@ class HistoryRepo(Repo):
     @snapshot_read
     def matching_event(self, account_id, subject, video_id, timestamp, tolerance):
         recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?',(subject,)).fetchone()
-        subject_column = 'unresolved_subject_key' if listening_summaries.available(self.conn) else 'identity_key'
         scope,args = ('recording_id=?',(recording[0],)) if recording else (
-            f'recording_id IS NULL AND {subject_column}=?',(subject,))
+            'recording_id IS NULL AND unresolved_subject_key=?',(subject,))
         return self.conn.execute(
             f'SELECT * FROM play_event_subjects WHERE account_id=? AND {scope} '
             "AND (NULLIF(trim(video_id),'') IS NULL OR NULLIF(trim(?),'') IS NULL OR video_id=?) "
@@ -305,9 +289,8 @@ class HistoryRepo(Repo):
         Even a fully parsed file may be filtered or partial; only a separately verified import
         may acquire coverage_start/end, account_verified and complete in a future verification flow.
         """
-        imports = entity_names.owner(self.conn, 'takeout_imports')
         cur = self.conn.execute(
-            f'INSERT INTO {imports.table}({imports.column("account_id")},fingerprint,imported_at,observed_start,'
+            'INSERT INTO takeout_imports(account_id,fingerprint,imported_at,observed_start,'
             "observed_end,unparsed_dates) VALUES (?,?,?,?,?,?)",
             (account_id, fingerprint, imported_at, observed_start, observed_end, unparsed_dates))
         self.conn.commit()
@@ -331,14 +314,12 @@ class HistoryRepo(Repo):
     @synchronized
     def remove_listening_source(self, source, account_id=None):
         with self.conn:
-            observations = entity_names.owner(self.conn, 'listening_observations')
-            events = entity_names.owner(self.conn, 'play_events')
-            scope = '' if account_id is None else f' AND {observations.column("account_id")}=?'
+            scope = '' if account_id is None else ' AND account_id=?'
             args = (source,) if account_id is None else (source, account_id)
-            self.conn.execute(f'DELETE FROM {observations.table} WHERE source=?' + scope, args)
+            self.conn.execute('DELETE FROM listening_observations WHERE source=?' + scope, args)
             self.conn.execute('DELETE FROM play_event_sources WHERE source=? AND event_id IN '
-                f'(SELECT id FROM {events.table} WHERE 1=1' + scope + ')', args)
-            self.conn.execute(f'DELETE FROM {events.table} WHERE NOT EXISTS '
+                '(SELECT id FROM play_events WHERE 1=1' + scope + ')', args)
+            self.conn.execute('DELETE FROM play_events WHERE NOT EXISTS '
                 '(SELECT 1 FROM play_event_sources s WHERE s.event_id=play_events.id)' + scope,
                 () if account_id is None else (account_id,))
             first_play.invalidate(self.conn)
@@ -351,9 +332,8 @@ class HistoryRepo(Repo):
 
     @synchronized
     def store_spotify_receipt(self, account, uri, timestamp, event, artist):
-        receipts = entity_names.owner(self.conn, 'spotify_history_listens')
-        self.conn.execute(f'INSERT INTO {receipts.table} VALUES (?,?,?,?,?) '
-            f'ON CONFLICT({receipts.column("account_id")},track_uri,ended_at) DO UPDATE SET '
+        self.conn.execute('INSERT INTO spotify_history_listens VALUES (?,?,?,?,?) '
+            'ON CONFLICT(account_id,track_uri,ended_at) DO UPDATE SET '
             'event_id=excluded.event_id,artist_id=COALESCE(spotify_history_listens.artist_id,excluded.artist_id)',
             (account, uri, timestamp, event, artist))
 

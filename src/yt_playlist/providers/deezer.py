@@ -9,9 +9,8 @@ Transient failures retain partial facts and a retry outcome; recording matching 
 import logging
 import math
 import re
-import urllib.parse
 
-from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.base import AccessState
 from yt_playlist.integrations.deezer import DeezerIAO, API, TIMEOUT_S
 from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult
@@ -23,7 +22,7 @@ _iao = DeezerIAO()
 
 
 def access(store=None):
-    return _iao.context(store.enrichment_state if store is not None else None)
+    return _iao.context(AccessState.for_store(store))
 
 
 def available(store=None) -> bool:
@@ -39,7 +38,7 @@ def probe(track, store=None) -> EnrichmentResult:
     with access(store):
         feat = lookup(track["title"], track["artist"], duration=track.get("duration_s"),
                       isrc=track.get("isrc"))
-    fields = {k: feat[k] for k in (*_FIELDS, "genre", "year") if feat.get(k) is not None}
+    fields = {k: feat[k] for k in (*_FIELDS, "genre", "year", 'artist_credits') if feat.get(k) is not None}
     if "year" in fields:
         fields["year"] = str(fields["year"])  # same discrete value type as the other providers
     return EnrichmentResult("deezer", fields)
@@ -102,7 +101,7 @@ def _isrcs(value):
     return {re.sub(r"[^A-Z0-9]", "", str(v).upper()) for v in values if v}
 
 
-def _select_track(data, title, artist, duration, isrc):
+def _select_track(data, title, artist, duration, isrc, *, details):
     matches, seen = [], set()
     wanted_duration, wanted_isrc = _seconds(duration), _isrcs(isrc)
     for candidate in data[:10]:
@@ -110,13 +109,7 @@ def _select_track(data, title, artist, duration, isrc):
         if track_id is None or track_id in seen or _title(candidate) != recording_title(title):
             continue
         seen.add(track_id)
-        try:
-            track = _get_json(_API + f"/track/{track_id}")
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception as exc:
-            logger.warning("Deezer track lookup failed for %s: %s", track_id, exc)
-            return None  # an unread candidate cannot establish an unambiguous selection
+        track = details.get(track_id)
         if not isinstance(track, dict) or track.get("error"):
             return None
         if track.get("id") != track_id or not _matches(track, title, artist):
@@ -143,28 +136,19 @@ def lookup(title, artist, *, duration=None, isrc=None):
     Duration (seconds) supports the title/artist check; it never overrides a version mismatch.
     A supplied ISRC must match. Legacy callers without either still require explicit artist/title.
     """
+    from yt_playlist.controllers.provider_acquisition import deezer_lookup
+    from types import SimpleNamespace
+    policy = SimpleNamespace(_empty=_empty, _FIELDS=_FIELDS, _EXTRA_FIELDS=_EXTRA_FIELDS,
+        _API=_API, _title=_title, _select_track=_select_track, project=project, logger=logger)
+    return deezer_lookup(policy, _get_json, title, artist, duration=duration, isrc=isrc)
+
+
+def project(track, album):
+    """Project verified supplied track/album envelopes without access or mutation."""
     feat = _empty(_FIELDS + _EXTRA_FIELDS)
-    if not recording_title(title) or not normalize(artist):
-        return feat
-    q = " ".join(p for p in (f'artist:"{artist}"' if artist else "",
-                             f'track:"{title}"' if title else "") if p)
-    search_url = _API + "/search/track?" + urllib.parse.urlencode({"q": q, "limit": "10"})
-    try:
-        res = _get_json(search_url)
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Deezer search failed for %r / %r: %s", title, artist, e)
-        return feat
-    if isinstance(res, dict) and res.get("error"):
-        logger.warning("Deezer error for %r / %r: %s", title, artist, res["error"])
-        return feat
-    data = (res or {}).get("data") or []
-    if not data:
-        return feat
-    track = _select_track(data, title, artist, duration, isrc)
-    if track is None:
-        return feat
+    from yt_playlist.providers.artist_credits import deezer
+    if credits := deezer(track):
+        feat['artist_credits'] = credits
     try:
         bpm = float(track.get("bpm"))
         feat["bpm"] = bpm if bpm > 0 else None     # Deezer reports 0 for un-analysed tracks
@@ -188,20 +172,11 @@ def lookup(title, artist, *, duration=None, isrc=None):
     feat["year"] = _year(track.get("release_date"))
     track_album = track.get("album") or {}
     feat["art"] = track_album.get("cover_xl") or track_album.get("cover_big") or None
-    album_id = track_album.get("id")
-    if album_id is not None:
-        try:
-            album = _get_json(_API + f"/album/{album_id}")
-            if isinstance(album, dict) and not album.get("error"):
-                feat["label"] = album.get("label") or None
-                # A track carries no genre of its own on Deezer; its album does.
-                genres = ((album.get("genres") or {}).get("data")) or []
-                feat["genre"] = (genres[0].get("name") or None) if genres else None
-                feat["year"] = feat["year"] or _year(album.get("release_date"))
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception as e:  # noqa: BLE001
-            logger.info("Deezer album lookup failed for %s: %s", album_id, e)
+    if isinstance(album, dict) and not album.get('error'):
+        feat['label'] = album.get('label') or None
+        genres = ((album.get('genres') or {}).get('data')) or []
+        feat['genre'] = (genres[0].get('name') or None) if genres else None
+        feat['year'] = feat['year'] or _year(album.get('release_date'))
     return feat
 
 

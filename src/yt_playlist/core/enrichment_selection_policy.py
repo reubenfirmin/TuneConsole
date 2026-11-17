@@ -21,6 +21,12 @@ def result_fields(provider, fields, run_id):
         raise ValueError('A provider result needs a bounded run identity')
     if 'year' in fields and 'mb_year' in fields:
         validate_fields({'year': fields['mb_year']}, {'year': fields['year']})
+    if 'artist_credits' in fields:
+        from yt_playlist.core.artist_credits import normalize_credit
+        credit = normalize_credit('', fields['artist_credits'], provider)
+        if any(member.provider not in (provider, 'musicbrainz' if provider == 'lastfm' else provider)
+               or not (member.raw_id or member.raw_browse_id) for member in credit.members):
+            raise ValueError('Artist credit needs explicit provider identities')
     return canonical_fields(fields)
 
 

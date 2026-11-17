@@ -20,8 +20,8 @@ function onboardingArrival(artistsRequired = false) {
     get progressLabel() {
       if (this.statusError) return this.statusError;
       if (!this.connected && !this.running) return 'Open YouTube Music to continue setup';
-      if (this.running && this.current && this.target && ['playlists', 'albums'].includes(this.activity)) {
-        return 'Reading ' + (this.activity === 'albums' ? 'album ' : 'playlist ')
+      if (this.running && this.current && this.target && ['playlists', 'albums', 'songs'].includes(this.activity)) {
+        return 'Reading ' + ({albums: 'album ', playlists: 'playlist ', songs: 'song '}[this.activity])
           + this.current + ' of ' + this.target;
       }
       if (!this.imported && !this.songs) return 'Bringing in your music';

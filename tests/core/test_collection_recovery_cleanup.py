@@ -10,11 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 from tests.core.test_action_work_migration import backup
+from tests.file_custody_support import expire_file as expired
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
 )
 from yt_playlist.core import collection_recovery as recovery
-from yt_playlist.core import activity
+from yt_playlist.controllers.collection_retention import CollectionCollector
+from yt_playlist.core import activity, fao
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded
 from yt_playlist.core.store import Store
 
@@ -80,7 +82,7 @@ def test_batches_bound_candidates_and_allow_read_write_between_turns(
         file_backed_store, monkeypatch, owners, record_property):
     store = file_backed_store
     assert seed_recipe_owners(store, owners) == owners
-    monkeypatch.setattr(recovery.OrphanCollector, 'LIMIT', 8)
+    monkeypatch.setattr(CollectionCollector, 'LIMIT', 8)
     held = {Path(row[3]) for row in recovery.references(store.conn)}
     orphaned = {Path(recovery.publish(store.conn, 'playlist-recipe', f'orphan-{i}', {'value': i})[0])
                 for i in range(45)}
@@ -103,7 +105,7 @@ def test_batches_bound_candidates_and_allow_read_write_between_turns(
             finally:
                 other.conn.close()
             if tick == 3:
-                recovery.close(store)  # A stopped worker loses only its disposable cursor.
+                store.retention.collections.close()  # A stopped worker loses only its disposable cursor.
                 continue
             if not store.retention.collection_recovery_pending():
                 break
@@ -111,7 +113,7 @@ def test_batches_bound_candidates_and_allow_read_write_between_turns(
             pytest.fail('Collection stopped making progress')
     finally:
         store.conn.set_trace_callback(None)
-        recovery.close(store)
+        store.retention.collections.close()
     assert all(path.exists() for path in held)
     assert not any(path.exists() for path in orphaned)
     ownership = [sql for sql in queries if sql.startswith('WITH page AS MATERIALIZED')]
@@ -133,6 +135,7 @@ def test_snapshot_and_retained_action_backup_survive_collection(file_backed_stor
     exact = retained.read_bytes()
     store.playlist_recipes.set_recipe('P', {'model': 'old'}, 1)
     old = Path(store.conn.execute("SELECT recovery_filename FROM rec_recipes").fetchone()[0])
+    expired(old)
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
         assert reader.playlist_recipes.get_recipe('P') == {'model': 'old'}
@@ -154,18 +157,20 @@ def test_inflight_publication_keeps_file_until_its_writer_finishes(
     writer._bind_repositories()
     entered, release = threading.Event(), threading.Event()
     paths = []
-    publish = recovery.publish_at
+    publish = writer.playlist_recipes.files.publish_reserved
 
     def held_publish(*args, **kwargs):
         result = publish(*args, **kwargs)
+        assert not writer.conn.in_transaction
         paths.append(Path(result[0]))
+        expired(paths[-1])
         entered.set()
         assert release.wait(15)
         if rollback:
             raise RuntimeError('Interrupted publication')
         return result
 
-    monkeypatch.setattr(recovery, 'publish_at', held_publish)
+    monkeypatch.setattr(writer.playlist_recipes.files, 'publish_reserved', held_publish)
     try:
         with ThreadPoolExecutor(1) as executor:
             job = executor.submit(writer.playlist_recipes.set_recipe, 'P', {'model': 'inflight'}, 1)
@@ -186,14 +191,15 @@ def test_inflight_publication_keeps_file_until_its_writer_finishes(
     finally:
         release.set()
         writer.conn.close()
-        recovery.close(store)
+        store.retention.collections.close()
 
 
 def test_interrupted_batch_retains_cursor_and_releases_all_protection(file_backed_store, monkeypatch):
     store = file_backed_store
     orphan = Path(recovery.publish(store.conn, 'playlist-recipe', 'orphan', {'exact': [1, 1, 2]})[0])
     with monkeypatch.context() as interrupted:
-        interrupted.setattr(recovery, 'check_cancellable_work',
+        from yt_playlist.repos import collection_retention
+        interrupted.setattr(collection_retention, 'check_cancellable_work',
                             lambda: (_ for _ in ()).throw(WorkBudgetExceeded('Controlled deadline')))
         assert store.retention.maintain_collection_recovery() == 0
     assert orphan.exists() and store.retention.collection_recovery_pending() and not store.conn.in_transaction
@@ -244,7 +250,7 @@ def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
             store.conn.set_trace_callback(None)
             store.conn.set_progress_handler(activity.interrupt_query, 1000)
     assert interrupted_queries and interrupted_progress and orphan.exists()
-    assert store.retention.collection_recovery_pending() and store.retention.database._collection_orphans.batch
+    assert store.retention.collection_recovery_pending() and store.retention.database._collection_orphans.files.batch
     assert not store.conn.in_transaction
     store.settings.set_setting('after SQL deadline', 'usable')
     finish(store)
@@ -257,15 +263,15 @@ def test_worker_continues_local_batches_without_clients(file_backed_store, monke
     from yt_playlist.rec import discover, rec_worker
 
     store = file_backed_store
-    monkeypatch.setattr(recovery.OrphanCollector, 'LIMIT', 1)
+    monkeypatch.setattr(CollectionCollector, 'LIMIT', 1)
     orphaned = [Path(recovery.publish(store.conn, 'playlist-recipe', f'orphan-{i}', {'value': i})[0])
                 for i in range(3)]
     clock, waits, batches, discoveries = [0], [], [], []
-    maintain = recovery.maintain
+    maintain = store.retention.collections.maintain
 
-    def collect(target):
+    def collect():
         batches.append(clock[0])
-        return maintain(target)
+        return maintain()
 
     class Stop:
         def wait(self, seconds):
@@ -281,7 +287,7 @@ def test_worker_continues_local_batches_without_clients(file_backed_store, monke
     def remote(*args, **kwargs):
         pytest.fail('Local maintenance must work without a remote client')
 
-    monkeypatch.setattr(recovery, 'maintain', collect)
+    monkeypatch.setattr(store.retention.collections, 'maintain', collect)
     monkeypatch.setattr(rec_worker, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(playlist_generated, 'gc_generated_playlists', remote)
     monkeypatch.setattr(discover, 'gc_discovery', lambda ctx, now: discoveries.append(now) or {})

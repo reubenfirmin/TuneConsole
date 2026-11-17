@@ -1,7 +1,7 @@
 """Evidence required for a prepared Vibe fit to count toward menu readiness."""
 import math
 
-from yt_playlist.rec import musical_character, vibe_preparation
+from yt_playlist.rec import musical_character, vibe_recording_rules as vibe_preparation
 
 
 def supported(track, preset):

@@ -19,6 +19,7 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
     store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "", 0)
     entry = store.tracks.upsert_track("video", "Old title", "Old artist", "Album", 200,
                                album_browse_id="BID")
+    artist_id = store.conn.execute('SELECT id FROM artists WHERE name=?', ('Old artist',)).fetchone()[0]
     store.playlists.set_playlist_tracks(pid, [entry])
     if scope == "generated":
         store.playlists.set_playlist_group("PL", "Generated")
@@ -78,6 +79,8 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
         assert current == {
             'track_id': entry, 'title': 'Edited title', 'artist': 'Edited artist',
             'genre': genre, 'year': year, 'orig_title': 'Old title', 'orig_artist': 'Old artist',
+            'artist_links': [{'name': 'Edited artist', 'artist_id': artist_id,
+                              'href': f'/artist?artist_id={artist_id}'}],
         }
         if scope == "generated":
             assert 'x-data="{ mood: 1 }"' in html

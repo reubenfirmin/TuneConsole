@@ -24,7 +24,8 @@ def test_lastfm_preserves_multiple_track_tags_counts_and_verified_match(monkeypa
     monkeypatch.setattr(lastfm, '_get', get)
     result = lastfm.probe({'title': 'Song', 'artist': 'Artist'}, key='fixture')
     assert calls == ['track.getinfo']
-    assert result.fields == {'genre': 'Metal'}
+    assert result.fields == {'genre': 'Metal', 'artist_credits': [
+        {'provider': 'musicbrainz', 'id': 'artist-id', 'name': 'Artist'}]}
     assert len(result.observations) == 1
     tags = result.observations[0].payload()
     assert (tags['scope'], tags['entity_id']) == ('recording', 'recording-id')

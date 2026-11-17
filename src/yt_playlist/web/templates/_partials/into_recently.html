@@ -49,7 +49,7 @@
         </span>
       </a>
       <a class="into-song-title" href="{{ track_url(song) }}" title="{{ song.title }}">{{ song.title }}</a>
-      <a class="into-song-artist" href="/artist?name={{ song.artist|urlencode }}" title="{{ song.artist }}">{{ song.artist }}</a>
+      {% from '_partials/artist_links.html' import artist_credit with context %}{{ artist_credit(song, 'into-song-artist') }}
     </li>
     {% endfor %}
   </ol>

@@ -11,6 +11,8 @@ def metadata(monkeypatch):
     now = [0]
     monkeypatch.setattr(candidates, "monotonic", lambda: now[0])
     monkeypatch.setattr(candidates.lastfm, "api_key", lambda store: store)
+    matcher = candidates.genres.GenreMatcher.from_values({'rock': 'Rock'})
+    monkeypatch.setattr(candidates.genres, 'snapshot', lambda store: matcher)
     yield now
     candidates._FACTS_CACHE.clear()
     candidates._ARTIST_GENRE_CACHE.clear()
@@ -20,7 +22,7 @@ def metadata(monkeypatch):
 def test_missing_and_changed_credentials_are_seen_immediately(monkeypatch):
     calls = []
     monkeypatch.setattr(candidates.lastfm, "artist_genre",
-                        lambda artist, key: calls.append(key) or key)
+                        lambda artist, key, **kwargs: calls.append(key) or key)
     assert candidates.artist_genre(None, "Artist") is None
     assert candidates.artist_genre("first", "Artist") == "first"
     assert candidates.artist_genre("second", "Artist") == "second"
@@ -29,7 +31,7 @@ def test_missing_and_changed_credentials_are_seen_immediately(monkeypatch):
 
 def test_ambiguous_miss_retries_and_positive_result_expires(metadata, monkeypatch):
     answers = iter([None, "Rock", "Folk"])
-    monkeypatch.setattr(candidates.lastfm, "artist_genre", lambda *args: next(answers))
+    monkeypatch.setattr(candidates.lastfm, "artist_genre", lambda *args, **kwargs: next(answers))
     assert candidates.artist_genre("key", "Artist") is None
     assert candidates.artist_genre("key", "Artist") is None
     metadata[0] += candidates._METADATA_RETRY_TTL
@@ -83,7 +85,7 @@ def test_metadata_caches_evict_least_recently_used(monkeypatch):
     monkeypatch.setattr(candidates, "_METADATA_CACHE_LIMIT", 2)
     calls = []
     monkeypatch.setattr(candidates.lastfm, "artist_genre",
-                        lambda artist, key: calls.append(artist) or "Rock")
+                        lambda artist, key, **kwargs: calls.append(artist) or "Rock")
     monkeypatch.setattr(candidates.lastfm, "tag_top_artists", lambda *a, **kw: ["Artist"])
     for artist in ["A", "B", "A", "C", "B"]:
         candidates.artist_genre("key", artist)

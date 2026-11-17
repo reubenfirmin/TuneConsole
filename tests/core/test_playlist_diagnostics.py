@@ -15,6 +15,7 @@ from yt_playlist.core.album_snapshot import LibrarySnapshotError
 from yt_playlist.core.playlist_snapshot import _page_envelope
 from yt_playlist.library.playlist_snapshot import is_complete_playlist
 from yt_playlist.web.radio_session import PlaylistRadio
+from yt_playlist.web.radio_playlist_io import PlaylistPending
 
 
 @pytest.fixture(autouse=True)
@@ -128,8 +129,10 @@ def test_missing_page_two_after_append_preserves_checkpoint_and_controls(diagnos
                 assert pool.submit(controller.stop).result(timeout=.5)['ok']
         finally:
             release.set()
-        with pytest.raises(LibrarySnapshotError, match='continuation.envelope'):
+        with pytest.raises(PlaylistPending) as error:
             advancing.result(timeout=5)
+        assert isinstance(error.value.__cause__, LibrarySnapshotError)
+        assert 'continuation.envelope' in str(error.value.__cause__)
     state = controller.persistence.load()
     assert state['pending']['video_id'] == 'v4' and state['pending_sent']
     assert state['pending_result']['status'] == 'STATUS_SUCCEEDED'
@@ -149,8 +152,10 @@ def test_missing_page_two_after_append_preserves_checkpoint_and_controls(diagnos
     # An incomplete page cannot prove rejection even after the ordinary
     # confirmation timeout. Only a later complete read can settle this write.
     monkeypatch.setattr(controller.ctx, 'now_fn', lambda: 1295.0)
-    with pytest.raises(LibrarySnapshotError, match='continuation.envelope'):
+    with pytest.raises(PlaylistPending) as error:
         play(restored, 'v3')
+    assert isinstance(error.value.__cause__, LibrarySnapshotError)
+    assert 'continuation.envelope' in str(error.value.__cause__)
     assert restored.session.pending['video_id'] == 'v4'
     assert not restored.session.halted and not restored.session.rejected
     remote.after_add = lambda: None
@@ -182,8 +187,10 @@ def test_radio_retains_uncertain_append_and_readback_recovers_without_replaying(
         return original(*args, **kwargs)
 
     remote.get_playlist = read
-    with pytest.raises(LibrarySnapshotError, match='contents.type'):
+    with pytest.raises(PlaylistPending) as error:
         play(controller, 'v3')
+    assert isinstance(error.value.__cause__, LibrarySnapshotError)
+    assert 'contents.type' in str(error.value.__cause__)
     assert controller.session.pending['video_id'] == 'v4'
     assert controller.status()['ahead'] == 0
     assert remote.adds == [['v4']]

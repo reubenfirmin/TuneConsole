@@ -1,10 +1,13 @@
 import json
 from tests.derived_rating_support import seed_like
 import sqlite3
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from yt_playlist.core import artists, listening
+from yt_playlist.library import discovery_composition
 from yt_playlist.library.spotify_data import import_spotify_data
 from yt_playlist.library.takeout import seed_discovery_from_unmatched
 from yt_playlist.rec import discover, graduation, rec_params, transient
@@ -234,13 +237,17 @@ def test_discovery_pass_keeps_spotify_derived_suggestions_removable(store, monke
             listening.observe_day(store.conn, iid, 'song', '2024-01-01', 'spotify', 'UTC', 100)
     else:
         store.discovery.seed_spotify_artists(iid, {'Imported artist':4}, 100)
-    monkeypatch.setattr(discover, 'new_artists', lambda ctx: [
+    suggestions = Mock(return_value=[
         {'artist':'Model suggestion', 'score':5, 'because':['Imported history'], 'fits':[]}])
-    monkeypatch.setattr(discover, 'populate_discovered_tracks', lambda *args: None)
-    monkeypatch.setattr(discover, 'populate_radio_tracks', lambda *args: None)
+    population = SimpleNamespace(populate=Mock(return_value=None), radio=Mock(return_value=None))
+    monkeypatch.setattr(discovery_composition, 'artists', lambda ctx: SimpleNamespace(query=suggestions))
+    monkeypatch.setattr(discovery_composition, 'catalog', lambda ctx: population)
     ctx = Ctx(store=store, client_provider=lambda: {}, now_fn=lambda: 1700000000,
               templates=None, jobs=None)
     discover.run_discovery(ctx, 1700000000, budget=0)
+    suggestions.assert_called_once_with(15, 30)
+    population.populate.assert_called_once_with(1700000000, 4)
+    population.radio.assert_called_once_with(1700000000, 6, 12)
     assert 'Model suggestion' in {a['artist'] for a in store.discovery.get_discovered_artists()}
     store.history.remove_spotify_history()
     assert not store.discovery.get_discovered_artists()

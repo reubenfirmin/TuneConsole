@@ -189,7 +189,7 @@ def test_comparison_preferences_serialize_with_concurrent_settings_updates(store
     # Production readers must stay coherent without waiting on an unrelated
     # uncommitted writer; the writer itself must compose its own pending inputs.
     import hashlib
-    from yt_playlist.core import album_feedback_storage
+    from yt_playlist.core import album_feedback_storage, albums
     from yt_playlist.core.evidence_ledger import canonical
 
     disk = file_backed_store
@@ -198,8 +198,12 @@ def test_comparison_preferences_serialize_with_concurrent_settings_updates(store
         pinned = snapshot.store
         disk.conn.execute('BEGIN IMMEDIATE')
         try:
-            disk.settings.publish_values({'rec_param:album_collab_weight': '.25'})
-            album_feedback_storage.import_legacy(disk.conn, {'pending-release': {'kind': 'more', 'at': 1}})
+            disk.conn.execute('INSERT INTO settings(key,value) VALUES (?,?) '
+                'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                ('rec_param:album_collab_weight', '.25'))
+            album = albums.observe(disk.conn, 'pending-release')
+            disk.conn.execute('INSERT INTO album_feedback(album_id,source_browse_id,response,created_at,'
+                'legacy_author_unknown) VALUES (?,\'pending-release\',\'more\',1,1)', (album,))
             values, standing = disk.model_selection.comparison_constraints()
             expected = hashlib.sha256(canonical([
                 values, standing, album_feedback_storage.original(disk.conn)])).hexdigest()
@@ -612,9 +616,9 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(menu_
         replacement['tracks'] = replacement['tracks'][1:] + replacement['tracks'][:1]
         assert [t['key'] for t in replacement['tracks']] != old_keys
         if rebuild == 'pool':
-            monkeypatch.setattr(views.recommendations, 'pool',
+            monkeypatch.setattr(views.commands, 'pool',
                 lambda *args: SimpleNamespace(proto=replacement))
-            fragment = views.pool_fragment(request, object())
+            fragment = views.pool_fragment(request, SimpleNamespace(done=True))
             assert fragment['p'] == replacement
         else:
             explicit = home_prepared.cards(store, normal, 1001, views.recommendations, record=False)

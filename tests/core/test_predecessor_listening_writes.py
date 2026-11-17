@@ -2,7 +2,6 @@
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from yt_playlist.core import entity_names
 
 
 def test_sync_disambiguation_keeps_captured_evidence_on_its_recording(installed):
@@ -85,9 +84,8 @@ def test_imports_keep_receipts_deduplicate_and_scope_resets_to_one_account(insta
                                                 [{'ts': stamp}], 2)
     assert store.conn.execute('SELECT id FROM main.takeout_imports').fetchone()[0] == receipt
     store.history.reset_play_history(first)
-    observations = entity_names.owner(store.conn, 'listening_observations')
     assert [row[0] for row in store.conn.execute(
-        f'SELECT {observations.column("account_id")} FROM {observations.table}')] == [second]
+        'SELECT account_id FROM listening_observations')] == [second]
     assert store.history.event_play_counts(first) == {key: 1}
     assert store.history.event_play_counts(second) == {}
     assert store.conn.execute('SELECT count(*) FROM main.spotify_history_listens').fetchone()[0] == 2

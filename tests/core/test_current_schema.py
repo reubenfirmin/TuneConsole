@@ -10,7 +10,7 @@ import threading
 import pytest
 
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
-from yt_playlist.core.migrations import current, registry, regular, v001_baseline
+from yt_playlist.core.migrations import current, registry, regular
 
 
 @pytest.fixture(autouse=True)
@@ -66,34 +66,16 @@ def current_database(current_template):
 
 
 def _forbid_historical_schema(monkeypatch):
-    from yt_playlist.core import (
-        frozen_share_contract, genre_contract, schema_definition, schema_transforms)
+    from yt_playlist.core import schema_definition
 
     def forbidden(*args, **kwargs):
         raise AssertionError('historical schema used by current database')
 
-    monkeypatch.setattr(schema_definition, 'assembled_statements', forbidden)
-    monkeypatch.setattr(schema_definition, '_statements', forbidden)
-    for name, operation in vars(schema_transforms).copy().items():
-        if callable(operation) and getattr(operation, '__module__', None) == schema_transforms.__name__:
-            monkeypatch.setattr(schema_transforms, name, forbidden)
-    monkeypatch.setattr(genre_contract, 'classified_definition', forbidden)
-    monkeypatch.setattr(frozen_share_contract, 'fences', forbidden)
     schema_definition.contract.cache_clear()
     schema_definition._normalized_vibe_contract.cache_clear()
     schema_definition._reference_contract.cache_clear()
-    monkeypatch.setattr(v001_baseline, 'expected', forbidden)
-    monkeypatch.setattr(v001_baseline, 'validate', forbidden)
-    from yt_playlist.core.migrations import runner
-    monkeypatch.setattr(runner, '_predecessor_contract', forbidden)
     # Forbid every upgrade callback, including additions after the old v51
     # bootstrap. A fresh install must use only the complete current definition.
-    for migration in registry.MIGRATIONS:
-        module = __import__(migration.apply.__module__, fromlist=['statements'])
-        if hasattr(module, 'statements'):
-            monkeypatch.setattr(module, 'statements', forbidden)
-        if hasattr(module, 'retire_preparation_capture'):
-            monkeypatch.setattr(module, 'retire_preparation_capture', forbidden)
     monkeypatch.setattr(registry, 'MIGRATIONS', tuple(
         Migration(m.version, m.name, forbidden) for m in registry.MIGRATIONS))
     monkeypatch.setattr(regular, 'CHANGES', tuple(
@@ -360,7 +342,7 @@ def test_bootstrap_failure_rolls_back_all_objects_and_history(monkeypatch):
     validate = current.validate
     monkeypatch.setattr(current, 'validate', lambda conn: (_ for _ in ()).throw(ValueError('injected bootstrap failure')))
     with connect() as conn:
-        with pytest.raises(MigrationError, match='injected bootstrap failure'):
+        with pytest.raises(ValueError, match='injected bootstrap failure'):
             migrate(conn)
         assert list(conn.execute('SELECT * FROM sqlite_master')) == []
         monkeypatch.setattr(current, 'validate', validate)
@@ -371,20 +353,23 @@ def test_bootstrap_failure_rolls_back_all_objects_and_history(monkeypatch):
 def test_explicit_later_migration_applies_and_rolls_back(tmp_path, monkeypatch):
     with connect(tmp_path / 'state.db') as conn:
         migrate(conn)
-        original = registry.MIGRATIONS
+        original = regular.CHANGES
         def interrupted(connection, context):
             connection.execute('CREATE TABLE later (id INTEGER PRIMARY KEY)')
             raise ValueError('injected later failure')
-        monkeypatch.setattr(registry, 'MIGRATIONS', (*original, Migration(LATEST_VERSION + 1, 'later', interrupted)))
-        with pytest.raises(MigrationError, match='injected later failure'):
-            migrate(conn, registry=registry.MIGRATIONS)
+        changes = (*original, regular.Change(len(original) + 1, 'later', interrupted, lambda conn: None))
+        with pytest.raises(ValueError, match='injected later failure'):
+            regular.migrate(conn, changes=changes)
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='later'").fetchone() is None
         assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
-        monkeypatch.setattr(registry, 'MIGRATIONS', (*original, Migration(LATEST_VERSION + 1, 'later', lambda c, x:
-            c.execute('CREATE TABLE later (id INTEGER PRIMARY KEY)'))))
-        migrate(conn, registry=registry.MIGRATIONS)
-        migrate(conn, registry=registry.MIGRATIONS)
-        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION + 1
+        changes = (*original, regular.Change(len(original) + 1, 'later', lambda c, x:
+            c.execute('CREATE TABLE later (id INTEGER PRIMARY KEY)'), lambda conn: None))
+        from tests.release_schema_support import future_schema
+        future_schema(monkeypatch, 'later', 'CREATE TABLE later (id INTEGER PRIMARY KEY)')
+        regular.migrate(conn, changes=changes)
+        regular.migrate(conn, changes=changes)
+        assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
+        assert conn.execute('SELECT MAX(version) FROM schema_changes').fetchone()[0] == len(changes)
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='later'").fetchone()
 
 

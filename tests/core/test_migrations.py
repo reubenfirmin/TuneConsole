@@ -3,11 +3,11 @@ import subprocess
 import sys
 import threading
 from contextlib import closing, contextmanager
-from pathlib import Path
 
 import pytest
 
-from yt_playlist.core.migrations import Migration, MigrationError, migrate
+from tests.release_schema_support import future_schema
+from yt_playlist.core.migrations import MigrationError, migrate, regular
 from yt_playlist.core.store import Store
 
 
@@ -19,38 +19,54 @@ def connect(path):
             yield conn
 
 
-def test_failure_rolls_back_ddl_data_and_version_then_resumes(tmp_path):
+def installed(conn):
+    migrate(conn)
+    with conn:
+        conn.execute("INSERT INTO settings VALUES ('evidence','original')")
+
+
+def successor(apply):
+    return (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'next_owner', apply,
+        lambda conn: conn.execute('SELECT id FROM next_owner LIMIT 0')))
+
+
+def test_failure_rolls_back_ddl_data_and_version_then_resumes(tmp_path, monkeypatch):
     path = tmp_path / 'state.db'
-    def first(conn, ctx):
-        conn.execute('CREATE TABLE evidence (value TEXT)')
-        conn.execute("INSERT INTO evidence VALUES ('original')")
     def broken(conn, ctx):
-        conn.execute('ALTER TABLE evidence ADD COLUMN changed INTEGER')
-        conn.execute("UPDATE evidence SET value='lost'")
+        conn.execute('CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+        conn.execute("UPDATE settings SET value='lost' WHERE key='evidence'")
         raise ValueError('injected interruption')
-    registry = (Migration(1,'first',first), Migration(2,'second',broken))
     with connect(path) as conn:
-        with pytest.raises(MigrationError, match='2 .*second.*injected'):
-            migrate(conn, registry=registry)
+        installed(conn)
+        before = list(conn.iterdump())
+        with pytest.raises(ValueError, match='injected interruption'):
+            regular.migrate(conn, changes=successor(broken))
     with connect(path) as reopened:
-        assert reopened.execute('SELECT * FROM evidence').fetchall() == [('original',)]
-        assert reopened.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
-        migrate(reopened, registry=(registry[0],Migration(2,'second',lambda c,x: c.execute("UPDATE evidence SET value='done'"))))
-        assert reopened.execute('SELECT * FROM evidence').fetchall() == [('done',)]
+        assert list(reopened.iterdump()) == before
+        future_schema(monkeypatch, 'next_owner', 'CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+        def completed(conn, ctx):
+            conn.execute('CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+            conn.execute("UPDATE settings SET value='done' WHERE key='evidence'")
+        regular.migrate(reopened, changes=successor(completed))
+        assert reopened.execute("SELECT value FROM settings WHERE key='evidence'").fetchone() == ('done',)
+        assert reopened.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES) + 1
 
 
-def test_baseline_failure_removes_history_and_all_changes(tmp_path):
-    def broken(conn, ctx):
-        conn.execute('CREATE TABLE half_ready (id INTEGER)')
+def test_baseline_failure_removes_history_and_all_changes(tmp_path, monkeypatch):
+    from yt_playlist.core import schema_bootstrap
+    bootstrap = schema_bootstrap.bootstrap
+    def broken(*args, **kwargs):
+        bootstrap(*args, **kwargs)
         raise KeyboardInterrupt()
+    monkeypatch.setattr(schema_bootstrap, 'bootstrap', broken)
     with connect(tmp_path / 'state.db') as conn:
         with pytest.raises(KeyboardInterrupt):
-            migrate(conn, registry=[Migration(1,'broken',broken)])
+            migrate(conn)
         assert conn.execute('SELECT name FROM sqlite_master').fetchall() == []
 
 
 @pytest.mark.parametrize('journal', ['DELETE', 'WAL'])
-def test_upgrade_rolls_back_and_commits_without_a_backup_destination(tmp_path, journal):
+def test_upgrade_rolls_back_and_commits_without_a_backup_destination(tmp_path, journal, monkeypatch):
     path = tmp_path / 'state.db'
     # A file blocks creation of a backup directory. Migration safety must come
     # from the transaction even when there is nowhere to store a snapshot.
@@ -58,21 +74,23 @@ def test_upgrade_rolls_back_and_commits_without_a_backup_destination(tmp_path, j
     blocked.write_text('existing file; leave untouched')
     with connect(path) as conn:
         conn.execute(f'PRAGMA journal_mode={journal}')
-        conn.execute('CREATE TABLE data (v INTEGER)')
-        conn.execute('INSERT INTO data VALUES (42)')
-        conn.commit()
+        installed(conn)
+        before = list(conn.iterdump())
         def interrupted(connection, context):
-            connection.execute('ALTER TABLE data ADD COLUMN changed INTEGER')
-            connection.execute('DELETE FROM data')
+            connection.execute('CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+            connection.execute("DELETE FROM settings WHERE key='evidence'")
             raise RuntimeError('interrupted replacement')
-        with pytest.raises(MigrationError, match='interrupted replacement'):
-            migrate(conn, registry=[Migration(1, 'replace', interrupted)])
-        assert conn.execute('SELECT * FROM data').fetchall() == [(42,)]
-        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone()
-        migrate(conn, registry=[Migration(1, 'replace', lambda c,x: c.execute('DELETE FROM data'))])
+        with pytest.raises(RuntimeError, match='interrupted replacement'):
+            regular.migrate(conn, changes=successor(interrupted))
+        assert list(conn.iterdump()) == before
+        future_schema(monkeypatch, 'next_owner', 'CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+        def completed(connection, context):
+            connection.execute('CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+            connection.execute("DELETE FROM settings WHERE key='evidence'")
+        regular.migrate(conn, changes=successor(completed))
     with connect(path) as reopened:
-        assert reopened.execute('SELECT * FROM data').fetchall() == []
-        assert reopened.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
+        assert reopened.execute("SELECT value FROM settings WHERE key='evidence'").fetchone() is None
+        assert reopened.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES) + 1
         assert reopened.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     assert blocked.read_text() == 'existing file; leave untouched'
     assert list(tmp_path.glob('*.db')) == [path]
@@ -90,8 +108,6 @@ def test_rejects_caller_transaction_without_committing_or_rolling_it_back():
 
 
 @pytest.mark.parametrize('sql', [
-    'CREATE TABLE unrelated (id INTEGER)',
-    'CREATE TABLE tracks (id TEXT PRIMARY KEY)',
     'CREATE TABLE schema_migrations (version TEXT)',
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at REAL NOT NULL); INSERT INTO schema_migrations VALUES (99,'future',1)",
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at REAL NOT NULL); INSERT INTO schema_migrations VALUES (2,'gap',1)",
@@ -113,44 +129,46 @@ def test_competing_startups_apply_once(tmp_path):
         try:
             with connect(path) as conn:
                 barrier.wait()
-                migrate(conn, registry=[Migration(1,'once',lambda c,x: c.execute('CREATE TABLE once_only (id INTEGER)'))])
+                migrate(conn)
         except Exception as exc:
             errors.append(exc)
     threads = [threading.Thread(target=run) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(15)
+    assert all(not t.is_alive() for t in threads)
     assert not errors
     with connect(path) as conn:
-        assert conn.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
+        assert conn.execute('SELECT max(version),count(*) FROM schema_migrations').fetchone() == (107, 107)
+        assert conn.execute('SELECT count(*) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
 
 
 @pytest.mark.parametrize('journal', ['DELETE', 'WAL'])
-def test_process_death_rolls_back(tmp_path, journal):
+def test_process_death_rolls_back(tmp_path, journal, monkeypatch):
     path = tmp_path / 'state.db'
-    def first(conn, context):
-        conn.execute('CREATE TABLE evidence (value TEXT)')
-        conn.execute("INSERT INTO evidence VALUES ('original')")
     with connect(path) as conn:
         conn.execute(f'PRAGMA journal_mode={journal}')
-        migrate(conn, registry=[Migration(1, 'first', first)])
+        installed(conn)
+        before = list(conn.iterdump())
     source = '''import os,sqlite3,sys
-from yt_playlist.core.migrations import Migration,migrate
+from yt_playlist.core.migrations import regular
 def interrupted(conn, context):
-    conn.execute('ALTER TABLE evidence ADD COLUMN changed INTEGER')
-    conn.execute("UPDATE evidence SET value='lost'")
+    conn.execute('CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+    conn.execute("UPDATE settings SET value='lost' WHERE key='evidence'")
     os._exit(7)
 c=sqlite3.connect(sys.argv[1])
-migrate(c,registry=[Migration(1,'first',lambda c,x: None),Migration(2,'second',interrupted)])
+regular.migrate(c,changes=(*regular.CHANGES,regular.Change(len(regular.CHANGES)+1,'next_owner',interrupted,lambda c: None)))
 '''
-    assert subprocess.run([sys.executable,'-c',source,str(path)]).returncode == 7
+    assert subprocess.run([sys.executable,'-c',source,str(path)], timeout=20).returncode == 7
     with connect(path) as conn:
-        assert conn.execute('SELECT * FROM evidence').fetchall() == [('original',)]
-        assert conn.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
-        migrate(conn, registry=[Migration(1, 'first', first), Migration(
-            2, 'second', lambda c,x: c.execute("UPDATE evidence SET value='done'"))])
-        assert conn.execute('SELECT * FROM evidence').fetchall() == [('done',)]
+        assert list(conn.iterdump()) == before
+        future_schema(monkeypatch, 'next_owner', 'CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+        def completed(connection, context):
+            connection.execute('CREATE TABLE next_owner(id INTEGER PRIMARY KEY)')
+            connection.execute("UPDATE settings SET value='done' WHERE key='evidence'")
+        regular.migrate(conn, changes=successor(completed))
+        assert conn.execute("SELECT value FROM settings WHERE key='evidence'").fetchone() == ('done',)
         assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     assert not (tmp_path / 'backups').exists()
 

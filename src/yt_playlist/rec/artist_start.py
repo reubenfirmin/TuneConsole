@@ -6,37 +6,20 @@ selected, and discovered songs never become library ownership or listening histo
 from collections import OrderedDict
 from concurrent.futures import Future
 from threading import Lock, BoundedSemaphore
-import re
 import time
 
 from yt_playlist.core.accounts import catalog_client
 from yt_playlist.util.matching import identity_key
 from yt_playlist.util.duration import parse_duration
+from yt_playlist.util.music_catalog import ARTIST_ID as _BROWSE_ID, artist, thumbnail
 
 MIN_ARTISTS = 3
 MAX_ARTISTS = 12
-_BROWSE_ID = re.compile(r'UC[A-Za-z0-9_-]{6,98}\Z')
+DRAFT = 'artist_start_music_draft'
 
 
 class CatalogUnavailable(ValueError):
     pass
-
-
-def thumbnail(rows):
-    for row in reversed(rows or []):
-        url = row.get('url', '')
-        if url.startswith('https://'):
-            return url
-    return ''
-
-
-def artist(row):
-    browse_id = row.get('browseId') or row.get('channelId') or ''
-    name = row.get('artist') or row.get('name') or row.get('title') or ''
-    if not _BROWSE_ID.fullmatch(browse_id) or not isinstance(name, str) or not name.strip():
-        return None
-    return {'browse_id': browse_id, 'name': name.strip()[:160],
-            'thumbnail': thumbnail(row.get('thumbnails'))}
 
 
 def required(store):
@@ -48,45 +31,77 @@ def required(store):
     if not getattr(store, '_read_only', False):
         with store.read_view() as reader:
             return required(reader)
+    if store.settings.get_setting(DRAFT) == '1':
+        # Completion follows the recorded choices even if an upload later
+        # becomes unavailable. Playable rows still govern the first-set offer.
+        videos = [*store.discovery.starter_song_videos(),
+                  *(row['video_id'] for row in store.discovery.starter_tracks())]
+        return not bool(videos and store.readiness.live_starter_played(videos))
     # Creating the first set also mirrors its tracks locally. Those tracks
     # remain generated output until adopted; saving them isn't a first listen.
-    if store.readiness.playable_owned(exclude_generated=True):
-        return False
-    if store.collection.get_saved_albums():
-        return False
+    owned = store.readiness.playable_owned(exclude_generated=True)
+    if owned:
+        return requires_artists(owned=owned)
+    albums = bool(store.collection.get_saved_albums())
+    if albums:
+        return requires_artists(albums=albums)
     # History and incidental extension-observed plays are not artist setup.
     # Graduate after explicit picks and a live start from their generated set.
     # A generated mirror, an imported play or an unrelated song cannot do this.
-    if len(store.discovery.starter_artists()) >= MIN_ARTISTS:
+    picks = len(store.discovery.starter_artists())
+    played = False
+    if picks >= MIN_ARTISTS:
         videos = [track['video_id'] for track in store.discovery.starter_tracks()]
-        if store.readiness.live_starter_played(videos):
-            return False
+        played = store.readiness.live_starter_played(videos)
+        if played:
+            return requires_artists(picks=picks, played=played)
     if store.settings.get_setting('last_sync_at') is not None:
-        return True
+        return requires_artists(imported=True)
     # Wait for evidence that each configured account's library was reached.
     # Empty saved-album pages can fail parsing just like empty Liked Music.
     # Neither failure should strand an account with no playable collection on
     # First sounds. Offer explicit picks while the ordinary imports retry.
     state = store.sync.state()
     accounts = {str(account.id) for account in store.accounts.get_accounts()}
-    return bool(accounts) and all(
+    reached = bool(accounts) and all(
         state.get('accounts', {}).get(account, {}).get('resources', {})
             .get('playlist_listing', {}).get('status') == 'complete'
         for account in accounts)
+    return requires_artists(reached=reached)
+
+
+def requires_artists(*, owned=False, albums=False, picks=0, played=False, imported=False, reached=False):
+    """Detached completion rule: generated/imported evidence cannot invent a live start."""
+    return not (owned or albums or picks >= MIN_ARTISTS and played) and bool(imported or reached)
 
 
 def first_set(store, now):
     """Keep a usable first offer while ordinary background preparation catches up."""
     from yt_playlist.rec import home_cards
     choices = store.discovery.starter_artists()
-    tracks = store.discovery.starter_tracks()
-    if len(choices) < MIN_ARTISTS or not tracks:
+    tracks = starter_tracks(store)
+    if not (saved_songs(store) or len(choices) >= MIN_ARTISTS) or not tracks:
         return None
-    proto = home_cards._proto(store, 'artist_start', 'From your artist picks', tracks, now)
-    proto['note'] = 'A first set from the artists you chose. More music is taking shape.'
-    proto['recipe'] = {'model': 'artist_start', 'artists': [choice['browse_id'] for choice in choices]}
+    proto = home_cards._proto(store, 'artist_start', 'From your picks', tracks, now)
+    proto['note'] = 'A first set from your songs and artists. More music is taking shape.'
+    proto['recipe'] = {'model': 'artist_start', 'artists': [choice['browse_id'] for choice in choices],
+                       'songs': [row['video_id'] for row in saved_songs(store)]}
     proto['experiment_id'] = home_cards.experiment_id(proto)
     return proto
+
+
+def remember_song(store, video_id, now):
+    store.discovery.select_starter_song(video_id, now)
+
+
+def saved_songs(store):
+    return store.discovery.starter_songs()
+
+
+def starter_tracks(store):
+    songs = saved_songs(store)
+    seen = {row['video_id'] for row in songs}
+    return [*songs, *(row for row in store.discovery.starter_tracks() if row['video_id'] not in seen)]
 
 
 class ArtistCatalog:
@@ -106,16 +121,21 @@ class ArtistCatalog:
 
     def state(self, store):
         choices = store.discovery.starter_artists()
-        songs = store.discovery.starter_tracks()
-        return {'selected': choices, 'songs': len(songs), 'minimum': MIN_ARTISTS,
+        songs = starter_tracks(store)
+        saved = saved_songs(store)
+        return {'selected': choices, 'songs': len(songs), 'saved_songs': saved, 'minimum': MIN_ARTISTS,
                 'complete': not required(store),
-                'ready': len(choices) >= MIN_ARTISTS and bool(songs)}
+                'ready': bool(saved or len(choices) >= MIN_ARTISTS and songs)}
 
-    def listen_context(self, store):
-        tracks = store.discovery.starter_tracks()
+    def listen_context(self, store, now=None):
+        from yt_playlist.rec import home_cards
+        tracks = starter_tracks(store)
         choices = store.discovery.starter_artists()
+        ready = bool(saved_songs(store) or len(choices) >= MIN_ARTISTS and tracks)
         return {'tracks': tracks, 'choices': choices,
-                'ready': len(choices) >= MIN_ARTISTS and bool(tracks)}
+                'ready': ready,
+                'proto': home_cards._proto(store, 'artist_start', 'My first set', tracks, now)
+                         if ready and now is not None else None}
 
     def _read(self, key, fetch):
         with self._lock:
@@ -224,3 +244,7 @@ class ArtistCatalog:
         if self.trigger_refresh:
             self.trigger_refresh()
         return result
+
+    def choose(self, store, browse_id, selected, now):
+        related = self.select(store, browse_id, selected, now)
+        return {**self.state(store), 'related': related}

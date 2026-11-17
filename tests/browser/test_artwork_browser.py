@@ -45,10 +45,11 @@ def test_shapes_match_between_library_and_search(page, artwork_library, width):
     page.goto(f"{base}/albums")
     album_shape = _shape(page.locator(".album-thumb").first)
     assert album_shape == ["0px", "none"]
-    page.locator(".omni-input").fill("Shape Artist")
+    page.locator(".omni-input").click()
+    page.locator("#music-search-query").fill("Shape Artist")
     for kind, expected in [("playlist", playlist_shape), ("artist", artist_shape),
                            ("album", album_shape)]:
-        result = page.locator(f".omni-thumb--{kind}").first
+        result = page.locator(f'#music-library-results [data-library-kind="{kind}"] .pl-cover').first
         expect(result).to_be_visible()
         assert _shape(result) == expected
 

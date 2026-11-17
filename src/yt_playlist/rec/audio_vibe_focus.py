@@ -1,10 +1,10 @@
 """Frozen Reading/Studying heads for independent Focus suitability."""
-from functools import lru_cache
 from pathlib import Path
 from statistics import mean
 
-from yt_playlist.core import audio_embedding, fao
+from yt_playlist.core import audio_embedding
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
+from yt_playlist.core.audio_model_files import artifact_loader
 from yt_playlist.rec import audio_vibe_runtime as bounded
 
 FORMAT = 'audio-vibe-focus-1'
@@ -51,15 +51,7 @@ def validate(artifact):
     return artifact
 
 
-@lru_cache(maxsize=2)
-def _load(path, mtime, size):
-    return bounded.read_artifact(path, size, MAX_BYTES, lambda artifact: {'header': validate(artifact)})
-
-
-def load(path):
-    path = Path(path).resolve()
-    info = fao.read(path).info
-    return _load(str(path), info.identity, info.logical_bytes)
+load = artifact_loader(lambda artifact: {'header': validate(artifact)}, MAX_BYTES)
 
 
 def score(model, values):

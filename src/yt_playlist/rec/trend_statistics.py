@@ -2,9 +2,6 @@
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from yt_playlist.util import genre_map
-
-
 def hour_buckets(rows, *, calendar):
     hours = [0] * 24
     for row in rows:
@@ -24,11 +21,20 @@ def last_complete_month(now):
     return (first - timedelta(days=1)).strftime("%Y-%m")
 
 
-def diversity_index(families):
+def family_distance(a, b, adjacency):
+    if a == b:
+        return 0.0
+    near = adjacency.get(a, {}).get(b)
+    if near is None:
+        near = adjacency.get(b, {}).get(a)
+    return near if near is not None else 1.0
+
+
+def diversity_index(families, *, family_adjacency):
     total = sum(families.values())
     if total <= 0:
         return 0.0
-    return sum((a_count / total) * (b_count / total) * genre_map.family_distance(a, b)
+    return sum((a_count / total) * (b_count / total) * family_distance(a, b, family_adjacency)
                for a, a_count in families.items() for b, b_count in families.items() if a != b)
 
 
@@ -44,7 +50,8 @@ def longest_streak(days):
     return best
 
 
-def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset(), *, genre_axes=None):
+def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset(), *,
+                   genre_axes, family_adjacency):
     """Calendar months with catalog-relative discovery and month-scoped streaks."""
     months = {}
     for day, key, cnt in day_counts:
@@ -61,11 +68,12 @@ def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset(), 
             row["new_artist_plays"] += cnt
             row["new_artists"].update(new)
         if genre:
-            family = genre_axes[genre][0] if genre_axes is not None else genre_map.family(genre)
+            family = genre_axes[genre][0]
             row["families"][family] = row["families"].get(family, 0) + cnt
     return [{"month": month, "plays": row["plays"], "distinct_artists": len(row["artists"]),
              "new_artist_plays": row["new_artist_plays"], "new_artists": len(row["new_artists"]),
-             "families": row["families"], "diversity": diversity_index(row["families"]),
+             "families": row["families"],
+             "diversity": diversity_index(row["families"], family_adjacency=family_adjacency),
              "listen_days": len(row["days"]), "longest_streak": longest_streak(row["days"])}
             for month, row in sorted(months.items())]
 

@@ -38,7 +38,7 @@ def report_routes(monkeypatch, without_metadata_providers):
     install_routes(monkeypatch, 'setup')
     # This owner checks cancellation and publication after a terminal provider
     # result. Retry backoff is a lower collaborator with independent coverage.
-    monkeypatch.setattr('yt_playlist.library.spotify_library.with_retry', lambda operation: operation())
+    monkeypatch.setattr('yt_playlist.controllers.spotify_library.with_retry', lambda operation: operation())
 
 
 @pytest.mark.parametrize('operation', ['find-album-candidates', 'resolve-album'])

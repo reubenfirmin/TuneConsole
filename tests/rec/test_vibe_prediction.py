@@ -14,18 +14,42 @@ from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
     reuse_reporting_reader, without_query_timing,
 )
-from yt_playlist.core import catalog, fao, schema_inspection, store as store_core, vibe_provenance
+from yt_playlist.core import catalog, fao, schema_inspection, sqlite_database as store_core, vibe_provenance
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
+from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, musical_character, musical_preparation, vibe_prediction as policy
-from yt_playlist.rec import vibe_preparation, vibe_joint_model as joint, vibe_joint_preparation
+from yt_playlist.rec import (vibe_preparation, vibe_recording_rules, vibe_joint_model as joint,
+                             vibe_joint_state as vibe_joint_preparation,
+                             vibe_joint_preparation as joint_commands)
 from yt_playlist.rec.progressive import Budget, Preparation
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def controlled_measurements(request, monkeypatch):
+    """Exercise storage/lifecycle with known audio responses, not fitted quality.
+
+    Specialist inference and artifact rollouts have their own production tests.
+    These subjects vary captured native mood heads to control cohort responses.
+    """
+    if 'arithmetic_rollout' in request.node.name:
+        return
+    from types import SimpleNamespace
+    from yt_playlist.library import vibe_composition
+    from yt_playlist.rec import audio_vibe_prediction
+
+    def predict(samples, **options):
+        result = audio_vibe_prediction.predict(samples, use_model=False, **options)
+        return {**result, 'suitability': {row['vibe']: row['score'] for row in result['ranking']}} if result else None
+
+    monkeypatch.setattr(vibe_composition, 'prediction', lambda: SimpleNamespace(
+        capture=lambda: SimpleNamespace(predict=predict)))
 
 
 @pytest.fixture(autouse=True)
@@ -178,7 +202,7 @@ def fixed_measurement_version(monkeypatch):
     # Read their real identities once rather than reopening the same files on
     # every queue poll. Artifact replacement has separate rollout owners below.
     version = vibe_preparation.version()
-    monkeypatch.setattr(vibe_preparation, 'version', lambda: version)
+    monkeypatch.setattr(vibe_recording_rules, 'version', lambda: version)
 
 
 def test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift(file_backed_store, monkeypatch):
@@ -214,11 +238,11 @@ def test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift(fi
 def test_explicit_intensity_stays_authoritative_after_audio_and_a_later_correction(store, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from yt_playlist.rec import audio_vibe_model
+    from tests.audio_model_support import disable_models
     from yt_playlist.web.app import create_app
 
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
-    monkeypatch.setenv(audio_vibe_model.ENVIRONMENT_KEY, '')
+    disable_models(monkeypatch)
     entry, key = track(store, 'override-song')
     with store.conn:
         catalog.choose_field(store.conn, entry, 'energy', .1, now=10)
@@ -591,7 +615,7 @@ def test_changed_measurement_and_subgenre_retract_old_cohort_and_notify_without_
     assert store.rec_refresh.revision() is not None
 
 
-@pytest.mark.parametrize('installed_version', [79, 98, 107])
+@pytest.mark.parametrize('installed_version', [107])
 def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction(
         tmp_path, _pristine_installed_schema, monkeypatch, qualified_candidate, installed_version):
     """Exercise genuine installed layouts, rather than the current empty schema."""
@@ -662,7 +686,7 @@ def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction
         store.conn.close()
 
 
-@pytest.mark.parametrize('failure', [vibe_preparation.WorkBudgetExceeded, fao.FileBudgetExceeded, fao.FileChanged])
+@pytest.mark.parametrize('failure', [WorkBudgetExceeded, fao.FileBudgetExceeded, fao.FileChanged])
 def test_ready_joint_vibes_refresh_when_last_channel_defers(prediction_store, monkeypatch, qualified_candidate, failure):
     """One deferred channel must not strand other newly published models."""
     from yt_playlist.core import vibe_model_files
@@ -723,7 +747,7 @@ def test_ready_joint_vibes_refresh_when_last_channel_defers(prediction_store, mo
     retry_at = deferred_state['retry_at']
     monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: retry_at + 1)
     assert vibe_joint_preparation.due(store)
-    assert vibe_joint_preparation.step(store)
+    assert joint_commands.step(store)
     assert attempts == [deferred, deferred]
     assert vibe_joint_preparation.state(store, deferred)['attempts'] == 2
     assert store.vibe_predictions.pending() is None
@@ -810,7 +834,7 @@ def test_model_version_change_recomputes_all_evidence_in_pages(
     capture(store, 'one')
     drain(store)
     old = fits(store, target)
-    monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'changed-model')
+    monkeypatch.setattr(vibe_preparation.audio_vibe_specialists, 'identity', lambda: 'changed-model')
     assert vibe_preparation.due(store)
     assert vibe_preparation.step(store, batch=1)
     assert store.vibe_predictions.pending()
@@ -830,8 +854,8 @@ def test_arithmetic_rollout_preserves_originals_and_reuses_new_identity_after_re
     entry, own = catalog_track(store, 'arithmetic-original')
     _entry, target = catalog_track(store, 'arithmetic-target')
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
-    monkeypatch.setenv(vibe_preparation.audio_vibe_model.ENVIRONMENT_KEY,
-                       str(vibe_preparation.audio_vibe_model.DEFAULT_PATH))
+    from tests.audio_model_support import enable_models
+    enable_models(monkeypatch)
     captured = samples('arithmetic-original')
     for row in captured:
         store.audio_vibes.save_sample(row, 100)
@@ -928,7 +952,7 @@ def test_many_interrupted_replays_preserve_last_complete_raw_measurement(store):
 
 
 def test_radio_chill_does_not_mistake_slow_forceful_music_for_low_intensity():
-    item = {'musical': {'vibes': {'fits': {
+    item = {'musical': {'vibes': {'intensity_fits': {
         'energize': {'score': .1, 'support': 1, 'source': 'audio_measurement'},
         'release': {'score': .95, 'support': 1, 'source': 'audio_measurement'}}}}}
     assert musical_character.intensity(item) == .95
@@ -1148,7 +1172,7 @@ def test_joint_input_batch_finishes_without_deadline_restarts_and_releases_reade
         {vibe_joint_preparation.config_identity(): 'controlled-input-batches'})
     # Keep a valid prior generation while a changed revision is prepared.
     for _ in vibe_joint_preparation.VIBES:
-        assert vibe_joint_preparation.step(store)
+        assert joint_commands.step(store)
     heads = {vibe: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
              for vibe in vibe_joint_preparation.VIBES}
     revision = int(store.settings.get_setting(vibe_model_files.REVISION) or 0)

@@ -1,6 +1,5 @@
 """Canonical artist references, ordered credits, and name lookup for display boundaries."""
 from contextlib import contextmanager
-import json
 
 from yt_playlist.core import artist_credits
 from yt_playlist.core.artist_keys import canonical_id
@@ -70,6 +69,11 @@ class ArtistRepo(Repo):
         return row[0] if row else None
 
     @synchronized
+    def identity_providers(self, identity):
+        return dict(self.conn.execute('SELECT provider,provider_id FROM artist_provider_ids WHERE artist_id=?',
+                                      (identity,)))
+
+    @synchronized
     def create(self, name, *, provisional):
         return self.conn.execute('INSERT INTO artists(name,provisional) VALUES (?,?)',
                                   (name, int(provisional))).lastrowid
@@ -129,11 +133,7 @@ class ArtistRepo(Repo):
         with self.conn.atomic(join=True):
             self.conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,?)', (previous, target, source, now))
             self.conn.execute('UPDATE artist_redirects SET artist_id=? WHERE artist_id=?', (target, previous))
-            typed = artist_credits.available(self.conn)
-            if typed:
-                artist_credits.reconcile_current(self.conn, previous, target, source, now)
-            else:
-                self.conn.execute(f'UPDATE {self.entry_artists_table} SET artist_id=? WHERE artist_id=?', (target, previous))
+            artist_credits.reconcile_current(self.conn, previous, target, source, now)
             self.conn.execute('UPDATE album_artists SET artist_id=? WHERE artist_id=?', (target, previous))
             self.conn.execute('INSERT OR IGNORE INTO artist_aliases SELECT ?,alias,source FROM artist_aliases WHERE artist_id=?',
                               (target, previous))
@@ -144,31 +144,25 @@ class ArtistRepo(Repo):
     def credit_inputs(self, entry_id):
         row = self.conn.execute('SELECT entry_id FROM legacy_track_refs WHERE legacy_id=?', (entry_id,)).fetchone()
         entry_id = row[0] if row else entry_id
-        return {'entry_id': entry_id, 'typed': artist_credits.available(self.conn),
+        return {'entry_id': entry_id,
                 'artists': [row[0] for row in self.conn.execute(
                     f'SELECT artist_id FROM {self.entry_artists_table} WHERE entry_id=? ORDER BY position', (entry_id,))]}
 
-    @snapshot_read
+    @lookup_read
     def credit_observation_inputs(self, entry_id):
         row = self.conn.execute('SELECT entry_id FROM legacy_track_refs WHERE legacy_id=?', (entry_id,)).fetchone()
         entry_id = row[0] if row else entry_id
-        return {'entry_id': entry_id, 'typed': artist_credits.available(self.conn), 'credits': [dict(row) for row in self.conn.execute(
+        return {'entry_id': entry_id, 'credits': [dict(row) for row in self.conn.execute(
             f'SELECT * FROM {self.entry_artists_table} WHERE entry_id=? ORDER BY position', (entry_id,))]}
 
     @synchronized
-    def store_credit(self, entry_id, credit, structured, source, now, *, typed, delivery_key=None, metadata_delivery_id=None):
+    def store_credit(self, entry_id, credit, source, now, *, delivery_key=None, metadata_delivery_id=None):
         with self.conn.atomic(join=True):
-            if typed:
-                version = artist_credits.intern(self.conn, credit)
-                observation, select = artist_credits.capture(self.conn, entry_id, version, source, now,
-                    delivery_key=delivery_key, metadata_delivery_id=metadata_delivery_id)
-                if select:
-                    artist_credits.select(self.conn, entry_id, observation)
-            else:
-                self.conn.execute('INSERT INTO artist_credit_observations(entry_id,credit,credits_json,source,observed_at) '
-                                  'VALUES (?,?,?,?,?)', (entry_id, credit.display_credit, json.dumps(structured), source, now))
-                artist_credits.update_projection(self.conn, entry_id,
-                    [(position, member.artist_id, member.credit_text, source) for position, member in enumerate(credit.members)])
+            version = artist_credits.intern(self.conn, credit)
+            observation, select = artist_credits.capture(self.conn, entry_id, version, source, now,
+                delivery_key=delivery_key, metadata_delivery_id=metadata_delivery_id)
+            if select:
+                artist_credits.select(self.conn, entry_id, observation)
 
     @synchronized
     def artist_row(self, identity):
@@ -200,16 +194,23 @@ class ArtistRepo(Repo):
             (entry_id,))]
 
     @synchronized
+    def video_credits(self, video_id):
+        row = self.conn.execute('SELECT id FROM catalog_tracks WHERE video_id=?', (video_id,)).fetchone()
+        return self.track_credits(row[0]) if row else []
+
+    @synchronized
     def track_artist_ids(self, *, library=False, keys=None):
         keys = list(dict.fromkeys(keys)) if keys is not None else None
         if keys == []:
             return {}
-        rows = self.conn.execute(
-            'SELECT DISTINCT r.identity_key,ta.artist_id FROM recordings r '
+        out = {}
+        batches = [None] if keys is None else (keys[offset:offset + 400] for offset in range(0, len(keys), 400))
+        for batch in batches:
+            rows = self.conn.execute(
+                'SELECT DISTINCT r.identity_key,ta.artist_id FROM recordings r '
             f'JOIN catalog_entries e ON e.recording_id=r.id JOIN {self.entry_artists_table} ta ON ta.entry_id=e.id '+
             ('JOIN library_memberships m ON m.entry_id=e.id ' if library else '') +
-            ('WHERE r.identity_key IN (' + ','.join('?' for _ in keys) + ')' if keys is not None else ''), keys or [])
-        out = {}
-        for key,aid in rows:
-            out.setdefault(key,set()).add(aid)
+                ('WHERE r.identity_key IN (' + ','.join('?' for _ in batch) + ')' if batch is not None else ''), batch or [])
+            for key, aid in rows:
+                out.setdefault(key, set()).add(aid)
         return out

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from tests.musical_support import prepare_profiles
-from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.recommendation_support import publish_bundles, seed_library_favorites, seed_publication_subjects
 from yt_playlist.util.matching import identity_key
 
 
@@ -39,6 +39,7 @@ def publication_inputs(store, monkeypatch, *, tracks_per_card=1, stable_options=
                     if lane != 'fresh' for track in tracks}.values())
     fresh = {track['key']: track for track in bundles['all']['fresh']}
     seed_publication_subjects(store, [*library, *fresh.values()], discoveries=fresh, now=1)
+    seed_library_favorites(store, bundles['all']['comfort'])
     store.modes.replace_modes([
         {'mode_id': mid, 'label': genre, 'families': [], 'size': 4,
          'centroid': np.eye(6)[mid], 'rep_keys': []}
@@ -90,6 +91,7 @@ def seed(store, *, tracks_per_lane=8, publish=True):
     # Preserve every subject, membership and genre before real preparation.
     seed_publication_subjects(store, [item for items in bundles['all'].values() for item in items],
                               discoveries=[item['key'] for item in bundles['all']['fresh']])
+    seed_library_favorites(store, bundles['all']['comfort'])
     store.modes.replace_modes(modes, [], 1)
     prepare_profiles(store)
     if publish:

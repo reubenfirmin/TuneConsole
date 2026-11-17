@@ -98,7 +98,7 @@ def _client(store):
 @pytest.fixture
 def _repository_client(monkeypatch):
     from fastapi import FastAPI
-    from fastapi.templating import Jinja2Templates
+    from tests.template_support import web_templates
     from yt_playlist.controllers.genres import Genres
     from yt_playlist.repos.genres import GenreRepo
     from yt_playlist.web import app as webapp
@@ -110,9 +110,9 @@ def _repository_client(monkeypatch):
     repository.label_matches.return_value = set()
     repository.genre_name.return_value = None
     repository.matcher_facts.return_value = None
-    store = SimpleNamespace(genres=Genres(repository, None))
+    store = SimpleNamespace(genres=Genres(repository))
     ctx = SimpleNamespace(store=store,
-        templates=Jinja2Templates(directory=Path(webapp.__file__).with_name('templates')))
+        templates=web_templates(directory=Path(webapp.__file__).with_name('templates')))
     app = FastAPI()
     app.state.ctx = ctx
     app.include_router(genres.build(ctx))
@@ -151,16 +151,21 @@ def test_page_renders_chip_list_zone(_repository_client):
     settings = Mock(spec_set=SettingsRepo)
     settings.get_setting.return_value = '1'
     store.enrichment_reports = EnrichmentReports(reports, None)
-    store.enrichment_state = EnrichmentState(state, None, None, None, None, None, None, None)
+    store.enrichment_queue = Mock(spec_set=['next_enrich_batch'])
+    store.enrichment = Mock(spec_set=['resolve_conflict'])
+    store.tracks = Mock(spec_set=['metadata_for_video'])
+    store.enrichment_state = EnrichmentState(state, None, None, None, None, None, None)
     store.settings = Settings(settings, None, None)
     ctx = c.app.state.ctx
     ctx.now_fn, ctx.enrich_worker = lambda: 1.0, None
+    ctx.jobs, ctx.rec_worker, ctx.logger = None, None, Mock(spec_set=['warning', 'exception'])
     # Global shell helpers are outside this genre-editor rendering contract.
     ctx.templates.env.globals.update(
         asset_v='test', arrow_icon=arrow_icon, mix_launch_tokens=mix_launch_tokens,
         storage_maintenance_status=lambda: {'active': False, 'warning': False},
         initial_setup_pending=lambda: False, has_multiple_identities=lambda: False,
         audio_preview_available=lambda: False, auth_expired={})
+    ctx.templates.env.globals['early_adopter_notice'] = lambda: False
     c.app.include_router(enrich.build(ctx))
     redirect = c.get("/genres", follow_redirects=False)
     assert redirect.status_code == 303
@@ -265,18 +270,21 @@ def test_query_survives_edits_and_escapes_input(_repository_client):
     assert "&lt;script&gt;bad&lt;/script&gt;" in r.text
 
 
-def test_current_taxonomy_controls_follow_rename_alias_family_and_merge(store, unlocked_home_controls):
+def test_current_taxonomy_controls_read_historical_names_aliases_families_and_redirects(store, unlocked_home_controls):
     client = _client(store)
-    store.genres.rename_genre('synth pop','Renamed style')
-    store.genres.set_genre_alias('Searchable custom alias','synth pop')
-    store.genres.set_genre_family('synth pop','jazz')
+    store.genres.add_genre('Retired custom style')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET name='Renamed style',family_key='jazz',"
+                           "family_source='custom' WHERE key='synth pop'")
+        store.conn.execute("INSERT INTO genre_alias VALUES ('searchable custom alias','Searchable custom alias','synth pop','custom')")
+        store.conn.execute("INSERT INTO genre_redirects VALUES ('retired custom style','synth pop')")
+        store.conn.execute("UPDATE genre_alias SET genre_key='synth pop' WHERE genre_key='retired custom style'")
+        store.conn.execute("DELETE FROM genre_preferences WHERE genre_key='retired custom style'")
     body = client.get('/genres/list',params={'q':'Searchable custom alias'}).text
     assert 'Renamed style' in body and 'Jazz' in body
     assert 'aria-label="Remove Synth Pop"' not in body
     options = client.get('/home/genres').json()['options']
     assert {'name':'synth pop','label':'Renamed style','kind':'genre'} in options
-    store.genres.add_genre('Retired custom style')
-    store.genres.merge_genres('retired custom style','synth pop')
     assert 'Retired custom style' in client.get('/genres/list',params={'q':'Retired custom style'}).text
     options = client.get('/home/genres').json()['options']
     assert not any(row['name']=='retired custom style' for row in options)

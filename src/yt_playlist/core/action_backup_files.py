@@ -3,6 +3,7 @@ import hashlib
 from pathlib import Path
 
 from . import collection_recovery, fao
+from .action_backup_paths import record_path, record_id
 from .evidence_ledger import canonical
 from .policy_documents import _publish_encoded
 
@@ -48,9 +49,15 @@ class ActionBackupFiles:
             raise ValueError('Unsupported playlist recovery backup')
         return (filename, digest, size, 'verified'), value
 
-    def retain(self, filename):
+    def retain_reserved(self, identity, filename, *, expected):
+        path = record_path(self.root, identity)
         (encoded, digest, size), age = verified(filename, with_age=True)
-        return _publish_encoded(self.root, encoded, digest, age=age), digest, size
+        if (digest, size) != expected:
+            raise ValueError('Action backup changed after reservation')
+        # The controller retains the domain root through the final SQL update.
+        with fao.prepare(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES)) as pending:
+            pending.publish()
+        return str(path), digest, size
 
 
 def inventory(conn):
@@ -86,14 +93,25 @@ def restore(conn,manifest):
         raise ValueError('Action backup restore requires an idle connection')
     conn.execute('BEGIN IMMEDIATE')
     try:
-        actual = [{key:item for key,item in row.items() if key!='retained_filename'} for row in inventory(conn)]
+        retained = inventory(conn)
+        actual = [{key:item for key,item in row.items() if key!='retained_filename'} for row in retained]
         if value['records']!=actual:
             raise ValueError('Action backup manifest does not match retained owners')
-        for row in actual:
+        for row in retained:
             if row['availability']=='verified':
                 source = path.parent.parent/row['digest'][:2]/(row['digest']+'.json')
                 (raw,_,_),age = verified(source,row['digest'],row['bytes'],with_age=True)
-                filename = _publish_encoded(collection_recovery.directory(conn),raw,row['digest'],age=age)
+                identity = record_id(row['retained_filename'])
+                if identity is not None:
+                    owner = conn.execute('SELECT action_id,position,content_digest,byte_size,file_status '
+                        'FROM action_backup_writes WHERE id=?', (identity,)).fetchone()
+                    if owner is None or tuple(owner) != (row['action_id'], row['position'], row['digest'], row['bytes'], 'ready'):
+                        raise ValueError('Action backup has an inconsistent file identity')
+                    target = record_path(collection_recovery.directory(conn), identity)
+                    fao.write(target, fao.Content(raw, metadata=age, max_bytes=MAX_BYTES))
+                    filename = str(target)
+                else:
+                    filename = _publish_encoded(collection_recovery.directory(conn),raw,row['digest'],age=age)
                 conn.execute('UPDATE action_backups SET retained_filename=? WHERE action_id=? AND position=?',
                              (filename,row['action_id'],row['position']))
                 conn.execute('UPDATE action_steps SET backup_filename=? WHERE action_id=? AND backup_status=\'verified\' '
@@ -110,6 +128,13 @@ def relocate(conn,action_id,filename):
                        '(filename=? OR retained_filename=?)',(action_id,filename,filename)).fetchone()
     if row and row[0] is not None:
         return row[0]
+    identity = record_id(filename)
+    if identity is not None:
+        row = conn.execute('SELECT b.retained_filename FROM action_backups b JOIN action_backup_writes f '
+            'ON f.action_id=b.action_id AND f.position=b.position WHERE b.action_id=? AND f.id=? '
+            "AND f.file_status='ready' AND b.availability='verified'", (action_id, identity)).fetchone()
+        if row:
+            return row[0]
     # Progress files can capture an older content-addressed retained location.
     # A cloned database has the same immutable digest under a different root.
     path = Path(filename)

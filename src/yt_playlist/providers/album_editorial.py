@@ -5,23 +5,13 @@ photography into its immutable evidence artifacts; SQLite holds the display
 projection. Copy acquisition is entirely mechanical and does not use this ledger.
 """
 import json
-from functools import lru_cache
-from pathlib import Path
-
-from yt_playlist.core import fao
-
 from yt_playlist.util.matching import artist_key, recording_title
 
 
-@lru_cache(maxsize=1)
-def _entries():
-    return json.loads(fao.read(Path(__file__).parent.parent / 'data' / 'album_editorial.json').bytes)['entries']
-
-
-def lookup(album):
+def lookup(album, entries):
     if not album.get('artist') or not album.get('title'):
         return None
-    for entry in _entries():
+    for entry in entries:
         artists = [entry['artist'], *entry.get('artist_aliases', [])]
         titles = [entry['title'], *entry.get('title_aliases', [])]
         if (artist_key(album['artist']) in {artist_key(artist) for artist in artists}

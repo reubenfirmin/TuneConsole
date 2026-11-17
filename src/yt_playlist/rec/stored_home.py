@@ -4,15 +4,14 @@ The private scratch database holds ordering keys, never a copied bundle or
 catalog document. SQLite can spill sorts to disk; only rank pages and the
 selected card are hydrated. No global cutoff can hide a rare family's tail.
 """
-from collections import Counter
 from contextlib import contextmanager
 import hashlib
-from itertools import permutations
 import json
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.rec import (experiments, group_roots, home_themes, layers, mode_eval,
-                             negative, rec_params, transient)
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import (experiments, group_roots, home_themes, mode_eval,
+                             negative, rec_params, transient, artist_variety)
 from yt_playlist.rec.eligibility import home_exclusions
 from yt_playlist.controllers.home_selection import HomeSelection
 from yt_playlist.rec.home_selection_policy import CandidateFilter
@@ -113,23 +112,9 @@ class Selection:
             after = rows[-1]['rank']
         return self.ppr_counts[mode]
 
-    @staticmethod
-    def diverse(rows, artist_cap, album_cap, initial=()):
-        selected = list(initial)
-        artists = Counter(row['artist'] for row in selected)
-        albums = Counter(row['album'] for row in selected if row['album'])
-        if len(selected) >= 12:
-            return selected
-        for row in rows:
-            if artists[row['artist']] >= artist_cap or row['album'] and albums[row['album']] >= album_cap:
-                continue
-            selected.append(row)
-            artists[row['artist']] += 1
-            if row['album']:
-                albums[row['album']] += 1
-            if len(selected) == 12:
-                break
-        return selected
+    def diverse(self, rows, artist_cap, album_cap, initial=()):
+        rows = self.reader.artists.credited_pages(rows)
+        return artist_variety.select(rows, artist_cap, album_cap, limit=12, initial=initial)
 
     def select(self, mode, ranker, selected, caps, *, family=None, initial=()):
         scale = (max(1, self.ppr_counts[str(mode)]) if
@@ -311,11 +296,7 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
         for mode in chosen:
             selected = predicate(mode, lane, eligible=True)
             depths[lane, mode] = len(selection.diverse(ordering.ranked(selected), *caps))
-    priority = {mode: index for index, mode in enumerate(chosen)}
-    def score(modes):
-        sizes = [depths.get((lane, mode), 0) for lane, mode in zip(active, modes)]
-        return sum(size >= 4 for size in sizes), sum(sizes), tuple(-priority.get(mode, len(chosen)) for mode in modes)
-    best = max(permutations(chosen + [None] * max(0, len(active) - len(chosen)), len(active)), key=score)
+    best = mode_selection.allocate_lanes(chosen, active, depths)
     families = {mode['mode_id']: max(mode['families'], key=lambda value: value[1])[0]
                 for mode in modes if mode.get('families')}
     share = float(rec_params.get_param(reader, 'ppr_ab_share'))

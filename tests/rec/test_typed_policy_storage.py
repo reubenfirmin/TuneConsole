@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
-from tests.repos.test_typed_recommendation_publication import plan, publish
+from tests.legacy_recommendation_fixture_support import recommendations
+from tests.repos.test_typed_recommendation_publication import plan, publish, collect
 from yt_playlist.core import (policy_config, storage_maintenance,
                               policy_documents, recommendation_pools as pools)
 from yt_playlist.core.evidence_ledger import canonical
@@ -52,14 +52,16 @@ def test_new_generation_reference_is_rechecked_at_policy_retirement(recommendati
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_prepared_legacy_references_remain_protected_during_reader_transition(recommendations):
+def test_clicked_pool_references_remain_protected_until_retirement(recommendations):
     store = recommendations
     store.rec_ledger.record_serving_policy('old-prepared-policy', {'algorithm': 'old-prepared'}, -10000)
-    store.rec_proposals.put_proposals('home_pool:wheelhouse', {'tracks': [{'pool_policy': 'old-prepared-policy'}]}, 10)
+    store.rec_proposals.put_proposals('home_pool:wheelhouse', {
+        'parameters': {'lane': 'wheelhouse', 'epoch': 0, 'include_genres': [], 'avoid_genres': []},
+        'tracks': [{'key': 'one', 'pool_policy': 'old-prepared-policy'}]}, 10)
     candidates, _ = store.rec_ledger.policy_retention_candidates(100)
     assert 'old-prepared-policy' not in candidates
-    with store.conn:
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface='home_pool:wheelhouse'")
+    store.recommendations.repository.clear_surface('home_pool:wheelhouse')
+    collect(store)
     candidates, cursor = store.rec_ledger.policy_retention_candidates(100)
     assert 'old-prepared-policy' in candidates
     with store.conn:

@@ -110,7 +110,8 @@ def test_cancelled_http_scan_interrupts_sql_and_does_not_publish(database, monke
     ctx, app = application(store)
     entered, release, readers, _ = slow_vector_loading(store, monkeypatch)
     offered = []
-    monkeypatch.setattr(clusters.measurement, 'record_recommendations', lambda *a, **kw: offered.append(True))
+    from yt_playlist.rec import measurement
+    monkeypatch.setattr(measurement, 'record_recommendations', lambda *a, **kw: offered.append(True))
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.action_errors import ActionInputError
-from yt_playlist.rec import fresh_pool
+from yt_playlist.library import mode_composition, pool_composition
 from yt_playlist.web import jobs
 
 
@@ -16,20 +16,21 @@ from yt_playlist.web import jobs
 def test_fresh_job_defers_to_worker_without_repeating_discovery(
         monkeypatch, result, waiting, failed):
     calls, discovered, refreshed, queued = [], [], [], []
-    monkeypatch.setattr(fresh_pool, 'populate', lambda *args, **kwargs: discovered.append(kwargs))
+    monkeypatch.setattr(pool_composition, 'fresh', lambda owner:
+        SimpleNamespace(populate=lambda *args, **kwargs: discovered.append(args)))
     def prepare(*args):
         calls.append(args)
         if isinstance(result, Exception):
             raise result
         return result
-    monkeypatch.setattr(fresh_pool, 'prepare', prepare)
+    monkeypatch.setattr(mode_composition, 'scheduled', prepare)
     monkeypatch.setattr(jobs, 'activity_for', lambda ctx: SimpleNamespace(start_thread=lambda run: run()))
     heads = []
     def head(surface):
         heads.append(surface)
         return {'id': 'previous-publication'}
     ctx = SimpleNamespace(store=SimpleNamespace(recommendations=SimpleNamespace(head=head)),
-        now_fn=lambda: 1, jobs=jobs.SyncJobs(),
+        now_fn=lambda: 1, jobs=jobs.SyncJobs(), client_provider=lambda: {},
         rec_worker=SimpleNamespace(trigger_home_refresh=lambda **kwargs: refreshed.append(kwargs),
                                   trigger_candidate_refresh=lambda: queued.append(True)),
         logger=logging.getLogger(__name__))

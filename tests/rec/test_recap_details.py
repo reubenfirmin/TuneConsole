@@ -26,7 +26,7 @@ def add_plays(data, month, *, days=10, per_day=6, source="live", offset=0, ident
             data["plays"].append({"account_id": identity, "identity_key": key,
                                   "played_at": at, "source": source, "video_id": key})
             data["first"][key] = min(at, data["first"].get(key, at))
-            data["meta"][key] = {"title": key, "artist": artist, "genre": genre,
+            data["meta"][key] = {"title": key, "artist": artist, "genre": genre, "family": genre,
                                   "mb_year": year, "album_browse_id": album}
 
 
@@ -178,8 +178,7 @@ def test_natural_variation_and_lack_of_evidence_do_not_become_habits(data):
     assert not any(f["metric"] == "activity" for f in findings(beats, "same"))
 
 
-def test_music_shares_need_metadata_and_repetition_across_days(data, monkeypatch):
-    monkeypatch.setattr("yt_playlist.util.genre_map.family", lambda g: g)
+def test_music_shares_need_metadata_and_repetition_across_days(data):
     familiar_months(data)
     add_plays(data, "2026-09", per_day=12, artist="Different", genre="jazz", year="2021")
     data["familiar_artists"].add("different")
@@ -188,6 +187,7 @@ def test_music_shares_need_metadata_and_repetition_across_days(data, monkeypatch
     # Unknown metadata cannot be interpreted as a change in preference.
     for card in data["meta"].values():
         card.pop("genre", None)
+        card.pop("family", None)
         card.pop("mb_year", None)
     assert not any(f["metric"].startswith(("genre:", "era:"))
                    for f in findings(screens(data, "2026-09"), "different"))

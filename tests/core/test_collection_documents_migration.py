@@ -32,8 +32,13 @@ def test_current_recipe_facets_follow_merge_while_capture_and_backup_remain(stor
     recipe = {'facets':{'genres':['synth pop','Unknown captured','synth pop'],'eras':['1990']}}
     store.playlist_recipes.set_recipe('PLAYLIST',recipe,3)
     before = store.conn.execute('SELECT * FROM rec_recipes').fetchone()
-    store.genres.set_genre_alias('Unknown captured','drum bass')
-    store.genres.merge_genres('synth pop','drum bass',now=4)
+    # The installed current references follow the redirect; captured text is immutable.
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_alias VALUES ('unknown captured','Unknown captured','drum bass','custom')")
+        store.conn.execute("INSERT INTO genre_redirects VALUES ('synth pop','drum bass')")
+        axis = store.conn.execute("INSERT INTO taste_axes(kind,genre_key) VALUES ('genre','drum bass') RETURNING id").fetchone()[0]
+        store.conn.execute("UPDATE playlist_recipe_facets SET axis_id=? WHERE axis_id IN "
+                           "(SELECT id FROM taste_axes WHERE kind='genre' AND genre_key='synth pop')", (axis,))
     assert store.playlist_recipes.get_recipe('PLAYLIST')['facets']['genres']==['drum bass','Unknown captured','drum bass']
     assert collection_recovery.read(before['recovery_filename'],before['recovery_digest'],before['recovery_bytes'],
                                     kind='playlist-recipe',owner=before['id'])==recipe
@@ -80,15 +85,3 @@ def test_recording_alias_rekeys_saved_documents_and_preserves_unknown_formats(st
     assert canvas['label']==old
     assert store.playlist_recipes.get_recipe('FUTURE')==future
     assert store.playlist_recipes.get_cluster_canvas('FUTURE')=='opaque text'
-
-
-def test_unsupported_job_rolls_back_original_documents(tmp_path, legacy_owner_store):
-    store = legacy_owner_store(tmp_path/'rollback.db')
-    raw = json.dumps({'status':'running','unclassified_new_field':True})
-    store.settings.set_setting(spotify_job_state.KEY,raw)
-    store.playlist_recipes.set_cluster_canvas('PLAYLIST','untouched',2)
-    with pytest.raises(MigrationError,match='Unsupported Spotify import job'):
-        migrate(store.conn, registry=registry.MIGRATIONS)
-    assert store.conn.execute("SELECT value FROM settings WHERE key=?",(spotify_job_state.KEY,)).fetchone()[0]==raw
-    assert store.playlist_recipes.get_cluster_canvas('PLAYLIST')=='untouched'
-    assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==96

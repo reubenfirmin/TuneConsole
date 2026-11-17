@@ -22,6 +22,15 @@ from tests.store_fixture_support import (
 )
 from yt_playlist.core.activity import Activity
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
+from yt_playlist.library import pool_composition, mode_composition
+from yt_playlist.rec import mode_inputs
+
+
+def stub_acquisition(monkeypatch, populate):
+    def compose(store):
+        return SimpleNamespace(populate=lambda client, now, include, avoid, progress:
+            populate(store, client, now, include_genres=include, avoid_genres=avoid, on_progress=progress))
+    monkeypatch.setattr(pool_composition, 'fresh', compose)
 from yt_playlist.util.matching import identity_key
 
 
@@ -262,7 +271,7 @@ def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(fres
         params["on_progress"]("Finding fresh jazz songs…")
         started.set()
         release.wait(5)
-    monkeypatch.setattr(fresh_pool, "populate", populate)
+    stub_acquisition(monkeypatch, populate)
     tracks, rankings = [], []
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *a, **k: rankings.append(True) or tracks)
     preview = client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]})
@@ -331,9 +340,9 @@ def test_fresh_workflow_job_starts_once_and_rejoins_until_publication(monkeypatc
         started.set()
         assert release.wait(2)
 
-    monkeypatch.setattr(fresh_pool, 'populate', populate)
+    stub_acquisition(monkeypatch, populate)
     prepare = Mock(return_value=None if deferred else {})
-    monkeypatch.setattr(fresh_pool, 'prepare', prepare)
+    monkeypatch.setattr(mode_composition, 'scheduled', prepare)
     job = start_fresh_pool(ctx, parameters)
     try:
         assert started.wait(1) and not job.done
@@ -361,7 +370,7 @@ def test_loading_and_choosing_genres_do_not_discover_or_rank_a_fresh_pool(fresh_
     store, client = fresh_workflow_home
     calls = []
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *a, **k: calls.append("rank") or [])
-    monkeypatch.setattr(fresh_pool, "populate", lambda *a, **k: calls.append("discover"))
+    stub_acquisition(monkeypatch, lambda *a, **k: calls.append("discover"))
     # Visible-choice capture has separate persistence owners. This contract
     # observes whether these ordinary controls trigger discovery or ranking.
     monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
@@ -415,7 +424,7 @@ def test_failed_or_empty_search_stops_polling_and_allows_retry(store, monkeypatc
     def fail(*args, **kwargs):
         from yt_playlist.core.action_errors import ActionInputError
         raise ActionInputError('fresh_account_required')
-    monkeypatch.setattr(fresh_pool, "populate", fail)
+    stub_acquisition(monkeypatch, fail)
     client = prepared_client(store)
     response = client.post("/home/fresh-pool", data={"include_genres": ["jazz"]})
     # The background task can finish before the POST returns.
@@ -436,11 +445,11 @@ def test_failed_or_empty_search_stops_polling_and_allows_retry(store, monkeypatc
 def test_completed_search_with_insufficient_tracks_is_retryable(empty_search_home, monkeypatch):
     from yt_playlist.rec import candidate_refresh
     store, client = empty_search_home
-    monkeypatch.setattr(fresh_pool, "populate", lambda *args, **kwargs: 0)
+    stub_acquisition(monkeypatch, lambda *args, **kwargs: 0)
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
     # This route owns completed/deferrable empty-search handling. Ranking has
     # independent owners; retain real candidate publication and job settlement.
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', lambda *args, **kwargs: ({}, []))
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', lambda *args, **kwargs: ({}, []))
     previous = None
     for deferred in (False, True):
         if deferred:
@@ -487,7 +496,7 @@ def test_board_refresh_checks_completed_search_before_declaring_old_slot_empty(f
         fresh = policies.stamp(tracks, 'fresh')
         return {'all': {'fresh': fresh}}, fresh
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', ranked)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', ranked)
     assert fresh_pool.prepare(store, 1000) is not None
     job.done = True
     # The old prepared board is intentionally retained, as happens when its

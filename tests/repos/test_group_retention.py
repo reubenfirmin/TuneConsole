@@ -6,7 +6,8 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_compact_groups_migration import historical_groups, apply
+from tests.recommendation_support import seed_compact_group_history
+from tests.store_fixture_support import initialize_consumer
 from tests.genre_catalog_support import bound_catalog
 from tests.repos.test_compact_group_publication import (
     finish,
@@ -16,7 +17,6 @@ from tests.store_fixture_support import native_sql_calls, reuse_reporting_reader
 from yt_playlist.core import group_evidence, group_storage, schema_inspection
 from yt_playlist.core import group_reads as group_queries
 from yt_playlist.core.db_revisions import Revisions
-from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.store import Store
 from yt_playlist.repos import compact_group_publication as compact, group_publication, group_retention
 from yt_playlist.repos.group_retention_queries import GroupRetentionRepo
@@ -27,29 +27,13 @@ def disable_periodic_library_sync():
     """Group retention owns SQL and file lifetimes without HTTP startup."""
 
 
-@pytest.fixture(scope='module')
-def retention_predecessor():
-    # Retention consumes real compacted history, including retired v69 tables.
-    with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as source:
-        bound_catalog(patch, entries=(('house', 'House'),))
-        source.execute('PRAGMA foreign_keys=ON')
-        runner.migrate(source, registry=registry.MIGRATIONS[:69])
-        source.execute('PRAGMA query_only=ON')
-        yield source
-
-
 @pytest.fixture
-def database(tmp_path, retention_predecessor, native_sql_calls):
-    # Build the populated predecessor and actual conversion once per private
-    # consumer, without an intermediate Store, template capture or file copy.
+def database(tmp_path, _pristine_current_schema, native_sql_calls):
     path = tmp_path / 'groups.db'
-    with historical_groups(path, retention_predecessor) as conn:
-        conn.execute('PRAGMA synchronous=OFF')
-        prepared = third_generation(conn)
-        apply(conn)
     store = Store(path)
     with closing(store.conn), schema_inspection.reuse_tables(store.conn):
-        store._bind_repositories()
+        initialize_consumer(store, _pristine_current_schema)
+        prepared = third_generation(seed_compact_group_history(store))
         store.conn.execute('PRAGMA journal_mode=WAL')
         store._snapshot_revisions = Revisions(store.conn)
         assert store.taste_groups.head_generation() == 'second'
@@ -156,7 +140,7 @@ def test_new_evidence_invalidates_a_retirement_plan_before_any_deletion(database
     enable(store)
     with store.read_snapshot() as snapshot:
         selected = group_queries.retention_plan(snapshot.store.conn)
-        assert selected and 'edges' in selected
+        assert selected
         snapshot.release_reader()
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
@@ -248,6 +232,13 @@ def test_lineage_retirement_bounds_mapping_deletions_instead_of_only_edge_count(
     enable(store)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 1)
     selected = group_queries.retention_plan(store.conn)
+    for _ in range(200):
+        if selected.get('edges'):
+            break
+        assert store.taste_groups.retire_history()
+        selected = group_queries.retention_plan(store.conn)
+    else:
+        pytest.fail('Bounded lineage walk never reached the unreferenced edge')
     assert len(selected['edges']) == 1
     changes = []
     store.conn.set_trace_callback(changes.append)

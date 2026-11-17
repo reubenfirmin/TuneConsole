@@ -1,0 +1,72 @@
+/* The full cover stays intact; its own colors extend into the viewport around it. */
+.album-listening {
+  position: fixed; inset: 0; width: 100vw; height: 100dvh;
+  max-width: none; max-height: none; margin: 0; padding: 0; border: 0;
+  background: var(--bg); color: var(--text); overflow: hidden;
+}
+.album-listening::backdrop { background: var(--bg); }
+body:has(.album-listening[open]) { overflow: hidden; }
+.album-listening-room { position: relative; width: 100%; height: 100%; isolation: isolate; }
+.album-listening-ambient {
+  position: absolute; inset: -5%; width: 110%; height: 110%; object-fit: cover;
+  filter: blur(50px); opacity: .22; z-index: -1; pointer-events: none;
+}
+.album-listening-header {
+  position: absolute; inset: 0 0 auto; z-index: 1;
+  display: flex; align-items: start; justify-content: space-between; gap: 2rem;
+  padding: 1.25rem 1.75rem;
+  background: linear-gradient(var(--bg), transparent);
+}
+.album-listening-identity { min-width: 0; }
+.album-listening-identity h2 { margin: 0; font-size: clamp(1rem, 1.5vw, 1.5rem); font-weight: 600; line-height: 1.25; }
+.album-listening-identity p { margin: .25rem 0 0; color: var(--dim); font-size: .9rem; }
+.album-listening-back {
+  display: inline-flex; align-items: center; flex: none; gap: .5rem;
+  min-height: 2.75rem; padding: .5rem .85rem; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface); color: var(--text);
+  font-size: .9rem; font-weight: 500;
+}
+.album-listening-back svg { fill: currentColor; flex: none; }
+.album-listening-back:hover { background: var(--surface-interactive); }
+.album-listening-back:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+.album-listening-stage {
+  position: absolute; inset: 4.5rem 1.5rem 6rem;
+  display: grid; place-items: center; min-height: 0;
+}
+/* Give the first-play guide its own space while retaining the whole cover. */
+.album-listening:has(> .onboarding-player-tour:not([hidden])) .album-listening-stage {
+  left: calc(22rem + 3rem);
+}
+.album-listening-cover {
+  display: block; width: 100%; height: 100%; min-height: 0;
+  object-fit: contain; filter: drop-shadow(0 12px 35px color-mix(in srgb, var(--shadow-ink) 35%, transparent));
+}
+.album-listening-placeholder { width: min(55vh, 65vw); height: 100%; fill: none; stroke: var(--faint); stroke-width: 1; }
+.album-listening-footer {
+  position: absolute; inset: auto 0 0; display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 1.5rem;
+  min-height: 5.25rem; padding: 1rem 1.75rem;
+  background: linear-gradient(transparent, var(--bg));
+}
+.album-listening-track { display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
+.album-listening-track a { color: var(--text); font-size: 1rem; font-weight: 600; }
+.album-listening-track span { color: var(--dim); font-size: .85rem; }
+.album-listening-track :is(a, span) { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.album-listening-controls .hs-rate-group { display: grid; width: 16rem; padding: .7rem 0 0; border: 0; }
+.album-listening-controls .hs-progress { inset: 0 0 auto; }
+.album-listening-controls :is(.hs-playpause, .hs-next, .hs-rate) { width: 2.75rem; height: 2.75rem; }
+.album-listening-controls .hs-playpause { width: 3.25rem; height: 3.25rem; }
+.album-listening-controls :is(.hs-playpause, .hs-next, .hs-rate) svg { width: 1.5rem; height: 1.5rem; }
+.album-listening-time { justify-self: end; color: var(--dim); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.hs-album-artwork {
+  display: block; margin: .5rem auto 0; padding: .25rem; border: 0;
+  background: transparent; color: var(--dim); font: inherit; font-size: var(--type-xs); cursor: pointer;
+}
+.hs-album-artwork:hover { color: var(--text); }
+@media (max-height: 540px) {
+  .album-listening-header { padding: .65rem 1rem; }
+  .album-listening-stage { inset: 3.75rem 1rem 4.75rem; }
+  .album-listening-footer { min-height: 4rem; padding: .5rem 1rem; gap: 1rem; }
+  .album-listening-controls .hs-rate-group { width: 14rem; }
+  .album-listening-track a { font-size: .9rem; }
+}

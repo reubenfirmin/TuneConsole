@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import tracemalloc
-from yt_playlist.rec import taste_modes as tm
+from yt_playlist.rec import mode_discovery as tm
 
 
 def _blobs():

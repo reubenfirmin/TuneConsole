@@ -1,14 +1,15 @@
-"""PK-addressed metadata documents. SQL stores no paths or content checksums.
+"""Metadata file ports and installed-format preparation adapters.
 
-Revisions are immutable: write the file before publishing its revision in SQL.
-A rolled-back publication leaves an unreferenced file, never a changed old head.
+RuntimeMetadataFiles receives detached SQL receipt IDs and verifies their bytes.
+Connection-based helpers retain the installed revision layout for explicit
+preparation and recovery; normal runtime publication uses the injected file port.
 """
 import hashlib
 import json
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 import tempfile
 
@@ -16,6 +17,7 @@ from .evidence_ledger import canonical
 from .activity import check_cancellable_work, WorkBudgetExceeded
 from . import fao, policy_documents
 from .metadata_contract import ALTERNATIVE_SECONDS, runtime_active
+from . import metadata_file_contract as contract
 
 MAX_BYTES = 8 * 1024 * 1024
 KINDS = frozenset(('alternatives', 'native', 'choices', 'conflicts'))
@@ -111,6 +113,20 @@ class RuntimeMetadataFiles:
     def retained(self):
         return policy_documents.retained_reader(self.root)
 
+    describe = staticmethod(contract.describe)
+
+    @contextmanager
+    def write_reserved(self, records):
+        with ExitStack() as retained:
+            for record in records:
+                encoded = contract.encode(record['kind'], record['owner'], record['revision'], record['data'])
+                if len(encoded) != record['size'] or hashlib.sha256(encoded).hexdigest() != record['digest']:
+                    raise ValueError('Runtime metadata document changed after reservation')
+                pending = retained.enter_context(fao.prepare(contract.record_path(self.root, record['file_id']),
+                    fao.Content(encoded, max_bytes=MAX_BYTES)))
+                pending.publish()
+            yield
+
     def publish(self, kind, owner, revision, data, *, current_revision=None):
         path, encoded = _prepared_at(self.root, kind, owner, revision, data,
                                      current_revision=current_revision)
@@ -118,12 +134,15 @@ class RuntimeMetadataFiles:
             fao.write(path, encoded)
         return path
 
-    def read(self, kind, owner, revision, *, missing=False):
-        return read_at(self.root, kind, owner, revision, missing=missing)
+    def read(self, kind, owner, revision, *, missing=False, reference=None):
+        return read_at(self.root, kind, owner, revision, missing=missing, reference=reference)
 
     def collecting(self):
         from .file_collection import collector
         return collector(self.root)
+
+    def delete_reserved(self, identities):
+        return sum(fao.delete(contract.record_path(self.root, identity), missing_ok=True) for identity in identities)
 
     def close(self):
         if self._alternatives_gc is not None:
@@ -156,6 +175,8 @@ class RuntimeMetadataFiles:
     def prune_revisions(self, kind, owner, keep, *, budget=128):
         parent = (self.root / relative(kind, owner, keep[0])).parent
         removed = 0
+        if not parent.exists():
+            return 0
         for index, path in enumerate(parent.iterdir()):
             if index == budget:
                 break
@@ -214,12 +235,23 @@ def publish_many(conn, documents):
 
 
 def read(conn, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
-    return read_at(directory(conn), kind, owner, revision, missing=missing, max_bytes=max_bytes)
+    from yt_playlist.repos import metadata_file_writes
+    return read_at(directory(conn), kind, owner, revision, missing=missing, max_bytes=max_bytes,
+                   reference=metadata_file_writes.reference(conn, kind, owner, revision))
 
 
-def read_at(root, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
+def reference_path(conn, kind, owner, revision):
+    from yt_playlist.repos import metadata_file_writes
+    reference = metadata_file_writes.reference(conn, kind, owner, revision)
+    root = directory(conn)
+    return contract.record_path(root, reference[0]) if reference else root / relative(kind, owner, revision)
+
+
+def read_at(root, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES, reference=None):
     """Read a SQL-selected document using an injected directory and primary keys."""
-    path = Path(root) / relative(kind, owner, revision)
+    path = contract.record_path(root, reference[0]) if reference is not None else Path(root) / relative(kind, owner, revision)
+    if reference is not None and (type(reference[2]) is not int or not 0 < reference[2] <= min(max_bytes, MAX_BYTES)):
+        raise WorkBudgetExceeded('Runtime metadata document exceeds its byte budget')
     try:
         with fao.read(path) as stream:
             encoded = stream.read(min(max_bytes, MAX_BYTES) + 1)
@@ -229,6 +261,8 @@ def read_at(root, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
         raise ValueError('Missing runtime metadata document: ' + str(path)) from None
     if len(encoded) > min(max_bytes, MAX_BYTES):
         raise WorkBudgetExceeded('Runtime metadata document exceeds its byte budget')
+    if reference is not None and (len(encoded) != reference[2] or hashlib.sha256(encoded).hexdigest() != reference[1]):
+        raise ValueError('Runtime metadata file differs from its SQL receipt')
     return _verified_data(encoded, kind, owner, revision)
 
 
@@ -269,6 +303,12 @@ def owns_file(conn, filename):
     Unknown or damaged evidence is retained rather than guessed to be orphaned.
     Prepared inactive heads have the same ownership rules as active heads.
     """
+    identity = contract.record_id(filename)
+    if identity is not None:
+        from yt_playlist.repos import metadata_file_writes
+        if not metadata_file_writes.available(conn):
+            return False
+        return conn.execute('SELECT 1 FROM metadata_file_references WHERE file_id=? LIMIT 1', (identity,)).fetchone() is not None
     try:
         encoded = fao.read(filename, max_bytes=MAX_BYTES).bytes
         body = json.loads(encoded)['body']
@@ -308,8 +348,9 @@ def export(conn, root):
         value = read(conn, kind, owner, revision, missing=not required)
         if value is None and not required:
             continue
-        relative_path = relative(kind, owner, revision)
-        source, target = directory(conn) / relative_path, root / relative_path
+        source = reference_path(conn, kind, owner, revision)
+        relative_path = source.relative_to(directory(conn))
+        target = root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         fao.write(target, fao.read(source, max_bytes=MAX_BYTES))
         entries.append({'kind': kind, 'owner': list(owner), 'revision': revision,
@@ -334,7 +375,7 @@ def _verify_backup(conn, manifest, *, staged=None, current=False):
         if key not in expected or key in seen:
             raise ValueError('Runtime metadata backup differs from SQL ownership')
         seen.add(key)
-        relative_path = relative(*key)
+        relative_path = reference_path(conn, *key).relative_to(directory(conn))
         prepared = manifest.parent / relative_path
         if staged is not None:
             prepared = staged / relative_path
@@ -343,6 +384,10 @@ def _verify_backup(conn, manifest, *, staged=None, current=False):
         if len(encoded) != entry['bytes'] or hashlib.sha256(encoded).hexdigest() != entry['sha256']:
             raise ValueError('Runtime metadata backup file failed verification')
         _verified_data(encoded, *key)
+        from yt_playlist.repos import metadata_file_writes
+        reference = metadata_file_writes.reference(conn, *key)
+        if reference and (len(encoded) != reference[2] or hashlib.sha256(encoded).hexdigest() != reference[1]):
+            raise ValueError('Runtime metadata backup differs from its SQL receipt')
         if current and encoded != fao.read(directory(conn) / relative_path, max_bytes=MAX_BYTES).bytes:
             raise ValueError('Runtime metadata backup differs from current content')
     if any(required and key not in seen for key, required in expected.items()):
@@ -369,5 +414,5 @@ def restore(conn, manifest):
         # Publish only the private, verified copies, so backup replacements
         # after validation cannot introduce unchecked bytes into live history.
         for key in seen:
-            relative_path = relative(*key)
+            relative_path = reference_path(conn, *key).relative_to(directory(conn))
             fao.write(directory(conn) / relative_path, fao.read(staged / relative_path, max_bytes=MAX_BYTES))

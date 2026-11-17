@@ -15,7 +15,7 @@ import pytest
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.integrations import lastfm as access
-from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.base import CredentialedAccessState, IntegrationUnavailable
 from yt_playlist.providers import lastfm
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.waterfall import run_waterfall
@@ -124,7 +124,7 @@ def test_retry_after_survives_a_new_access_object(boundary, store, header, expec
     recreated = access.LastFmIAO(now_fn=lambda: b.clock[0],
         open_fn=lambda *args, **kwargs: pytest.fail('Persisted wait was bypassed'),
         pacer=SimpleNamespace(wait=lambda: pytest.fail('Deferred requests should not pace')))
-    with recreated.context(store), pytest.raises(IntegrationUnavailable) as deferred:
+    with recreated.context(CredentialedAccessState.for_store(store, lambda: lastfm.api_key(store))), pytest.raises(IntegrationUnavailable) as deferred:
         recreated.get(query('artist.getsimilar'))
     assert deferred.value.retry_at == expected
 
@@ -166,9 +166,10 @@ def test_bad_key_is_shared_across_methods_but_new_key_is_admitted(boundary, stor
 
 def test_store_key_change_and_removal_are_resolved_each_time(boundary, store, monkeypatch, tmp_path):
     monkeypatch.delenv('LASTFM_API_KEY', raising=False)
-    monkeypatch.setattr(access.credentials.paths, 'config_path', lambda: tmp_path / 'missing.toml')
+    from yt_playlist.core import paths
+    monkeypatch.setattr(paths, 'config_path', lambda: tmp_path / 'missing.toml')
     b = boundary(lambda request: tags())
-    with b.iao.context(store):
+    with b.iao.context(CredentialedAccessState.for_store(store, lambda: lastfm.api_key(store))):
         with pytest.raises(IntegrationUnavailable):
             b.iao.get({'method': 'artist.gettoptags', 'artist': 'Artist'})
         for key in ('first', 'second'):

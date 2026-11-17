@@ -8,7 +8,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec import account_growth
+from yt_playlist.rec import account_growth, growth_access
 from yt_playlist.web.app import create_app
 
 
@@ -16,7 +16,8 @@ from yt_playlist.web.app import create_app
 def test_rejected_vibe_does_not_wait_for_an_unrelated_writer(file_backed_store, monkeypatch, allowed, status):
     store = file_backed_store
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
-    monkeypatch.setattr(account_growth, 'retained_access', lambda *_: True)
+    monkeypatch.setattr(account_growth, 'retained_usage', lambda *_: 'USAGE')
+    monkeypatch.setattr(growth_access, 'retained_access', lambda *_: True)
     monkeypatch.setattr(account_growth, 'vibe_access', lambda *_: allowed)
     entered, release = threading.Event(), threading.Event()
 
@@ -50,7 +51,8 @@ def test_vibe_reader_waits_leave_the_event_loop_responsive(file_backed_store, mo
     store = file_backed_store
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     # This fault probe isolates reader ownership, independently of music readiness.
-    monkeypatch.setattr(account_growth, 'retained_access', lambda *_: True)
+    monkeypatch.setattr(account_growth, 'retained_usage', lambda *_: 'USAGE')
+    monkeypatch.setattr(growth_access, 'retained_access', lambda *_: True)
     monkeypatch.setattr(account_growth, 'vibe_access', lambda *_: True)
     # This request accepts durable intent. Generation has separate worker owners.
     monkeypatch.setattr(app.state.ctx.vibe_requests, 'resume', lambda: None)

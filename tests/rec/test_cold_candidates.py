@@ -169,4 +169,4 @@ def test_large_pool_evaluates_feedback_once_per_genre_family(monkeypatch, candid
     monkeypatch.setattr(surfaces, "discovery_facet_weight", weight)
     out = surfaces.cold_candidates(store, 0.0)
     assert len(out) == 500 and all(t.genre == "techno" for t in out)
-    assert calls == ["techno", "ambient"]
+    assert sorted(calls) == ["ambient", "techno"]

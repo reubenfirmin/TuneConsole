@@ -6,7 +6,7 @@ import pytest
 
 from yt_playlist.core import fao, policy_history as owner, policy_documents
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.preparation import policy_history
+from tests.file_preparation_support import policy_history
 from yt_playlist.core.store import Store
 from yt_playlist.repos import policy_storage
 from tests.rec.test_policy_storage import _publish
@@ -51,10 +51,24 @@ def test_impression_only_history_keeps_exact_shared_configuration_and_compact_id
     store.rec_proposals.put_proposals('home_choice',{'items':[{'pool_policy':live}]},10000)
     expected = store.rec_ledger.policy_configuration(historical)
     with monkeypatch.context() as patch:
-        patch.setattr(fao,'write',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
+        patch.setattr(fao,'prepare',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
         with pytest.raises(OSError,match='disk full'):
             policy_history.prepare(store,now=10000)
     assert store.rec_ledger.policy_configuration(historical) == expected
+    assert store.conn.execute("SELECT file_status FROM policy_history_files").fetchone()[0] == 'pending'
+    from yt_playlist.repos import policy_history_files
+    complete = policy_history_files.complete
+
+    def interrupted(conn, record):
+        complete(conn, record)
+        raise OSError('SQL status interruption')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(policy_history_files, 'complete', interrupted)
+        with pytest.raises(OSError, match='SQL status interruption'):
+            policy_history.prepare(store, now=10000)
+    assert store.rec_ledger.policy_configuration(historical) == expected
+    assert [row[0] for row in store.conn.execute('SELECT file_status FROM policy_history_files')] == ['pending', 'pending']
     with store.read_view() as snapshot:
         assert policy_history.prepare(store,now=10000) == 1
         assert policy_documents.configuration(snapshot.conn,historical) == expected

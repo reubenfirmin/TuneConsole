@@ -247,7 +247,7 @@ def test_retry_after_survives_recreation(clock, monkeypatch, store, header, dead
     recreated = access.CoverArtArchiveIAO(now_fn=lambda: clock[0],
         pacer=SimpleNamespace(wait=lambda: pytest.fail('Deferred requests must not pace')),
         open_fn=lambda *a, **kw: pytest.fail('Persisted cooldown was bypassed'))
-    with recreated.context(store), pytest.raises(IntegrationUnavailable) as error:
+    with recreated.context(store.enrichment_state), pytest.raises(IntegrationUnavailable) as error:
         recreated.release('different')
     assert error.value.provider == 'coverartarchive' and error.value.retry_at == deadline
 

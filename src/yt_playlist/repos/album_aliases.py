@@ -46,15 +46,8 @@ class AlbumAliasesRepo(Repo):
         conflict = self.conn.execute('SELECT 1 FROM album_provider_ids a JOIN album_provider_ids b '
             "ON a.provider=b.provider AND a.provider<>'youtube' AND a.provider_id<>b.provider_id "
             'WHERE a.album_id=? AND b.album_id=? LIMIT 1', (target, retired)).fetchone() is not None
-        memberships = ('account_albums', 'unattributed_album_memberships') if album_memberships.available(self.conn) else (
-            'album_library_memberships',)
-        tables = ('albums', 'album_provider_ids', 'album_artists', *memberships,
-                  'album_discovery_memberships', 'album_tracks', 'album_fetch_state')
-        original = {table: [dict(row) for row in self.conn.execute(
-            f'SELECT * FROM {table} WHERE {"id" if table == "albums" else "album_id"} IN (?,?)',
-            (target, retired))] for table in tables}
         return {'conflict': conflict, 'target': self._track_inputs(target),
-                'retired': self._track_inputs(retired), 'original': original}
+                'retired': self._track_inputs(retired)}
 
     def _move_memberships(self, target, retired):
         if album_memberships.available(self.conn):

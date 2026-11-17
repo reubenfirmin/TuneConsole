@@ -196,18 +196,20 @@ def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, p
     store.rec_proposals.put_proposals('album_prepared', {
         'built_at': 1, 'context': {}, 'items': records()}, 1)
     pending = []
-    from yt_playlist.web.routes import home_discovery
-    album_context = home_discovery.album_context
+    from yt_playlist.library import home_query_composition
+    album_menu = home_query_composition.album_menu
     if delayed:
         # Exercise the genuine lazy-fragment path even when the normal Home
         # response can already embed this fixture's prepared album board.
-        monkeypatch.setattr(home_discovery, 'album_context', lambda *args, **kwargs: None)
+        from types import SimpleNamespace
+        monkeypatch.setattr(home_query_composition, 'album_menu',
+                            lambda *args, **kwargs: SimpleNamespace(query=lambda now: None))
         page.route('**/home/album-choices', lambda route: pending.append(route))
     page.set_viewport_size({'width': 1440, 'height': 1100})
     page.goto(live_app + '/#album-choices', wait_until='domcontentloaded')
     tune = page.get_by_role('button', name='Adjust album parameters')
     if delayed:
-        monkeypatch.setattr(home_discovery, 'album_context', album_context)
+        monkeypatch.setattr(home_query_composition, 'album_menu', album_menu)
         expect(tune).to_be_visible()
         expect(tune).to_be_disabled()
         assert len(pending) == 1

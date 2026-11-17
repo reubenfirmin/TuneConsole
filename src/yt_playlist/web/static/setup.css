@@ -1,5 +1,12 @@
 /* Setup page. Kept separate because its connection, identity and import controls
    are not shared application components. Colour always comes from role tokens. */
+.setup-destination { scroll-margin-block: 2rem; }
+.setup-destination:target { outline: 3px solid var(--accent-2); outline-offset: 4px;
+  animation: setup-destination-arrival 1.2s ease-out 2; }
+@keyframes setup-destination-arrival {
+  50% { box-shadow: 0 0 0 10px var(--accent-soft); }
+}
+
 .connection-card { display: flex; gap: .8125rem; align-items: center; margin-bottom: .9375rem; }
 .connection-card.is-connected { border-color: var(--conn-ok); background: var(--conn-ok-soft); }
 .connection-card.is-disconnected { border-color: var(--conn-warn); background: var(--conn-warn-soft); }

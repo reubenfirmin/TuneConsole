@@ -9,7 +9,7 @@ from scipy.special import expit
 from experiments.audio_lab_tools.training import robust_vibes as robust
 from experiments.audio_lab_tools.training import train_vibes as trainer
 from tests.test_audio_vibe_model import examples
-from yt_playlist.rec import audio_vibe_model as model
+from experiments.audio_lab_tools.legacy import audio_vibe_model as model
 
 
 @pytest.mark.parametrize('radius', [0., .5, 1.])

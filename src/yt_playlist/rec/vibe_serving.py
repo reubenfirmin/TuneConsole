@@ -25,6 +25,11 @@ def _indexed_cards(store, now, preset, epoch):
     generation = (store.recommendations.head('vibe:' + preset) or {}).get('id')
     selections = [('', card['pool_lane'], [item['key'] for item in card['tracks']]) for card in cards]
     pages = store.recommendations.selected_candidates('vibe:' + preset, selections, generation=generation)
+    return indexed_cards(cards, pages)
+
+
+def indexed_cards(cards, pages):
+    """Rehydrate exact retained identities, rejecting incomplete prepared pages."""
     result = []
     for card, tracks in zip(cards, pages, strict=True):
         by_key = {item['key']: item for item in tracks}

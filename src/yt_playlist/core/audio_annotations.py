@@ -7,7 +7,8 @@ from yt_playlist.core.audio_annotation_contract import FILE_FORMAT, evaluation_v
 
 def latest(conn, run_id, *, kind, taxonomy_version):
     fields = ('id', 'run_id', 'kind', 'taxonomy_version', 'revision', 'state', 'created_at',
-              'legacy_run_key', 'resolution_status', 'unresolved_sample_count', 'model_output_filename')
+              'legacy_run_key', 'resolution_status', 'unresolved_sample_count', 'model_output_filename',
+              'model_output_digest')
     row = conn.execute('SELECT ' + ','.join(fields) + ' FROM audio_annotations '
         'WHERE COALESCE(run_id,legacy_run_key)=? AND kind=? AND taxonomy_version=? AND sealed=1 '
         'ORDER BY revision DESC LIMIT 1', (run_id, kind, taxonomy_version)).fetchone()
@@ -17,7 +18,7 @@ def latest(conn, run_id, *, kind, taxonomy_version):
 def read(conn, annotation):
     annotation_id = annotation['id']
     run = annotation['run_id'] or annotation['legacy_run_key']
-    document = files.read(annotation['model_output_filename'], expected={
+    document = files.read(annotation['model_output_filename'], expected_digest=annotation['model_output_digest'], expected={
         'run_key': run, 'kind': annotation['kind'], 'taxonomy_version': annotation['taxonomy_version'],
         'revision': annotation['revision']})
     samples = [row[0] for row in conn.execute('SELECT sample_id FROM audio_annotation_samples '

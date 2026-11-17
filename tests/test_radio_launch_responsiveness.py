@@ -8,7 +8,7 @@ from tests.radio_session_support import (
     completed_poc as poc, completed_radio_schema, completed_radio_store,
 )
 from tests.store_fixture_support import without_query_timing
-from yt_playlist.library import playlist_generated
+from yt_playlist.library import generated_acquisition
 from yt_playlist.web import radio_session
 
 
@@ -73,7 +73,7 @@ def test_initial_direction_planning_keeps_status_and_stop_available(poc, monkeyp
         # its unfinished receipt until the original launch drains. It never
         # replays that create or navigates after the confirmation arrives.
         writing, written = threading.Event(), threading.Event()
-        create = playlist_generated.create_generated_playlist
+        create = generated_acquisition.create_generated_playlist
 
         def held_receipt(*args, **kwargs):
             result = create(*args, **kwargs)
@@ -82,7 +82,7 @@ def test_initial_direction_planning_keeps_status_and_stop_available(poc, monkeyp
             return result
 
         with monkeypatch.context() as patch:
-            patch.setattr(playlist_generated, 'create_generated_playlist', held_receipt)
+            patch.setattr(generated_acquisition, 'create_generated_playlist', held_receipt)
             with ThreadPoolExecutor(2) as pool:
                 starting = pool.submit(controller.start, songs[0]['video_id'])
                 try:

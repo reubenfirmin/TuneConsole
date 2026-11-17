@@ -29,7 +29,7 @@ def _pristine_current_schema():
         yield schema
 
 
-@pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_exact_installed_format_personal_values_hidden_ids_and_sequences(installed, tmp_path):
     store, version = installed
     store.settings.set_setting('personal value', 'retained')
@@ -131,7 +131,7 @@ def test_metadata_retirement_refuses_an_unaudited_history_reference(tmp_path, co
 
 
 @pytest.mark.parametrize('failure',['cancelled','concurrent-write','validation'])
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_failed_build_cannot_be_installed_and_leaves_source_exact(installed,tmp_path,monkeypatch,failure):
     store,_ = installed
     before = list(store.conn.iterdump())
@@ -155,7 +155,7 @@ def test_failed_build_cannot_be_installed_and_leaves_source_exact(installed,tmp_
         assert list(store.conn.iterdump()) == before
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('declaration,initial,replacement', [
     ('TEXT COLLATE NOCASE', 'MiXeD personal note é', 'mixed personal note é'),
     ('BLOB', 1.0, 1),

@@ -6,6 +6,7 @@ from itertools import zip_longest
 from typing import Protocol
 
 from yt_playlist.rec.journeys import journey_order
+from yt_playlist.rec.artist_variety import members
 from yt_playlist.util import genre_map
 
 AVG_TRACK_S = 210
@@ -61,7 +62,7 @@ def _sample_order(cands, rng, weight_of):
 
 
 def _artist_cap(cands, needed):
-    artists = {c["artist"] for c in cands if c["artist"]}
+    artists = {artist for candidate in cands for artist in members(candidate)}
     return max(2, math.ceil(needed / max(1, len(artists))) + 1)
 
 
@@ -135,11 +136,11 @@ def _fill(order, slots, cap, quotas=None, preferred_artists=()):
     spent = {kind: Counter() for kind in quotas}
     total = 0.0
 
-    def blocked(candidate):
+    def blocked(candidate, *, relax_artist=False):
         if len(picked) >= slots:
             return True
-        if (candidate["artist"] and candidate["artist"].casefold() not in preferred_artists
-                and per[candidate["artist"]] >= cap):
+        if (not relax_artist and candidate["artist"].casefold() not in preferred_artists
+                and any(per[artist] >= cap for artist in members(candidate))):
             return True
         return any(spent[kind][_bucket(candidate, kind, quota)] + 1 > quota.get(_bucket(candidate, kind, quota), 0)
                    for kind, quota in quotas.items())
@@ -148,7 +149,7 @@ def _fill(order, slots, cap, quotas=None, preferred_artists=()):
         nonlocal total
         for kind, quota in quotas.items():
             spent[kind][_bucket(candidate, kind, quota)] += 1
-        per[candidate["artist"]] += 1
+        per.update(members(candidate))
         taken.add(candidate["video_id"])
         picked.append(candidate)
         total += candidate["duration"] or AVG_TRACK_S
@@ -166,11 +167,16 @@ def _fill(order, slots, cap, quotas=None, preferred_artists=()):
     for candidate in order:
         if candidate["video_id"] not in taken and not blocked(candidate):
             take(candidate)
+    # Keep explicit genre/era quotas; artist variety alone cannot shorten a mix.
+    for candidate in order:
+        if candidate['video_id'] not in taken and not blocked(candidate, relax_artist=True):
+            take(candidate)
     return picked, total
 
 
 def _feat(item):
     return {"artist": item.get("artist") or "", "genre": item.get("genre") or "",
+            'artist_ids': item.get('artist_ids'),
             "family": item.get('family') or '',
             "source": item.get("source") or "theirs"}
 

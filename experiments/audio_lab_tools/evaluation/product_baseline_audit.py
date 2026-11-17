@@ -33,7 +33,7 @@ def predict(model, x):
 
 
 def run(directory, database):
-    from yt_playlist.rec import audio_vibe_model, audio_vibe_external
+    from experiments.audio_lab_tools.legacy import audio_vibe_model, audio_vibe_external
     from ..training import train_vibes
     from .external_transfer import SNAPSHOT
 

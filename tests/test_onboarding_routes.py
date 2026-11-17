@@ -110,11 +110,12 @@ def test_radio_starter_uses_ready_radio_and_falls_back_without_building_models(s
     _, client = _client(store)
     store.settings.set_setting('onboard_listening_format', 'radio')
     seed_catalog_track(store, 'ready|artist', 'Ready song', 'Artist', video_id='ready')
+    store.settings.set_setting('last_sync_at', '1000')
     radio = client.app.state.ctx.radio
     monkeypatch.setattr(radio, 'seeds', lambda: pytest.fail('Starter must only read prepared radio'))
     html = client.get('/home/onboard/start').text
-    assert 'Play mix' in html
-    assert 'while we find songs for your station' in html
+    assert 'Start listening' in html
+    assert 'keep adding songs' in html
     radio.offer = [{'key': 'ready|artist', 'video_id': 'ready', 'title': 'Ready song', 'artist': 'Artist'}]
     radio.offer_id = 'prepared-radio-offer'
     html = client.get('/home/onboard/start').text
@@ -174,6 +175,31 @@ def test_generated_starter_hides_radio_until_setup_is_complete(store, monkeypatc
     assert f'href="/?radio_playlist={playlist.id}#radio"' in html
     assert store.settings.get_setting('home_format') is None
     assert store.settings.get_setting('onboard_listening_format') is None
+
+
+@pytest.mark.parametrize('first_sounds', [False, True])
+def test_only_first_sounds_generation_attaches_continuation_to_the_confirmed_playlist(store, first_sounds):
+    from tests.conftest import _track
+
+    remote, client = _client(store)
+    tracks = []
+    for index in range(3):
+        video = f'first-{index}'
+        remote._catalog[video] = _track(video, f'First {index}', 'Artist')
+        entry = store.tracks.upsert_track(video, f'First {index}', 'Artist', duration_s=200)
+        tracks.append({'video_id': video, 'title': f'First {index}', 'artist': 'Artist',
+                       'key': store.tracks.catalog_subject(entry)['identity_key']})
+    response = client.post('/home/generate', headers={'HX-Request': 'true'}, data={
+        'name': 'First sounds', 'tracks': json.dumps(tracks), 'first_sounds': '1' if first_sounds else '0'})
+    assert response.status_code == 200
+    assert response.headers['HX-Redirect'].startswith('/playlist/')
+    playlist = json.loads(response.headers['HX-Trigger'])['generated-playlist-saved']['playlist']
+    state = client.app.state.ctx.first_sounds.state
+    if first_sounds:
+        assert state['playlist'] == playlist
+        assert [track['video_id'] for track in state['tracks']] == [track['video_id'] for track in tracks]
+    else:
+        assert state is None
 
 
 @pytest.mark.parametrize('artist_set', [False, True])
@@ -265,19 +291,23 @@ def test_first_mix_polls_until_verified_songs_arrive(store, home_routes_only):
     fake._tracks = {"PL1": [_track("ready", "Verified song", "Artist")]}
     sync_identity(store, iid, fake, now=1000)
     assert store.settings.get_setting("last_sync_at") is None
+    assert 'id="gen-onboard_library"' not in c.get("/home/onboard/start").text
+    fake._tracks['PL1'] += [_track('second', 'Second song', 'Artist'), _track('third', 'Third song', 'Artist')]
+    fake._playlists[0]['count'] = 3
+    sync_identity(store, iid, fake, now=1001)
     ready = c.get("/home/onboard/start").text
     assert 'id="gen-onboard_library"' in ready
     assert 'hx-trigger="every 3s"' not in ready
     assert "Verified song" in ready and "Unverified song" not in ready
-    assert "Play mix" in ready
-    assert "Something to listen to" in ready
-    assert 'while we find more music for you.' in ready
+    assert "Start listening" in ready and 'first_sounds: "1"' in ready
+    assert "First sounds" in ready
+    assert 'keep adding songs as your music arrives.' in ready
     assert c.post("/home/refresh-card/onboard_library").status_code == 200
     status = c.get("/home/onboard/status").json()
-    assert status["songs"] == 1
+    assert status["songs"] == 3
     assert status["playlists"] == 1
     assert status["albums"] == 0
-    assert len(status["covers"]) == 1
+    assert len(status["covers"]) == 3
     assert "partial" not in status["covers"][0]
 
 
@@ -300,8 +330,9 @@ def test_first_mix_is_available_while_album_sync_is_blocked(store):
             assert release_album.wait(timeout=10)
             return {"title": "Slow album", "tracks": [_track("album", "Album song", "Artist")]}
 
-    fake = SlowAlbumClient(playlists=[{"playlistId": "PL1", "title": "Ready", "count": 1}],
-                           tracks={"PL1": [_track("ready", "Ready before albums", "Artist")]})
+    fake = SlowAlbumClient(playlists=[{"playlistId": "PL1", "title": "Ready", "count": 3}],
+                           tracks={"PL1": [_track(f"ready-{i}", "Ready before albums", f"Artist {i}")
+                                            for i in range(3)]})
     with ThreadPoolExecutor(max_workers=1) as pool:
         pending = pool.submit(sync_all, store, {iid: fake}, 1000)
         try:
@@ -359,7 +390,7 @@ def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, ou
     store.settings.set_setting("last_sync_outcome", outcome)
     html = client.get("/").text
     assert 'id="home-feed"' in html
-    assert 'class="setup-banner"' not in html
+    assert 'data-setup-pending="false"' in html
     assert 'id="library-import-details"' not in html
     assert "Some items need a retry" not in html
     assert "Reconnect or sign in, then sync again" not in html
@@ -403,7 +434,7 @@ def test_setup_banner_tracks_import_then_models_across_pages(store):
     early_journey(store)
     publish_personal_mix(store)
     assert client.get("/home/onboard/status").json()["setup"]["complete"]
-    assert 'class="setup-banner"' not in client.get("/playlists").text
+    assert 'data-setup-pending="false"' in client.get("/playlists").text
 
 
 @pytest.mark.parametrize('format', ['mixes', 'albums'])
@@ -431,7 +462,7 @@ def test_partial_sync_with_playable_offers_finishes_setup_without_faking_sync_su
     html = client.get('/').text
     assert 'id="onboarding-feed"' not in html
     assert 'class="dash-nav"' in html
-    assert 'class="setup-banner"' not in html
+    assert 'data-setup-pending="false"' in html
     setup = client.get('/home/onboard/status').json()['setup']
     assert setup['complete'] and setup['phase'] == 'ready' and setup['offers_ready']
     assert not setup['imported'] and setup['analyzed'] == 0 and setup['modes'] == 0
@@ -460,7 +491,7 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
     html = client.get("/").text
     assert 'id="home-feed"' in html
     assert 'id="onboarding-feed"' not in html
-    assert 'class="setup-banner"' not in html
+    assert 'data-setup-pending="false"' in html
     assert not onboarding.initial_setup_pending(store, 1000)
     assert not onboarding.onboarding_active(store, 1000)
     setup = client.get("/home/onboard/status").json()["setup"]
@@ -468,7 +499,7 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
     assert setup["mixes_ready"]
     assert setup["complete"]
     assert setup["phase"] == "ready"
-    assert 'class="setup-banner"' not in client.get("/playlists").text
+    assert 'data-setup-pending="false"' in client.get("/playlists").text
 
 
 @pytest.mark.parametrize('format', ['mixes', 'albums'])
@@ -478,7 +509,7 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
     from tests.conftest import seed_catalog_track
     from tests.onboarding_support import publish_personal_album, publish_personal_mix
     from unittest.mock import Mock
-    from yt_playlist.core import home_outputs, store as store_module
+    from yt_playlist.core import home_outputs, sqlite_database as store_module
     from yt_playlist.core import migrations
     from yt_playlist.rec import growth_readiness, onboarding
 
@@ -531,7 +562,7 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
             html = client.get('/').text
             assert 'id="home-feed"' in html
             assert 'id="onboarding-feed"' not in html
-            assert 'class="setup-banner"' not in html
+            assert 'data-setup-pending="false"' in html
 
 
 @pytest.mark.parametrize('surface,payload', [
@@ -560,20 +591,16 @@ def test_existing_actual_home_offers_backfill_setup_completion(store, surface, p
     ('choice_window:mixes', {'opportunity_id': ''}),
 ])
 def test_empty_or_invalid_historical_offers_do_not_complete_setup(
-        tmp_path, _pristine_installed_schema, surface, payload):
+        store, monkeypatch, surface, payload):
     from yt_playlist.rec import onboarding
 
     # These malformed rows predate the typed offer owner; current writers reject them.
-    store = Store(tmp_path / 'historical-offers.db')
-    try:
-        _pristine_installed_schema(82).backup(store.conn)
-        store.init_schema(defer_metadata=True)
-        _synced_thin(store)
-        store.rec_proposals.put_proposals(surface, payload, 999)
-        assert onboarding.initial_setup_pending(store, 1000)
-        assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
-    finally:
-        store.conn.close()
+    _synced_thin(store)
+    read = store.rec_proposals.get_proposals
+    monkeypatch.setattr(store.rec_proposals, 'get_proposals',
+                        lambda name, *args, **kwargs: payload if name == surface else read(name, *args, **kwargs))
+    assert onboarding.initial_setup_pending(store, 1000)
+    assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
 
 
 def test_snapshot_readiness_does_not_write_setup_completion(store, monkeypatch):
@@ -610,6 +637,32 @@ def test_setup_status_uses_live_import_step_and_empty_accounts_need_artists(stor
     setup = client.get("/home/onboard/status").json()["setup"]
     assert not setup['complete']
     assert setup['artists_required'] and setup['phase'] == 'artists'
+
+
+def test_import_progress_does_not_wait_for_readiness_queries(store, monkeypatch):
+    from yt_playlist.rec import onboarding
+
+    _, client = _client(store)
+    job = client.app.state.ctx.jobs.create(kind='library')
+    job.events.append({'type': 'step', 'text': 'Playlist imported', 'stage': 'playlists',
+                       'i': 3, 'total': 5, 'completed': 3})
+    monkeypatch.setattr(onboarding, 'arrival_status', lambda *_: pytest.fail('Readiness ran in progress request'))
+    result = client.get('/home/onboard/progress').json()
+    assert result['running'] and result['completed'] == 3 and result['target'] == 5
+    store.settings.set_setting(onboarding.SETUP_COMPLETE, '1')
+    job.done = True
+    result = client.get('/home/onboard/progress').json()
+    assert result['complete'] and not result['running']
+
+
+def test_welcome_and_player_tour_acknowledgements_are_independent_and_durable(store):
+    _, client = _client(store)
+    assert 'class="onboarding-welcome"' in client.get('/').text
+    assert client.post('/onboard/welcome/dismiss').status_code == 204
+    assert 'class="onboarding-welcome"' not in client.get('/').text
+    assert store.settings.get_setting('onboard_player_tour_dismissed') is None
+    assert client.post('/onboard/player-tour/dismiss').status_code == 204
+    assert 'data-player-tour-dismissed="true"' in client.get('/').text
 
 
 def test_imported_likes_and_dismissal_cannot_open_an_empty_home(store):

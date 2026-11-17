@@ -4,10 +4,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from contextlib import contextmanager
 
 from yt_playlist.core.audio_annotation_contract import FILE_FORMAT
 from yt_playlist.core.evidence_ledger import canonical
+from .annotation_paths import record_path, record_id
 from . import fao
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -32,27 +34,42 @@ class AnnotationFiles:
         self.root = root
 
     def read(self, annotation):
-        return read(annotation['model_output_filename'], expected={
+        return read(annotation['model_output_filename'], expected_digest=annotation['model_output_digest'], expected={
             'run_key': annotation['run_id'] or annotation['legacy_run_key'],
             'kind': annotation['kind'], 'taxonomy_version': annotation['taxonomy_version'],
             'revision': annotation['revision']})
 
     @contextmanager
-    def write(self, document):
-        encoded, path = _publication(self.root, document)
+    def write_reserved(self, identity, document, *, expected):
+        path = record_path(self.root, identity)
+        encoded = _encoded(document)
+        digest = hashlib.sha256(encoded).hexdigest()
+        if (digest, len(encoded)) != expected:
+            raise ValueError('Annotation document changed after reservation')
         with fao.prepare(path, fao.Content(encoded, max_bytes=MAX_BYTES)) as pending:
-            # Content addressing makes concurrent identical publications safe.
-            pending.expected = None
             pending.publish()
-            yield str(path), path.stem
+            yield str(path), digest, len(encoded)
+
+    def describe(self, document):
+        encoded = _encoded(document)
+        return hashlib.sha256(encoded).hexdigest(), len(encoded)
+
+    def retained(self):
+        from .policy_documents import retained_reader
+        return retained_reader(self.root)
 
 
-def _publication(root, document):
+def _encoded(document):
     if not isinstance(document, dict) or document.get('format') != FILE_FORMAT:
         raise ValueError('Unsupported annotation document format')
     encoded = canonical(document)
     if len(encoded) > MAX_BYTES:
         raise ValueError('Annotation document exceeds the input byte budget')
+    return encoded
+
+
+def _publication(root, document):
+    encoded = _encoded(document)
     digest = hashlib.sha256(encoded).hexdigest()
     return encoded, Path(root) / digest[:2] / (digest + '.json')
 
@@ -64,14 +81,15 @@ def publish(root, document, *, age=None):
     return str(path)
 
 
-def read(filename, *, expected=None, with_age=False):
+def read(filename, *, expected=None, expected_digest=None, with_age=False):
     path = Path(filename)
     with fao.read(path) as stream:
         age = stream.info
         encoded = stream.read(MAX_BYTES + 1)
     if len(encoded) > MAX_BYTES:
         raise ValueError('Annotation document exceeds the input byte budget')
-    if path.stem != hashlib.sha256(encoded).hexdigest():
+    digest = expected_digest if expected_digest is not None else path.stem
+    if digest != hashlib.sha256(encoded).hexdigest():
         raise ValueError('Annotation file does not match its content hash')
     document = json.loads(encoded)
     if (not isinstance(document, dict) or document.get('format') != FILE_FORMAT
@@ -91,9 +109,12 @@ def export(conn, root):
     if Path(root).resolve() == directory(conn).resolve():
         raise ValueError('Annotation backup requires a separate destination directory')
     files = []
-    for annotation_id, filename in conn.execute(
-            'SELECT id,model_output_filename FROM audio_annotations ORDER BY id'):
-        value, age = read(filename, with_age=True)
+    # Tiny offline codec owners may have only the historical two columns.
+    columns = {row[1] for row in conn.execute('PRAGMA main.table_info(audio_annotations)')}
+    digest_column = 'model_output_digest' if 'model_output_digest' in columns else 'NULL'
+    for annotation_id, filename, digest in conn.execute(
+            f'SELECT id,model_output_filename,{digest_column} FROM audio_annotations ORDER BY id'):
+        value, age = read(filename, expected_digest=digest, with_age=True)
         target = publish(root, value, age=age)
         files.append({'annotation_id': annotation_id, 'digest': Path(target).stem,
                       'relative_filename': str(Path(target).relative_to(root))})
@@ -118,10 +139,24 @@ def restore(conn, manifest, *, memory_key=None):
         for entry in entries:
             relative = Path(entry['relative_filename'])
             digest = entry['digest']
-            if relative != Path(digest[:2]) / (digest + '.json') or Path(expected[entry['annotation_id']]).stem != digest:
+            identity = record_id(expected[entry['annotation_id']])
+            if (relative != Path(digest[:2]) / (digest + '.json')
+                    or identity is None and Path(expected[entry['annotation_id']]).stem != digest):
                 raise ValueError('Annotation backup identity mismatch')
             value, age = read(root / relative, with_age=True)
-            targets.append((publish(directory(conn, memory_key), value, age=age), entry['annotation_id']))
+            if identity is not None:
+                owner = conn.execute('SELECT content_digest,byte_size,annotation_id,file_status '
+                    'FROM annotation_file_writes WHERE id=?', (identity,)).fetchone()
+                encoded = _encoded(value)
+                integrity = hashlib.sha256(encoded).hexdigest(), len(encoded)
+                if owner is None or tuple(owner) != (*integrity, entry['annotation_id'], 'ready'):
+                    raise ValueError('Annotation backup has an inconsistent file identity')
+                target = record_path(directory(conn, memory_key), identity)
+                fao.write(target, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
+                filename = str(target)
+            else:
+                filename = publish(directory(conn, memory_key), value, age=age)
+            targets.append((filename, entry['annotation_id']))
         conn.executemany('UPDATE audio_annotations SET model_output_filename=? WHERE id=?', targets)
         conn.commit()
     except BaseException:
@@ -134,15 +169,33 @@ def collect_orphans(conn, *, memory_key=None):
     if conn.in_transaction:
         raise ValueError('Annotation cleanup requires its own writer reservation')
     root = directory(conn, memory_key)
+    from . import file_collection
+    with file_collection.collector(root) as admitted:
+        if not admitted:
+            return 0
+        return _collect_orphans(conn, root)
+
+
+def _collect_orphans(conn, root):
+    from . import file_collection
     removed = 0
     conn.execute('BEGIN IMMEDIATE')
     try:
         retained = {Path(row[0]).resolve() for row in conn.execute(
             'SELECT model_output_filename FROM audio_annotations')}
-        if root.exists():
-            for path in (*root.glob('*/*.json'), *root.glob('*/.pending-*')):
-                if path.resolve() not in retained:
-                    removed += fao.delete(path, missing_ok=True)
+        for path in file_collection.walk_entries(root, pending=True, max_depth=2):
+            if path is None or path.resolve() in retained or not (path.suffix == '.json' or path.name.startswith('.fao-pending-')):
+                continue
+            try:
+                info = fao.read(path).info
+                if record_id(path) is not None and info.ctime_ns / 1e9 > time.time() - 30 * 86400:
+                    continue
+                removed += fao.delete(path, expected=info.identity, missing_ok=True)
+            except (FileNotFoundError, fao.FileChanged):
+                continue
+        # Pre-FAO preparation left this different temporary-file spelling.
+        for path in root.glob('*/.pending-*'):
+            removed += fao.delete(path, missing_ok=True)
         conn.commit()
     except BaseException:
         conn.rollback()

@@ -11,7 +11,6 @@ import threading
 
 import pytest
 
-from tests.core.test_db_rebuild_destination import development93, production64
 from tests.genre_catalog_support import bound_catalog
 from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core import db_handles, group_admission
@@ -111,96 +110,6 @@ def test_install_reopens_original_after_close_callback_failure(installed, destin
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-@pytest.mark.parametrize('blocker', ['transaction', 'maintenance', 'evidence', 'compaction'])
-def test_pending_evidence_retry_does_not_bypass_live_write_owners(development93, blocker, monkeypatch):
-    from yt_playlist.core.store import Store
-    from yt_playlist.rec import choice_evidence
-
-    store = Store(development93)
-    try:
-        store.init_schema(defer_metadata=True)
-        store.settings.set_setting(choice_evidence.STORAGE_PENDING, '1')
-        store._evidence_recovery_pending = True
-        original_inode = development93.stat().st_ino
-
-        def unexpected_copy(phase, detail):
-            raise AssertionError('Rebuild entered copy while evidence owned publication')
-
-        def rejected(error, match):
-            before = list(store.conn.iterdump())
-            with pytest.raises(error, match=match):
-                job.run(store, rebuild=True, progress=unexpected_copy)
-            assert list(store.conn.iterdump()) == before
-            assert development93.stat().st_ino == original_inode
-            assert db_handles.state(development93) is None
-            assert not list(development93.parent.glob('.development93.db.compaction-*'))
-            assert store._evidence_recovery_pending
-            assert store.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
-
-        if blocker == 'transaction':
-            store.conn.execute('BEGIN IMMEDIATE')
-            rejected(RuntimeError, 'idle write admission')
-        elif blocker == 'maintenance':
-            store.activity_paused = True
-            rejected(RuntimeError, 'idle write admission')
-        elif blocker == 'evidence':
-            # Exercise both real owners under their existing domain admission,
-            # rather than assigning an otherwise unobserved maintenance count.
-            for operation in ('publication', 'collection'):
-                entered, release = threading.Event(), threading.Event()
-                attribute = '_issue_record' if operation == 'publication' else '_maintain_storage'
-                original = getattr(choice_evidence, attribute)
-
-                def held(*args, **kwargs):
-                    entered.set()
-                    assert release.wait(10)
-                    return original(*args, **kwargs)
-
-                with monkeypatch.context() as patch, ThreadPoolExecutor(1) as executor:
-                    patch.setattr(choice_evidence, attribute, held)
-                    if operation == 'publication':
-                        future = executor.submit(choice_evidence.issue, store, 'albums',
-                            [{'id': 'one'}], 1000, context={}, opportunity_id='rebuild-admission')
-                    else:
-                        future = executor.submit(choice_evidence.maintain_storage, store, 1001)
-                    try:
-                        assert entered.wait(5)
-                        assert not future.done() and not store.activity_paused
-                        store.settings.set_setting('during-evidence-' + operation, 'accepted')
-                        rejected(WorkBudgetExceeded, 'using publication')
-                    finally:
-                        release.set()
-                    result = future.result(10)
-                    if operation == 'publication':
-                        assert result == 'rebuild-admission'
-                    else:
-                        assert isinstance(result, dict)
-            opportunity = store.rec_ledger.evidence().get('opportunity', 'rebuild-admission')
-            assert opportunity and opportunity['options'] == [{'id': 'one'}]
-            report = job.run(store)
-            assert report['phase'] == 'complete'
-            assert store.rec_ledger.evidence().get('opportunity', 'rebuild-admission') == opportunity
-            assert store.settings.get_setting('during-evidence-publication') == 'accepted'
-            assert store.settings.get_setting('during-evidence-collection') == 'accepted'
-            assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        else:
-            # Saved routine cleanup intent is safe during installed-format
-            # compaction and must survive the real replacement/reopen.
-            before = sorted(store.conn.iterdump())
-            report = job.run(store)
-            assert report['phase'] == 'complete' and report['operation'] == 'compaction'
-            assert development93.stat().st_ino != original_inode
-            assert sorted(store.conn.iterdump()) == before
-            assert store._evidence_recovery_pending
-            assert store.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
-            store.settings.set_setting('after-pending-compaction', 'accepted')
-            assert store.settings.get_setting('after-pending-compaction') == 'accepted'
-        assert store.conn.in_transaction == (blocker == 'transaction')
-    finally:
-        store.conn.rollback()
-        store.conn.close()
-
-
 @pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('outcome', ['complete', 'reject', 'resume', 'restart', 'changed'])
 def test_direct_destination_uses_readonly_original_and_shared_install(
@@ -295,54 +204,6 @@ def test_direct_destination_uses_readonly_original_and_shared_install(
     assert not store.activity_paused
     store.settings.set_setting('after rebuild', 'accepted')
     assert store.settings.get_setting('after rebuild') == 'accepted'
-
-
-@pytest.mark.parametrize(('source_fixture', 'changed'), [
-    ('production64', False), ('development93', False), ('development93', True)])
-def test_startup_reuses_unchanged_source_and_restarts_after_accepted_edits(
-        request, source_fixture, changed, monkeypatch):
-    from yt_playlist.core.store import Store
-
-    path = request.getfixturevalue(source_fixture)
-    store = Store(path)
-    store.init_schema()
-    first = StorageMaintenance(store)
-    progress = first._progress
-
-    def interrupted(phase, detail):
-        progress(phase, detail)
-        if detail.get('stage') == 'copy:playlist_items':
-            raise InterruptedError('controlled background checkpoint')
-
-    monkeypatch.setattr(first, '_progress', interrupted)
-    try:
-        first.start()
-        first.join(30)
-        assert first.phase == 'deferred', first.error
-        state = db_handles.state(path)
-        assert state['phase'] == 'failed' and state['failed_phase'] == 'building'
-        if changed:
-            store.settings.set_setting('accepted-between-attempts', 'preserved')
-        second = StorageMaintenance(store)
-        second.start()
-        second.join(30)
-        assert second.phase == 'done', second.error
-        if changed:
-            assert second.report['id'] != state['id']
-            assert store.settings.get_setting('accepted-between-attempts') == 'preserved'
-        else:
-            assert second.report['id'] == state['id'] and second.report['resumed']
-        assert second.ready.is_set() and not store.activity_paused
-        assert store.conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0] == (
-            64 if source_fixture == 'production64' else 93)
-        store.settings.set_setting('after-automatic-resume', 'accepted')
-    finally:
-        first.stop()
-        first.join(30)
-        if 'second' in locals():
-            second.stop()
-            second.join(30)
-        store.conn.close()
 
 
 @pytest.mark.parametrize('installed', [107], indirect=True)

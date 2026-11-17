@@ -3,13 +3,9 @@ narrative BEATS for the full-screen reel.
 
 Design: docs/superpowers/specs/2026-07-10-trends-monthly-recap-story-design.md
 
-The beat builders are PURE: each takes already-prepared month data and returns a beat dict (rendered
-verbatim by the route) or None (omitted -- a quiet month simply runs shorter). `build_story` wires the
-store data in and assembles them; `personality` is the one beat that reads the store (acoustic + hours).
-Nothing here renders HTML."""
+Beat builders consume supplied month, acoustic, calendar and taxonomy facts.
+Quiet months omit unsupported beats. Nothing here acquires inputs or renders HTML."""
 from datetime import datetime, timezone
-
-from yt_playlist.util import genre_map
 
 # ── personality axes ─────────────────────────────────────────────────────────────────────────
 # Genre-family energy priors (0 calm .. 1 charged), used to fill the energy axis where a played track
@@ -50,7 +46,7 @@ def _clamp01(x):
     return 0.0 if x < 0 else 1.0 if x > 1 else x
 
 
-def energy_axis(track_plays, audio, meta, *, genre_axes=None):
+def energy_axis(track_plays, audio, meta, *, genre_axes):
     """Calm(0)..Charged(1) for the month. Weighted by plays over tracks that HAVE acoustic energy; where
     coverage is thin, blends in genre-family priors so the axis is always defined. Returns
     (value, source) where source is 'acoustic' (mostly measured) or 'genre' (mostly inferred)."""
@@ -64,7 +60,7 @@ def energy_axis(track_plays, audio, meta, *, genre_axes=None):
             e_den += plays
             covered += plays
         genre = (meta.get(key) or ("", None))[1]
-        fam = (genre_axes[genre][0] if genre_axes is not None else genre_map.family(genre)) if genre else None
+        fam = genre_axes[genre][0] if genre else None
         g_num += _FAMILY_ENERGY.get(fam, _DEFAULT_ENERGY) * plays
         g_den += plays
     acoustic = (e_num / e_den) if e_den else None
@@ -95,14 +91,9 @@ def exploration_axis(month_row):
     return _clamp01(0.5 * div_scaled + 0.5 * disc_scaled)
 
 
-def personality(store, month, month_row, meta):
+def personality(month_row, meta, *, track_plays, audio, hours, genre_axes):
     """The signature beat: 3 axes -> a named archetype + a deterministic aura. Always defined (energy
     falls back to genre priors, exploration to the month rollup, rhythm to play timestamps)."""
-    since, until = _month_bounds(month)
-    track_plays = store.trends.ledger_track_plays(since, until, calendar=True)
-    audio = store.trends.track_audio()
-    hours = store.trends.play_hours(since, until, calendar=True)
-    genre_axes = store.genres.feature_axes(row[1] for row in meta.values())
     energy, e_src = energy_axis(track_plays, audio, meta,genre_axes=genre_axes)
     rhythm = rhythm_axis(hours)
     explore = exploration_axis(month_row or {})
@@ -197,7 +188,7 @@ def _closing(review, month_name, personality_beat):
             "listen_days": review.get("listen_days", 0)}
 
 
-def build_story(store, months, review, month_name, *, detail_beats=()):
+def build_story(months, review, month_name, *, personality_beat=None, detail_beats=()):
     """Assemble a completed month's recap. Returns None when there is no completed month to recap.
     `month_name` is the display name (e.g. 'June'); callers pass their own formatter so tz/locale stay
     in one place."""
@@ -205,7 +196,7 @@ def build_story(store, months, review, month_name, *, detail_beats=()):
         return None
     month = review["month"]
     month_row = next((x for x in months if x["month"] == month), None)
-    pers = personality(store, month, month_row, store.trends.track_meta())
+    pers = personality_beat
     middle = [b for b in (
         _beat_numbers(review, month_row),
         _beat_all_in(review),

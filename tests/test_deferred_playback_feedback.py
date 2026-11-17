@@ -158,7 +158,7 @@ def test_feedback_requires_its_owned_file_before_replay_or_acknowledgement(libra
     assert not queue.pending() and not path.exists()
 
 
-def test_earlier_inbox_relocation_keeps_capture_identity_order_and_account(library):
+def test_earlier_inline_inbox_keeps_reading_and_writing_without_startup_conversion(library):
     store, main, _, _, _ = library
     queue = playback_feedback.inbox(store)
     body = {'kind': 'next', 'videoId': 'known', 'position': 20, 'duration': 180}
@@ -176,6 +176,13 @@ def test_earlier_inbox_relocation_keeps_capture_identity_order_and_account(libra
     assert playback_feedback.drain(store) == 1
     assert store.conn.execute('SELECT capture_id FROM playback_feedback_receipts').fetchone()[0] == 'original-capture'
     assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
+    later = queue.capture('player', main, body, 101)
+    with closing(sqlite3.connect(queue.path)) as conn:
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(playback_feedback_inbox)')}
+        assert 'body' in columns and 'filename' not in columns
+    assert queue.next()['capture_id'] == later and queue.body(queue.next()) == body
+    assert playback_feedback.drain(store) == 1
+    assert store.conn.execute('SELECT count(*) FROM playback_feedback_receipts').fetchone()[0] == 2
 
 
 def test_rating_skull_and_next_acknowledge_while_writer_is_held_and_survive_restart(library, monkeypatch):

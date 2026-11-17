@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Model map · TuneConsole{% endblock %}
+{% block page_class %}page-model-admin{% endblock %}
+{% block page_styles %}
+<link rel="stylesheet" href="/static/model-admin.css?v={{ asset_v }}">
+<script defer src="/static/model-admin-layout.js?v={{ asset_v }}"></script>
+<script defer src="/static/model-admin-routing.js?v={{ asset_v }}"></script>
+<script defer src="/static/model-admin-renderer.js?v={{ asset_v }}"></script>
+<script defer src="/static/model-admin.js?v={{ asset_v }}"></script>
+{% endblock %}
+
+{% macro node_detail(node) %}
+  <div class="mm-detail-heading">
+    <p class="mm-category">{{ node.app_area ~ ' · ' ~ ('Backend process' if node.feature_type == 'backend' else 'User-facing feature') if node.area == 'feature' else node.group ~ ' · ' ~ node.kind }}</p>
+    <h2 id="mm-detail-title">{{ node.title }}</h2>
+    <p class="mm-detail-summary">{{ node.summary }}</p>
+    <div class="mm-detail-periods">
+      {% for period in graph.periods if period.id in node.layers %}<span class="mm-period" data-period="{{ period.id }}">{{ period.title }}</span>{% endfor %}
+    </div>
+  </div>
+  <dl class="mm-definition">
+    <dt>{{ 'How it is derived' if node.area == 'feature' else 'Predicts or represents' }}</dt><dd>{{ node.output }}</dd>
+    <dt>Data & evidence</dt><dd>{{ node.inputs }}</dd>
+    <dt>Maintenance & grooming</dt><dd>{{ node.maintenance }}</dd>
+    <dt>Time horizon</dt><dd>{{ node.temporal }}</dd>
+  </dl>
+  {% if node.caution %}<p class="mm-caveat">{{ node.caution }}</p>{% endif %}
+  {% for direction, label in [('incoming', 'Inputs from'), ('outgoing', 'Used by')] %}
+    {% if node[direction] %}
+    <section class="mm-connections" aria-label="{{ label }}">
+      <h3>{{ label }} <span>{{ node[direction]|length }}</span></h3>
+      {% for connection in node[direction] %}
+      <button type="button" class="mm-connection" data-inspect="{{ connection.id }}">
+        <strong>{{ connection.title }}</strong>
+        <span>{{ connection.detail }}</span>
+        {% if connection.condition %}<em>{{ connection.condition }}</em>{% endif %}
+      </button>
+      {% endfor %}
+    </section>
+    {% endif %}
+  {% endfor %}
+  <details class="mm-sources"><summary>Implementation references</summary>
+    <ul>{% for source in node.sources %}<li><code>{{ source }}</code></li>{% endfor %}</ul>
+  </details>
+{% endmacro %}
+
+{% block body %}
+<div id="model-map">
+  <div class="mm-feature-areas" aria-hidden="true">
+    {% for area in graph.feature_areas %}<section class="mm-feature-area{{ ' mm-feature-area-backend' if area == 'Backend' else '' }}" data-mm-feature-area="{{ area }}" hidden><h2>{{ area }}</h2></section>{% endfor %}
+  </div>
+  <div id="mm-canvas" tabindex="0" role="img" aria-label="Model dependency graph. Scroll to zoom, drag to pan, or use search to inspect a node."></div>
+  <div class="mm-toolbar" aria-label="Graph controls">
+    <div class="mm-search">
+      <input id="mm-search" type="search" role="combobox" aria-label="Find a model or feature" aria-controls="mm-results" aria-expanded="false" aria-autocomplete="list" placeholder="Find a model or feature…" autocomplete="off">
+      <div id="mm-results" hidden>
+        {% for node in graph.nodes %}<button type="button" data-inspect="{{ node.id }}"><strong>{{ node.title }}</strong><small>{{ node.app_area ~ ' · ' ~ ('Backend process' if node.feature_type == 'backend' else 'User-facing feature') if node.area == 'feature' else node.group ~ ' · ' ~ node.kind }}</small></button>{% endfor %}
+      </div>
+    </div>
+    <select id="mm-area" aria-label="Model area"><option value="">All areas</option>{% for group in graph.groups %}<option>{{ group }}</option>{% endfor %}</select>
+    <select id="mm-layer" aria-label="Time layer"><option value="">All time layers</option>{% for period in graph.periods %}<option value="{{ period.id }}">{{ period.title }}</option>{% endfor %}</select>
+    <label class="mm-isolate"><input type="checkbox" id="mm-isolate"> Focus connections</label>
+    <button type="button" id="mm-reset">Reset</button>
+  </div>
+  <div class="mm-zoom" aria-label="Graph zoom">
+    <button type="button" id="mm-zoom-in" aria-label="Zoom in">+</button>
+    <button type="button" id="mm-zoom-out" aria-label="Zoom out">−</button>
+    <button type="button" id="mm-fit">Fit graph</button>
+  </div>
+  <div class="mm-legend">
+    <span class="mm-key-model">Model / policy</span><span class="mm-key-feature">User-facing feature</span><span class="mm-key-backend">Backend</span>
+    <details class="mm-color-key"><summary>Model colors</summary><div>{% for group in graph.groups %}<span data-mm-group="{{ group }}">{{ group }}</span>{% endfor %}</div></details>
+    <span><i class="mm-line-key"></i> Feeds</span><span><i class="mm-line-key mm-line-conditional"></i> Conditional</span>
+    <output id="mm-visible-count"></output>
+  </div>
+  <p class="mm-hint">Dependencies run left to right · Scroll to zoom · Drag to pan · Hover to trace · Click for details</p>
+  <div class="mm-hover" hidden><strong></strong><span></span></div>
+  <p class="mm-empty" hidden>No matching models or features.</p>
+  <dialog id="mm-dialog" aria-labelledby="mm-detail-title">
+    <div class="mm-dialog-controls"><button type="button" id="mm-focus">Focus this flow</button><button type="button" id="mm-close" autofocus aria-label="Close model details">×</button></div>
+    <div class="mm-dialog-body" id="mm-detail"></div>
+  </dialog>
+  {% for node in graph.nodes %}<template id="mm-detail-{{ node.id }}">{{ node_detail(node) }}</template>{% endfor %}
+  <script type="application/json" id="mm-data">{{ graph|tojson }}</script>
+  <noscript><p>Enable JavaScript to trace graph connections. The complete definitions are available below.</p>{% for node in graph.nodes %}<details><summary>{{ node.title }}</summary>{{ node_detail(node) }}</details>{% endfor %}</noscript>
+</div>
+{% endblock %}

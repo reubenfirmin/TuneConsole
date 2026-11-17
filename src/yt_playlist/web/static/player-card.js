@@ -39,6 +39,7 @@ function playerStatus() {
     skipping: false,
     toggling: false,
     artworkFailed: '',
+    albumArtworkAvailable: false,
     currentLocation: location.href,
     sourceLinkVisible() {
       const source = this.nowPlaying && this.nowPlaying.source;

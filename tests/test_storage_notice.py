@@ -104,7 +104,7 @@ def test_notice_matches_status_without_javascript(store, state, expected, active
             assert response.text == status['message']
 
 
-def test_analytics_notice_remains_visible_with_usable_recommendations(store):
+def test_analytics_preparation_stays_quiet_with_usable_recommendations(store):
     app = create_app(store,lambda:{},background_work=False)
     maintenance = app.state.ctx.storage_maintenance
     maintenance.ready.clear()
@@ -113,9 +113,9 @@ def test_analytics_notice_remains_visible_with_usable_recommendations(store):
         {'label':'Available mix','tracks':[{'videoId':'prepared-track'}]}]},1)
     with TestClient(app,base_url='http://127.0.0.1') as client:
         status = client.get('/storage-maintenance/status').json()
-        assert status['banner_message']=='Optimizing app storage; some recommendations are temporarily unavailable.'
+        assert status['banner_message'] == ''
         assert not status['active'] and status['recording']
-        assert status['banner_message'] in client.get('/playlists').text
+        assert re.search(r'<div id="storage-maintenance"[^>]* hidden>', client.get('/playlists').text)
         maintenance.report['analytics_pending'] = False
         maintenance.ready.set()
         assert client.get('/storage-maintenance/status').json()['banner_message']==''

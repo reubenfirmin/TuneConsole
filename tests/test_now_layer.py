@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from tests.repository_mock_support import no_database, repository_store
-from yt_playlist.rec import embedding_vectors as embed, layers
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import embedding_vectors as embed
 
 
 @pytest.fixture
@@ -15,6 +16,7 @@ def now_store(no_database):
         history={'play_events_since': []},
         rec_eligibility={'generated_only_keys': set()},
         playlists={'radio_playlist_ids': []},
+        genres={'feature_axes': {}},
         modes={'list_modes': [
             {'mode_id': 1, 'centroid': np.array([1., 0.], dtype=np.float32)},
             {'mode_id': 2, 'centroid': np.array([0., 1.], dtype=np.float32)},

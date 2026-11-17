@@ -9,7 +9,8 @@ import time
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import album_feedback_state, embedding_vectors as vectors, layers, mix_tuning, negative, rec_params, transient, vector_math
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import album_feedback_state, embedding_vectors as vectors, mix_tuning, negative, rec_params, transient, vector_math
 from yt_playlist.rec.taste_analysis import taste_breadth
 from yt_playlist.rec.taste_context import PlaylistTaste
 
@@ -80,16 +81,26 @@ def _behavior_centroid(store, M, idx):
 
 def _with_albums(store, taste, matrix, index):
     """Keep release interests separate in either vector space, including cold saved libraries."""
-    titles, cents = list(taste.titles), list(taste.centroids)
-    weights = list(taste.weights * max(1, len(taste.titles)))
-    pids = list(taste.pids)
-    contexts = list(getattr(taste, "sources", [{"kind": "playlist", "id": p} for p in pids]))
     base = rec_params.get_param(store, "album_saved_weight")
     returns = rec_params.get_param(store, "album_return_weight")
     feedback = album_feedback_state.state(store)
     confirmed = (store.rec_proposals.get_proposals('choice_interests') or {}).get('album_track_days', {})
-    for album in store.collection.taste_album_contexts(
-            include_browse=set(confirmed) | {browse for browse, item in feedback.items() if item["kind"] == "more"}):
+    albums = store.collection.taste_album_contexts(
+        include_browse=set(confirmed) | {browse for browse, item in feedback.items() if item["kind"] == "more"})
+    feedback_weight = rec_params.get_param(store, "album_feedback_weight") if any(
+        item['kind'] == 'more' for item in feedback.values()) else 0.
+    return album_contexts_from_inputs(taste, matrix, index, albums, feedback, confirmed,
+        saved_weight=base, return_weight=returns, feedback_weight=feedback_weight)
+
+
+def album_contexts_from_inputs(taste, matrix, index, albums, feedback, confirmed, *,
+                               saved_weight, return_weight, feedback_weight):
+    titles, cents = list(taste.titles), list(taste.centroids)
+    weights = list(taste.weights * max(1, len(taste.titles)))
+    pids = list(taste.pids)
+    contexts = list(getattr(taste, "sources", [{"kind": "playlist", "id": p} for p in pids]))
+    base, returns = saved_weight, return_weight
+    for album in albums:
         judgment = feedback.get(album["browse"], {}).get("kind")
         if judgment == "reject":
             continue
@@ -123,7 +134,7 @@ def _with_albums(store, taste, matrix, index):
             # This is an explicit release judgment, so its geometry can include
             # the full record even when organic returns cover only a few favorites.
             center = whole
-            weight = max(1., weight) * rec_params.get_param(store, "album_feedback_weight")
+            weight = max(1., weight) * feedback_weight
         norm = np.linalg.norm(center)
         if weight <= 0 or norm == 0:
             continue
@@ -152,15 +163,25 @@ def _with_choices(store, taste, matrix, index, *, content=False, now=None):
     interests = choice_learning.contexts(store, now)
     if not interests:
         return taste
+    sources = getattr(taste, 'sources', ())
+    saved_albums = {source.get('browse') for source in sources if source['kind'] == 'album'}
+    album_ids = [interest['option_id'] for interest in interests if interest['format'] == 'albums']
+    preferred = store.collection.preferred_album_ids(set(album_ids) | saved_albums)
+    feedback = album_feedback_state.state(store, album_ids)
+    basis = vectors.content_space_id(store) if content and any(
+        interest.get('feature') and not any(key in index for key in interest['keys'])
+        for interest in interests if interest['format'] != 'mixes') else None
+    return choice_contexts_from_inputs(taste, matrix, index, interests, preferred, feedback,
+        content=content, basis=basis)
+
+
+def choice_contexts_from_inputs(taste, matrix, index, interests, preferred, feedback, *, content, basis):
     titles, cents = list(taste.titles), list(taste.centroids)
     weights = list(taste.weights * max(1, len(taste.titles)))
     pids = list(taste.pids)
     sources = list(getattr(taste, "sources", [{"kind": "playlist" if p is not None else "history"} for p in pids]))
     saved_albums = {source.get("browse") for source in sources if source["kind"] == "album"}
-    album_ids = [interest['option_id'] for interest in interests if interest['format'] == 'albums']
-    preferred = store.collection.preferred_album_ids(set(album_ids) | saved_albums)
     saved_albums = {preferred[browse] for browse in saved_albums}
-    feedback = album_feedback_state.state(store, album_ids)
     for interest in interests:
         if interest['format'] == 'mixes':
             continue  # A displayed theme/genre choice cannot define a track-vector centroid.
@@ -172,7 +193,7 @@ def _with_choices(store, taste, matrix, index, *, content=False, now=None):
         rows = [index[key] for key in interest["keys"] if key in index]
         center = matrix[rows].mean(0) if rows else None
         if center is None and content and interest.get("feature"):
-            if interest.get("basis") == vectors.content_space_id(store):
+            if interest.get("basis") == basis:
                 center = np.asarray(interest["feature"])
         if center is None or len(center) != matrix.shape[1] or np.linalg.norm(center) == 0:
             continue
@@ -458,11 +479,17 @@ def discovery_facet_weight(store, family, now, *, leans=None):
         return None
     standing = store.rec_model.get_lean(f"genre:{family}")
     lean = (transient.facet_leans(store, now) if leans is None else leans).get(f"genre:{family}", 0.0)
+    return discovery_multiplier(perm, standing, lean)
+
+
+def discovery_multiplier(permanent, standing, lean):
+    if permanent == 0:
+        return None
     tmult = transient.facet_multiplier(lean * rec_params.DISCOVERY_TRANSIENT_DAMP,
                                        rec_params.PARAMS_BY_NAME["facet_gain"].default,
                                        rec_params.PARAMS_BY_NAME["facet_mult_min"].default,
                                        rec_params.PARAMS_BY_NAME["facet_mult_max"].default)
-    return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, perm * standing * tmult))
+    return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, permanent * standing * tmult))
 
 
 MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the taste score
@@ -486,6 +513,10 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None)
         atilt = transient.audio_centroid_tilt(store, now)
     if atilt is None:
         return None
+    return audio_alignment(idx, content_vecs, atilt)
+
+
+def audio_alignment(idx, content_vecs, tilt):
     _keys, CV, cidx = content_vecs
     if CV is None:
         return None
@@ -493,7 +524,7 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None)
     for k, r in idx.items():
         ci = cidx.get(k)
         if ci is not None:
-            boost[r] = float(CV[ci] @ atilt)
+            boost[r] = float(CV[ci] @ tilt)
     return boost
 
 
@@ -504,30 +535,34 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vec
     `evidence_vecs` optionally supplies (V, idx) for producing collaborative/session tilts,
     independently of the candidates being scored. Both must use the same embedding space.
     """
-    base = np.asarray(scores, dtype=np.float64)
-    components = {"durable": base.copy(), "transient": np.zeros(len(base)),
-                  "session": np.zeros(len(base)), "audio": np.zeros(len(base)),
-                  "negative": negative.penalties(store, V, idx, evidence_vecs=evidence_vecs)}
-    Vn = None
+    penalties = negative.penalties(store, V, idx, evidence_vecs=evidence_vecs)
     evidence_V, evidence_idx = (V, idx) if evidence_vecs is None else evidence_vecs
     tilt = transient.centroid_tilt(store, now, evidence_V, evidence_idx)
-    if tilt is not None:
-        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-        components["transient"] = MOOD_ALPHA * (Vn @ tilt)
     st = layers.session_tilt(store, now, evidence_V, evidence_idx)
-    if st is not None:
-        if Vn is None:
-            Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-        components["session"] = rec_params.get_param(store, "session_alpha") * (Vn @ st)
+    session_alpha = rec_params.get_param(store, "session_alpha") if st is not None else 0.
     # TODO: normalize this legacy 0–2 strength alongside play/like weights in transient.py.
     # 0 disables this boost; 1 is not neutral (default 0.30). The UI maps it to 0–100%
     # influence strength, not a share of picks; any range cleanup must migrate saved values.
     w = rec_params.get_param(store, "audio_transient_w")
-    if w > 0:
-        boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs,
-                                  content_snapshot=content_snapshot)
-        if boost is not None:
-            components["audio"] = w * boost
+    boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs,
+                             content_snapshot=content_snapshot) if w > 0 else None
+    return mood_components_from_inputs(scores, V, penalties, tilt, st,
+        session_alpha=session_alpha, audio_boost=boost, audio_weight=w)
+
+
+def mood_components_from_inputs(scores, V, penalties, tilt, session_tilt, *,
+                                session_alpha, audio_boost, audio_weight):
+    base = np.asarray(scores, dtype=np.float64)
+    components = {'durable': base.copy(), 'transient': np.zeros(len(base)),
+                  'session': np.zeros(len(base)), 'audio': np.zeros(len(base)), 'negative': penalties}
+    if tilt is not None or session_tilt is not None:
+        normalized = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+        if tilt is not None:
+            components['transient'] = MOOD_ALPHA * (normalized @ tilt)
+        if session_tilt is not None:
+            components['session'] = session_alpha * (normalized @ session_tilt)
+    if audio_boost is not None:
+        components['audio'] = audio_weight * audio_boost
     components["combined"] = sum(components[name] for name in
                                   ("durable", "negative", "transient", "session", "audio"))
     return components

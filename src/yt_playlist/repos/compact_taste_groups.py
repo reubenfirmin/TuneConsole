@@ -6,7 +6,7 @@ from yt_playlist.core import group_evidence, group_storage
 from yt_playlist.core.db_revisions import keyed_reads
 from .base import lookup_read, snapshot_read, synchronized
 from .group_preparation import GroupPreparationRepo
-from . import compact_group_publication as publication, group_publication as batches, group_queries
+from . import compact_group_publication as publication, group_publication as batches, group_queries, group_file_writes
 
 
 class CompactTasteGroupsRepo(GroupPreparationRepo):
@@ -106,8 +106,18 @@ class CompactTasteGroupsRepo(GroupPreparationRepo):
     def clear_build_conflicts(self, prepared, plans):
         return publication._clear_foreign_conflicts(self, prepared, plans)
 
-    def claim_generation(self, prepared, inputs, policy_version, policy_reference, metadata_reference):
-        return publication._claim(self, prepared, inputs, policy_version, policy_reference, metadata_reference)
+    def reserve_files(self, records):
+        if not records:
+            return []
+        with batches._write(self) as conn:
+            return group_file_writes.reserve(conn, records)
+
+    @lookup_read
+    def generation_reference(self, prepared, policy_version, inputs):
+        return publication.generation_reference(self.conn, prepared, policy_version, inputs)
+
+    def claim_generation(self, prepared, inputs, policy_version, metadata_reference):
+        return publication._claim(self, prepared, inputs, policy_version, metadata_reference)
 
     def install_inputs(self, generation_id, manifest_id, owner, rows):
         return publication._inputs(self, generation_id, manifest_id, owner, rows)

@@ -1,6 +1,6 @@
 """Binary vectors keep exact bytes, coherent bases and discovery tie ordering."""
 from tests.file_custody_support import export_owner, restore_owner
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, file_consumer_store
 import shutil
 import sqlite3
 import struct
@@ -9,7 +9,7 @@ import pytest
 
 from yt_playlist.core import embeddings, embedding_files as owner, fao
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.preparation import embeddings as preparation
+from tests.file_preparation_support import embeddings as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.core.rec_model_policy import VectorChanges
 
@@ -53,7 +53,9 @@ def test_basis_validation_work_grows_linearly_and_rejects_both_storage_forms(sto
             conn.execute("DELETE FROM recording_embedding_files WHERE space='content_library'")
             conn.set_progress_handler(tick, 1000)
             try:
-                conn.executemany('INSERT INTO recording_embedding_files VALUES (?,?,?,?,?,?,?,?)',
+                conn.executemany('INSERT INTO recording_embedding_files('
+                    'recording_id,space,model_version,dimensions,publication,position,insertion_order,built_at) '
+                    'VALUES (?,?,?,?,?,?,?,?)',
                     [(rid, 'content_library', 'basis', 2, b'x' * 32, 0, i + 1, 0)
                      for i, rid in enumerate(subjects[:count])])
             finally:
@@ -68,7 +70,9 @@ def test_basis_validation_work_grows_linearly_and_rejects_both_storage_forms(sto
         for version, dimensions in (('other', 2), ('basis', 3)):
             with pytest.raises(sqlite3.IntegrityError, match='Mixed bases'), atomic_write(store):
                 if table.endswith('_files'):
-                    conn.execute(f'INSERT INTO {table} VALUES (?,?,?,?,?,?,?,?)',
+                    conn.execute(f'INSERT INTO {table}('
+                        'recording_id,space,model_version,dimensions,publication,position,insertion_order,built_at) '
+                        'VALUES (?,?,?,?,?,?,?,?)',
                         (subjects[0], 'content_library', version, dimensions, b'y' * 32, 0, 1, 0))
                 else:
                     conn.execute(f'INSERT INTO {table} VALUES (?,?,?,?,?,?)',
@@ -167,8 +171,10 @@ def test_required_chunks_snapshot_and_independent_restore(store, tmp_path):
     with atomic_write(store):
         embeddings.publish(store.conn, 'rec_vectors', [(key, vector)], model_version='first')
     with store.read_view() as snapshot:
-        with atomic_write(store):
-            embeddings.publish(store.conn, 'rec_vectors', [(key, vector[::-1])], replace=True, model_version='second')
+        store.embeddings.replace('rec_vectors', [(key, vector[::-1])], {})
+        receipt = store.conn.execute('SELECT id,file_status FROM embedding_file_writes').fetchone()
+        assert receipt[1] == 'ready'
+        assert next(owner.references(store.conn)).name == f'{receipt[0]}.bin'
         assert embeddings.rows(snapshot.conn, 'rec_vectors') == [(key, vector)]
         assert store.retention.collect_embeddings(10**10) == 0
     store.retention.collect_embeddings(10**10)
@@ -178,12 +184,62 @@ def test_required_chunks_snapshot_and_independent_restore(store, tmp_path):
         store.conn.backup(restored.conn)
         shutil.rmtree(owner.directory(store.conn))
         restore_owner(restored.conn, 'embeddings', owner, manifest)
+        assert tuple(restored.conn.execute('SELECT id,file_status FROM embedding_file_writes').fetchone()) == tuple(receipt)
         assert embeddings.rows(restored.conn, 'rec_vectors') == [(key, vector[::-1])]
         fao.write(next(owner.references(restored.conn)), b'broken')
         with pytest.raises(fao.CorruptFile):
             embeddings.rows(restored.conn, 'rec_vectors')
     finally:
         restored.conn.close()
+
+
+@pytest.mark.parametrize('boundary', ['file', 'status'])
+def test_interrupted_native_publication_retains_the_selected_vectors_and_pending_identity(store, monkeypatch, boundary):
+    from yt_playlist.repos import embedding_file_writes
+    store.tracks.upsert_track('one', 'One', 'Artist', '', 100)
+    key = store.conn.execute('SELECT identity_key FROM recordings').fetchone()[0]
+    previous, replacement = struct.pack('=ff', .5, -.0), struct.pack('=ff', .75, -.0)
+    store.embeddings.replace('rec_vectors', [(key, previous)], {})
+    first_path = next(owner.references(store.conn))
+    first_bytes = fao.read(first_path).bytes
+    with monkeypatch.context() as patch:
+        if boundary == 'file':
+            patch.setattr(fao, 'prepare', lambda *a, **k: (_ for _ in ()).throw(OSError('interrupted')))
+        else:
+            complete = embedding_file_writes.complete
+            def interrupted(*args):
+                complete(*args)
+                raise OSError('interrupted')
+            patch.setattr(embedding_file_writes, 'complete', interrupted)
+        with pytest.raises(OSError, match='interrupted'):
+            store.embeddings.replace('rec_vectors', [(key, replacement)], {})
+    assert store.embeddings.rows('rec_vectors') == [(key, previous)]
+    assert [row[0] for row in store.conn.execute('SELECT file_status FROM embedding_file_writes ORDER BY id')] == ['ready', 'pending']
+    assert fao.read(first_path).bytes == first_bytes
+    assert not store.conn.in_transaction
+    with store.read_snapshot() as snapshot:
+        assert snapshot.store.embeddings.rows('rec_vectors') == [(key, previous)]
+    with atomic_write(store):
+        store.conn.execute("INSERT INTO settings(key,value) VALUES ('after-failure','confirmed')")
+    assert store.embeddings.rows('rec_vectors') == [(key, previous)]
+    store.embeddings.replace('rec_vectors', [(key, replacement)], {})
+    assert store.embeddings.rows('rec_vectors') == [(key, replacement)]
+    assert [row[0] for row in store.conn.execute('SELECT file_status FROM embedding_file_writes ORDER BY id')] == ['ready', 'pending', 'ready']
+
+
+def test_training_snapshot_reserves_on_the_live_writer_and_publishes_after_its_reader_closes(file_consumer_store):
+    store = file_consumer_store
+    store.tracks.upsert_track('training', 'Training', 'Artist', '', 100)
+    key = store.conn.execute('SELECT identity_key FROM recordings').fetchone()[0]
+    vector = struct.pack('=ff', .125, -.0)
+    with store.read_snapshot() as snapshot:
+        changes = snapshot.store.rec_model.prepare_training_changes({'rec_vectors': [(key, vector)]},
+                                                                    {'rec_dim': '2'})
+        assert store.conn.execute('SELECT file_status FROM embedding_file_writes').fetchone()[0] == 'pending'
+        assert store.embeddings.rows('rec_vectors') == []
+        assert snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
+    assert store.embeddings.rows('rec_vectors') == [(key, vector)]
+    assert store.conn.execute('SELECT file_status FROM embedding_file_writes').fetchone()[0] == 'ready'
 
 
 @pytest.mark.parametrize('converted',[1,3])

@@ -1,43 +1,6 @@
 # tests/test_store.py
 
 
-
-
-def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_store):
-    store = legacy_store
-    import json
-    from yt_playlist.core.migrations import migrate
-    from yt_playlist.core.migrations.registry import MIGRATIONS
-    from yt_playlist.util.action_kinds import COPY_PLAYLIST, MOVE_IDENTITY
-
-    # Recreate the previous schema, then exercise the real startup migration.
-    with store.conn:
-        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','cred',1)")
-        for ytm in ("song", "generated", "303", "Brexit List", "planned", "moved"):
-            store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,content_hash,first_seen,last_seen,last_changed) VALUES (1,?,?,0,'',9000,9000,9000)", (ytm, ytm))
-        for kind, ytm, status, at in ((COPY_PLAYLIST, "song", "executed", 100),
-                                      (COPY_PLAYLIST, "song", "executed", 200),
-                                      (COPY_PLAYLIST, "planned", "planned", 300),
-                                      (MOVE_IDENTITY, "moved", "executed", 400)):
-            store.conn.execute("INSERT INTO actions(kind,params_json,plan_json,status,undo_json,created_at) VALUES (?,'{}','{}',?,?,?)", (kind, status, json.dumps({"new_ytm": ytm}), at))
-        store.conn.execute("INSERT INTO actions(kind,status,undo_json,created_at) VALUES (?,'executed','invalid legacy payload',500)", (COPY_PLAYLIST,))
-        store.conn.execute("INSERT INTO rec_recipes VALUES ('generated',?,50)", (json.dumps({"theme": "mix"}),))
-        store.conn.execute("ALTER TABLE playlists DROP COLUMN created_at")
-        store.conn.execute("DELETE FROM settings WHERE key='playlist_created_at_backfilled'")
-        store.conn.execute("DROP TABLE schema_migrations")
-    # Replay the creation-date migration on its frozen schema. The intentionally
-    # invalid action payload tests v4's tolerant date lookup, not v98 admission.
-    migrate(store.conn, registry=MIGRATIONS[:7])
-    dates = dict(store.conn.execute('SELECT ytm_playlist_id,created_at FROM playlists'))
-    assert dates == {"song": 100, "generated": 50, "303": None, "Brexit List": None,
-                     "planned": None, "moved": None}
-    with store.conn:
-        store.conn.execute('UPDATE rec_recipes SET recipe=?,created_at=8000 WHERE playlist_ytm=?',
-                           (json.dumps({"theme": "updated mix"}), "generated"))
-    migrate(store.conn, registry=MIGRATIONS[:7])
-    assert dict(store.conn.execute('SELECT ytm_playlist_id,created_at FROM playlists')) == dates
-
-
 def test_upsert_playlist_tracks_seen_and_changed(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     t1 = store.tracks.upsert_track("v1", "Song A", "Artist", "Alb", 200)

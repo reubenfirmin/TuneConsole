@@ -7,7 +7,6 @@
     <span data-vibe-count></span>
     <button type="button" data-vibe-next>Next song</button>
   </div>
-  <button type="button" class="audio-vibe-pending" data-vibe-pending hidden></button>
   <template data-vibe-card-template>
     <article class="audio-vibe-card" data-vibe-card>
       <div class="audio-vibe-heading">
@@ -15,7 +14,10 @@
           <h2 class="audio-vibe-track" data-vibe-track></h2>
           <p class="audio-vibe-artist" data-vibe-artist></p>
         </div>
-        <button type="button" class="audio-vibe-dismiss" data-vibe-dismiss aria-label="Dismiss vibe check for this song">×</button>
+        <div class="audio-vibe-heading-actions">
+          <button type="button" class="audio-vibe-dismiss-all" data-vibe-dismiss-all hidden>Close all</button>
+          <button type="button" class="audio-vibe-dismiss" data-vibe-dismiss aria-label="Dismiss vibe check for this song">×</button>
+        </div>
       </div>
       <div class="audio-vibe-guess">
         <p class="audio-vibe-prediction" data-vibe-prediction></p>
@@ -24,6 +26,11 @@
            target="_blank" rel="noopener">Update extension</a>
         <div class="audio-vibe-checks" data-vibe-checks role="group" aria-label="Completed audio checks"></div>
       </div>
+      <dl class="audio-vibe-specialists" data-vibe-specialists hidden>
+        {% for key, preset in audio_vibe_choices.items() %}
+        <div data-vibe-specialist="{{ key }}"><dt>{{ preset.label }}</dt><dd><output></output></dd></div>
+        {% endfor %}
+      </dl>
       <p class="audio-vibe-prompt">Your take <span>Choose all that fit</span></p>
       <div class="audio-vibe-choices" role="group" aria-label="Listening session descriptions">
         {% for key, preset in audio_vibe_choices.items() %}

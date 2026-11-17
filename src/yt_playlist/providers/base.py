@@ -115,3 +115,15 @@ def detect_conflicts(results) -> dict:
     return conflicts
 
 
+def conflict_plan(results, successful, complete):
+    """Detached candidate refresh and agreement decisions for one captured pass."""
+    conflicts = detect_conflicts(results)
+    refreshed = {field: {result.provider for result in results if result.provider in successful
+                         and field in result.fields and not _empty(result.fields[field])}
+                 for field in conflicts}
+    agreeing = ({field: {result.provider: result.fields[field] for result in results
+                         if field in result.fields and not _empty(result.fields[field])}
+                 for field in FIELD_SPECS if field not in conflicts} if complete else None)
+    return conflicts, refreshed, agreeing
+
+

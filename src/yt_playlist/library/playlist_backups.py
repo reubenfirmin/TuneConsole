@@ -1,10 +1,6 @@
 """Publish complete, durable playlist backups before any destructive operation."""
-import json
-import re
 from types import SimpleNamespace
-from uuid import uuid4
 
-from yt_playlist.core import fao, paths
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.matching import track_artist
@@ -27,16 +23,16 @@ def backup_playlist(store, playlist_id, now, client, *, snapshot=None) -> str:
     return _capture_backup(store,pl,now,detail)
 
 
-def backup_remote_playlist(store,account_id,ytm,title,now,snapshot):
+def backup_remote_playlist(store,account_id,ytm,title,now,snapshot, *, files=None):
     """Retain a recovery target even when its local membership has been retired."""
     pl = next((item for item in store.playlists.get_playlists()
                if item.account_id==account_id and item.provider_playlist_id==ytm),None)
     if pl is None:
         pl = SimpleNamespace(id=None,account_id=account_id,provider_playlist_id=ytm,title=title or ytm)
-    return _capture_backup(store,pl,now,validate_playlist(snapshot))
+    return _capture_backup(store,pl,now,validate_playlist(snapshot), files=files)
 
 
-def _capture_backup(store,pl,now,detail):
+def backup_payload(pl, now, detail, group, provenance):
     playlist_id = pl.id
     ytm = pl.provider_playlist_id
     # central guard: every delete path backs up first, so refusing here keeps undeletable
@@ -49,20 +45,15 @@ def _capture_backup(store,pl,now,detail):
               for pos, t in enumerate(detail["tracks"])]
     # Backup-v2 is a saved external format. Its field names stay stable while
     # the local model and SQL use account/provider playlist vocabulary.
-    payload = {"playlist_id": playlist_id, "ytm_playlist_id": ytm, "identity_id": pl.account_id,
+    return {"playlist_id": playlist_id, "ytm_playlist_id": ytm, "identity_id": pl.account_id,
                "title": detail.get("title") or pl.title, "tracks": tracks,
                "description": detail.get("description"), "captured_at": now,
-               "snapshot_version": 2, "group": store.playlists.get_playlist_groups().get(ytm),
-               "provenance": store.playlists.playlist_provenance(ytm)}
-    # ytm comes from the YouTube API (untrusted); strip anything that could escape
-    # the backups dir (e.g. "/" or "..") before using it in a filename.
-    safe_ytm = re.sub(r"[^A-Za-z0-9_-]", "_", ytm)
-    filename = f"{safe_ytm}_{playlist_id}_{int(now)}_{uuid4().hex}.json"
-    backups = paths.backups_dir().resolve()
-    path = (backups / filename).resolve()
-    if path.parent != backups:  # belt-and-suspenders: must stay inside backups dir
-        raise ValueError(f"refusing to write backup outside {backups}")
-    # A failed write must never replace a previous recovery artifact or authorize deletion.
-    fao.write(path, fao.Content(json.dumps(payload, indent=2).encode(), durable=True))
-    return str(path)
+               "snapshot_version": 2, "group": group, "provenance": provenance}
+
+
+def _capture_backup(store, pl, now, detail, *, files=None):
+    remote = pl.provider_playlist_id
+    payload = backup_payload(pl, now, detail, store.playlists.get_playlist_groups().get(remote),
+                             store.playlists.playlist_provenance(remote))
+    return store.playlist_backups.capture(payload, files=files)
 

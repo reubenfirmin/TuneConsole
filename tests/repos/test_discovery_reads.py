@@ -5,9 +5,8 @@ from tests.enrichment_support import seed_discovered_audio, seed_discovered_enri
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from tests.publication_fixture_support import installed as prepared_discovery
 from tests.store_fixture_support import _publication_preparation_input, native_sql_calls
-from yt_playlist.core.preparation.discovery_publication import read_owners
+from yt_playlist.core.discovery_reads import read_owners
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +32,7 @@ def seed(store):
     return key
 
 
-@pytest.mark.parametrize('installed', [79, 99, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_membership_reads_canonical_keys_without_hydrating_track_fields(installed, monkeypatch):
     store, _ = installed
     key = seed(store)
@@ -130,39 +129,5 @@ def test_tracked_full_read_invalidates_each_changed_input(store, change):
         expected = [reader.discovery.repository._dtrack_row(row) for row in
                     reader.conn.execute('SELECT * FROM ' + relation)]
         assert expected != before
-        assert reader.discovery.get_discovered_tracks() == expected
-        assert reader.discovery.discovered_track_keys() == {row['identity_key'] for row in expected}
-
-
-@pytest.fixture
-def prepared_read_sql(prepared_discovery, native_sql_calls, monkeypatch):
-    # Admission and historical replay belong to the installed membership cases
-    # above and test_installed_fixture. Keep real preparation/publication SQL,
-    # files and fresh reader connections beneath these repository assertions.
-    store, _ = prepared_discovery
-    _publication_preparation_input(store, monkeypatch)
-
-
-@pytest.mark.parametrize('prepared_discovery', [79, 99], indirect=True)
-def test_reads_follow_prepared_discovery_selection_and_continuing_writes(
-        prepared_discovery, prepared_read_sql):
-    from tests.core.test_discovery_owner_preparation import seed as seed_owners
-    from tests.core.test_discovery_publication import ready
-
-    store, _ = prepared_discovery
-    seed_owners(store)
-    owner, stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    with store.read_view(tracked=True) as reader:
-        assert read_owners(reader.conn).revision is not None
-        before = reader.discovery.get_discovered_tracks()
-        assert reader.discovery.discovered_track_keys() == {row['identity_key'] for row in before}
-    store.discovery.upsert_discovered_track('new', 'new', 'New', 'Other', None, None,
-                                           'Techno', '2020', 'radio:seed', 40)
-    with store.read_view(tracked=True) as reader:
-        relation = read_owners(reader.conn).relation('discovered_tracks')
-        expected = [reader.discovery.repository._dtrack_row(row) for row in
-                    reader.conn.execute('SELECT * FROM ' + relation)]
-        assert len(expected) == len(before) + 1
         assert reader.discovery.get_discovered_tracks() == expected
         assert reader.discovery.discovered_track_keys() == {row['identity_key'] for row in expected}

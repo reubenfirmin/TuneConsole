@@ -3,6 +3,7 @@ from contextlib import contextmanager
 
 from yt_playlist.core import albums
 from yt_playlist.repos.base import Repo, lookup_read, synchronized
+from yt_playlist.repos import description_file_writes
 
 
 class AlbumDescriptionsRepo(Repo):
@@ -132,25 +133,9 @@ class AlbumDescriptionsRepo(Repo):
             'claim_token=CASE WHEN ? THEN claim_token ELSE NULL END,updated_at=? WHERE id=?',
             (status, keep_token, now, request_id))
 
-    @lookup_read
-    def policy_digest(self, version):
-        row = self.conn.execute('SELECT content_digest FROM recommendation_policies WHERE version=?',
-                                (version,)).fetchone()
-        return row[0] if row else None
-
     @synchronized
     def reserve(self, album_id, version, key, request_id, attempt, token, credential, lease_until, period, now,
-                *, initial_status, claimed_status, policy_reference=None):
-        if policy_reference is not None:
-            filename, digest, size = policy_reference
-            existing = self.policy_digest(version)
-            if existing is not None and existing != digest:
-                raise ValueError(f'Conflicting immutable recommendation policy: {version!r}')
-            self.conn.execute('INSERT INTO recommendation_policies(version,configuration_filename,content_digest,'
-                'byte_size,configuration_offset,created_at,base_version) VALUES (?,?,?,?,0,?,NULL) '
-                'ON CONFLICT(version) DO NOTHING', (version, filename, digest, size, now))
-            self.conn.execute('UPDATE recommendation_impression_policies SET policy_version=raw_version,'
-                "resolution_reason=NULL WHERE resolution_reason='missing_policy' AND raw_version=?", (version,))
+                *, initial_status, claimed_status):
         if request_id is None:
             request_id = self.conn.execute('INSERT INTO album_description_requests('
                 'album_id,request_key,policy_version,resolution_status,status,attempt_count,created_at,updated_at) '
@@ -174,7 +159,14 @@ class AlbumDescriptionsRepo(Repo):
             (status, now, lease_until, now, request_id, token, expected_status)).rowcount == 1
 
     @synchronized
-    def complete(self, request_id, attempt, expected_token, decision, reference, tokens, period, now, *, model=None):
+    def reserve_result(self, request_id, attempt, digest, size):
+        with self.transaction():
+            return description_file_writes.reserve(self.conn, request_id, attempt, digest, size)
+
+    @synchronized
+    def complete(self, request_id, attempt, expected_token, decision, reference, tokens, period, now,
+                 *, file_id, model=None):
+        description_file_writes.complete(self.conn, file_id, request_id, attempt, reference)
         filename, digest, _size = reference
         if model is not None:
             self.conn.execute('INSERT INTO album_descriptions('

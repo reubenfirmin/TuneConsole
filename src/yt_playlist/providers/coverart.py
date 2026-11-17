@@ -11,9 +11,8 @@ release; transient errors get a short, increasing retry delay rather than one re
 """
 from dataclasses import dataclass
 
-from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.base import AccessState
 from yt_playlist.integrations.coverartarchive import CoverArtArchiveIAO, API, ERROR_RETRY
-from yt_playlist.util import net
 _MAX_RELEASES = 4          # candidates to try before accepting that there is no art
 _iao = CoverArtArchiveIAO()
 
@@ -27,7 +26,7 @@ class CoverResult:
 
 
 def access(store=None):
-    return _iao.context(store)
+    return _iao.context(AccessState.for_store(store))
 
 
 def tripped() -> bool:
@@ -63,42 +62,11 @@ def front_cover(release_ids):
     A host outage defers uncached editions; cached covers remain available. A
     fresh selected cover completes demand even if a previous edition failed.
     """
-    collected = []
-    for rid in list(dict.fromkeys(release_ids or []))[:_MAX_RELEASES]:
-        with net.probe_errors() as errors:
-            try:
-                url = _release_cover(rid)
-            except (WorkClosing, WorkBudgetExceeded):
-                raise
-            except Exception as exc:
-                if not any(error is exc for error in errors):
-                    net.record_probe_failure(exc)
-                url = None
-        collected.extend(errors)
-        if url:
-            for error in errors:
-                net.record_probe_failure(error)
-            return url
-    for error in collected:
-        net.record_probe_failure(error)
-    return None
+    from yt_playlist.controllers.cover_art import front_cover as acquire
+    return acquire(release_ids, _release_cover, maximum=_MAX_RELEASES)
 
 
 def lookup(release_ids):
     """Retain the distinction between a confirmed miss and a deferred archive request."""
-    with net.probe_errors() as errors:
-        try:
-            url = front_cover(release_ids)
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception as exc:
-            net.record_probe_failure(exc)
-            url = None
-    if errors:
-        now = _iao.now()
-        delay = max([ERROR_RETRY, *(getattr(e, "retry_in", 0) for e in errors),
-                     *(net.retry_after(e, now) - now for e in errors)])
-        return CoverResult("retry", url, retry_in=delay, error=str(errors[-1]))
-    if url:
-        return CoverResult("found", url)
-    return CoverResult("absent")
+    from yt_playlist.controllers.cover_art import lookup as acquire
+    return acquire(release_ids, front_cover, _iao.now, CoverResult, ERROR_RETRY)

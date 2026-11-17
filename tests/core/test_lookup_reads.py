@@ -1,7 +1,7 @@
 """Verify the connection ownership guaranteed by the lookup_read boundary."""
 from concurrent.futures import ThreadPoolExecutor
 from tests.derived_rating_support import seed_dislike
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import sqlite3
 import threading
 
@@ -36,6 +36,61 @@ class LookupProbe(Repo):
         if failure is not None:
             raise failure('controlled method failure')
         return value
+
+
+def test_track_admission_reuses_available_connection_and_contended_inputs_use_private_views(
+        file_backed_store, monkeypatch):
+    store = file_backed_store
+    readers = []
+    read_view = store.read_view
+
+    @contextmanager
+    def observed_view():
+        with read_view() as reader:
+            readers.append(reader)
+            yield reader
+
+    monkeypatch.setattr(store, 'read_view', observed_view)
+    entry = store.tracks.upsert_track('import-video', 'Imported song', 'Artist', 'Record', 200,
+        artist_browse_id='UC_import', album_browse_id='MPRE_import', thumbnail='https://example.test/cover.jpg',
+        available=True, video_type='MUSIC_VIDEO_TYPE_ATV', created_at=100)
+    assert readers == [], 'Track admission must not construct a repository graph for each indexed lookup'
+    subject = store.tracks.catalog_subject(entry)
+    album, = store.conn.execute("SELECT album_id FROM album_provider_ids WHERE provider='youtube' AND provider_id=?",
+                                ('MPRE_import',)).fetchone()
+    reads = [lambda: store.recording_keys.repository.key_candidates(subject['identity_key']),
+             lambda: store.recording_keys.repository.listening_keys(subject['recording_id']),
+             lambda: store.tracks.repository.catalog_metadata_inputs(entry, ('genre',)),
+             lambda: store.tracks.repository.artwork_inputs(entry),
+             lambda: store.artists.repository.credit_observation_inputs(entry),
+             lambda: store.albums.repository.linked_artist_inputs(album)]
+    expected = [read() for read in reads]
+    readers.clear()
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with store._lock:
+            store.conn.execute("INSERT INTO settings VALUES ('import-owner','uncommitted')")
+            try:
+                entered.set()
+                assert release.wait(10)
+            finally:
+                store.conn.rollback()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(writer)
+        try:
+            assert entered.wait(2)
+            actual = pool.submit(lambda: [read() for read in reads]).result(timeout=5)
+            assert actual == expected
+            assert not pending.done()
+        finally:
+            release.set()
+        pending.result(timeout=2)
+    assert len(readers) == len(reads)
+    for reader in readers:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            reader.conn.execute('SELECT 1')
 
 
 def test_composed_read_keeps_its_original_snapshot_after_an_independent_commit(file_backed_store):

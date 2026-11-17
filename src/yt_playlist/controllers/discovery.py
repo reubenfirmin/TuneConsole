@@ -14,19 +14,6 @@ from yt_playlist.core.db_diagnostics import database_operation
 class Discovery:
     def prepare_track_reassociation(self, video, previous, target, association, now):
         inputs = self.repository.track_reassociation_inputs(video, previous, target)
-        for row in inputs['originals']:
-            key = ([association, row['id']] if inputs['typed'] else
-                   [association, row['recording_id'], row['source_token']])
-            self.originals.retain('discovery', 'discovery_reassociation', json.dumps(key), json.dumps(row),
-                'exact upload reassociation; retained source contribution' if inputs['typed'] else
-                'exact upload reassociation; retained pre-merge evidence')
-        reason = 'recording reassociation ' + str(association)
-        for row in inputs['impressions']:
-            self.originals.retain('discovery', 'discovery_impression_merge',
-                json.dumps(['track', previous, target, row['id']]), json.dumps(row), reason)
-        if inputs['legacy']:
-            self.originals.retain('discovery', 'discovery_legacy_offer_merge',
-                json.dumps(['track', previous, target]), json.dumps(inputs['legacy']), reason)
         member, remaining, sources = inputs['member'], inputs['remaining'], inputs['sources']
         membership_found = None
         retain_member = bool(member and (remaining is None or sources))
@@ -41,12 +28,11 @@ class Discovery:
         self.repository.finish_track_reassociation(inputs, retain_member=retain_member,
             membership_found=found, source_identities=identities, association=association)
 
-    def __init__(self, repository, artists, eligibility, files, *, originals, tracks, albums, genres,
+    def __init__(self, repository, artists, eligibility, files, *, tracks, albums, genres,
                  metadata, keys, proposals=None, settings=None):
         self.repository, self.artists = repository, artists
         self.eligibility, self.files = eligibility, files
         self.proposals, self.settings = proposals, settings
-        self.originals = originals
         self.tracks, self.albums, self.genres = tracks, albums, genres
         self.metadata, self.keys = metadata, keys
 
@@ -64,46 +50,15 @@ class Discovery:
         genre = self.genres.resolve(value)[0] if kind == 'genre' else None
         return discovery_origin_policy.fields(token, facts, genre=genre, account_id=account_id, import_key=import_key)
 
-    def _retain(self, kind, identity, row, reason):
-        self.originals.retain('discovery', kind, json.dumps(identity), json.dumps(row), reason)
-
-    def _retain_origins(self, origins, target, reason):
-        for item in origins:
-            old, current = item['origin']['id'], item['target']
-            self._retain('discovery_origin_merge', [old, target], item['origin'], reason)
-            if current is not None:
-                for row in item['sources']:
-                    self._retain('discovery_source_origin_merge', [row['id'], current], row, reason)
-                for row in item['artists']:
-                    self._retain('discovery_artist_origin_merge', [row['artist_id'], old, current], row, reason)
-
     def reconcile_artist(self, previous, target, *, source):
-        with self.files.retained():
-            inputs = self.repository.artist_reconciliation_inputs(previous, target)
-            origins = self.repository.origin_merge_inputs('artist_id', previous, target)
-            if inputs['typed']:
-                origins = artist_reconciliation.origins_after_artist_move(origins, previous, target)
-                for row in inputs['sources']:
-                    self._retain('discovery_artist_source_merge', [previous, target, row['artist_id'], row['origin_id']], row, source)
-                self._retain_origins(origins, target, source)
-                for row in inputs['impressions']:
-                    self._retain('discovery_impression_merge', ['artist', previous, target, row['id']], row, source)
-                if inputs['legacy']:
-                    self._retain('discovery_legacy_offer_merge', ['artist', previous, target], inputs['legacy'], source)
-            for table in ('artist_scans', 'discovered_artists'):
-                for row in inputs[table]:
-                    captured = dict(row)
-                    if table == 'discovered_artists' and inputs['typed']:
-                        reference = tuple(row[field] for field in ('recovery_filename', 'recovery_digest', 'recovery_bytes'))
-                        captured['explanation'] = (self.files.read(reference, kind='discovery-candidate',
-                            owner=policy.explanation_owner(row)) if reference[0] is not None else {'because': [], 'fits': []})
-                    identity = row['artist_id'] if inputs['typed'] else row['artist']
-                    self.originals.retain('artist', 'artist_reconcile:'+table,
-                        json.dumps([previous, target, identity]), json.dumps(captured), source)
-            scan = artist_reconciliation.latest(inputs['artist_scans'], 'scanned_at', target, legacy=not inputs['typed'])
-            candidate = artist_reconciliation.candidate(inputs['discovered_artists'], target,
-                typed=inputs['typed'], duplicates=inputs['duplicates'])
-            self.repository.apply_artist_reconciliation(previous, target, inputs, origins, scan, candidate)
+        inputs = self.repository.artist_reconciliation_inputs(previous, target)
+        origins = self.repository.origin_merge_inputs('artist_id', previous, target)
+        if inputs['typed']:
+            origins = artist_reconciliation.origins_after_artist_move(origins, previous, target)
+        scan = artist_reconciliation.latest(inputs['artist_scans'], 'scanned_at', target, legacy=not inputs['typed'])
+        candidate = artist_reconciliation.candidate(inputs['discovered_artists'], target,
+            typed=inputs['typed'], duplicates=inputs['duplicates'])
+        self.repository.apply_artist_reconciliation(previous, target, inputs, origins, scan, candidate)
 
     def select_starter_artist(self, name, browse_id, thumbnail, selected, now):
         identity = self.artists.ensure_artist(name, provider='youtube', provider_id=browse_id)
@@ -121,6 +76,15 @@ class Discovery:
     def starter_tracks(self):
         rows = self.repository.starter_track_rows(self.eligibility.maximum_duration())
         return policy.starter_tracks(rows)
+
+    def select_starter_song(self, video_id, now):
+        return self.repository.select_starter_song(video_id, now)
+
+    def starter_songs(self):
+        return self.repository.starter_songs()
+
+    def starter_song_videos(self):
+        return self.repository.starter_song_videos()
 
     def interested_artists(self, limit=None):
         return self.repository.interested_artists(weights=policy.INTEREST_WEIGHTS, limit=limit)
@@ -183,20 +147,9 @@ class Discovery:
     def remove_spotify_origins(self):
         return self.repository.remove_spotify_origins()
 
-    def merge_genre_origins(self, previous, target):
-        origins = self.repository.origin_merge_inputs('genre_key', previous, target)
-        self._retain_origins(origins, target, 'explicit genre merge')
-        self.repository.apply_origin_merge('genre_key', target, origins)
-
     def merge_albums(self, previous, target):
-        reason = f'verified album reconciliation {previous} to {target}'
         inputs = self.repository.album_merge_inputs(previous, target)
         origins = self.repository.origin_merge_inputs('album_id', previous, target)
-        self._retain_origins(origins, target, reason)
-        for row in inputs['impressions']:
-            self._retain('discovery_impression_merge', ['album', previous, target, row['id']], row, reason)
-        if inputs['legacy']:
-            self._retain('discovery_legacy_offer_merge', ['album', previous, target], inputs['legacy'], reason)
         member = policy.merged_album_membership(inputs['memberships'], target)
         self.repository.apply_album_merge(previous, target, inputs, origins, member)
 
@@ -232,9 +185,15 @@ class Discovery:
         with self.files.retained():
             native = self.repository.explanation_files()
             origin = self._origin(source) if native else None
-            reference = self.files.publish('discovery-candidate', identity, explanation) if native else None
+            reference, file_id = None, None
+            if native:
+                integrity = self.files.describe('discovery-candidate', identity, explanation)
+                file_id = self.repository.reserve_explanation_file(identity, integrity)
+                reference = self.files.publish_reserved(file_id, 'discovery-candidate', identity, explanation,
+                                                        expected=integrity)
             self.repository.store_discovered_artist(identity, score, thumbnail, now, genre, source=source,
-                                                    reference=reference, encoded=encoded, origin=origin, genre_key=genre_key)
+                                                    reference=reference, file_id=file_id, encoded=encoded,
+                                                    origin=origin, genre_key=genre_key)
 
     def retain_discovered_artist(self, artist, score):
         identity = self.artists.resolve_exact(artist)

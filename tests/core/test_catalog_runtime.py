@@ -6,7 +6,6 @@ from copy import deepcopy
 import pytest
 
 from yt_playlist.core import catalog_identity, catalog_state
-from yt_playlist.core.migrations import v008_recordings
 
 
 def test_runtime_operations_do_not_import_historical_catalog_helpers(store, monkeypatch):
@@ -32,11 +31,6 @@ def test_runtime_operations_do_not_import_historical_catalog_helpers(store, monk
     assert saved['nodes'][0]['key'] == store.tracks.catalog_subject(first)['identity_key']
     assert saved['label'] == old
     assert saved['catalog_state_version'] == 1
-
-
-@pytest.mark.parametrize('album,title,artist', [('', '', ''), ('Álbum', '曲', 'Artista'), (None, 'Song', 'A')])
-def test_runtime_source_entry_ids_preserve_existing_identity(album, title, artist):
-    assert catalog_identity.unresolved_ref(album, title, artist) == v008_recordings.unresolved_ref(album, title, artist)
 
 
 def test_runtime_rekey_changes_only_declared_key_slots_and_preserves_input():
@@ -65,12 +59,3 @@ def test_unknown_runtime_state_format_is_preserved_on_live_rekey(store):
     assert store.playlist_recipes.get_cluster_canvas('future') == future
     with pytest.raises(ValueError, match='Unsupported'):
         catalog_state.rekey_state(json.loads(future), {old: 'new'})
-
-
-def test_historical_state_conversion_does_not_follow_runtime_format_changes(monkeypatch):
-    monkeypatch.setattr(catalog_state, 'STATE_VERSION', 99)
-    monkeypatch.setattr(catalog_state, 'IDENTITY_VERSION', 99)
-    monkeypatch.setattr(catalog_identity, 'RECORDING_FIELDS', ('future_field',))
-    historical = v008_recordings.convert_state({'keys': ['old'], 'label': 'old'}, {'old': 'new'})
-    assert historical == {'keys': ['new'], 'label': 'old', 'catalog_identity_version': 2}
-    assert 'future_field' not in v008_recordings.RECORDING_FIELDS

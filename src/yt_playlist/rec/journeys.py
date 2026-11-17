@@ -6,10 +6,12 @@ trivially testable. Dependencies are genre_map and ordering.dj_order (the within
 both are leaf modules, so there is no longer a circular import to dodge.
 """
 import random
+from collections import Counter
 from functools import lru_cache
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec.ordering import dj_order
+from yt_playlist.rec.artist_variety import members
 
 # The journey keys, in picker order; each maps to an ordering strategy in journey_order below.
 JOURNEYS = ["energy_arc", "warm_up", "wind_down", "smooth_segue", "odyssey",
@@ -65,12 +67,12 @@ _AXIS = {
 _BAND_SIZE = 4   # target tracks per band; a 12-track mix -> ~3 bands
 
 
-def _space(items, seed, feat):
+def _space(items, seed, feat, previous=frozenset()):
     """Seeded artist-spacing (+ light genre segue) for a small group, via the existing dj_order
     engine. <=2 items: nothing to space."""
-    if len(items) <= 2:
+    if len(items) <= 2 and not previous:
         return list(items)
-    return dj_order(items, stickiness=0.4, seed=seed, feat=feat)
+    return dj_order(items, stickiness=0.4, seed=seed, feat=feat, previous=previous)
 
 
 def _split_bands(items, value_of, min_bands=1):
@@ -85,7 +87,17 @@ def _split_bands(items, value_of, min_bands=1):
     nb = max(min_bands, round(len(have) / _BAND_SIZE))
     nb = max(1, min(nb, len(have)))
     size = len(have) / nb
-    bands = [have[round(i * size):round((i + 1) * size)] for i in range(nb)]
+    boundaries = [0]
+    for i in range(1, nb):
+        end = round(i * size)
+        # Equal values carry no journey distinction. Keep their full choice of
+        # performers available to the spacer rather than freezing arbitrary ties.
+        while end < len(have) and value_of(have[end - 1]) == value_of(have[end]):
+            end += 1
+        if boundaries[-1] < end < len(have):
+            boundaries.append(end)
+    boundaries.append(len(have))
+    bands = [have[start:end] for start, end in zip(boundaries, boundaries[1:])]
     return [b for b in bands if b], none
 
 
@@ -110,10 +122,7 @@ def _axis_order(items, journey, seed, feat):
         bands.append(none_band)                       # undated/untagged always trail at the end
     out = []
     for i, band in enumerate(bands):
-        spaced = _space(band, seed + i, feat)
-        if (out and len(spaced) > 1 and feat(out[-1])["artist"]
-                and feat(out[-1])["artist"] == feat(spaced[0])["artist"]):
-            spaced[0], spaced[1] = spaced[1], spaced[0]   # seam repair across the band boundary
+        spaced = _space(band, seed + i, feat, members(feat(out[-1])) if out else frozenset())
         out.extend(spaced)
     return out
 
@@ -127,9 +136,13 @@ def _segue_order(items, journey, seed, feat):
     rows = []
     for item in items:
         features = feat(item)
-        rows.append((item, features["artist"], features.get('family',genre_map.family(features["genre"]))))
+        rows.append((item, members(features), features.get('family',genre_map.family(features["genre"]))))
     rng.shuffle(rows)
-    out = [rows.pop(0)]
+    remaining = Counter(artist for row in rows for artist in row[1])
+    weight = lambda artists: max((remaining[artist] for artist in artists), default=0)
+    first = max(range(len(rows)), key=lambda i: weight(rows[i][1]))
+    out = [rows.pop(first)]
+    remaining.subtract(out[-1][1])
     smooth = journey == "smooth_segue"
     distance = lru_cache(maxsize=256)(genre_map.family_distance)
     while rows:
@@ -139,12 +152,13 @@ def _segue_order(items, journey, seed, feat):
             # Sort key, ascending: same-artist last (0 before 1), then nearest genre for smooth_segue
             # (smallest distance first) or farthest for odyssey (negate), with a seeded random tiebreak.
             _, artist, genre = c
-            same = 1 if (artist and artist == last_a) else 0
+            same = bool(artist & last_a)
             d = distance(last_g, genre)
-            return (same, d if smooth else -d, rng.random())
+            return (same, -weight(artist), d if smooth else -d, rng.random())
 
         best = min(range(len(rows)), key=lambda i: score(rows[i]))
         out.append(rows.pop(best))
+        remaining.subtract(out[-1][1])
     return [row[0] for row in out]
 
 
@@ -175,10 +189,7 @@ def _road_trip_order(items, seed, feat):
     bands = [seq[i:i + _BAND_SIZE] for i in range(0, len(seq), _BAND_SIZE)]
     out = []
     for i, band in enumerate(bands):
-        spaced = _space(band, seed + i, feat)
-        if (out and len(spaced) > 1 and feat(out[-1])["artist"]
-                and feat(out[-1])["artist"] == feat(spaced[0])["artist"]):
-            spaced[0], spaced[1] = spaced[1], spaced[0]   # seam repair across the band boundary
+        spaced = _space(band, seed + i, feat, members(feat(out[-1])) if out else frozenset())
         out.extend(spaced)
     return out
 

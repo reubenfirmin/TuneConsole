@@ -14,7 +14,8 @@ import numpy as np
 from threadpoolctl import threadpool_limits
 
 from yt_playlist.core import audio_embedding, audio_vibe_metadata, sample_files, vibe_versions
-from yt_playlist.rec import audio_vibe_external, audio_vibe_model, home_vibe, musical_profiles
+from experiments.audio_lab_tools.legacy import audio_vibe_external, audio_vibe_model
+from yt_playlist.rec import home_vibe, musical_profiles
 
 from ..support.external_experiment import OUT, digest, normalize, save, stamp
 from ..evaluation.external_ranking import average_precision

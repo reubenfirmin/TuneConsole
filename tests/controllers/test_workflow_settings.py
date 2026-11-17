@@ -20,20 +20,24 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def service():
     repository = create_autospec(SettingsRepo, instance=True, spec_set=True)
     repository.workflow_write_facts.return_value = {'prior': None, 'known': 7, 'next_id': 12}
+    repository.reserve_file.side_effect = [41, 42]
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
-    files.publish.return_value = ('receipt', 'digest', 50)
+    files.describe.return_value = ('digest', 50)
+    files.publish_reserved.return_value = ('receipt', 'digest', 50)
     return WorkflowSettings(repository, files)
 
 
 def test_transfer_writes_evidence_before_sql_and_strips_the_worker_token(service):
     events = []
-    service.files.publish.side_effect = lambda *args: events.append('file') or ('receipt', 'digest', 50)
+    service.repository.reserve_file.side_effect = lambda *args: events.append('reserve') or 41
+    service.files.publish_reserved.side_effect = lambda *args, **kwargs: events.append('file') or ('receipt', 'digest', 50)
     service.repository.save_workflows.side_effect = lambda *args: events.append('sql') or 'next'
     value = {'creation_phase': 'prepared', 'marker': 'marker', workflows.TOKEN: ''}
     assert service.save_transfer(7, 'fingerprint', value) == 'next'
-    assert events == ['file', 'sql']
-    service.files.publish.assert_called_once_with('spotify-transfer', 12, {'creation_phase': 'prepared', 'marker': 'marker'})
+    assert events == ['reserve', 'file', 'sql']
+    service.files.publish_reserved.assert_called_once_with(41, 'spotify-transfer', 12,
+        {'creation_phase': 'prepared', 'marker': 'marker'}, expected=('digest', 50))
     kind, prepared, reference = service.repository.save_workflows.call_args.args[0][0]
     assert kind == 'receipt'
     assert prepared['expected_revision'] == ''
@@ -50,7 +54,7 @@ def test_transfer_rejects_changed_targets_and_invalid_slots_before_files(service
         'known': 7, 'next_id': 13}
     with pytest.raises(ValueError):
         service.save_transfer(7, 'fingerprint', {**value, workflows.TOKEN: 'current'})
-    service.files.publish.assert_not_called()
+    service.files.publish_reserved.assert_not_called()
     service.repository.save_workflows.assert_not_called()
 
 
@@ -60,11 +64,11 @@ def test_stale_transfer_never_writes_evidence(service):
         'known': 7, 'next_id': 13}
     with pytest.raises(ValueError, match='stale revision'):
         service.save_transfer(7, 'fingerprint', {workflows.TOKEN: 'old'})
-    service.files.publish.assert_not_called()
+    service.files.publish_reserved.assert_not_called()
 
 
 def test_file_failure_does_not_persist_the_transfer(service):
-    service.files.publish.side_effect = OSError('disk full')
+    service.files.publish_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError):
         service.save_transfer(7, 'fingerprint', {})
     service.repository.save_workflows.assert_not_called()
@@ -75,13 +79,14 @@ def test_family_batch_assigns_distinct_sql_owner_ids_and_keeps_null_slots(servic
     plans = service.prepare_values({key: json.dumps({'first': {'source_video_ids': ['one', None]}, 'second': {}})})
     assert [prepared['identity'] for _, prepared, _ in plans] == [12, 13]
     assert plans[0][1]['value']['source_video_ids'] == ['one', None]
-    assert [call.args[1] for call in service.files.publish.call_args_list] == [12, 13]
+    assert [call.args[0] for call in service.files.publish_reserved.call_args_list] == [41, 42]
+    assert [call.args[2] for call in service.files.publish_reserved.call_args_list] == [12, 13]
 
 
 def test_family_validates_every_receipt_before_publishing_any(service):
     with pytest.raises(ValueError, match='source slots'):
         service.prepare_values({workflows.PLAYLIST+':7': json.dumps({'valid': {}, 'invalid': {'source_video_ids': [False]}})})
-    service.files.publish.assert_not_called()
+    service.files.publish_reserved.assert_not_called()
 
 
 def test_gc_delete_and_receipt_family_delete_do_not_write_files(service):
@@ -90,13 +95,13 @@ def test_gc_delete_and_receipt_family_delete_do_not_write_files(service):
     assert plans[0][0] == 'gc'
     assert plans[0][1]['value'] is None
     assert plans[1] == ('delete', ('playlist', 7), None)
-    service.files.publish.assert_not_called()
+    service.files.publish_reserved.assert_not_called()
 
 
 def test_gc_value_cannot_change_its_target(service):
     with pytest.raises(ValueError, match='captured target'):
         service.prepare_values({workflows._gc_key(7, 'remote'): json.dumps({'identity': 8, 'ytm': 'remote'})})
-    service.files.publish.assert_not_called()
+    service.files.publish_reserved.assert_not_called()
 
 
 def test_receipt_reads_overlay_sql_fields_and_keep_opaque_evidence(service):

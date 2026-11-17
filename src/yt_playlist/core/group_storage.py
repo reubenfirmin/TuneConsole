@@ -142,54 +142,6 @@ def definition_fields(value, members=None):
     return tuple(result)
 
 
-def install_versions(conn, prepared, generation_id, resolve, *, unfinished_legacy=False):
-    """Import one bounded generation, verifying semantic matches before reuse.
-
-Background publication will stage the same rows through its leased batches;
-this atomic importer is for migration and already bounded callers.
-"""
-    _writer(conn)
-    pending = []
-    for position, group in enumerate(prepared['groups']):
-        conn.execute('INSERT INTO taste_groups(external_key,legacy_mode_id,created_at) VALUES (?,?,?) '
-                     'ON CONFLICT(external_key) DO NOTHING',
-                     (group['group_id'], group.get('legacy_mode_id'), prepared['at']))
-    for position, group in enumerate(prepared['groups']):
-        value = content.document(group['payload'], 'Musical group definition')
-        fields = definition_fields(value, None if unfinished_legacy else group['members'])
-        incomplete = bool(fields[2] and fields[4] != len(group['members']))
-        if not fields[2] and group['members']:
-            raise ValueError('Unknown musical group membership has asserted members')
-        group_id = conn.execute('SELECT id FROM taste_groups WHERE external_key=?', (group['group_id'],)).fetchone()[0]
-        digest = content.digest(content.prepared_rows(prepared, group, resolve))
-        if incomplete:
-            # An old interrupted build has no digest of its missing output.
-            # Keep that exact prefix private under its original generation and
-            # lease until cleanup. It cannot alias or become published content.
-            digest = hashlib.sha256(canonical(['unfinished-legacy-group', prepared['generation'],
-                                                group['version'], digest])).hexdigest()
-        existing = conn.execute('SELECT id FROM group_versions WHERE group_id=? AND content_digest=?',
-                                (group_id, digest)).fetchone()
-        if existing is not None:
-            if not content.equal(version_rows(conn, existing[0]), content.prepared_rows(prepared, group, resolve)):
-                raise ValueError('Musical group version digest collision')
-            _link(conn, generation_id, group_id, existing[0], position, group['version'])
-        else:
-            pending.append((position, group, group_id, digest, value, fields, incomplete))
-    root = group_documents.directory(conn)
-    for (position, group, group_id, digest, value, fields, incomplete), file in zip(
-            pending, group_documents.publish_many(root, (('definition', row[4]) for row in pending))):
-        version_id = create_version(conn, prepared, group, generation_id, group_id, digest, fields, file)
-        insert_members(conn, version_id, group['members'], resolve,
-                       content._prepared_document(prepared, 'payload', 'Musical group generation').get('recording_inputs', {}))
-        insert_representatives(conn, version_id, enumerate(value.get('rep_keys', [])), resolve)
-        if incomplete:
-            conn.execute('INSERT INTO group_build_versions VALUES (?,?,?,?)',
-                         (generation_id, version_id, position, group['version']))
-        else:
-            _link(conn, generation_id, group_id, version_id, position, group['version'])
-
-
 def create_version(conn, prepared, group, generation_id, group_id, digest, fields, file):
     generation = conn.execute('SELECT policy_version FROM group_generations WHERE id=?',
                                (generation_id,)).fetchone()

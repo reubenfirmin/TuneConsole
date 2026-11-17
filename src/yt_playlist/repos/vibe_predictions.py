@@ -4,9 +4,10 @@ import json
 
 from yt_playlist.core import audio_vibe_metadata, metadata_evidence, metadata_native, vibe_provenance, vibe_versions
 from yt_playlist.core.activity import check_stopping
+from yt_playlist.core.audio_vibe_contract import serving_prefix
 from yt_playlist.core.db_revisions import column_group_reads, keyed_reads
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
-from yt_playlist.repos import vibe_models
+from yt_playlist.repos import provenance_file_writes, vibe_models
 
 
 class VibePredictionsRepo(Repo):
@@ -73,8 +74,54 @@ class VibePredictionsRepo(Repo):
             raise RuntimeError('Vibe files must be published outside a transaction')
 
     @synchronized
+    def reserve_provenance(self, records):
+        with self.conn.atomic():
+            return provenance_file_writes.reserve(self.conn, records)
+
+    @synchronized
+    def provenance_available(self):
+        return vibe_provenance.available(self.conn)
+
+    @synchronized
+    def expire_provenance(self, now):
+        with self.conn.atomic():
+            return vibe_provenance.maintain(self.conn, now)
+
+    @synchronized
+    def provenance_owners(self, identity, group):
+        # The caller holds the file-reader fence. Opening another application
+        # reader here would wait for that same fence; use the current SQL owner.
+        if identity is not None:
+            ready = self.conn.execute("SELECT 1 FROM prediction_provenance WHERE file_id=? AND state='ready' LIMIT 1",
+                                      (identity,)).fetchone() is not None
+            return ready, None
+        rows = self.conn.execute('SELECT prediction_id,state FROM prediction_provenance '
+            'WHERE prediction_id>=? AND prediction_id<? AND file_id IS NULL',
+            (group * 128, (group + 1) * 128)).fetchall()
+        return {str(pid) for pid, state in rows if state == 'ready'}, {str(pid) for pid, state in rows}
+
+    @synchronized
+    def retire_history(self, now, after, limit=128):
+        from yt_playlist.core.vibe_history import RETAIN_SECONDS
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError('Invalid vibe history collection budget')
+        removed = 0
+        with self.conn.atomic():
+            rows = self.conn.execute('SELECT id,recording_id,vibe,predicted_at FROM predictions '
+                'WHERE id>? ORDER BY id LIMIT ?', (after, limit)).fetchall()
+            for pid, recording, vibe, at in rows:
+                if at is None or at >= now - RETAIN_SECONDS:
+                    continue
+                if self.conn.execute('SELECT 1 FROM recording_vibes WHERE recording_id=? AND vibe=? '
+                                     'AND prediction_id=?', (recording, vibe, pid)).fetchone():
+                    continue
+                removed += self.conn.execute('DELETE FROM predictions WHERE id=?', (pid,)).rowcount
+        return removed, rows[-1][0] if len(rows) == limit else 0
+
+    @synchronized
     def publish_prepared(self, plan, *, cohorts=()):
         with self.conn.atomic():
+            provenance_file_writes.complete(self.conn, plan.file_records)
             measured = vibe_versions.column(self.conn, 'measurements')
             predicted = vibe_versions.column(self.conn, 'predictions')
             current = vibe_versions.column(self.conn, 'recording_vibes')
@@ -88,7 +135,8 @@ class VibePredictionsRepo(Repo):
                 'VALUES (?,?,?,?,?,?,?,?,?)', [(*row[:7], versions[row[7]], row[8]) for row in plan.predictions])
             self.conn.executemany('INSERT INTO prediction_model_generations VALUES (?,?)', plan.generations)
             self.conn.executemany('INSERT OR IGNORE INTO prediction_measurement_roots VALUES (?)', [(mid,) for mid in plan.roots])
-            self.conn.executemany("INSERT INTO prediction_provenance VALUES (?,?,?,'ready')", plan.markers)
+            self.conn.executemany('INSERT INTO prediction_provenance '
+                "(prediction_id,input_fingerprint,byte_size,file_id,state) VALUES (?,?,?,?,'ready')", plan.markers)
             self.conn.executemany('DELETE FROM recording_vibes WHERE recording_id=? AND vibe=?', plan.deleted)
             self.conn.executemany('INSERT INTO recording_vibes VALUES (?,?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(recording_id,vibe) DO UPDATE SET score=excluded.score,support=excluded.support,'
@@ -211,13 +259,13 @@ class VibePredictionsRepo(Repo):
                 artists = [r[0] for r in self.conn.execute('SELECT DISTINCT a.artist_id FROM catalog_entries e '
                     f'JOIN {self.entry_artists_table} a ON a.entry_id=e.id WHERE e.recording_id=? ORDER BY a.artist_id LIMIT 17', (rid,))]
                 runs = self.conn.execute('SELECT run_id,video_id,MAX(captured_at) AS captured FROM sample_attributes '
-                    'WHERE recording_id=? GROUP BY run_id,video_id HAVING COUNT(*)=3 '
+                    "WHERE recording_id=? AND file_status='ready' GROUP BY run_id,video_id HAVING COUNT(*)=3 "
                     'ORDER BY captured DESC,video_id DESC,run_id DESC LIMIT 16', (rid,)).fetchall()
                 samples = []
                 for run in runs:
                     rows = [dict(row) for row in self.conn.execute(
-                        'SELECT id,run_id,point,video_id,filename FROM sample_attributes WHERE run_id=? '
-                        'AND recording_id=? ORDER BY point', (run[0], rid))]
+                        'SELECT id,run_id,point,video_id,filename,content_digest FROM sample_attributes WHERE run_id=? '
+                        "AND recording_id=? AND file_status='ready' ORDER BY point", (run[0], rid))]
                     samples.append((rows, audio_vibe_metadata.read_facts(self.conn, run[1])))
                 result[key] = {'old': old, 'artists': artists, 'runs': samples, 'recording': rid}
         return result
@@ -229,8 +277,10 @@ class VibePredictionsRepo(Repo):
             return [tuple(row) for row in self.conn.execute(
                 'SELECT v.recording_id,r.identity_key,m.id,m.vibe,m.score,m.support FROM recording_vibes v '
                 'JOIN recordings r ON r.id=v.recording_id JOIN measurements m ON m.id=v.measurement_id '
-                f'WHERE {where} AND m.support>0 AND (v.recording_id,v.vibe)>(?,?) '
-                'ORDER BY v.recording_id,v.vibe LIMIT ?', (*args, *after, limit))]
+                f'WHERE {where} AND m.support>0 AND '
+                + vibe_versions.expression(self.conn, 'recording_vibes', 'v') + ' GLOB ? '
+                'AND (v.recording_id,v.vibe)>(?,?) ORDER BY v.recording_id,v.vibe LIMIT ?',
+                (*args, serving_prefix() + '*', *after, limit))]
 
     @synchronized
     def joint_training_rows(self, vibe, limit):
@@ -272,9 +322,10 @@ class VibePredictionsRepo(Repo):
         with keyed_reads(self._store, 'recordings', keys):
             ids = {key: row[0] for key in keys for row in self.conn.execute(
                 'SELECT id FROM recordings WHERE identity_key=?', (key,))}
-        with keyed_reads(self._store, 'recording_vibes', ids.values()):
+        with keyed_reads(self._store, 'recording_vibes', ids.values()), keyed_reads(self._store, 'vibe_versions', []):
             for key, rid in ids.items():
-                result[key] = [dict(row) for row in self.conn.execute('SELECT v.* FROM recording_vibes v '
+                result[key] = [dict(row) for row in self.conn.execute('SELECT ' +
+                    vibe_versions.projection(self.conn, 'recording_vibes', 'v') + ' FROM recording_vibes v '
                     'JOIN prediction_model_generations g ON g.prediction_id=v.prediction_id WHERE recording_id=?', (rid,))]
         return result
 
@@ -299,10 +350,13 @@ class VibePredictionsRepo(Repo):
                 result.update(dict(self.conn.execute('SELECT r.identity_key,v.score FROM recordings r '
                     'JOIN rec_musical_profiles p ON p.identity_key=r.identity_key '
                     'JOIN recording_vibes v ON v.recording_id=r.id '
-                    f'WHERE r.identity_key IN ({marks}) AND v.vibe=?', (*page, preset))))
+                    f'WHERE r.identity_key IN ({marks}) AND v.vibe=? AND '
+                    + vibe_versions.expression(self.conn, 'recording_vibes', 'v') + ' GLOB ?',
+                    (*page, preset, serving_prefix() + '*'))))
         return result
 
     @synchronized
     def ranked(self, vibe, limit=100):
-        return [dict(row) for row in self.conn.execute('SELECT recording_id,score,support,source FROM recording_vibes '
-            'WHERE vibe=? ORDER BY score DESC,recording_id LIMIT ?', (vibe, limit))]
+        return [dict(row) for row in self.conn.execute('SELECT recording_id,score,support,source FROM recording_vibes v '
+            'WHERE vibe=? AND ' + vibe_versions.expression(self.conn, 'recording_vibes', 'v') +
+            ' GLOB ? ORDER BY score DESC,recording_id LIMIT ?', (vibe, serving_prefix() + '*', limit))]

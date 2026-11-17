@@ -28,6 +28,7 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "metadata_runtime_choices": "entry_id", "metadata_runtime_recording_sources": "recording_id",
                 "metadata_runtime_entry_sources": "entry_id", "metadata_runtime_recording_genres": "recording_id",
                 "metadata_observations": "entry_id",
+                "metadata_file_references": "owner_key", "metadata_file_writes": "id",
                 "native_metadata_observations": "id", "metadata_deliveries": "id",
                 "published_metadata_head": "id", "published_metadata_destination_head": "id",
                 "published_metadata_destination_native": "source_key",

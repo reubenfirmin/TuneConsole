@@ -8,7 +8,7 @@ import zlib
 import pytest
 
 from experiments.audio_lab_tools.cruise import cruise_specialist as runtime
-from yt_playlist.rec import audio_vibe_model
+from experiments.audio_lab_tools.legacy import audio_vibe_model
 
 
 def coefficients():

@@ -1,8 +1,9 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from contextlib import contextmanager
-from yt_playlist.core import association_work, catalog, entity_names, metadata
+from yt_playlist.core import association_work, catalog, metadata
 from yt_playlist.core.catalog_keys import resolve_recording
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
+from yt_playlist.repos.album_navigation import track_album_browse_ids
 
 
 class TrackRepo(Repo):
@@ -10,10 +11,9 @@ class TrackRepo(Repo):
     def store_playback_alternate(self, account_id, original, actual, *, same_recording,
                                  evidence_json, now):
         with self.conn:
-            alternates = entity_names.owner(self.conn, 'youtube_playback_alternates')
             self.conn.execute(
-                f'INSERT INTO {alternates.table} VALUES (?,?,?,?,?,?) '
-                f'ON CONFLICT({alternates.column("account_id")},requested_video_id) DO UPDATE SET '
+                'INSERT INTO youtube_playback_alternates VALUES (?,?,?,?,?,?) '
+                'ON CONFLICT(account_id,requested_video_id) DO UPDATE SET '
                 'video_id=excluded.video_id,same_recording=excluded.same_recording,'
                 'evidence_json=excluded.evidence_json,observed_at=excluded.observed_at',
                 (account_id, original, actual, int(same_recording), evidence_json, now))
@@ -45,6 +45,9 @@ class TrackRepo(Repo):
             return None
         track = dict(row)
         track['album_browse'] = track.get('album_browse_id')
+        if not track['album_browse'] and track.get('album'):
+            track['album_browse'] = track_album_browse_ids(
+                self.conn, self.album_tracks_table, [track['id']]).get(track['id'])
         track['duration'] = track.get('duration_s')
         track['year'] = track.get('mb_year')
         track['playlists'] = [dict(p) for p in self.conn.execute(
@@ -59,11 +62,11 @@ class TrackRepo(Repo):
 
     @snapshot_read
     def track_play_ledger(self, recording_id, *, page=0, limit=50):
-        """Bounded evidence ledger; an imported observation is never an exact play.
+        """Page through a recording's timestamped plays and history observations.
 
-        All confirmed uploads of this recording share history. Playlist membership and
-        ratings remain exact-upload facts. Repeated history snapshots collapse by day,
-        account, source and precision rather than manufacturing additional plays.
+        Confirmed uploads share history. Group repeated observations by source date,
+        account, source, precision and timezone. Hide YouTube Music calendar-day rows
+        covered by an exact play in the account's listening calendar.
         """
         rows = self.conn.execute(
             "SELECT 'play' kind,pe.id evidence_id,pe.played_at sort_at,pe.played_at,"
@@ -76,6 +79,9 @@ class TrackRepo(Repo):
             "o.precision,i.label,o.source,NULL,NULL,0 "
             "FROM listening_observation_subjects o JOIN accounts i ON i.id=o.account_id "
             "WHERE o.recording_id=? "
+            "AND NOT (o.source='ytm_history' AND o.precision='calendar_day' AND EXISTS ("
+            "SELECT 1 FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id "
+            "WHERE pe.recording_id=o.recording_id AND pe.account_id=o.account_id AND c.day=o.day)) "
             "GROUP BY o.account_id,o.source_day,o.precision,o.source,o.timezone "
             "ORDER BY sort_at DESC,kind,evidence_id DESC LIMIT ? OFFSET ?",
             (recording_id, recording_id, limit + 1, page * limit)).fetchall()
@@ -226,16 +232,40 @@ class TrackRepo(Repo):
                 f'WHERE recording_id IS NULL AND {column}=? AND NULLIF(trim(video_id),\'\') IS NOT NULL '
                 'AND NOT EXISTS(SELECT 1 FROM youtube_items y WHERE y.video_id=play_events.video_id)', (key,))
 
-    @snapshot_read
+    @lookup_read
     def catalog_metadata_inputs(self, entry, fields):
         from yt_playlist.core import metadata_evidence
         return {'evidence': metadata_evidence.available(self.conn),
-                'sources': {field: metadata.selected_source(self.conn, entry, field) for field in fields}}
+                'sources': metadata.selected_sources(self.conn, entry, fields)}
 
     @synchronized
     def add_library_membership(self, entry, now):
         with self.conn.atomic(join=True):
             self.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)", (entry, now))
+
+    @synchronized
+    def remove_song_library_membership(self, video):
+        """Release a standalone save, preserving playlist and saved-album ownership."""
+        with self.conn.atomic(join=True):
+            if self.song_library_membership(video)['retained']:
+                return False
+            self.conn.execute('DELETE FROM library_memberships WHERE entry_id IN ('
+                'SELECT id FROM catalog_entries WHERE video_id=?)', (video,))
+            self.conn.execute('DELETE FROM starter_song_choices WHERE video_id=?', (video,))
+            return True
+
+    @lookup_read
+    def song_library_membership(self, video):
+        """Exact-upload ownership and owners a standalone removal cannot release."""
+        from yt_playlist.core import album_memberships
+        row = self.conn.execute(
+            'SELECT EXISTS(SELECT 1 FROM library_memberships m WHERE m.entry_id=e.id) owned, '
+            'EXISTS(SELECT 1 FROM playlist_items p WHERE p.video_id=e.video_id) OR '
+            f'EXISTS(SELECT 1 FROM {self.album_tracks_table} a '
+            f'JOIN {album_memberships.read_relation(self.conn)} m ON m.album_id=a.album_id '
+            'WHERE a.entry_id=e.id) retained FROM catalog_entries e WHERE e.video_id=?', (video,)).fetchone()
+        retained = bool(row and row['retained'])
+        return {'owned': bool(row and row['owned']) or retained, 'retained': retained}
 
     @lookup_read
     def entry_key(self, entry):
@@ -268,14 +298,12 @@ class TrackRepo(Repo):
     @synchronized
     def write_item_ratings(self, observations, action_rows):
         with self.conn.atomic(join=True):
-            ratings = entity_names.owner(self.conn, 'item_ratings')
-            actions = entity_names.owner(self.conn, 'listening_rating_actions')
-            self.conn.executemany(f'INSERT INTO {actions.table} '
-                f'({actions.column("account_id")},video_id,previous_status,status,source,at) VALUES (?,?,?,?,?,?)',
+            self.conn.executemany('INSERT INTO listening_rating_actions '
+                '(account_id,video_id,previous_status,status,source,at) VALUES (?,?,?,?,?,?)',
                 action_rows)
             self.conn.executemany(
-                f'INSERT INTO {ratings.table} VALUES (?,?,?,?,?) '
-                f'ON CONFLICT({ratings.column("account_id")},video_id) DO UPDATE SET '
+                'INSERT INTO item_ratings VALUES (?,?,?,?,?) '
+                'ON CONFLICT(account_id,video_id) DO UPDATE SET '
                 'source=excluded.source,observed_at=excluded.observed_at,status=excluded.status',
                 observations)
 
@@ -424,7 +452,7 @@ class TrackRepo(Repo):
             f"WHERE a.browse_id=? AND ({self._NEEDS}) ORDER BY t.id", (album_browse_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    @snapshot_read
+    @lookup_read
     def artwork_inputs(self, track_id):
         track_id = catalog.resolve_entry(self.conn, track_id)
         row = self.conn.execute(

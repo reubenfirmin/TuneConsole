@@ -26,6 +26,8 @@ def profiles():
     refresh = create_autospec(RecommendationRefresh, instance=True, spec_set=True)
     files.retained.side_effect = metadata.retained.side_effect = nullcontext
     predictions.overlay.side_effect = lambda values: values
+    files.describe.return_value = [{'raw': b'pack'}]
+    repository.reserve_files.return_value = [257]
     return MusicalProfiles(repository, files, metadata, predictions, refresh)
 
 
@@ -53,17 +55,19 @@ def test_source_decoding_uses_only_captured_references_and_supplied_byte_bound(p
 def test_source_file_precedes_sql_fanout_and_acknowledgement(profiles):
     events = []
     profiles.repository.publication_owners.return_value = {'source': 'source'}
-    profiles.files.write.side_effect = lambda *args: events.append('file') or ['reference']
+    profiles.repository.reserve_files.side_effect = lambda *args: events.append('pending') or [257]
+    profiles.files.write_reserved.side_effect = lambda *args: events.append('file') or ['reference']
     profiles.repository.publish_source.side_effect = lambda *args, **kwargs: events.append('sql')
     profiles.publish_source('source', (2, 0), [7], '{}', 'v', 'digest', 10)
-    assert events == ['file', 'sql']
+    assert events == ['pending', 'file', 'sql']
+    profiles.files.write_reserved.assert_called_once_with([{'raw': b'pack', 'file_id': 257}])
     profiles.repository.publish_source.assert_called_once_with(
         'source', (2, 0), [7], '{}', 'v', 'digest', 10, 32, references=['reference'])
 
 
 def test_failed_source_file_does_not_acknowledge_pending_work(profiles):
     profiles.repository.publication_owners.return_value = {'source': 'source'}
-    profiles.files.write.side_effect = OSError('disk full')
+    profiles.files.write_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         profiles.publish_source('source', (2, 0), [7], '{}', 'v', 'digest', 10)
     profiles.repository.publish_source.assert_not_called()
@@ -102,14 +106,15 @@ def test_prediction_overlay_is_separate_from_profile_file_decoding(profiles):
 def test_recording_publication_removes_derived_vibes_and_notifies_after_sql(profiles):
     events = []
     profiles.repository.publication_owners.return_value = {'song': 17}
-    profiles.files.write.side_effect = lambda *args: events.append('file') or ['reference']
+    profiles.repository.reserve_files.side_effect = lambda *args: events.append('pending') or [257]
+    profiles.files.write_reserved.side_effect = lambda *args: events.append('file') or ['reference']
     profiles.repository.publish_recordings.side_effect = lambda *args, **kwargs: events.append('sql') or True
     profiles.refresh.publish_notification.side_effect = lambda: events.append('notify')
     profiles.publish_recordings([('song', '{"energy":0.4,"vibes":{"old":true}}', 'v', 'old')], 10)
     raw = '{"energy":0.4}'
     digest = hashlib.sha256(raw.encode()).hexdigest()
-    assert events == ['file', 'sql', 'notify']
-    profiles.files.write.assert_called_once_with('recording', [('song', 17, raw, 'v', digest)])
+    assert events == ['pending', 'file', 'sql', 'notify']
+    profiles.files.describe.assert_called_once_with('recording', [('song', 17, raw, 'v', digest)])
     profiles.repository.publish_recordings.assert_called_once_with(
         [('song', raw, 'v', digest)], 10, references=['reference'])
 
@@ -124,14 +129,14 @@ def test_unchanged_publication_does_not_notify(profiles):
 def test_legacy_inline_format_has_no_file_publication(profiles):
     profiles.repository.publication_owners.return_value = None
     profiles.publish_recordings([('song', '{}', 'v', 'digest')], 10)
-    profiles.files.write.assert_not_called()
+    profiles.files.write_reserved.assert_not_called()
     profiles.repository.publish_recordings.assert_called_once_with(
         [('song', '{}', 'v', 'digest')], 10, references=[])
 
 
 def test_failed_recording_file_does_not_write_sql_or_notify(profiles):
     profiles.repository.publication_owners.return_value = {'song': 17}
-    profiles.files.write.side_effect = OSError('disk full')
+    profiles.files.write_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         profiles.publish_recordings([('song', '{}', 'v', 'digest')], 10)
     profiles.repository.publish_recordings.assert_not_called()
@@ -142,7 +147,26 @@ def test_enclosing_transaction_is_rejected_before_file_work(profiles):
     profiles.repository.assert_idle.side_effect = RuntimeError('outside a transaction')
     with pytest.raises(RuntimeError, match='outside'):
         profiles.publish_recordings([('song', '{}', 'v', 'digest')], 10)
-    profiles.files.write.assert_not_called()
+    profiles.files.write_reserved.assert_not_called()
+
+
+def test_invalid_profile_description_does_not_reserve_sql_work(profiles):
+    profiles.repository.publication_owners.return_value = {'song': 17}
+    profiles.files.describe.side_effect = ValueError('invalid body')
+    with pytest.raises(ValueError, match='invalid body'):
+        profiles.publish_recordings([('song', '{}', 'v', 'digest')], 10)
+    profiles.repository.reserve_files.assert_not_called()
+    profiles.files.write_reserved.assert_not_called()
+
+
+def test_collection_rechecks_current_owners_before_exact_file_deletion(profiles):
+    profiles.files.garbage.return_value = nullcontext(iter([
+        ('recording', 1, 'owned', 'first-info'), ('source', 2, 'abandoned', 'second-info')]))
+    profiles.repository.file_required.side_effect = [True, False]
+    profiles.files.remove.return_value = 1
+    assert profiles.collect(40*86400, limit=7) == 1
+    profiles.files.garbage.assert_called_once_with(10*86400, limit=7)
+    profiles.files.remove.assert_called_once_with('abandoned', 'second-info')
 
 
 def test_provenance_budget_omits_new_or_unaffordable_sources(profiles):

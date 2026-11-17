@@ -14,9 +14,8 @@ def build(ctx):
 
     @router.post('/home/growth/format')
     def choose_format(form=Depends(request_form)):
-        state = account_growth.view(ctx.store, ctx.now_fn(), radio=ctx.radio.bootstrap())
         try:
-            home_preferences.choose(ctx.store, form.get('format'), ready_formats=state['ready_formats'])
+            home_preferences.choose(ctx.store, form.get('format'), now=ctx.now_fn(), radio=ctx.radio)
         except home_preferences.FormatNotReady as exc:
             return Response(str(exc), status_code=409)
         except ValueError as exc:

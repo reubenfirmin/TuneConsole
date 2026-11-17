@@ -10,7 +10,7 @@ from playwright.sync_api import expect
 
 from yt_playlist.rec import rec_params
 from yt_playlist.util.matching import identity_key
-from yt_playlist.web.track_links import track_url
+from yt_playlist.util.navigation import track_url
 
 
 @pytest.mark.parametrize("width", [1440])
@@ -290,7 +290,8 @@ def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, stor
     rows = table.locator("tbody tr.srow")
     expect(rows).to_have_count(3)
     expect(rows.first).to_contain_text("Zeta Song")
-    expect(rows.nth(1).get_by_role("link", name="Artist's Band", exact=True)).to_have_attribute("href", "/artist?name=Artist%27s%20Band")
+    expect(rows.nth(1).get_by_role("link", name="Artist's Band", exact=True)).to_have_attribute(
+        'href', f'/artist?artist_id={store.artists.resolve("Artist\'s Band")}')
     assert table.locator("img.pl-thumb").evaluate_all("images => images.every(img => img.complete && img.naturalWidth > 0)")
     expect(table.locator("img.pl-thumb")).to_have_count(2)
     table.get_by_role("button", name="Song", exact=True).click()

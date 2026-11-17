@@ -82,10 +82,18 @@ def test_other_genre_fallback_returns_usable_mix_without_track_exposure(home_sto
     no_track_exposure = Mock(side_effect=AssertionError("A mix menu does not expose its individual tracks"))
     monkeypatch.setattr(measurement, "record_offers", no_track_exposure)
     home_store.discovery.mark_offered.side_effect = AssertionError("No tracks were served")
-    result = home.cards(home_cards.CardsRequest(1000))
+    version_policy = {'confirmed_memberships': {'a|b': ['work']}, 'destination_recordings': [],
+                      'allow_multiple': True, 'policy_revision': '3', 'membership_revision': '7'}
+    result = home.cards(home_cards.CardsRequest(1000, version_policy=version_policy))
     assert "usual mixes" in result.genre_warning
     assert any(search.get("avoid") == {"jazz"} for search in searches)
     assert [track['key'] for track in result.protos[0]['tracks']] == ['a|b']
+    assert result.protos[0]['recipe']['version_policy'] == version_policy
+    from yt_playlist.controllers.home_preparation import menu_values
+    prepared = menu_values(result)
+    assert prepared['protos'][0]['recipe']['version_policy'] == version_policy
+    prepared['protos'][0]['recipe']['version_policy']['confirmed_memberships'].clear()
+    assert version_policy['confirmed_memberships'] == {'a|b': ['work']}
     no_track_exposure.assert_not_called()
     home_store.discovery.mark_offered.assert_not_called()
     assert home.jobs.admitted == []

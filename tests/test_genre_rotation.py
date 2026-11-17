@@ -5,7 +5,7 @@ import pytest
 
 from tests.home_fixture_support import home_routes_only, install_home_routes, returning_listener
 from tests.prepared_fixture_support import capture_template, prepared_template
-from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.recommendation_support import publish_bundles, seed_library_favorites, seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema
 from tests.test_home_other_genres import (
     _client, _publish_menu, genre_bundles, genre_http_inputs, genre_route_context,
@@ -37,11 +37,11 @@ def test_rotation_schema_has_real_empty_owners_and_six_genre_families(rotation_s
 def rotation_candidates(rotation_schema):
     def seed(source):
         returning_listener(source, 'mixes', now=1000)
-        bundles = genre_bundles(source, genres=list(GENRES), tracks_per_lane=4)
+        bundles = genre_bundles(source, genres=list(GENRES), tracks_per_lane=12)
         bundles['all'] = {}
         for mode in range(6):
-            # Genre selection needs four distinct recordings per theme; lanes
-            # can frame the same recordings without separate metadata ingestion.
+            # Supply a full mix per theme so unconstrained assembly does not
+            # widen a thin bucket to neighboring genres. Lanes share recordings.
             tracks = bundles[str(mode)]['wheelhouse']
             for track in tracks:
                 track['video_id'] = 'rotation-' + track['key']
@@ -50,6 +50,7 @@ def rotation_candidates(rotation_schema):
                 bundles[str(mode)][lane] = items
                 bundles['all'].setdefault(lane, []).extend(items)
         seed_publication_subjects(source, bundles['all']['wheelhouse'])
+        seed_library_favorites(source, bundles['all']['comfort'])
         publish_bundles(source, bundles, 1.0)
         return bundles
 
@@ -59,7 +60,7 @@ def rotation_candidates(rotation_schema):
 
 def test_rotation_inputs_keep_six_real_modes_and_every_lane(rotation_candidates):
     source = rotation_candidates.source
-    assert source.conn.execute('SELECT COUNT(*) FROM library_memberships').fetchone()[0] == 24
+    assert source.conn.execute('SELECT COUNT(*) FROM library_memberships').fetchone()[0] == 72
     assert len(source.modes.list_modes()) == 6
     assert source.recommendations.head('home') is not None
     selections = [(str(mode), lane, -1) for mode in range(6) for lane in mode_surfaces.CARD_SURFACES]
@@ -68,10 +69,10 @@ def test_rotation_inputs_keep_six_real_modes_and_every_lane(rotation_candidates)
     with source.read_view() as reader:
         for offset in range(0, len(selections), 12):
             batch = selections[offset:offset + 12]
-            pages = reader.recommendations.candidate_pages('home', batch, limit=5)
+            pages = reader.recommendations.candidate_pages('home', batch, limit=13)
             for (mode, _lane, _after), page in zip(batch, pages, strict=True):
                 tracks = page['tracks']
-                assert len({track['key'] for track in tracks}) == 4
+                assert len({track['key'] for track in tracks}) == 12
                 assert {track['genre'] for track in tracks} == {GENRES[int(mode)]}
                 assert all(track['video_id'] for track in tracks)
     assert not source.conn.execute('PRAGMA foreign_key_check').fetchall()

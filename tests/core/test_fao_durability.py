@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from yt_playlist.core import fao, profile_files, sample_files
-from yt_playlist.core.preparation import profiles
+from tests.file_preparation_support import profiles
 from tests.core.test_profile_files import seed
 from tests.test_audio_vibes import sample
 
@@ -18,7 +18,11 @@ def test_domain_publication_failure_keeps_sql_evidence_and_retry_can_commit(file
         def publish():
             store.audio_vibes.save_sample(value, 1)
         def unchanged():
-            assert not store.conn.execute('SELECT 1 FROM sample_attributes').fetchone()
+            row = store.conn.execute('SELECT id,file_status,filename FROM sample_attributes').fetchone()
+            assert tuple(row[:2]) == (value['id'], 'pending')
+            assert not Path(row['filename']).exists()
+            assert store.audio_vibes.samples(value['run_id']) == []
+            assert store.audio_vibes.sample_receipts(value['run_id']) == []
         def committed():
             assert store.audio_vibes.samples(value['run_id']) == [value]
     else:

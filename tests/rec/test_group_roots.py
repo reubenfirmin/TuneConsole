@@ -3,12 +3,13 @@ import json
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
+from tests.group_history_support import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.repos.test_group_retention import enable, drain
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.store import Store
-from yt_playlist.core import group_documents, group_evidence, policy_documents
+from yt_playlist.core import group_documents, group_evidence, policy_documents, home_outputs, model_projections
+from tests.rec.test_recommendation_roots import display_root
 from yt_playlist.rec import choice_evidence, group_roots
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.core.group_reads import service as compact_groups
@@ -148,30 +149,33 @@ def test_proposal_replacement_and_sql_deletion_release_exact_prepared_owners(gro
     first = {'context': context()}
     second = {'context': context('second', 'second')}
     groups.rec_proposals.put_proposals('home_prepared', first, 10)
-    assert roots(groups, 'prepared') == ['proposal:home_prepared:context']
-    with pytest.raises(RuntimeError, match='controlled rollback'), groups.conn:
-        groups.conn.execute('BEGIN IMMEDIATE')
-        groups.rec_proposals.publish_prepared_home(json.dumps(second), 11)
-        raise RuntimeError('controlled rollback')
+    assert roots(groups, 'prepared') == [display_root(groups, 'home_prepared', 'context')]
+    with groups.rec_proposals.prepare_home(json.dumps(second), 11) as prepared:
+        with pytest.raises(RuntimeError, match='controlled rollback'), groups.conn:
+            groups.conn.execute('BEGIN IMMEDIATE')
+            groups.rec_proposals.publish_home(prepared)
+            raise RuntimeError('controlled rollback')
     assert groups.rec_proposals.get_proposals('home_prepared') == first
     assert groups.conn.execute("SELECT generation_id FROM group_evidence_generations WHERE kind='prepared'").fetchone()[0] == 1
     assert issue(groups) == 'menu'
     groups.rec_proposals.put_proposals('home_prepared', second, 12)
     with groups.conn:
-        groups.conn.execute("DELETE FROM rec_proposals WHERE surface='home_prepared'")
+        groups.conn.execute('BEGIN IMMEDIATE')
+        home_outputs.clear(groups.conn, ('home_prepared',))
     assert not roots(groups, 'prepared') and not roots(groups, 'offer')
     enable(groups)
     drain(groups)
     assert groups.taste_groups.definition('first-leaf') is None
 
 
-def test_comparison_envelope_retains_context_without_decoding_its_payload(groups):
-    envelope = {'codec': 'invalid-compressed-data-is-never-read-for-roots', 'data': 'opaque',
-                'context': context(), 'run_id': 'trial'}
-    groups.rec_proposals.put_proposals('model_pair:trial:incumbent:mixes', envelope, 10)
-    assert roots(groups, 'comparison') == ['proposal:model_pair:trial:incumbent:mixes:context']
+def test_comparison_envelope_retains_context_until_its_owner_is_cleared(groups):
+    envelope = {'data': {'context': context()}, 'run_id': 1}
+    groups.rec_proposals.put_proposals('model_pair:1:incumbent:mixes', envelope, 10)
+    identity = groups.conn.execute('SELECT publication_id FROM model_pair_heads').fetchone()[0]
+    assert roots(groups, 'comparison') == [f'comparison-output:{identity}:context']
     with groups.conn:
-        groups.conn.execute("DELETE FROM rec_proposals WHERE surface LIKE 'model_pair:%'")
+        groups.conn.execute('BEGIN IMMEDIATE')
+        model_projections.clear(groups.conn)
     assert not roots(groups, 'comparison')
 
 

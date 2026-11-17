@@ -3,18 +3,30 @@ from contextlib import contextmanager
 
 from yt_playlist.core import metadata_locator_contract
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos import delivery_file_writes
 
 
 class MetadataDeliveryRepo(Repo):
     @contextmanager
     def transaction(self):
         with self._lock:
-            # Captures made while observing/editing a catalog item must roll
-            # back with that owning write, including its earlier field edits.
-            with self.conn.atomic(join=True):
+            with self.conn.atomic():
                 if metadata_locator_contract.retired(self.conn):
                     raise ValueError('Installed delivery writes are retired; use runtime metadata')
                 yield
+
+    @synchronized
+    def reserve_response(self, contract, digest, size):
+        if self.conn.in_transaction:
+            raise ValueError('Metadata response reservation requires its own transaction')
+        with self.conn.atomic():
+            if metadata_locator_contract.retired(self.conn):
+                raise ValueError('Installed delivery writes are retired; use runtime metadata')
+            return delivery_file_writes.reserve(self.conn, contract, digest, size)
+
+    @synchronized
+    def complete_response(self, identity, contract, delivery, reference):
+        delivery_file_writes.complete(self.conn, identity, contract, delivery, reference)
 
     @synchronized
     def subject(self, entry):

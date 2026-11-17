@@ -18,7 +18,7 @@
       </div>
       <div class="album-story-copy">
       <h3 class="album-choice-title" id="album-story-title-{{ loop.index }}"><button type="button" data-choice-action="open" @click="expanded = !expanded" :aria-expanded="expanded" aria-controls="album-open-{{ loop.index }}">{{ a.title }}</button></h3>
-      <p class="album-choice-artist"><a href="/artist?name={{ a.artist|urlencode }}" data-choice-action="open">{{ a.artist }}</a></p>
+      <p class="album-choice-artist">{% from '_partials/artist_links.html' import artist_credit with context %}{{ artist_credit(a, css='', album=true, choice=true) }}</p>
       <div class="album-choice-facts">
         {% if a.year %}<span>{{ a.year }}</span>{% endif %}
         {% if a.genre %}<span class="gtag" title="{{ a.genre }}"><span class="gtag-label">{{ a.genre }}</span></span>{% endif %}
@@ -29,7 +29,7 @@
       {% with notes=a.notes, notes_pending=a.notes_pending, notes_attempt=0, notes_scene=true %}{% include '_partials/album_notes.html' %}{% endwith %}
       {% if a.rationale %}<p class="album-fit-note"><strong>Why you might like it:</strong> {{ a.rationale.text }}</p>{% endif %}
       <div class="album-story-actions">
-      {{ album_play_control(a.browse_id, a.title, opportunity_id, css='album-choice-play') }}
+      {{ album_play_control(a.browse_id, a.title, opportunity_id, css='album-choice-play', artist=a.artist or '', thumbnail=a.thumbnail or '') }}
       <button class="album-choice-open" type="button" data-choice-action="open" @click="expanded = !expanded"
               :aria-expanded="expanded" aria-controls="album-open-{{ loop.index }}" x-text="expanded ? 'Close album' : 'Open album'">Open album</button>
       </div>

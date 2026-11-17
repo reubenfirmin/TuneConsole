@@ -30,9 +30,8 @@ def disable_periodic_library_sync():
 def walking(tmp_path, monkeypatch, retention_reader_repositories, native_sql_calls):
     # Retention consumes published history, not a replay of earlier migrations.
     # Keep both original generations, aliases, members and unresolved inputs.
-    with _numbered_input(79, tmp_path, monkeypatch) as (store, _):
+    with _numbered_input(107, tmp_path, monkeypatch) as (store, _):
         with store.conn:
-            group_retention_progress.install(store.conn)
             store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)', [(1, 'one'), (2, 'two')])
         with monkeypatch.context() as seed, mock_snapshot_coordinator(store, seed):
             for name, serial, parent in [('first', 1, None), ('second', 2, 'first')]:

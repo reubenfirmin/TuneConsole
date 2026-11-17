@@ -53,16 +53,19 @@ def test_radio_pull_persists_unowned_and_dedups(monkeypatch, store):
 
 
 def test_no_client_returns_zero(no_database):
-    store = repository_store(settings={'get_setting': '1'}, accounts={'get_accounts': []})
+    store = repository_store(settings={'get_setting': '1'}, accounts={'get_accounts': []}, playlists={},
+                             collection={}, discovery={}, rec_query={}, tracks={}, charts={})
     ctx = SimpleNamespace(store=store, client_provider=lambda: {},
                           now_fn=lambda: 1.0, logger=SimpleNamespace(info=lambda *a, **k: None))
     assert discover.populate_radio_tracks(ctx, 1.0) == 0
 
 
 def test_radio_discovery_is_disabled_by_default_without_requesting_a_client(no_database):
-    store = repository_store(settings={'get_setting': '0'})
+    store = repository_store(settings={'get_setting': '0'},
+                             collection={}, discovery={}, rec_query={}, tracks={}, charts={})
     def unexpected_client():
         raise AssertionError("Disabled radio discovery must not fetch any catalog data")
-    ctx = SimpleNamespace(store=store, client_provider=unexpected_client)
+    ctx = SimpleNamespace(store=store, client_provider=unexpected_client,
+                          logger=SimpleNamespace(info=lambda *a, **k: None))
     assert discover.populate_radio_tracks(ctx, 1.0) == 0
     store.settings.get_setting.assert_called_once_with('radio_discovery_enabled', '0')

@@ -14,7 +14,8 @@ import threading
 
 import numpy as np
 
-from yt_playlist.rec import (embedding_vectors as vectors, layers, musical_character, rec_params,
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import (embedding_vectors as vectors, musical_character, rec_params,
                              radio_catalog, radio_intensity, radio_rotation, radio_tuning)
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.core import json_cache
@@ -80,11 +81,13 @@ def _input_cache(store):
         return store._radio_input_cache
 
 
-def _prepared_inputs(store, *, project=None, prepared=None, blocked=(), muted=(), comfort=.5):
+def _prepared_inputs(store, *, project=None, prepared=None, blocked=(), muted=(), comfort=.5, capture=None):
     """Read one committed model/pool generation; inflate after closing its reader."""
     owned = (getattr(store, '_read_only', False)
              or getattr(store._lock, 'held_by_current_thread', False))
     with (nullcontext(store) if owned else store.read_view(seconds=None)) as reader:
+        if capture is not None:
+            blocked, muted = capture(reader)
         generation = reader.settings.get_setting('rec_content_generation')
         encoding_model = reader.settings.get_setting('rec_content_model')
         space = vectors.content_space_id(reader, snapshot={'model': encoding_model})
@@ -159,17 +162,23 @@ class RadioCandidates:
         self.catalog_pools = {}
         self.intensity_pools = {}
         self.rotated = set()
-        self.maximum_length = 60 * rec_params.setting_param(store.settings, "max_track_minutes")
+        from yt_playlist.controllers.radio_inputs import inputs_for
+        self.inputs = inputs_for(store)
         self.eligibility_at = now
-        self.refresh_exclusions(now)
-        self.genre_weights = store.rec_model.get_weights(now=now)
+
+        def capture(reader):
+            self.axes = self.inputs.taxonomy_facts(reader)
+            self.maximum_length = 60 * rec_params.setting_param(reader.settings, 'max_track_minutes')
+            self.blocked, self.muted = self.inputs.exclusions(reader, now)
+            self.genre_weights = reader.rec_model.get_weights(now=now)
+            return self.blocked, self.muted
         from yt_playlist.rec.stored_radio import PreparedRadio
         self.prepared = PreparedRadio(store, now) if getattr(store, '_recommendation_files', False) else None
         # Read one generation of the existing model, not its full vector pools.
         self.generation, self.encoding_model, space, self.modes, bundles = _prepared_inputs(
             store, project=lambda value, modes, space, generation: _initial_projection(
                 value, modes, space, generation, self.blocked, self.muted, self.tuning['comfort']),
-            prepared=self.prepared, blocked=self.blocked, muted=self.muted, comfort=self.tuning['comfort'])
+            prepared=self.prepared, comfort=self.tuning['comfort'], capture=capture)
         from yt_playlist.rec import product_comparison
         allow_assignment = comparison is _UNASSIGNED or bool(comparison)
         if comparison is _UNASSIGNED:
@@ -306,7 +315,7 @@ class RadioCandidates:
             added = self.prepared.tracks('radio', mid, 'membership', excluded=excluded, used=rejected,
                                         allowed=allowed, limit=CLUSTER_POOL_LIMIT - len(eligible))
         else:
-            added = radio_catalog.cluster_pool(self.store, self.cluster_members[mid], excluded, rejected, allowed,
+            added = radio_catalog.cluster_pool(self.read_store, self.cluster_members[mid], excluded, rejected, allowed,
                                               limit=CLUSTER_POOL_LIMIT - len(eligible))
         for track in added:
             track['_radio_mode'] = mid
@@ -380,7 +389,7 @@ class RadioCandidates:
                     keys = (key for _, labels in radio_intensity.ordered_groups(groups, energy)
                             for label, members in labels.items() if self._genre_allowed(label)
                             and genres.allows({'genre': label}) for key in members)
-                    pool = radio_catalog.cluster_pool(self.store, keys, excluded, used,
+                    pool = radio_catalog.cluster_pool(self.read_store, keys, excluded, used,
                         lambda t: self._allowed(t) and genres.allows(t), limit=CLUSTER_POOL_LIMIT)
                     for track in pool:
                         track['_radio_mode'] = mid
@@ -480,9 +489,13 @@ class RadioCandidates:
         """Use the live feedback clock even when prepared/current-layer data is older."""
         self.eligibility_at = max(self.eligibility_at, self.prepared_at, self.now_sampled_at,
                                   now if now is not None else self.eligibility_at)
-        self.blocked = (self.read_store.rec_model.disliked_identity_keys()
-                        | self.read_store.rec_model.suppressed_keys('for_you', self.eligibility_at))
-        self.muted = {a.casefold() for a in self.read_store.rec_model.muted_artists()}
+        # Prepared planning holds a pinned view; otherwise acquire one reader
+        # for both exclusions so feedback updates cannot split the two facts.
+        if self.read_store is self.store:
+            with self.inputs.read_view() as reader:
+                self.blocked, self.muted = self.inputs.exclusions(reader, self.eligibility_at)
+        else:
+            self.blocked, self.muted = self.inputs.exclusions(self.read_store, self.eligibility_at)
 
     def _now(self, mid, base=0.):
         return radio_tuning.now_bonus(base, self.now_posterior.get(str(mid), 0), self.now_gain)
@@ -491,17 +504,16 @@ class RadioCandidates:
         return _allowed_seed(track, self.blocked, self.muted, self.maximum_length, self._genre_allowed)
 
     def _genre_allowed(self, label):
-        if self.prepared is not None and self.prepared.current_reader is not None:
-            family, subgenre = self.prepared.genre_axes(label)
-            return (self.genre_weights.get(f'genre:{family}', 1) != 0
-                    and self.genre_weights.get(f'genre:{subgenre}', 1) != 0)
-        family, subgenre = self.read_store.genres.feature_axes([label]).get(label, ('', None))
+        family, subgenre = self.axes.get(label, ('', None))
         return (self.genre_weights.get(f'genre:{family}', 1) != 0
                 and self.genre_weights.get(f'genre:{subgenre}', 1) != 0)
 
     def retain(self, tracks):
         """Retain session metadata when historical songs leave the prepared pool."""
         tracks = list(tracks)
+        labels = {track.get('genre') for track in tracks} - self.axes.keys() - {None, ''}
+        if labels:
+            self.axes.update(self.inputs.taxonomy(labels))
         self._rotation_facts(tracks)
         if self.prepared is not None and self.prepared.generation is not None:
             for start in range(0, len(tracks), CLUSTER_POOL_LIMIT):
@@ -592,6 +604,7 @@ class RadioCandidates:
         if not videos:
             return False
         by_video = self.store.radio_catalog.details(videos)
+        self.axes = self.inputs.taxonomy(track.get('genre') for track in by_video.values())
         changed = self._rotation_facts([track for track in tracks if track['video_id'] in videos])
         for track in tracks:
             values = by_video.get(track["video_id"])
@@ -623,7 +636,7 @@ class RadioCandidates:
         """Only known, clear mismatches invalidate a future song after enrichment."""
         if not self._allowed(track):
             return False
-        if self.tuning["theme"] == 1 and not GenrePolicy(1, [], current=anchor, store=self.read_store).allows(track):
+        if self.tuning["theme"] == 1 and not GenrePolicy(1, [], current=anchor, axes=self.axes).allows(track):
             return False
         energy, support = musical_character.intensity_evidence(track)
         target = self.tuning["energy"]
@@ -644,7 +657,7 @@ class RadioCandidates:
         if vector is not None and self.centroids:
             mid = max(self.centroids, key=lambda mid: _cosine(vector, self.centroids[mid]))
         else:
-            family = self.read_store.genres.feature_axes([track.get('genre')]).get(track.get('genre'), (None, None))[0]
+            family = self.axes.get(track.get('genre'), (None, None))[0]
             mid = max(self.pools, key=lambda mid: sum(n for f, n in self.modes.get(mid, {}).get("families", [])
                                                        if f == family))
         self.membership[key] = mid
@@ -659,7 +672,7 @@ class RadioCandidates:
         if va is not None and vb is not None:
             score = max(0., _cosine(va, vb))
         else:
-            axes = self.read_store.genres.feature_axes([a.get('genre'), b.get('genre')])
+            axes = self.axes
             fa, fb = (axes.get(track.get('genre'), (None, None))[0] for track in (a, b))
             score = 1 - genre_map.family_distance(fa, fb) if fa and fb else .2
         self.affinities[pair] = score
@@ -683,46 +696,31 @@ class RadioCandidates:
         return max(self.centroids, key=lambda mid: _cosine(center, self.centroids[mid]))
 
     def _score(self, track, history, target, feedback, genres):
+        from yt_playlist.rec.radio_ranking import candidate_score
         mid = self.cluster_for(track)
-        score = .2 * self.prior.get(mid, {}).get(track["key"],
-                    track.get('_radio_catalog_score', self.catalog_scores.get(track['key'], 0)))
         recent = history[-8:]
-        continuity = 1 - genres.breadth
-        if recent and continuity:
-            weights = [.8 ** age for age in range(len(recent))]
-            score += continuity * .3 * sum(w * self.similarity(track, anchor)
-                for w, anchor in zip(weights, reversed(recent))) / sum(weights)
-            score += continuity * .25 * self.similarity(track, recent[-1])
-        if target and continuity:
-            score += continuity * (.2 + .9 * self.tuning["theme"]) * self.similarity(track, target)
-        comfort = self.tuning["comfort"]
-        familiarity = min(1., (track.get("plays") or 0) / 10 + .5 * bool(track.get("liked"))
-                          + .3 * bool(track.get("_radio_comfort")))
-        score += .7 * comfort * familiarity
-        energy = musical_character.intensity(track)
-        score -= 1.4 * abs(self.tuning["energy"] - .5) * abs(energy - self.tuning["energy"])
-        score += genres.bonus(track)
-        for key, strength in list((feedback or {}).items())[-24:]:
-            anchor = self.by_key.get(key)
-            if anchor:
-                score += strength * max(0, self.similarity(track, anchor) - .45)
-        return self._now(mid, score)
+        return candidate_score(track, prior=self.prior.get(mid, {}).get(track['key'],
+            track.get('_radio_catalog_score', self.catalog_scores.get(track['key'], 0))),
+            recent=[self.similarity(track, anchor) for anchor in reversed(recent)] if genres.breadth != 1 else [],
+            target=self.similarity(track, target) if target and genres.breadth != 1 else None,
+            feedback=[(strength, self.similarity(track, self.by_key[key]))
+                      for key, strength in list((feedback or {}).items())[-24:] if key in self.by_key],
+            tuning=self.tuning, breadth=genres.breadth, genre_bonus=genres.bonus(track),
+            now_share=self.now_posterior.get(str(mid), 0), now_gain=self.now_gain)
 
     def _choice_tier(self, eligible, history, target, genres):
-        eligible = [t for t in eligible if self._allowed(t) and genres.allows(t)]
-        if not eligible:
-            return []
-        eligible = radio_intensity.narrow(eligible, self.tuning['energy'])
-        if genres.breadth == 1:
-            # At the endpoint, similarity or a favourite artist cannot buy back
-            # the genre we are actively trying to leave.
-            contrast = max(genres.contrast(t) for t in eligible)
-            eligible = [t for t in eligible if genres.contrast(t) == contrast]
-        fit = [t for t in eligible if self.fits(t, genres.current if genres.pinned else target)]
-        eligible = fit or eligible  # Thin pools soften preferences, never eligibility.
-        gaps = [_artist_gap(t, history) for t in eligible]
-        longest = max(gaps)
-        return [t for t, gap in zip(eligible, gaps) if gap == longest]
+        from yt_playlist.rec.radio_ranking import choice_tier
+        eligible = list(eligible)
+        allowed = [t for t in eligible if self._allowed(t) and genres.allows(t)]
+        allowed = radio_intensity.narrow(allowed, self.tuning['energy'])
+        if genres.breadth == 1 and allowed:
+            contrast = max(genres.contrast(t) for t in allowed)
+            allowed = [t for t in allowed if genres.contrast(t) == contrast]
+        self._read_vectors([t['key'] for t in allowed])
+        decisions = {t['key']: dict(allowed=True, contrast=genres.contrast(t),
+            fits=self.fits(t, genres.current if genres.pinned else target), artist_gap=_artist_gap(t, history))
+            for t in allowed}
+        return choice_tier(allowed, decisions, energy=self.tuning['energy'], breadth=genres.breadth)
 
     def _choose(self, eligible, history, target, feedback, genres, *, other_anchors=()):
         eligible = self._choice_tier(eligible, history, target, genres)
@@ -777,7 +775,7 @@ class RadioCandidates:
             # New catalog entries were not present when session feedback built
             # its video exclusions. Apply current global suppressions on refill.
             self.refresh_exclusions()
-            pool = radio_catalog.themed_pool(self.store, genres, excluded, used, self._allowed,
+            pool = radio_catalog.themed_pool(self.read_store, genres, excluded, used, self._allowed,
                                             limit=CLUSTER_POOL_LIMIT)
             self.catalog_pools[label] = pool
             for track in pool:
@@ -806,7 +804,7 @@ class RadioCandidates:
                 if not eligible:
                     continue
                 # The seed establishes the genre; an empty history cannot pin it.
-                genres = GenrePolicy(.5, [], store=self.read_store)
+                genres = GenrePolicy(.5, [], axes=self.axes)
                 track = self._choose(eligible, selected, None, None, genres)
                 if track is None:
                     continue
@@ -819,11 +817,17 @@ class RadioCandidates:
                 break
         return selected
 
-    def next_track(self, history, *, excluded=(), target=None, feedback=None, current=None):
+    def next_track(self, history, *, excluded=(), target=None, feedback=None, current=None,
+                   destination=(), recipe=None, policy='upload'):
+        # Callers supply the persisted destination facts on fresh and resumed
+        # sessions. Keep today's exact-upload exclusion contract explicit.
+        if policy != 'upload':
+            raise ValueError('unsupported Radio membership policy')
+        excluded = set(excluded) | {video for _, video in destination if video}
         if self.tuning['energy'] != .5:
             excluded = set(excluded) | {t['video_id'] for t in history}
             context = self.cluster_for(target or current or history[-1]) if (target or current or history) else next(iter(self.pools))
-            genres = GenrePolicy(self.tuning['theme'], history, current=current, store=self.read_store)
+            genres = GenrePolicy(self.tuning['theme'], history, current=current, axes=self.axes)
             styles = (self._genre_modes(genres, excluded) if not self.cluster_members and (genres.pinned or genres.breadth == 1)
                       else self._style_modes(context))
             eligible = self._intensity_candidates(history, excluded, genres, styles)
@@ -835,7 +839,7 @@ class RadioCandidates:
             context = self.cluster_for(destination) if destination else next(iter(self.pools))
             # Prepared styles guide continuity; the fully Themed endpoint still
             # requires the observed now-playing genre inside that style.
-            genres = GenrePolicy(self.tuning['theme'], history, current=current, store=self.read_store)
+            genres = GenrePolicy(self.tuning['theme'], history, current=current, axes=self.axes)
             fallback = None
             for mid in _bounded_styles(self._style_modes(context), context):
                 eligible = self._cluster_pool(mid, history, excluded, genres=genres)
@@ -845,7 +849,7 @@ class RadioCandidates:
                     if pick and pick['_radio_rotation'] == radio_rotation.next_kind(history, self.tuning['comfort']):
                         return pick
             return fallback
-        genres = GenrePolicy(self.tuning["theme"], history, current=current, store=self.read_store)
+        genres = GenrePolicy(self.tuning["theme"], history, current=current, axes=self.axes)
         excluded = set(excluded) | {t["video_id"] for t in history}
         if genres.pinned or genres.breadth == 1:
             return self._genre_pick(history, target, feedback, genres, excluded)
@@ -879,7 +883,7 @@ class RadioCandidates:
             excluded = set(excluded) | {t['video_id'] for t in [*history, *other_anchors]}
             current = self._context(history)
             genres = GenrePolicy(self.tuning['theme'], history + other_anchors,
-                                 current=history[-1] if history else None, store=self.read_store)
+                                 current=history[-1] if history else None, axes=self.axes)
             styles = (self._genre_modes(genres, excluded) if not self.cluster_members and (genres.pinned or genres.breadth == 1)
                       else self._style_modes(current))
             taken = {self.cluster_for(track) for track in other_anchors}
@@ -895,7 +899,7 @@ class RadioCandidates:
             if self.tuning['theme'] < 1:
                 taken = {self.cluster_for(track) for track in other_anchors}
                 modes.sort(key=lambda mid: mid in taken)
-            genres = GenrePolicy(self.tuning['theme'], history, store=self.read_store)
+            genres = GenrePolicy(self.tuning['theme'], history, axes=self.axes)
             fallback = None
             for mid in _bounded_styles(modes, current):
                 eligible = self._cluster_pool(mid, history, excluded, genres=genres)
@@ -909,7 +913,7 @@ class RadioCandidates:
                         return pick
             return fallback
         genres = GenrePolicy(self.tuning["theme"], history + other_anchors,
-                             current=history[-1] if history else None, store=self.read_store)
+                             current=history[-1] if history else None, axes=self.axes)
         excluded = set(excluded) | {t["video_id"] for t in history}
         if genres.pinned or genres.breadth == 1:
             return self._genre_pick(history, None, feedback, genres, excluded)

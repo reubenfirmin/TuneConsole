@@ -1,8 +1,8 @@
 """Canonical album rows, exact release links and their ordered artist references."""
 from contextlib import contextmanager
 
-from yt_playlist.core import album_tracklists, artist_credits, genre_classifications
-from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.core import album_tracklists, genre_classifications
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 
 
 class AlbumRepo(Repo):
@@ -48,13 +48,13 @@ class AlbumRepo(Repo):
             elif not self.conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND entry_id=?', (aid, entry)).fetchone():
                 self.conn.execute('INSERT INTO album_tracks(album_id,entry_id,is_full,source) VALUES (?,?,0,?)', (aid, entry, source))
 
-    @snapshot_read
+    @lookup_read
     def linked_artist_inputs(self, aid):
         return {'credits': [dict(row) for row in self.conn.execute(
             'SELECT aa.artist_id,aa.credit,a.provisional FROM album_artists aa JOIN artists a ON a.id=aa.artist_id '
             'WHERE aa.album_id=?', (aid,))],
             'subjects': [row[0] for row in self.conn.execute('SELECT DISTINCT ta.artist_id FROM album_tracks at '
-                f'JOIN {artist_credits.projection_table(self.conn)} ta ON ta.entry_id=at.entry_id '
+                'JOIN entry_artists ta ON ta.entry_id=at.entry_id '
                 'JOIN artist_provider_ids p ON p.artist_id=ta.artist_id WHERE at.album_id=?', (aid,))]}
 
     @synchronized

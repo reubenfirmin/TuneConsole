@@ -7,6 +7,7 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from yt_playlist.rec import into_recently
+from yt_playlist.controllers.story_preparation import StoryPreparation
 from yt_playlist.providers import wikipedia
 from tests.conftest import FakeClient
 from tests.store_fixture_support import (
@@ -73,7 +74,7 @@ def _prepare_usable_stories(store, monkeypatch, count):
         store.wiki.put(subject['subject'], 'artist', subject['display'], {
             'title': subject['display'], 'extract': 'A complete story.',
             'thumbnail': 'http://portrait', 'url': f'http://wiki/Artist_{index}'}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     into_recently.prepare(store, NOW)
 
 
@@ -93,7 +94,7 @@ def test_recent_http_access_requires_three_usable_story_groups(store, monkeypatc
 
 
 def test_card_renders_from_fetched_summary(store, monkeypatch):
-    monkeypatch.setattr(into_recently, "ranked_subjects",
+    monkeypatch.setattr(StoryPreparation, 'ranked',
                         lambda s, now, epoch=0: [{"kind": "genre", "subject": "genre:shoegaze",
                                                   "display": "shoegaze"}])
     monkeypatch.setattr(wikipedia, "fetch_summary",
@@ -119,7 +120,7 @@ def test_genre_without_article_image_has_text_layout_instead_of_album_art(store,
     _heard(store, 'ritmo')
     subject = {"kind": "genre", "subject": "genre:shoegaze", "display": "shoegaze"}
     artist = {'kind': 'artist', 'subject': 'artist:Artist', 'display': 'Artist'}
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: [subject, artist])
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: [subject, artist])
     monkeypatch.setattr(wikipedia, 'fetch_summary', lambda kind, display: {
         'title': display, 'extract': f'About {display}.',
         'thumbnail': None if kind == 'genre' else 'http://local/portrait.jpg',
@@ -146,7 +147,7 @@ def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cac
         seed_catalog_track(store, f'song{i}|band', f'Song {i}', 'Band & Guest', video_id=f'video{i}',
                            genre='Dub Techno', thumbnail=f'http://local/song{i}.jpg')
     seed_catalog_track(store, 'unrelated|band', 'Unrelated', 'Band', video_id='unrelated', genre='Rock')
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: [subject])
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: [subject])
     monkeypatch.setattr(wikipedia, 'fetch_summary', lambda *a: {
         'title': 'Dub techno', 'extract': 'A particular scene.', 'thumbnail': 'http://genre/art.jpg',
         'url': 'http://wiki/Dub_techno'})
@@ -161,7 +162,7 @@ def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cac
     assert response.text.count('class="into-song"') == 3
     assert response.text.count('class="into-song-play"') == 3
     assert 'href="https://music.youtube.com/watch?v=video0"' in response.text
-    assert 'href="/artist?name=Band%20%26%20Guest"' in response.text
+    assert f'href="/artist?artist_id={store.artists.resolve("Band & Guest")}"' in response.text
     assert 'Unrelated' not in response.text
     assert 'into-heading' not in response.text
 
@@ -183,7 +184,7 @@ def test_worker_connects_genre_and_artist_articles_using_recorded_credits(store,
         store.wiki.put(subject['subject'], subject['kind'], subject['display'],
             {'extract': f"About {subject['display']}.", 'thumbnail': 'http://img',
              'url': f"http://wiki/{subject['display']}"}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     assert not into_recently.prepare(store, NOW)
 
     def forbidden(*a, **kw):
@@ -213,7 +214,7 @@ def test_common_or_familiar_genre_supports_an_artist_instead_of_leading(store, m
         store.wiki.put(subject['subject'], subject['kind'], subject['display'],
             {'title': subject['display'], 'extract': f"About {subject['display']}.",
              'thumbnail': 'http://image', 'url': f"http://wiki/{subject['display']}"}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
 
     assert not into_recently.prepare(store, NOW)
     response = _fragment_client(store).get('/test/story-fragment')
@@ -230,7 +231,7 @@ def test_a_common_or_imageless_genre_cannot_be_a_standalone_story(store, monkeyp
     store.wiki.put(subject['subject'], 'genre', genre,
         {'title': genre, 'extract': 'A complete paragraph.', 'thumbnail': thumbnail,
          'url': 'http://wiki/genre'}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: [subject])
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: [subject])
 
     assert not into_recently.prepare(store, NOW)
     assert into_recently.load(store, NOW) == ([], False)
@@ -268,7 +269,7 @@ def test_wrong_fresh_articles_are_replaced_before_building_a_related_spread(stor
         store.wiki.put(subject['subject'], subject['kind'], subject['display'],
             {'title': wrong, 'extract': 'A story about the wrong subject.',
              'thumbnail': 'http://img', 'url': 'http://wiki/wrong'}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     calls = []
 
     def fetch(kind, display):
@@ -293,7 +294,7 @@ def test_wrong_fresh_articles_are_replaced_before_building_a_related_spread(stor
 
 def test_genre_list_articles_do_not_become_stories(store, monkeypatch):
     subject = {"kind": "genre", "subject": "genre:dub techno", "display": "dub techno"}
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: [subject])
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: [subject])
     monkeypatch.setattr(wikipedia, 'fetch_summary', lambda *a: {
         'title': 'List of dub techno artists', 'extract': 'This is a list.',
         'thumbnail': None, 'url': 'http://wiki/List'})
@@ -307,7 +308,7 @@ def test_specific_topic_redirecting_to_a_genre_primer_is_not_published(store, mo
         {'kind': 'genre', 'subject': 'genre:dub techno', 'display': 'dub techno'},
         {'kind': 'artist', 'subject': 'artist:New band', 'display': 'New band'},
     ]
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     monkeypatch.setattr(wikipedia, 'fetch_summary', lambda *a: None)
     for subject, title in zip(subjects, ['Techno', 'New band']):
         store.wiki.put(subject['subject'], subject['kind'], subject['display'],
@@ -349,7 +350,7 @@ def test_cached_indie_rock_and_redirected_primers_are_filtered_before_display(st
 
 
 def test_card_caches_and_does_not_refetch(store, monkeypatch):
-    monkeypatch.setattr(into_recently, "ranked_subjects",
+    monkeypatch.setattr(StoryPreparation, 'ranked',
                         lambda s, now, epoch=0: [{"kind": "artist", "subject": "artist:khruangbin",
                                                   "display": "Khruangbin"}])
     calls = {"n": 0}
@@ -375,7 +376,7 @@ def test_prepared_stories_fill_the_collection_without_duplicate_articles(store, 
         store.wiki.put(subject["subject"], subject["kind"], subject["display"],
                        {"extract": f"About band {i}.", "thumbnail": f"http://img/{i}",
                         "url": f"http://wiki/Band_{page}"}, 1e12)
-    monkeypatch.setattr(into_recently, "ranked_subjects", lambda *a, **kw: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a, **kw: subjects)
 
     def forbidden(*a):
         raise AssertionError("Already cached")
@@ -391,7 +392,7 @@ def test_worker_lookups_are_bounded_and_do_not_hide_later_cached_stories(store, 
                 for i in range(10)]
     store.wiki.put(subjects[-1]["subject"], "artist", "Band 9",
                    {"extract": "A cached band.", "thumbnail": "http://img/9", "url": "http://wiki/9"}, 1e12)
-    monkeypatch.setattr(into_recently, "ranked_subjects", lambda *a, **kw: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a, **kw: subjects)
     lookups = []
 
     def miss(kind, display):
@@ -407,7 +408,7 @@ def test_worker_lookups_are_bounded_and_do_not_hide_later_cached_stories(store, 
 
 def test_empty_when_no_subject(empty_story_store, monkeypatch):
     store = empty_story_store
-    monkeypatch.setattr(into_recently, "ranked_subjects", lambda s, now: [])
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda s, now: [])
     into_recently.prepare(store, NOW)
     r = _fragment_client(store).get('/test/story-fragment')
     assert r.status_code == 200
@@ -415,7 +416,7 @@ def test_empty_when_no_subject(empty_story_store, monkeypatch):
 
 
 def test_empty_when_wikipedia_misses(store, monkeypatch):
-    monkeypatch.setattr(into_recently, "ranked_subjects",
+    monkeypatch.setattr(StoryPreparation, 'ranked',
                         lambda s, now, epoch=0: [{"kind": "artist", "subject": "artist:nobody",
                                                   "display": "Nobody"}])
     monkeypatch.setattr(wikipedia, "fetch_summary", lambda kind, display: None)
@@ -427,7 +428,7 @@ def test_empty_when_wikipedia_misses(store, monkeypatch):
 def test_falls_back_to_next_subject_when_first_fails(store, monkeypatch):
     # The reported bug: a rotation landed on a subject with no Wikipedia page and the card blanked.
     # Now the route walks past the dead subject to the next one that resolves.
-    monkeypatch.setattr(into_recently, "ranked_subjects",
+    monkeypatch.setattr(StoryPreparation, 'ranked',
                         lambda s, now, epoch=0: [
                             {"kind": "artist", "subject": "artist:nopage", "display": "NoPage"},
                             {"kind": "genre", "subject": "genre:shoegaze", "display": "shoegaze"}])
@@ -447,7 +448,7 @@ def test_artist_card_uses_local_thumbnail_color_and_cta(store, monkeypatch):
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,'k|khruangbin','T','Khruangbin',track_id=1,thumbnail='http://local/k.jpg')
     store.conn.commit()
-    monkeypatch.setattr(into_recently, "ranked_subjects",
+    monkeypatch.setattr(StoryPreparation, 'ranked',
                         lambda s, now, epoch=0: [{"kind": "artist", "subject": "artist:Khruangbin",
                                                   "display": "Khruangbin"}])
     monkeypatch.setattr(wikipedia, "fetch_summary",
@@ -462,7 +463,7 @@ def test_artist_card_uses_local_thumbnail_color_and_cta(store, monkeypatch):
 
 
 def test_card_hidden_when_no_thumbnail_anywhere(store, monkeypatch):
-    monkeypatch.setattr(into_recently, "ranked_subjects",
+    monkeypatch.setattr(StoryPreparation, 'ranked',
                         lambda s, now, epoch=0: [{"kind": "artist", "subject": "artist:Ghost",
                                                   "display": "Ghost"}])
     monkeypatch.setattr(wikipedia, "fetch_summary",
@@ -474,7 +475,7 @@ def test_card_hidden_when_no_thumbnail_anywhere(store, monkeypatch):
 
 def test_refresh_failure_preserves_stale_card_and_retries(store, monkeypatch):
     subj = {"kind": "artist", "subject": "artist:Khruangbin", "display": "Khruangbin"}
-    monkeypatch.setattr(into_recently, "ranked_subjects", lambda *a, **kw: [subj])
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a, **kw: [subj])
     store.wiki.put(subj["subject"], "artist", "Khruangbin",
                    {"extract": "A trio.", "thumbnail": "http://img", "url": "http://wiki"}, 0)
     calls = []
@@ -507,8 +508,8 @@ def test_cold_fragment_only_schedules_work_and_prepared_reads_do_no_ranking(stor
     def forbidden(*a, **kw):
         raise AssertionError("Story preparation must stay in the worker")
 
-    monkeypatch.setattr(into_recently, "ranked_subjects", forbidden)
-    monkeypatch.setattr(into_recently, "decorate", forbidden)
+    monkeypatch.setattr(StoryPreparation, 'ranked', forbidden)
+    monkeypatch.setattr(StoryPreparation, 'decorate', forbidden)
     monkeypatch.setattr(wikipedia, "fetch_summary", forbidden)
     response = client.get('/test/story-fragment')
     assert response.status_code == 200 and scheduled == [True]
@@ -532,7 +533,7 @@ def test_worker_drains_small_story_batches_without_rebuilding_home_or_models(sto
 
     subjects = [{"kind": "artist", "subject": f"artist:Band {i}", "display": f"Band {i}"}
                 for i in range(9)]
-    monkeypatch.setattr(into_recently, "ranked_subjects", lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     calls = []
 
     def fetch(kind, display):
@@ -589,7 +590,7 @@ def test_readable_genre_clusters_survive_misses_and_keep_developed_article_near_
                 'extract': ('A complete paragraph. ' * (words // 3)) if kind == 'artist' else f'About {genre}.',
                 'thumbnail': 'http://portrait' if kind == 'artist' else None,
                 'url': f'http://wiki/{name}'}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
 
     def unexpected_fetch(*a):
         raise AssertionError('All candidates have a fresh confirmed answer')
@@ -612,7 +613,7 @@ def test_cached_genre_list_is_replaced_with_an_actual_context_article(store, mon
         'extract': 'A list.', 'url': 'http://wiki/List'}, NOW)
     store.wiki.put('artist:Band', 'artist', 'Band', {'title': 'Band', 'extract': 'Band is a rock band.',
         'thumbnail': 'http://portrait', 'url': 'http://wiki/Band'}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     calls = []
 
     def fetch(kind, display):
@@ -646,7 +647,7 @@ def test_coarse_tags_and_original_artist_biographies_do_not_make_remixes_rock_ex
         store.wiki.put(subject['subject'], 'artist', artist, {'title': artist, 'extract': extract,
             'thumbnail': 'http://portrait', 'url': f'http://wiki/{video}'}, NOW)
     _heard(store, 'suzuki', 'yuuf', 'band')
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
 
     assert not into_recently.prepare(store, NOW)
     cards, pending = into_recently.load(store, NOW)
@@ -672,7 +673,7 @@ def test_story_connection_uses_recent_recording_instead_of_artists_dominant_old_
         store.wiki.put(subject['subject'], subject['kind'], subject['display'], {
             'title': subject['display'], 'extract': 'A complete paragraph.', 'thumbnail': 'http://portrait',
             'url': f"http://wiki/{subject['display']}"}, NOW)
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
 
     assert not into_recently.prepare(store, NOW)
     cards, _ = into_recently.load(store, NOW)
@@ -700,7 +701,7 @@ def test_story_variety_waits_for_next_edition_and_survives_restart(
 
     bound_catalog(monkeypatch, entries=())
     subjects = [{'kind': 'artist', 'subject': f'artist:Band {i}', 'display': f'Band {i}'} for i in range(15)]
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     # Bootstrap and reporting connection admission are below story selection.
     # Keep the private WAL file, actual publication guards, all fifteen stories
     # and the genuine close/reopen startup that proves persisted variety.

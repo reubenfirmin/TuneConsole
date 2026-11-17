@@ -5,7 +5,7 @@ inference implementation as the application.
 """
 from statistics import mean
 
-from yt_playlist.rec import audio_vibe_external as shared
+from experiments.audio_lab_tools.legacy import audio_vibe_external as shared
 from yt_playlist.rec import audio_vibe_runtime as bounded
 from yt_playlist.rec import audio_vibe_cruise as production
 from yt_playlist.rec.audio_vibe_cruise import (

@@ -10,6 +10,7 @@ from tests.conftest import FakeClient, _track
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.app import create_app
 from yt_playlist.rec import road_trip
+from yt_playlist.controllers.road_trip_transitions import RoadTripTransitions
 
 
 class Client(FakeClient):
@@ -46,7 +47,7 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
         state = dict(revision=uuid4().hex,picked=[track],picks=['video'],own_pct=50,
                      familiarity_pct=50,target_minutes=30,stats={})
         store.road_trip.save_road_trip_draft(rid,state,1)
-        monkeypatch.setattr(road_trip,'normalized',lambda state,*args:state)
+        monkeypatch.setattr(RoadTripTransitions,'normalize',lambda self,state,*args:state)
         monkeypatch.setattr(road_trip,'draft_tracks',lambda state:state['picked'])
         url,data = f'/road_trip/draft/{rid}/save',{}
     elif operation=='album':
@@ -91,7 +92,7 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
 @pytest.mark.parametrize('order',['main-last','main-first','main-missing'])
 def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     from yt_playlist.web import radio_session
-    from yt_playlist.library import playlist_generated
+    from yt_playlist.library import generated_acquisition
     other = store.accounts.upsert_account('Other','c','brand',False)
     main = store.accounts.upsert_account('Main','c',None,True)
     remotes = {other:object(),main:object()}
@@ -115,10 +116,10 @@ def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
         tuning=radio_session.radio_tuning.DEFAULTS.copy()))
     monkeypatch.setattr(radio.policy,'pick',lambda session:song)
     writes = []
-    def create(store,title,tracks,client,now,identity):
+    def create(store,title,tracks,client,now,identity,*,recipe=None):
         writes.append((identity,client))
         raise RuntimeError('remote creation unavailable')
-    monkeypatch.setattr(playlist_generated,'create_generated_playlist',create)
+    monkeypatch.setattr(generated_acquisition,'create_generated_playlist',create)
     try:
         result = radio.start()
         assert not result['ok']

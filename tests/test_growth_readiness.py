@@ -2,6 +2,7 @@
 from contextlib import closing, contextmanager
 from copy import deepcopy
 import time
+from unittest.mock import Mock
 from tests.derived_rating_support import seed_dislike
 
 import pytest
@@ -12,7 +13,10 @@ from tests.store_fixture_support import (
 )
 from yt_playlist.core.store import Store
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, home_vibe, measurement, musical_character, vibe_preparation
+from yt_playlist.rec import (
+    album_feedback, growth_readiness, home_prepared, home_vibe, measurement,
+    musical_character, vibe_preparation, vibe_recording_rules, vibe_support,
+)
 
 
 @contextmanager
@@ -156,28 +160,28 @@ def test_vibe_input_must_be_compatible_supported_prediction_or_measurement():
     track = {'musical': {'version': musical_character.VERSION, 'vibes': {
         'inputs_version': vibe_preparation.version(), 'fits': {
         'relax': {'score': .8, 'support': .2, 'source': 'artist_genre'}}}}}
-    assert growth_readiness._supported(track, 'relax')
+    assert vibe_support.supported(track, 'relax')
     # A model replacement queues new fits; the prepared, supported output
     # retains the same meaning and remains useful during that work.
     track['musical']['vibes']['inputs_version'] = vibe_preparation.serving_prefix() + 'previous-model'
-    assert growth_readiness._supported(track, 'relax')
-    assert not growth_readiness._supported(track, 'energize')
+    assert vibe_support.supported(track, 'relax')
+    assert not vibe_support.supported(track, 'energize')
     for field, value in [('source', 'heuristic'), ('support', 0), ('score', float('nan'))]:
         invalid = deepcopy(track)
         invalid['musical']['vibes']['fits']['relax'][field] = value
-        assert not growth_readiness._supported(invalid, 'relax')
+        assert not vibe_support.supported(invalid, 'relax')
     track['musical']['version'] = 'old'
-    assert not growth_readiness._supported(track, 'relax')
+    assert not vibe_support.supported(track, 'relax')
     track['musical']['version'] = musical_character.VERSION
     track['musical']['vibes']['inputs_version'] = 'old-fit-policy'
-    assert not growth_readiness._supported(track, 'relax')
+    assert not vibe_support.supported(track, 'relax')
 
 
 def test_compatible_vibe_evidence_survives_model_replacement_and_still_rechecks_feedback(
         store, monkeypatch, completed_vibe_menus):
     lanes = completed_vibe_menus
     assert growth_readiness.vibes(store, 1000)
-    monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'replacement-model')
+    monkeypatch.setattr(vibe_preparation.audio_vibe_specialists, 'identity', lambda: 'replacement-model')
     assert vibe_preparation.due(store)
     assert growth_readiness.vibes(store, 1001)
     with atomic_write(store):
@@ -203,6 +207,8 @@ def vibe_menu_inputs(store, *, lane_count=8, fresh_count=48, comfort_count=36, a
         lanes[lane] = tracks
     seed_publication_subjects(store, [track for tracks in lanes.values() for track in tracks],
                               discoveries=[track['key'] for track in lanes['fresh']])
+    from tests.recommendation_support import seed_library_favorites
+    seed_library_favorites(store, lanes['comfort'])
     return lanes, audio_inputs
 
 
@@ -236,7 +242,7 @@ def completed_vibe_inputs(store, monkeypatch, native_sql_calls):
     # feedback. The real worker/update owners below cover profile production.
     # Retain all 116 original subjects and completed profiles for every lane.
     # Synchronous private reads keep native SQL below the diagnostic clocks.
-    monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'readiness-model')
+    monkeypatch.setattr(vibe_preparation.audio_vibe_specialists, 'identity', lambda: 'readiness-model')
     lanes, audio_inputs = vibe_menu_inputs(store, lane_count=16, fresh_count=48, comfort_count=36)
     rec_params.set_param(store, 'comfort_min_pool', 36)
     profiles = {}
@@ -283,7 +289,7 @@ def measured_readiness_worker(store, monkeypatch):
     from tests.genre_catalog_support import bound_catalog
     from yt_playlist.core import metadata_evidence, metadata_runtime, vibe_versions
     from yt_playlist.core.db_diagnostics import DiagnosticConnection
-    from yt_playlist.rec import vibe_joint_preparation, vibe_pools
+    from yt_playlist.rec import vibe_joint_state, vibe_pools
 
     # Match the installed fixture's single Jazz identity. Taxonomy curation is
     # below this measured-evidence worker and readiness consumer.
@@ -294,11 +300,8 @@ def measured_readiness_worker(store, monkeypatch):
     # This owner changes a recording's own measured support through the real
     # worker. Admission/training of optional statistical models is a lower
     # collaborator; no model is admitted in this controlled catalog.
-    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
-    for module in (vibe_preparation.audio_vibe_cruise, vibe_preparation.audio_vibe_release,
-                   vibe_preparation.audio_vibe_relax, vibe_preparation.audio_vibe_uplift,
-                   vibe_preparation.audio_vibe_energize, vibe_preparation.audio_vibe_focus,
-                   vibe_preparation.audio_vibe_model):
+    monkeypatch.setattr(vibe_joint_state, 'qualified', lambda: False)
+    for _vibe, module in vibe_preparation.audio_vibe_specialists.SPECIALISTS:
         monkeypatch.setattr(module, 'identity', lambda: 'readiness-unconfigured-model')
     # This synchronous private database has no compactor or competing query
     # thread. Keep native SQLite execution, constraints and transactions while
@@ -424,7 +427,7 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
             with monkeypatch.context() as patch:
                 patch.setattr(musical_character, 'load', current_profiles)
                 menus = [vibe_pools.assemble(reader, 1000, preset) for preset in home_vibe.PRESETS]
-            usable = all(len(cards) == 4 and all(sum(growth_readiness._supported(track, preset)
+            usable = all(len(cards) == 4 and all(sum(vibe_support.supported(track, preset)
                          for track in card['tracks']) >= 4 for card in cards)
                          for preset, cards in zip(home_vibe.PRESETS, menus))
             distinct = len({tuple(tuple(track['key'] for track in card['tracks']) for card in cards)
@@ -537,8 +540,10 @@ def test_summary_does_not_hide_a_changed_preset_or_incompatible_fit_policy(
     with store.conn:
         store.conn.execute('UPDATE recommendation_heads SET generation_id=?', (original['id'],))
     assert growth_readiness.vibes(store, 1000)
-    monkeypatch.setattr(vibe_preparation, 'serving_prefix', lambda: 'incompatible-fit-policy/')
+    incompatible = Mock(return_value='incompatible-fit-policy/')
+    monkeypatch.setattr(vibe_recording_rules, 'serving_prefix', incompatible)
     assert not growth_readiness.vibes(store, 1000)
+    incompatible.assert_called()
 
 
 def test_legacy_publication_without_summary_does_not_restore_full_bundle(store, monkeypatch, vibe_menus):
@@ -597,7 +602,7 @@ def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
                     with measured(record_property, f'state_{state}_epoch_{epoch}_{preset}_assembly'):
                         cards = vibe_pools.assemble(reader, 1000, preset, epoch, **filters)
                     usable = usable and len(cards) == 4 and all(
-                        sum(growth_readiness._supported(track, preset) for track in card['tracks']) >= 4
+                        sum(vibe_support.supported(track, preset) for track in card['tracks']) >= 4
                         for card in cards)
                     signatures.add(tuple(tuple(track['key'] for track in card['tracks']) for card in cards))
                 assert (usable and len(signatures) > 1) is expected

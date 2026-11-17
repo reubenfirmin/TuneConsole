@@ -5,7 +5,7 @@ from types import MappingProxyType
 
 from yt_playlist.core import json_cache
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.rec import home_vibe, musical_character, rec_params, vibe_pools, vibe_preparation
+from yt_playlist.rec import home_vibe, musical_character, rec_params, vibe_pools, vibe_recording_rules as vibe_preparation
 from yt_playlist.rec.vibe_readiness_index import MAX_INDEX_BYTES, VERSION, compact, prepare, project
 from yt_playlist.rec.vibe_support import supported
 
@@ -116,8 +116,13 @@ def ready(store, now, epoch, *, include_genres=(), avoid_genres=()):
 
 
 def _ready(store, now, epoch, include_genres, avoid_genres):
+    return ready_values(menus(store, now, epoch, include_genres, avoid_genres))
+
+
+def ready_values(selections):
+    """Readiness requires supported full cards and genuinely different preset menus."""
     signatures = set()
-    for preset, cards in menus(store, now, epoch, include_genres, avoid_genres):
+    for preset, cards in selections:
         if len(cards) < 4 or any(sum(preset in item['supported'] for item in card['tracks']) < 4 for card in cards):
             return False
         signatures.add(tuple(tuple(item['key'] for item in card['tracks']) for card in cards))
@@ -185,6 +190,30 @@ def _menus(store, value, presets, now, epoch, include_genres, avoid_genres):
 
 def _menus_from_pools(store, value, presets, pools, now, epoch, include_genres, avoid_genres,
                       *, full_pools=None, resolved=None, prior_inputs=None):
+    from yt_playlist.rec.eligibility import comfort_tracks
+
+    positions = menu_positions(value, presets, pools, epoch, include_genres, avoid_genres)
+    items = dict(resolved or {})
+    pending = {index: value['tracks'][index] for index in sorted(positions - items.keys())}
+    inputs = vibe_pools.eligibility_inputs(store, list(pending.values()), now)
+    comfort_positions = {index for preset in presets
+                         for index in pools.get(preset, {}).get('comfort', [])}
+    if include_genres or avoid_genres:
+        comfort_positions.update(index for preset in presets
+            for family, members in value['genres'].get(preset, {}).get('comfort', {}).items()
+            if family not in avoid_genres and (not include_genres or family in include_genres)
+            for index in members)
+    comfort_keys = {item['key'] for item in comfort_tracks(
+        store, [value['tracks'][index] for index in comfort_positions], now)}
+    return menu_values(value, presets, pools, epoch, include_genres, avoid_genres,
+        items=items, pending=pending, inputs=inputs, prior_inputs=prior_inputs, full_pools=full_pools,
+        resolve_catalog=getattr(store, '_recommendation_files', False),
+        artist_cap=int(rec_params.get_param(store, 'modes_artist_cap')),
+        album_cap=int(rec_params.get_param(store, 'modes_album_cap')),
+        comfort_minimum=rec_params.get_param(store, 'comfort_min_pool'), comfort_keys=comfort_keys)
+
+
+def menu_positions(value, presets, pools, epoch, include_genres, avoid_genres):
     temporal = f'temporal:{epoch % 3}'
     positions = {index for preset in presets for members in pools.get(preset, {}).values() for index in members}
     if include_genres or avoid_genres:
@@ -192,16 +221,19 @@ def _menus_from_pools(store, value, presets, pools, now, epoch, include_genres, 
                          if not lane.startswith('temporal:') or lane == temporal
                          for family, members in groups.items() if family not in avoid_genres
                          and (not include_genres or family in include_genres) for index in members)
-    items = dict(resolved or {})
-    pending = {index: value['tracks'][index] for index in sorted(positions - items.keys())}
-    inputs = vibe_pools.eligibility_inputs(store, list(pending.values()), now)
+    return positions
+
+
+def menu_values(value, presets, pools, epoch, include_genres, avoid_genres, *, items, pending,
+                inputs, prior_inputs, full_pools, resolve_catalog, artist_cap, album_cap, comfort_minimum,
+                comfort_keys):
     if prior_inputs is not None:
         blocked, owned, discoveries, metadata, weights, maximum, muted, axes = prior_inputs
         new_blocked, new_owned, new_discoveries, new_metadata, _, _, _, new_axes = inputs
         inputs = (blocked | new_blocked, {**owned, **new_owned},
                   {**discoveries, **new_discoveries}, {**metadata, **new_metadata},
                   weights, maximum, muted, {**axes, **new_axes})
-    if getattr(store, '_recommendation_files', False):
+    if resolve_catalog:
         # Typed serving resolves catalog corrections before filtering its pools.
         # Keep that same interpretation for the prepared compact index.
         _, owned, discoveries, metadata, *_ = inputs
@@ -210,8 +242,6 @@ def _menus_from_pools(store, value, presets, pools, now, epoch, include_genres, 
                    for index, item in pending.items()}
     items.update(pending)
     axes = inputs[-1]
-    artist_cap = int(rec_params.get_param(store, 'modes_artist_cap'))
-    album_cap = int(rec_params.get_param(store, 'modes_album_cap'))
     selected, complete = [], True
     for preset in presets:
         def select(lane, seen):
@@ -229,7 +259,9 @@ def _menus_from_pools(store, value, presets, pools, now, epoch, include_genres, 
                 pool.sort(key=lambda item: item['order'][preset])
             pool = pool[:vibe_pools.POOL_LIMIT]
             pool.sort(key=lambda item: item['order'][preset])
-            pool = vibe_pools.iter_eligible(store, pool, now, lane.split(':')[0], seen,
+            if lane == 'comfort':
+                pool = [item for item in pool if item['key'] in comfort_keys]
+            pool = vibe_pools.iter_eligible_values(pool, lane.split(':')[0], seen,
                 include_genres=include_genres, avoid_genres=avoid_genres, inputs=inputs)
             tracks = vibe_pools.diversify(pool, artist_cap, album_cap)
             if (full_pools is not None and len(tracks) < 12
@@ -240,7 +272,6 @@ def _menus_from_pools(store, value, presets, pools, now, epoch, include_genres, 
             return tracks
 
         meta = value.get('metas', {}).get(preset, value['meta'])
-        cards = vibe_pools.assemble_lanes(meta, epoch,
-            rec_params.get_param(store, 'comfort_min_pool'), select)
+        cards = vibe_pools.assemble_lanes(meta, epoch, comfort_minimum, select)
         selected.append((preset, cards))
     return selected, complete, items, inputs

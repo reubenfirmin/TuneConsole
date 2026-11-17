@@ -15,8 +15,10 @@ from threadpoolctl import threadpool_limits
 
 from yt_playlist.core import sample_files
 from yt_playlist.core.store import Store
-from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_model as shared
-from yt_playlist.rec import audio_vibe_prediction as predictor, home_vibe, musical_character
+from yt_playlist.rec import audio_vibe_cruise as cruise
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
+from experiments.audio_lab_tools.legacy import audio_vibe_prediction as predictor
+from yt_playlist.rec import home_vibe, musical_character
 from yt_playlist.rec import musical_preparation, progressive, vibe_preparation
 from .cruise_export import captures
 from ..support.external_experiment import digest, save, stamp
@@ -26,7 +28,7 @@ from ..studies.vibe_specialist_round import inside, versions
 def code_hashes():
     # Whole product source is checked so concurrent edits cannot be concealed by
     # checking only the new scorer. Cached bytecode and unrelated assets excluded.
-    root = Path(shared.__file__).resolve().parents[1]
+    root = Path(cruise.__file__).resolve().parents[1]
     return {str(path.relative_to(root)): digest(path) for path in sorted(root.rglob('*.py'))}
 
 

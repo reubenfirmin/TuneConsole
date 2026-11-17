@@ -4,8 +4,6 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import catalog, metadata
-from yt_playlist.core.migrations import current
-from yt_playlist.core.migrations import v102_catalog_writes
 
 
 def test_catalog_projections_are_read_only_and_owner_constraints_remain(store):
@@ -14,8 +12,6 @@ def test_catalog_projections_are_read_only_and_owner_constraints_remain(store):
     playlist = store.playlists.upsert_playlist(account,'remote','Playlist',1,'hash',1)
     store.playlists.set_playlist_tracks(playlist,[track])
     store.discovery.upsert_discovered_track('song|artist','video','Song','Artist',None,None,None,None,None,1)
-    assert not set(v102_catalog_writes.RETIRED) & {r[0] for r in store.conn.execute(
-        "SELECT name FROM sqlite_schema WHERE type='trigger'")}
     for sql in ("UPDATE catalog_tracks SET genre='Jazz'", "UPDATE tracks SET title='Other'",
                 'UPDATE discovered_tracks SET bpm=120', 'DELETE FROM discovered_tracks',
                 'DELETE FROM playlist_tracks', 'INSERT INTO playlist_tracks VALUES (1,1,1)'):
@@ -80,14 +76,3 @@ def test_metadata_fill_rolls_back_every_selection_if_one_field_is_invalid(store)
         with store.conn:
             metadata.fill(store.conn, entry, {'bpm': 120, 'instrumental': float('inf')}, 'acousticbrainz')
     assert list(store.conn.iterdump())==before
-
-
-def test_historical_implicit_definition_lookup_is_version_bound_and_always_resets():
-    def triggers():
-        return {sql.split()[2] for sql in current.statements() if sql.lstrip().startswith('CREATE TRIGGER ')}
-    assert not v102_catalog_writes.RETIRED & triggers()
-    with pytest.raises(RuntimeError):
-        with current.migration_definitions(92):
-            assert 'catalog_tracks_update' in triggers()
-            raise RuntimeError('interrupted historical lookup')
-    assert not v102_catalog_writes.RETIRED & triggers()

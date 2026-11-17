@@ -30,8 +30,8 @@ def test_wheelhouse_excludes_play_recency_lane(store):
     assert "Gem" in {i.title for i in surfaces.comfort_listening(store, now=now, limit=10)}
 
 
-def test_comfort_listening_favors_high_play_not_recent(store):
-    """Comfort = your high-rotation favorites, demoted the more recently you've heard them."""
+def test_comfort_listening_excludes_recent_favorites(store):
+    """A recent favorite is ineligible even when it has as many plays as an old one."""
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Old Favorite", "X", None, None)
     store.tracks.upsert_track("v2", "Recent Favorite", "X", None, None)
@@ -44,8 +44,7 @@ def test_comfort_listening_favors_high_play_not_recent(store):
 
     items = surfaces.comfort_listening(store, now=now, limit=10)
     titles = [i.title for i in items]
-    assert {"Old Favorite", "Recent Favorite"} <= set(titles)
-    assert titles.index("Old Favorite") < titles.index("Recent Favorite")   # not-recent ranks higher
+    assert titles == ["Old Favorite"]
     assert all(i.lane == "comfort" for i in items)
 
 
@@ -93,9 +92,8 @@ def test_for_you_genre_suppression_reduces_that_family(store):
     assert boosted > suppressed
 
 
-def test_comfort_candidates_scores_plays_times_recency(store):
-    """comfort_candidates ranks by plays * min(1, days_since_last / recency_full_days): a dormant
-    4-play track beats a recently-spun 8-play one, and below-min_plays tracks are excluded."""
+def test_comfort_candidates_require_a_full_listening_rest(store):
+    """Recent heavy rotation cannot qualify through a high play count."""
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Dormant", "X", None, None)        # key "dormant|x"
     store.tracks.upsert_track("v2", "HeavyRecent", "X", None, None)    # key "heavyrecent|x"
@@ -110,9 +108,9 @@ def test_comfort_candidates_scores_plays_times_recency(store):
 
     res = store.rec_candidates.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=10)
     titles = [r["title"] for r in res]
-    assert titles[0] == "Dormant"                              # 4*1.0 > 8*(1/30)
-    assert set(titles) == {"Dormant", "HeavyRecent"}           # Barely excluded (below min_plays)
-    assert res[0]["plays"] == 4 and res[0]["last_played"] == now - 120 * day
+    assert titles == ["Dormant"]
+    # Imported dates have no exact playback time; use the conservative day end.
+    assert res[0]["plays"] == 4 and res[0]["last_played"] == now - 119 * day
 
 
 def test_for_you_blends_real_signals_with_reasons(store):

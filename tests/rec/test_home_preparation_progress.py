@@ -41,8 +41,7 @@ def candidate_inputs(store, *, genres=('Jazz', 'Techno'), lanes=mode_surfaces.CA
             for lane in list(pools):
                 if lane not in lanes:
                     del pools[lane]
-    with store._lock, store.conn.atomic():
-        seed_bundle_subjects(store, bundles)
+    seed_bundle_subjects(store, bundles)
     return bundles
 
 

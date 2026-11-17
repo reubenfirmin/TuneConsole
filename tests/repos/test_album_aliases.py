@@ -1,6 +1,5 @@
 """Exact source comparisons preserve editions, ownership, order and historical shares."""
 from copy import deepcopy
-import json
 import threading
 
 import pytest
@@ -8,7 +7,7 @@ import pytest
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as store, without_query_timing,
 )
-from yt_playlist.core import album_aliases, albums, legacy_evidence, album_tracklists
+from yt_playlist.core import album_aliases, albums, album_tracklists
 from yt_playlist.core.migrations import registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
@@ -67,8 +66,6 @@ def test_exact_aliases_aggregate_once_and_preserve_accounts_playback_and_shares(
     with store.conn:
         album_tracklists.freeze(store.conn,albums.lookup(store.conn,ALIAS),ALIAS,'Frozen',['video-0'],now=10)
     old_id, alias_id = store.collection.album_id(OLD), store.collection.album_id(ALIAS)
-    original_memberships = [dict(row) for row in store.conn.execute(
-        'SELECT * FROM account_albums WHERE album_id IN (?,?)', (old_id, alias_id))]
     assert old_id != alias_id
     assert store.collection.observe_album_representation(OLD, payload, now=200)
     assert store.collection.observe_album_representation(ALIAS, payload, now=201)
@@ -86,9 +83,6 @@ def test_exact_aliases_aggregate_once_and_preserve_accounts_playback_and_shares(
     assert len(store.charts.album_tracks_detail(ALIAS)) == 1
     assert store.artists.album_credits(ALIAS)
     assert album_tracklists.share(store.conn,old_id,ALIAS)=={'title':'Frozen','video_ids':['video-0']}
-    archive = json.loads(legacy_evidence.original(store.conn, 'album', 'album_alias_reconciliation', str(alias_id)))
-    assert archive['account_albums'] == original_memberships
-    assert len(original_memberships) == 3
     assert store.collection.saved_album_revision(first) > before_revision
     # A remote snapshot admitted before reconciliation cannot erase the merged ownership.
     assert store.collection.replace_saved_album_snapshots({first: []}, expected_revisions={first: before_revision}) == set()
@@ -216,14 +210,11 @@ def test_retry_after_owner_commits_does_not_duplicate_discovery_or_feedback(stor
     responses = [tuple(row) for row in store.conn.execute('SELECT * FROM album_feedback ORDER BY id')]
     assert len(responses) == 2
     assert store.conn.execute('SELECT source_browse_id FROM album_feedback WHERE withdrawn_at IS NULL').fetchone()[0] == ALIAS
-    original = legacy_evidence.original(store.conn, 'album', 'album_alias_reconciliation', str(retired))
-    assert len(json.loads(original)['album_discovery_memberships']) == 2
     monkeypatch.setattr(repository, 'apply_merge', apply_merge)
     assert store.collection.observe_album_representation(ALIAS, release(), now=32)
     assert store.collection.album_id(ALIAS) == target
     assert [tuple(row) for row in store.conn.execute('SELECT * FROM album_feedback ORDER BY id')] == responses
     assert store.discovery.get_discovered_albums()[0]['offered_count'] == 3
-    assert legacy_evidence.original(store.conn, 'album', 'album_alias_reconciliation', str(retired)) == original
 
 
 def test_aliases_preserve_repeated_full_occurrences_and_each_frozen_share(store):

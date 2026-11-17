@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import httpx
 from fastapi import FastAPI
-from fastapi.templating import Jinja2Templates
+from tests.template_support import web_templates
 from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 
@@ -51,7 +51,8 @@ def _pristine_current_schema():
 def context(store):
     return SimpleNamespace(store=store, setup=None, rec_worker=None, now_fn=lambda: 1000,
                            work=Activity(), bridge=Bridge(),
-                           templates=Jinja2Templates(directory='src/yt_playlist/web/templates'))
+                           auth_expired={}, clear_auth_expired=lambda account_id: None,
+                           templates=web_templates(directory='src/yt_playlist/web/templates'))
 
 
 @pytest.fixture
@@ -124,7 +125,7 @@ def test_spotify_captured_identity_reaches_discovery_after_main_changes(store, m
         discovery_sources.remove_spotify_artists(store.conn, account_id=first)
     assert origins() == {second}
     assert len(store.discovery.get_discovered_artists()) == 1
-    assert imports.ctx.work.wait(1)
+    assert imports.work.wait(1)
 
 
 def test_slow_import_keeps_requests_and_bridge_replies_responsive_and_serializes_history(
@@ -222,9 +223,8 @@ def test_import_error_is_terminal_visible_and_keeps_retry_form(store, monkeypatc
 
 
 @asynccontextmanager
-async def held_history_import(imports, monkeypatch, report=REPORT, *, wall_clock=time.monotonic):
+async def held_history_import(imports, store, monkeypatch, report=REPORT, *, wall_clock=time.monotonic):
     """Own the worker through failed assertions, with diagnostics before releasing it."""
-    ctx = imports.ctx
     entered, release = threading.Event(), threading.Event()
     settings_entered = threading.Event()
     completed = Future()
@@ -234,8 +234,8 @@ async def held_history_import(imports, monkeypatch, report=REPORT, *, wall_clock
     def diagnostics():
         frame = sys._current_frames().get(worker.get('ident'))
         return json.dumps({
-            'active': ctx.work.active, 'status': imports.status('takeout'),
-            'store_lock': repr(ctx.store._lock._lock), 'worker': worker,
+            'active': imports.work.active, 'status': imports.status('takeout'),
+            'store_lock': repr(store._lock._lock), 'worker': worker,
             'operations': operations,
             'stack': traceback.format_stack(frame) if frame else [],
         }, indent=2)
@@ -271,8 +271,8 @@ async def held_history_import(imports, monkeypatch, report=REPORT, *, wall_clock
 
     monkeypatch.setattr(takeout, 'import_takeout', slow_import)
     monkeypatch.setattr(imports, '_run', observed_run)
-    monkeypatch.setattr(ctx.store.settings, 'set_setting',
-                        measured(ctx.store.settings.set_setting, 'post-import settings'))
+    monkeypatch.setattr(store.settings, 'set_setting',
+                        measured(store.settings.set_setting, 'post-import settings'))
     monkeypatch.setattr(takeout, 'seed_discovery_from_unmatched',
                         measured(takeout.seed_discovery_from_unmatched, 'post-import discovery'))
     task = asyncio.create_task(imports.run('takeout', b'data'))
@@ -284,9 +284,9 @@ async def held_history_import(imports, monkeypatch, report=REPORT, *, wall_clock
         exc.add_note(diagnostics())
         raise
     finally:
-        ctx.work.close_admission()
+        imports.work.close_admission()
         release.set()
-        assert await asyncio.to_thread(ctx.work.wait, 30), diagnostics()
+        assert await asyncio.to_thread(imports.work.wait, 30), diagnostics()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
@@ -296,8 +296,8 @@ async def cancel_held_import(imports, held):
     held.task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await held.task
-    imports.ctx.work.close_admission()
-    assert imports.ctx.work.active
+    imports.work.close_admission()
+    assert imports.work.active
     assert not imports.status('takeout')['done']
     with pytest.raises(WorkClosing):
         await imports.run('spotify', b'refused')
@@ -309,7 +309,7 @@ async def finish_held_import(imports, held):
     # Real settings/discovery work has its own bounded completion phase. The
     # two-second check then tests Activity releasing ownership, not disk speed.
     await asyncio.to_thread(held.completed.result, 30)
-    assert await asyncio.to_thread(imports.ctx.work.wait, 2), held.diagnostics()
+    assert await asyncio.to_thread(imports.work.wait, 2), held.diagnostics()
     status = imports.status('takeout')
     assert status['done'] and status['outcome'] == 'complete', held.diagnostics()
 
@@ -319,7 +319,7 @@ def test_cancelled_import_request_remains_owned_until_worker_finishes(store, mon
     imports = HistoryImports(context(store))
 
     async def run():
-        async with held_history_import(imports, monkeypatch) as held:
+        async with held_history_import(imports, store, monkeypatch) as held:
             await cancel_held_import(imports, held)
             await finish_held_import(imports, held)
             assert [op['operation'] for op in held.operations] == [
@@ -334,7 +334,7 @@ def test_cancelled_import_failure_cleanup_drains_before_store_closes(store, monk
     imports = HistoryImports(context(store))
 
     async def run():
-        async with held_history_import(imports, monkeypatch) as held:
+        async with held_history_import(imports, store, monkeypatch) as held:
             await cancel_held_import(imports, held)
             raise AssertionError('controlled ownership assertion failure')
 
@@ -344,7 +344,7 @@ def test_cancelled_import_failure_cleanup_drains_before_store_closes(store, monk
     assert snapshot['active'] == ['_run'] and not snapshot['status']['done']
     assert snapshot['worker']['operation'] == 'importing'
     assert any('slow_import' in line for line in snapshot['stack'])
-    assert not imports.ctx.work.active
+    assert not imports.work.active
     assert imports.status('takeout')['outcome'] == 'complete'
     assert store.settings.get_setting('takeout_nag_dismissed_at') == '1000'
 
@@ -356,12 +356,12 @@ def test_cancelled_import_stays_owned_during_real_post_import_lock_wait(store, m
     clock = [1000.0]
 
     async def run():
-        async with held_history_import(imports, monkeypatch, report, wall_clock=lambda: clock[0]) as held:
+        async with held_history_import(imports, store, monkeypatch, report, wall_clock=lambda: clock[0]) as held:
             await cancel_held_import(imports, held)
             with store._lock:
                 held.release.set()
                 assert await asyncio.to_thread(held.settings_entered.wait, 5)
-                assert not imports.ctx.work.wait(0)
+                assert not imports.work.wait(0)
                 # Wait for the observed lock frame, rather than sleeping two
                 # seconds and assuming the worker has reached it. The real
                 # worker remains blocked on this thread's actual Store lock.
@@ -397,7 +397,9 @@ def test_library_decode_keeps_requests_and_bridge_responsive_and_is_drained(
     app.include_router(bridge.build(ctx))
     entered, release = threading.Event(), threading.Event()
     worker_threads = []
-    decode = setup.load_spotify_library
+    from yt_playlist.library.spotify_transfer_composition import commands
+    transfer = commands(ctx)
+    decode = transfer.parse
 
     @app.get('/responsive')
     async def responsive():
@@ -409,7 +411,7 @@ def test_library_decode_keeps_requests_and_bridge_responsive_and_is_drained(
         assert release.wait(5)
         return decode(raw)
 
-    monkeypatch.setattr(setup, 'load_spotify_library', slow_decode)
+    monkeypatch.setattr(transfer, 'parse', slow_decode)
     with ThreadPoolExecutor(max_workers=4) as callers, TestClient(app) as client:
         with client.websocket_connect('/bridge/ws', headers={'origin': bridge.EXTENSION_ORIGIN}) as ws:
             upload = callers.submit(client.post, '/import/spotify-library/v6',
@@ -442,14 +444,16 @@ def test_cancelled_library_upload_keeps_decoder_owned(store, monkeypatch, upload
     app = FastAPI()
     app.include_router(setup.build(ctx))
     entered, release = threading.Event(), threading.Event()
-    decode = setup.load_spotify_library
+    from yt_playlist.library.spotify_transfer_composition import commands
+    transfer = commands(ctx)
+    decode = transfer.parse
 
     def slow_decode(raw):
         entered.set()
         assert release.wait(5)
         return decode(raw)
 
-    monkeypatch.setattr(setup, 'load_spotify_library', slow_decode)
+    monkeypatch.setattr(transfer, 'parse', slow_decode)
 
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),

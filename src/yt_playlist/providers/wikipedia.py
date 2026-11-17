@@ -12,9 +12,11 @@ import urllib.error
 from html import unescape
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.base import AccessState
 from yt_playlist.integrations.wikipedia import WikipediaIAO, SEARCH, SUMMARY
 from yt_playlist.providers.base import LookupUnavailable
 from yt_playlist.util import genre_catalog, net
+from yt_playlist.util.wikipedia_subject import matches_subject as subject_matches
 
 name = "wikipedia"
 
@@ -36,8 +38,12 @@ def _get_json(url):
     return _iao.get_url(url)
 
 
+def matches_subject(kind, display, title):
+    return subject_matches(kind, display, title, canonical_name=genre_catalog.canonical_name)
+
+
 def access(store=None):
-    return _iao.context(store)
+    return _iao.context(AccessState.for_store(store))
 
 
 def _project(fetch, *args):
@@ -68,26 +74,6 @@ def _search_name(kind, display):
 
 def _plain_name(text):
     return ' '.join(re.findall(r'[^\W_]+', unicodedata.normalize('NFKC', text).casefold()))
-
-
-def matches_subject(kind, display, title):
-    """Require the named subject, rather than one shared word in a search hit.
-
-    Artist disambiguators are fine; another person's surname or an album whose
-    title contains a band's name is not evidence of the same artist.
-    """
-    if kind == 'artist':
-        base = re.sub(r'\s*\([^)]*\)\s*$', '', title).strip()
-        wanted, actual = _plain_name(display), _plain_name(base)
-        if not wanted:
-            return display.casefold() == base.casefold()
-        return wanted.removeprefix('the ') == actual.removeprefix('the ')
-    name = _search_name(kind, display)
-    if genre_catalog.canonical_name(name).casefold() == genre_catalog.canonical_name(title).casefold():
-        return True
-    wanted = _tokens(name)
-    actual = _plain_name(title)
-    return bool(wanted) and all(word in actual.split() for word in wanted)
 
 
 def _search_titles(kind, display):
@@ -124,44 +110,23 @@ def _fetch_summary(kind, display):
     Walks the top search candidates and accepts the first that is a real article (type 'standard',
     non-empty extract) AND has the subject's identity in the title. A shared
     first name or a mention of the artist inside another article is insufficient."""
-    try:
-        titles = _search_titles(kind, display)
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as exc:
-        raise LookupUnavailable("Wikipedia search unavailable") from exc
-    failed = False
-    for title in titles:
-        if not matches_subject(kind, display, title):
-            continue
-        try:
-            s = _summary(title)
-            if not isinstance(s, dict) or "type" not in s:
-                raise ValueError("Invalid Wikipedia summary response")
-            extract = (s.get("extract") or "").strip()
-            if s.get("title") is not None and not isinstance(s["title"], str):
-                raise ValueError("Invalid Wikipedia title")
-            thumbnail = (s.get("thumbnail") or {}).get("source")
-            page_url = ((s.get("content_urls") or {}).get("desktop") or {}).get("page")
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception:
-            failed = True
-            continue
-        if not s or s.get("type") != "standard":
-            continue
-        if not extract or not matches_subject(kind, display, s.get('title') or title):
-            continue
-        return {
-            "display": display,
-            "title": s.get("title") or title,
-            "extract": extract,
-            "thumbnail": thumbnail,
-            "url": page_url,
-        }
-    if failed:
-        raise LookupUnavailable("Wikipedia summaries unavailable")
-    return None
+    from yt_playlist.controllers.wikipedia_acquisition import summary
+    from types import SimpleNamespace
+    policy = SimpleNamespace(matches_subject=matches_subject, project_summary=project_summary)
+    return summary(policy, _search_titles, _summary, kind, display)
+
+
+def project_summary(s, kind, display, title):
+    if not isinstance(s, dict) or 'type' not in s:
+        raise ValueError('Invalid Wikipedia summary response')
+    extract = (s.get('extract') or '').strip()
+    if s.get('title') is not None and not isinstance(s['title'], str):
+        raise ValueError('Invalid Wikipedia title')
+    if s.get('type') != 'standard' or not extract or not matches_subject(kind, display, s.get('title') or title):
+        return None
+    return dict(display=display, title=s.get('title') or title, extract=extract,
+                thumbnail=(s.get('thumbnail') or {}).get('source'),
+                url=((s.get('content_urls') or {}).get('desktop') or {}).get('page'))
 
 
 def fetch_artwork(display):
@@ -175,45 +140,46 @@ def _fetch_artwork(display):
     Require a matching musician article and original file identity; unrelated
     people, disambiguation pages and unattributed files cannot become scenery.
     """
-    try:
-        for title in _search_titles('artist', display):
-            if not matches_subject('artist', display, title):
-                continue
-            summary = _summary(title)
-            if (summary.get('type') != 'standard'
-                    or not matches_subject('artist', display, summary.get('title') or title)):
-                continue
-            context = summary.get('description') or summary.get('extract') or ''
-            if not re.search(r'\b(musician|musical|band|singer|songwriter|dj|composer|rapper|'
-                             r'guitarist|bassist|drummer|pianist|vocalist|orchestra|'
-                             r'music producer|record producer)\b', context, re.I):
-                continue
-            original = summary.get('originalimage') or {}
-            url = original.get('source') or ''
-            parsed = urllib.parse.urlsplit(url)
-            if parsed.scheme != 'https' or parsed.netloc != 'upload.wikimedia.org':
-                continue
-            filename = urllib.parse.unquote(parsed.path.rsplit('/', 1)[-1])
-            params = {'action': 'query', 'format': 'json', 'prop': 'imageinfo',
-                      'titles': 'File:' + filename, 'iiprop': 'url|extmetadata', 'iiurlwidth': '1200'}
-            data = _get_json(_SEARCH + '?' + urllib.parse.urlencode(params))
-            for page in data['query']['pages'].values():
-                for info in page.get('imageinfo') or []:
-                    meta = info.get('extmetadata') or {}
-                    def plain(key):
-                        return ' '.join(unescape(re.sub('<[^>]+>', '',
-                            (meta.get(key) or {}).get('value') or '')).split())
-                    author, license_name = plain('Artist'), plain('LicenseShortName')
-                    source = info.get('descriptionurl') or ''
-                    image = info.get('thumburl') or info.get('url') or ''
-                    nonfree = (meta.get('NonFree') or {}).get('value')
-                    if (author and license_name and str(nonfree).casefold() not in ('true', '1')
-                            and 'fair use' not in license_name.casefold() and source.startswith('https://')
-                            and image.startswith('https://upload.wikimedia.org/')):
-                        return {'url': image, 'source_url': source, 'kind': 'artist',
-                                'credit': f'{display} · {author} · {license_name}'}
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as exc:
-        raise LookupUnavailable('Wikipedia artwork unavailable') from exc
+    from yt_playlist.controllers.wikipedia_acquisition import artwork
+    from types import SimpleNamespace
+    policy = SimpleNamespace(matches_subject=matches_subject, artwork_filename=artwork_filename,
+                             project_artwork=project_artwork)
+    return artwork(policy, _search_titles, _summary, _image_info, display)
+
+
+def _image_info(filename):
+    params = {'action': 'query', 'format': 'json', 'prop': 'imageinfo',
+              'titles': 'File:' + filename, 'iiprop': 'url|extmetadata', 'iiurlwidth': '1200'}
+    return _get_json(_SEARCH + '?' + urllib.parse.urlencode(params))
+
+
+def artwork_filename(summary, display, title):
+    if (summary.get('type') != 'standard'
+            or not matches_subject('artist', display, summary.get('title') or title)):
+        return None
+    context = summary.get('description') or summary.get('extract') or ''
+    if not re.search(r'\b(musician|musical|band|singer|songwriter|dj|composer|rapper|'
+                     r'guitarist|bassist|drummer|pianist|vocalist|orchestra|'
+                     r'music producer|record producer)\b', context, re.I):
+        return None
+    parsed = urllib.parse.urlsplit((summary.get('originalimage') or {}).get('source') or '')
+    if parsed.scheme == 'https' and parsed.netloc == 'upload.wikimedia.org':
+        return urllib.parse.unquote(parsed.path.rsplit('/', 1)[-1])
+    return None
+
+
+def project_artwork(data, display):
+    for page in data['query']['pages'].values():
+        for info in page.get('imageinfo') or []:
+            meta = info.get('extmetadata') or {}
+            def plain(key):
+                return ' '.join(unescape(re.sub('<[^>]+>', '', (meta.get(key) or {}).get('value') or '')).split())
+            author, license_name = plain('Artist'), plain('LicenseShortName')
+            source, image = info.get('descriptionurl') or '', info.get('thumburl') or info.get('url') or ''
+            nonfree = (meta.get('NonFree') or {}).get('value')
+            if (author and license_name and str(nonfree).casefold() not in ('true', '1')
+                    and 'fair use' not in license_name.casefold() and source.startswith('https://')
+                    and image.startswith('https://upload.wikimedia.org/')):
+                return {'url': image, 'source_url': source, 'kind': 'artist',
+                        'credit': f'{display} · {author} · {license_name}'}
     return None

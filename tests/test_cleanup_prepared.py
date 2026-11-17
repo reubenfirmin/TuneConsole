@@ -106,12 +106,12 @@ def test_memberships_preferences_and_upload_kinds_share_a_snapshot(file_backed_s
 
         with monkeypatch.context() as patch:
             patch.setattr(type(store.overlaps), 'cleanup_preferences', change_after_memberships)
-            result = analysis.analyze_cleanup(store)
+            result = analysis.analyze_cleanup(analysis.prepare_cleanup(store))
         assert len(result.groups) == 1
         assert result.groups[0].track_count == 1
         assert result.analysis.memberships.kinds['A'] == 'mixed'
         assert result.analysis.preferences.ignored == {}
-        assert analysis.analyze_cleanup(store).summary().count == 1  # A is tiny; B dismissed
+        assert analysis.analyze_cleanup(analysis.prepare_cleanup(store)).summary().count == 1  # A is tiny; B dismissed
     finally:
         store.conn.close()
 

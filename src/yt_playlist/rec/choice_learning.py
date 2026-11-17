@@ -36,6 +36,11 @@ def _weighted_contexts(store, projection, now):
     parameters = {name: rec_params.get_param(store, name) for name in (
         'now_gain', 'now_window_h', 'session_alpha', 'session_halflife_h',
         'choice_recent_w', 'choice_halflife_d', 'choice_saved_w', 'choice_saved_days')}
+    yield from weighted_contexts(projection, now, parameters)
+
+
+def weighted_contexts(projection, now, parameters):
+    """Apply decay to detached, verified context projection and parameter facts."""
     for latest in projection.get("contexts", []):
         if latest['format'] == 'mixes' and latest.get('descriptor_id') is None:
             continue  # Old selected-track projections are not broad descriptor evidence.

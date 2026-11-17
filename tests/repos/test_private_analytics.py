@@ -13,6 +13,8 @@ from tests.store_fixture_support import (
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import charts as chart_routes
+from yt_playlist.controllers.analytics_queries import AnalyticsQueries
+from yt_playlist.library import analytics_composition
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing')
@@ -168,7 +170,7 @@ def test_album_context_memo_keeps_history_dependencies(library):
 @pytest.mark.usefixtures('native_sql_calls')
 def test_chart_sections_allow_commits_between_queries(library, monkeypatch, chart_http):
     store, account, _ = library
-    original, changed = chart_routes._build_ticker, []
+    original, changed = AnalyticsQueries.ticker, []
 
     def ticker(reader, dimension, periods):
         result = original(reader, dimension, periods)
@@ -179,13 +181,13 @@ def test_chart_sections_allow_commits_between_queries(library, monkeypatch, char
                 [identity_key('Later', 'Later artist')], source_timezone='UTC')
         return result
 
-    monkeypatch.setattr(chart_routes, '_build_ticker', ticker)
+    monkeypatch.setattr(AnalyticsQueries, 'ticker', staticmethod(ticker))
     app = create_app(store, lambda: {}, now_fn=lambda: 3 * 86400, background_work=False)
     client = TestClient(app, base_url='http://127.0.0.1')
     first = client.get('/charts?view=songs')
     assert first.status_code == 200
     assert {song['title'] for song in first.context['songs']} == {'Song', 'Later'}
-    assert 'Later artist' in {row['cat'] for row in first.context['tickers']['artist']['rows']}
+    assert 'Later artist' in {row['label'] for row in first.context['tickers']['artist']['rows']}
     following = client.get('/charts?view=songs')
     assert following.status_code == 200
     assert {song['title'] for song in following.context['songs']} == {'Song', 'Later'}
@@ -205,7 +207,7 @@ def test_artist_report_reads_current_saved_flags_after_song_query(library, monke
         return result
 
     monkeypatch.setattr(ChartsRepo, 'artist_songs', songs)
-    monkeypatch.setattr(chart_routes, 'fetch_artist_info', lambda *args: None)
+    monkeypatch.setattr(analytics_composition, 'fetch_artist_info', lambda *args: None)
     app = create_app(store, lambda: {}, now_fn=lambda: 3 * 86400, background_work=False)
     client = TestClient(app, base_url='http://127.0.0.1')
     first = client.get('/artist?name=Artist')

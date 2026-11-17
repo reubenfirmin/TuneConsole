@@ -26,12 +26,8 @@ class AudioMetadataFiles:
             if reference['revision'] is None:
                 return {}
             return metadata_runtime_files.read_at(self.runtime_root, 'native', (reference['key'],),
-                                                  reference['revision'], max_bytes=max_bytes)['observations']
-        if 'prepared' in reference:
-            from .preparation import metadata_destinations
-            rows = [metadata_destinations.original(row) for row in reference['prepared']]
-            return {row['field']: metadata_native._profile_value({**json.loads(row['provenance_json']),
-                'field': row['field'], 'value': json.loads(row['value_json'])}) for row in rows}
+                reference['revision'], max_bytes=max_bytes,
+                **({'reference': reference['file']} if reference.get('file') else {}))['observations']
         rows = reference['observations']
         if sum(row['raw_byte_size'] for row in rows) > max_bytes:
             raise WorkBudgetExceeded('Source profile input exceeds byte budget')

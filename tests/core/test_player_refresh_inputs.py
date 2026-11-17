@@ -54,25 +54,3 @@ def test_reclassifying_or_deleting_a_consumed_event_invalidates_snapshot(player_
         store.conn.execute('DELETE FROM player_events WHERE id=?', (row,))
         store.conn.commit()
         assert not snapshot.publish(lambda: None)
-
-
-def test_version_39_upgrade_preserves_events_and_pending_work(tmp_path):
-    with closing(sqlite3.connect(tmp_path / 'old.db')) as conn, conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA foreign_keys=ON')
-        migrate(conn, registry=registry.MIGRATIONS[:39])
-        conn.execute("INSERT INTO identities(id,label,credential_ref) VALUES (1,'Fixture','fixture')")
-        conn.execute("INSERT INTO player_events(identity_id,kind,video_id,at) VALUES (1,'tick','video',100)")
-        conn.commit()
-        before = [tuple(row) for row in conn.execute('SELECT * FROM player_events')]
-        pending = [tuple(row) for row in conn.execute('SELECT * FROM rec_change_queue')]
-        # Exercise v40's telemetry trigger change on its genuine predecessor.
-        migrate(conn, registry=registry.MIGRATIONS[:40])
-        validate_version(conn, 40)
-        assert [tuple(row) for row in conn.execute('SELECT * FROM player_events')] == before
-        assert [tuple(row) for row in conn.execute('SELECT * FROM rec_change_queue')] == pending
-        conn.execute('DELETE FROM rec_change_queue')
-        conn.execute("INSERT INTO player_events(identity_id,kind,video_id,at) VALUES (1,'tick','video',130)")
-        assert conn.execute('SELECT COUNT(*) FROM rec_change_queue').fetchone()[0] == 0
-        conn.execute("INSERT INTO player_events(identity_id,kind,video_id,at) VALUES (1,'track_exit','video',140)")
-        assert conn.execute('SELECT COUNT(*) FROM rec_change_queue').fetchone()[0] == 1

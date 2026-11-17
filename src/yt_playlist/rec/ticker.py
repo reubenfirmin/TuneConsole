@@ -7,6 +7,18 @@ tick at the category's CORPUS share (bar past the tick = over-indexed, "punching
 weight"), a faint marker for where it sat a year ago, and a thin whisker for its min/max share
 across the periods. Pure functions. DB queries live in ChartsRepo, SVG/CSS in the template.
 """
+def periods(earliest, now, window_days=None):
+    """Disjoint newest-first windows, retaining the complete all-time history."""
+    if window_days is not None:
+        width = window_days * 86400.
+        return ([(f'w{k}', (now - width * (k + 1), None if k == 0 else now - width * k))
+                 for k in range(4)], window_days, window_days * 4)
+    if earliest is None or earliest >= now:
+        return [], 1, 1
+    days = max(1, round((now - earliest) / 86400.))
+    return [('w0', (earliest, None))], days, days
+
+
 def _shares(dist: dict) -> dict:
     """Normalize a {category: count} distribution to {category: fraction-of-total}."""
     total = sum(dist.values())

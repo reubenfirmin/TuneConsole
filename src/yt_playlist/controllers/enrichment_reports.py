@@ -20,7 +20,8 @@ class EnrichmentReports:
         if 'candidates' in evidence:
             return evidence['candidates']
         identity, revision = evidence['reference']
-        document = self.read_document('conflicts', (identity,), revision)
+        document = self.read_document('conflicts', (identity,), revision,
+            **({'reference': evidence['file']} if evidence.get('file') else {}))
         return reporting.current_candidates(document, evidence['updated_at'], self.now_fn())
 
     def genre_provenance(self, track_id):
@@ -34,7 +35,8 @@ class EnrichmentReports:
                 if reference['at'] <= now - ALTERNATIVE_SECONDS:
                     continue
                 data = self.read_document('alternatives',
-                    (reference['recording_id'], reference['provider_id']), float(reference['at']), missing=True)
+                    (reference['recording_id'], reference['provider_id']), float(reference['at']), missing=True,
+                    **({'reference': reference['file']} if reference.get('file') else {}))
                 if data:
                     candidates.append({'provider': reference['provider'], 'value': data.get('fields', {}).get('genre') or ''})
         return reporting.genre_provenance(facts['track'], candidates, self._candidates(facts['conflict']))

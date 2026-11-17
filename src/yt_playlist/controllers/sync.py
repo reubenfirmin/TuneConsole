@@ -27,7 +27,7 @@ def restore_progress(result, attempt, cursors):
                 item[target] = row[column]
         if row['cursor'] is not None:
             item['cursor'] = row['cursor']
-    result['last_attempt_at'] = attempt['finished_at']
+    result['last_attempt_at'] = attempt['finished_at'] or 0
     if attempt['phase'] != 'running':
         result['status'] = attempt['phase']
     return result
@@ -59,15 +59,25 @@ class LibrarySync:
             return self.repository.begin_attempt(now)
         self.settings.set_setting('last_sync_attempt_at', str(now))
 
-    def finish_attempt(self, now, result, *, expected_revision=None):
+    def checkpoint(self, now, result, *, expected_revision, previous):
+        return self.finish_attempt(now, result, expected_revision=expected_revision,
+                                   previous=previous, checkpoint=True)
+
+    def finish_attempt(self, now, result, *, expected_revision=None, previous=None, checkpoint=False):
         self.repository.require_revision(expected_revision)
-        result = stamp_result(result, self.state(), now)
+        from copy import deepcopy
+        result = stamp_result(deepcopy(result), self.state() if previous is None else previous, now)
         if self.repository.has_attempt_state():
             self.repository.ensure_attempt(now)
-            reference = self.recovery.publish('library-sync', 1, result)
-            self.repository.finish_attempt(
-                now, result, reference=reference, expected_revision=expected_revision,
-                last_success=now if result['status'] == 'complete' else None)
+            with self.recovery.retained():
+                integrity = self.recovery.describe('library-sync', 1, result)
+                file_id = self.repository.reserve_file(integrity)
+                reference = self.recovery.publish_reserved(file_id, 'library-sync', 1, result,
+                                                            expected=integrity)
+                self.repository.finish_attempt(
+                    now, result, reference=reference, file_id=file_id, expected_revision=expected_revision,
+                    last_success=now if result['status'] == 'complete' and not checkpoint else None,
+                    checkpoint=checkpoint)
         else:
             values = {'library_sync_state': json.dumps(result), 'last_sync_outcome': result['status']}
             if result['status'] == 'complete':

@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from yt_playlist.rec.ordering import _field
-from yt_playlist.rec.recipes import theme_counts
+from yt_playlist.rec.recipes import theme_count_values
 
 logger = logging.getLogger("yt_playlist.home_audit")
 logger.propagate = False
@@ -25,10 +25,15 @@ def record(store, protos, now, *, source, epoch, card_epochs):
     This records server offers, not proof that a browser displayed or a person noticed them.
     Metadata is snapshotted now so later enrichment cannot rewrite the history."""
     catalog = _catalog(store, protos)
+    logger.info('%s', json.dumps(projection(protos, catalog, now, source=source,
+        epoch=epoch, card_epochs=card_epochs), ensure_ascii=False))
+
+
+def projection(protos, catalog, now, *, source, epoch, card_epochs):
     cards = []
     for position, proto in enumerate(protos, 1):
         tracks = proto["tracks"]
-        genres, decades = theme_counts(store, tracks, catalog=catalog)
+        genres, decades = theme_count_values(tracks, catalog)
         cards.append({
             "position": position, "framing": proto["lane"], "label": proto["label"],
             "description": proto["note"], "mode_id": proto.get("mode_id"),
@@ -38,8 +43,8 @@ def record(store, protos, now, *, source, epoch, card_epochs):
             "unknown_genre_count": len(tracks) - sum(genres.values()),
             "unknown_decade_count": len(tracks) - sum(decades.values()),
         })
-    logger.info("%s", json.dumps({
+    return {
         "schema": 1, "event": "home_cards_offered",
         "timestamp": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "source": source, "menu_epoch": epoch, "cards": cards,
-    }, ensure_ascii=False))
+    }

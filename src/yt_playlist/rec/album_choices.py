@@ -11,7 +11,8 @@ from collections import Counter
 
 import numpy as np
 
-from yt_playlist.rec import content_model, embedding_vectors, layers, rec_params, scoring
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import content_model, embedding_vectors, rec_params, scoring
 from yt_playlist.rec.album_feedback import state as feedback_state, set_feedback
 from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.util.years import decade
@@ -78,10 +79,11 @@ def prepare_cached(store, now):
 
             payload = reader.memoized_read(('album-choices', 6, int(now // MAX_AGE_S)), calculate)
             encoded = json.dumps(payload, separators=(',', ':'))
-            if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
-                    encoded, payload['built_at'], surface=SURFACE, input_revision=snapshot._changes),
-                    allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES):
-                return None
+            with store.rec_proposals.prepare_home(encoded, payload['built_at'], surface=SURFACE) as publication:
+                if not snapshot.publish(lambda: store.rec_proposals.publish_home(
+                        publication, input_revision=snapshot._changes),
+                        allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES):
+                    return None
             return payload
     except WorkBudgetExceeded:
         store.maintenance_diagnostics.record('deferred', reasons=('time_budget',), phase='rec: Albums')
@@ -384,29 +386,22 @@ def _companions(store, albums, features, matrix, index):
     vectors = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
     ranks = np.argsort(-(features @ vectors.T), axis=1, kind="stable")
     cap = rec_params.get_param(store, "modes_artist_cap")
+    from yt_playlist.rec.artist_variety import select
+    pool = {track['key']: track for track in store.artists.credited_pages(pool.values())}
     results = []
     for album, order in zip(albums, ranks):
-        own, artists, chosen = set(album.get("keys") or []), {}, []
-        for position in order:
-            track = pool[keys[position]]
-            artist = (track.get("artist") or "").casefold()
-            if track["key"] in own or artists.get(artist, 0) >= cap:
-                continue
-            chosen.append(track)
-            artists[artist] = artists.get(artist, 0) + 1
-            if len(chosen) == home_cards.PROTO_SIZE:
-                break
-        results.append(chosen)
+        own = set(album.get('keys') or [])
+        ranked = (pool[keys[position]] for position in order if keys[position] not in own)
+        results.append(select(ranked, cap, home_cards.PROTO_SIZE, limit=home_cards.PROTO_SIZE))
     return results
 
 
 def _stored_companions(store, albums, features, matrix, index):
-    """Keep the best capped frontier while visiting complete prepared membership.
+    """Rank complete membership before capping overlapping performing credits.
 
-    There is one diversity partition (artist), so a discarded row can never
-    become useful after a better row arrives. Each album retains at most twelve
-    candidates; each matrix multiplication uses at most one metadata page.
-    Equal similarities use canonical recording order, independent of pool reuse.
+    A collaboration belongs to multiple artist groups, so a capped prefix cannot
+    safely discard lower rows before the ranking is complete. Scores spill to a
+    disposable database; matrix work and hydration use bounded pages.
     """
     from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
     from yt_playlist.rec import home_cards
@@ -420,35 +415,28 @@ def _stored_companions(store, albums, features, matrix, index):
         return [[] for _ in albums]
     cap = int(rec_params.get_param(store, 'modes_artist_cap'))
     own = [set(album.get('keys') or []) for album in albums]
-    selected, after = [[] for _ in albums], 0
-    while True:
-        check_cancellable_work()
-        page = store.recommendations.recording_metadata_page(
-            'home', generation=head['id'], mode_key='all', after=after, limit=128)
-        tracks = [track for track in page['tracks'] if track['key'] in index]
-        if tracks:
-            vectors = matrix[[index[track['key']] for track in tracks]]
-            vectors = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
-            scores = features @ vectors.T
-            for album_position, row in enumerate(scores):
-                for track, score in zip(tracks, row):
-                    if track['key'] in own[album_position]:
-                        continue
-                    ordered = sorted([*selected[album_position], (float(score), track)],
-                                     key=lambda pair: (-pair[0], pair[1]['recording_id']))
-                    artists, kept = Counter(), []
-                    for candidate in ordered:
-                        artist = (candidate[1].get('artist') or '').casefold()
-                        if artists[artist] < cap:
-                            artists[artist] += 1
-                            kept.append(candidate)
-                        if len(kept) == home_cards.PROTO_SIZE:
-                            break
-                    selected[album_position] = kept
-        after = page['after']
-        if page['exhausted']:
-            break
-    return [[track for _score, track in rows] for rows in selected]
+    from yt_playlist.rec.artist_variety import select
+    from yt_playlist.repos.companion_ordering import CompanionOrderingRepo
+    with CompanionOrderingRepo.open() as ordering:
+        after = 0
+        while True:
+            check_cancellable_work()
+            page = store.recommendations.recording_metadata_page(
+                'home', generation=head['id'], mode_key='all', after=after, limit=128)
+            tracks = [track for track in page['tracks'] if track['key'] in index]
+            if tracks:
+                ordering.add_tracks(tracks)
+                vectors = matrix[[index[track['key']] for track in tracks]]
+                vectors = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
+                scores = features @ vectors.T
+                ordering.add_scores((position, track['recording_id'], float(score))
+                    for position, row in enumerate(scores) for track, score in zip(tracks, row)
+                    if track['key'] not in own[position])
+            after = page['after']
+            if page['exhausted']:
+                break
+        return [select(ordering.ranked(position), cap, home_cards.PROTO_SIZE, limit=home_cards.PROTO_SIZE)
+                for position in range(len(albums))]
 
 
 def eligible(store, items, now):

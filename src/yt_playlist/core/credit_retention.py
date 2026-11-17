@@ -26,10 +26,6 @@ def statements():
            "next_scan_at REAL NOT NULL DEFAULT 0)")
 
 
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='artist_credit_replays'").fetchone() is not None
-
-
 def install(conn, context=None):
     for sql in statements():
         conn.execute(sql)
@@ -94,8 +90,6 @@ def step(conn, now, *, activate=False):
     """Inspect at most BATCH IDs; commit cursor, receipts and retirement together."""
     if not conn.in_transaction:
         raise RuntimeError('Artist capture retirement requires an outer transaction')
-    if not available(conn):
-        return False
     if type(now) not in (int, float) or not -1.7976931348623157e308 <= now <= 1.7976931348623157e308:
         raise ValueError('Artist credit capture time must be finite')
     state = conn.execute('SELECT enabled,cursor,next_scan_at FROM artist_credit_retention WHERE id=1').fetchone()

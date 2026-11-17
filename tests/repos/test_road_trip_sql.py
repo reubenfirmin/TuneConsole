@@ -13,12 +13,12 @@ def recipe(store):
 
 def test_file_write_is_outside_the_sql_transaction_and_repository_calls_never_read_files(store, monkeypatch):
     identity = recipe(store)
-    publish = store.road_trip.recovery.publish
-    def outside_sql(*args):
+    publish = store.road_trip.recovery.publish_reserved
+    def outside_sql(*args, **kwargs):
         assert not store.conn.in_transaction
         assert not store._lock.held_by_current_thread
-        return publish(*args)
-    monkeypatch.setattr(store.road_trip.recovery, 'publish', outside_sql)
+        return publish(*args, **kwargs)
+    monkeypatch.setattr(store.road_trip.recovery, 'publish_reserved', outside_sql)
     store.road_trip.save_road_trip_draft(identity, {'revision':'first', 'picks':['exact-video']}, 2)
     def forbidden(*args, **kwargs):
         raise AssertionError('A repository called file access')
@@ -34,12 +34,12 @@ def test_worker_losing_its_revision_during_file_publication_cannot_overwrite_new
     store.road_trip.save_road_trip_draft(identity, {'revision':'held', 'picks':['old-video']}, 2)
     other = Store(store._db_path)
     other.init_schema()
-    publish = store.road_trip.recovery.publish
-    def concurrent_user_edit(*args):
-        reference = publish(*args)
+    publish = store.road_trip.recovery.publish_reserved
+    def concurrent_user_edit(*args, **kwargs):
+        reference = publish(*args, **kwargs)
         other.road_trip.save_road_trip_draft(identity, {'revision':'user-edit', 'picks':['user-video']}, 4)
         return reference
-    monkeypatch.setattr(store.road_trip.recovery, 'publish', concurrent_user_edit)
+    monkeypatch.setattr(store.road_trip.recovery, 'publish_reserved', concurrent_user_edit)
     try:
         assert not store.road_trip.replace_road_trip_draft(identity,
             {'revision':'worker', 'picks':['worker-video']}, 3, expected_revision='held')
@@ -52,9 +52,9 @@ def test_worker_losing_its_revision_during_file_publication_cannot_overwrite_new
 def test_failed_file_publication_preserves_the_existing_draft_and_selections(store, monkeypatch):
     identity = recipe(store)
     store.road_trip.save_road_trip_draft(identity, {'revision':'held', 'picks':['old-video']}, 2)
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise OSError('controlled file failure')
-    monkeypatch.setattr(store.road_trip.recovery, 'publish', fail)
+    monkeypatch.setattr(store.road_trip.recovery, 'publish_reserved', fail)
     with pytest.raises(OSError, match='controlled file failure'):
         store.road_trip.save_road_trip_draft(identity, {'revision':'next', 'picks':['new-video']}, 3)
     assert store.road_trip.get_road_trip_draft(identity)['revision'] == 'held'

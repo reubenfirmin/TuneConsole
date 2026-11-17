@@ -8,11 +8,19 @@ development collection/inspection and model training/evaluation paths.
 """
 
 TAXONOMY_VERSION = 'audio-session-targets-1'
-PREDICTION_VERSION = 'measured-vibes-1/subgenres-only-1'
+PREDICTION_VERSION = 'measured-vibes-2/specialists-1/subgenres-only-1'
 
-# Internal measurement channels, not additional user-facing vibes. Preserve
-# comparable shared scores and their propagation lineage for radio intensity
-# when independent specialists supply selected-vibe recommendation ranking.
-INTENSITY_RELEASE = 'shared_release'
-INTENSITY_ENERGIZE = 'shared_energize'
+# Internal measurement channels, not additional user-facing vibes. New identities
+# prevent retained shared-classifier fits from entering the specialist ensemble.
+# Historical measurements and their immutable lineage remain readable.
+INTENSITY_RELEASE = 'specialist_force'
+INTENSITY_ENERGIZE = 'specialist_activation'
 INTENSITY_CHANNELS = {INTENSITY_RELEASE: 'release', INTENSITY_ENERGIZE: 'energize'}
+
+
+def serving_prefix():
+    return 'recording-vibes-1/' + PREDICTION_VERSION + '/'
+
+
+def serving_compatible(version):
+    return isinstance(version, str) and version.startswith(serving_prefix())

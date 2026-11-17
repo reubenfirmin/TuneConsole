@@ -1,6 +1,7 @@
 import numpy as np
-from yt_playlist.rec import rec_params, mode_surfaces as ms
+from yt_playlist.rec import mode_selection, rec_params, mode_surfaces as ms
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.repository_mock_support import no_database
 
 
 def _seed_one_mode(store):
@@ -39,10 +40,11 @@ def test_cosine_arm_keeps_existing_order(store):
     assert [t["key"] for t in wh["tracks"]] == ["w0", "w1", "w2", "w3", "w4", "w5"]
 
 
-def test_ranker_deterministic_per_epoch_mode(store):
-    # _ranker_for is a pure function of (epoch, mode, share); same inputs -> same arm.
-    assert ms._ranker_for(3, 7, 1.0) == ms._ranker_for(3, 7, 1.0) == "ppr"
-    assert ms._ranker_for(3, 7, 0.0) == "cosine"
+def test_ranker_deterministic_per_epoch_mode(no_database):
+    assert mode_selection.ranker_for(3, 7, 1.0) == "ppr"
+    assert mode_selection.ranker_for(3, 7, 0.0) == "cosine"
+    # A mixed share exercises determinism without fixing the sampled arm.
+    assert mode_selection.ranker_for(3, 7, 0.5) == mode_selection.ranker_for(3, 7, 0.5)
 
 
 def test_ppr_arm_falls_back_to_cosine_when_ppr_pos_empty(store):

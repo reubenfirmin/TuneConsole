@@ -21,7 +21,7 @@ def test_pending_polling_is_bounded_and_ready_offers_stop_it(
         pytest.fail('Polling policy opened a database')
 
     monkeypatch.setattr(sqlite3, 'connect', forbidden)
-    context = SimpleNamespace(store=SimpleNamespace(_read_only=True), templates=None,
+    context = SimpleNamespace(store=SimpleNamespace(_read_only=True, rec_ledger=SimpleNamespace()), templates=None,
                               logger=logging.getLogger(__name__), rec_worker=None, vibe_requests=None)
     view = HomeViews(context)
     result = CardsResult(protos=[{'label': 'Usable offer'}], slots=[], genre_notice=None,

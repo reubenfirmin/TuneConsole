@@ -3,7 +3,9 @@ import json
 import re
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.integrations.deepseek import DeepSeekIAO, DescriptionUnavailable, ENDPOINT
+from yt_playlist.controllers.access_configuration import AccessConfiguration, resolve
+from yt_playlist.controllers.description_access import DescriptionAccess
+from yt_playlist.integrations.deepseek import DeepSeekIAO, DescriptionUnavailable, ENDPOINT, RETRY_DELAYS, credential_id, description_response
 
 MODEL = 'deepseek-flash'
 PROMPT_VERSION = 1
@@ -25,15 +27,37 @@ _SYSTEM = (
 
 
 def api_key(store=None, config_path=None):
-    return _iao.api_key(store, config_path)
+    return resolve(env_name='DEEPSEEK_API_KEY', setting_name='deepseek_api_key', store=store, config_path=config_path)
 
 
 def settings(store, now, *, paid=None):
-    return _iao.settings(store, now, paid=paid)
+    return _access(store, paid=paid).settings(now)
 
 
-def generate(store, identity, project, now, *, now_fn=None, policy=None):
-    return _iao.complete(store, identity, project, now, now_fn=now_fn, policy=policy)
+def availability(store, key, now, *, paid=None):
+    return _access(store, paid=paid).availability(key, now)
+
+
+def _access(store, *, paid=None):
+    return DescriptionAccess(store.settings, store.album_descriptions, store.rec_proposals,
+        AccessConfiguration(store.settings), _iao,
+        paid=getattr(store, '_paid_descriptions', False) if paid is None else paid,
+        key_source=lambda: api_key(store))
+
+
+def remember_failure(digest, record):
+    return _iao.remember(digest, record)
+
+
+def attempt(key, payload, *, now_fn, reauthorize):
+    """One admitted bounded attempt; see DeepSeekIAO.attempt.
+
+    The Description controller (rec/album_descriptions.py) owns consent/budget
+    policy, durable reservation and completion, and calls this for the one
+    paced, re-admitted dispatch -- this provider forwards credential/pacing/
+    transport concerns to the IAO without itself holding any admission state.
+    """
+    return _iao.attempt(key, payload, now_fn=now_fn, reauthorize=reauthorize)
 
 
 def _parameters():
@@ -62,24 +86,16 @@ def _usage(data):
             if type(value := raw.get(key)) is int and value >= 0}
 
 
-def describe(album, send):
-    """Build public album input and validate generated prose through an IAO admission."""
-    check_cancellable_work()
-    payload = {**_parameters(),
+def description_request(album):
+    """Construct bounded public request data without dispatching it."""
+    return {**_parameters(),
                'messages': [{'role': 'system', 'content': _SYSTEM},
                             {'role': 'user', 'content': json.dumps(album_fields(album), ensure_ascii=False)}]}
-    data = send(payload)
+
+
+def project_description(album, result, usage):
+    """Select prose, abstention and provenance using an acquired response document."""
     try:
-        if not isinstance(data, dict):
-            raise ValueError
-        choice = data['choices'][0]
-        if (not isinstance(choice, dict) or choice.get('finish_reason') != 'stop'
-                or data.get('model') != MODEL):
-            raise ValueError
-        message = choice['message']
-        if not isinstance(message, dict):
-            raise ValueError
-        result = json.loads(message['content'])
         if not isinstance(result, dict):
             raise ValueError
         confidence = result['confidence']
@@ -96,7 +112,14 @@ def describe(album, send):
               or re.search(r'https?://|www\.|<[^>]+>|\*\*|\b(?:pitchfork|discogs|wikipedia)\b', text, re.I)):
             raise ValueError
         return {'description': text, 'confidence': confidence, 'uncertainty': uncertainty[:1000],
-                'model': MODEL, 'prompt_version': PROMPT_VERSION, 'usage': _usage(data),
+                'model': MODEL, 'prompt_version': PROMPT_VERSION, 'usage': dict(usage),
                 'album': album_fields(album)}
     except (KeyError, IndexError, TypeError, ValueError):
         raise DescriptionUnavailable('invalid_response') from None
+
+
+def describe(album, send):
+    """Compatibility composition; application callers sequence acquisition explicitly."""
+    check_cancellable_work()
+    document, usage = description_response(send(description_request(album)), MODEL)
+    return project_description(album, document, usage)

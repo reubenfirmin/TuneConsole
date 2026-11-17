@@ -9,6 +9,8 @@ import pytest
 @pytest.mark.parametrize("scenario", [
     "native_then_page", "strict_future", "retries_and_drift", "endpoint_guard",
     "other_playlist", "missing_sidebar", "refresh_errors", "reinjection",
+    "counterpart_refresh", "counterpart_confirmed", "counterpart_trimmed", "counterpart_repeat",
+    "unrelated_selected", "counterpart_other_playlist", "counterpart_wrong_index", "counterpart_stale_endpoint",
 ])
 def test_radio_native_refresh_and_playlist_view(scenario):
     node = shutil.which("node")
@@ -24,7 +26,22 @@ let now = 10000, current = 'v2', playlist = 'PLSESSION', nativePlaylist = playli
 let nativeIds = ['v1', 'v2', 'old-next'], available = true;
 let pageIds = ['v1', 'v2', 'old-next'], sidebarAvailable = true;
 let nativeFails = false, viewFails = false, clicks = 0, toggleClicks = 0;
-const expected = ['v1', 'v2', 'v3', 'v4'];
+let expected = ['v1', 'v2', 'v3', 'v4'];
+let selected = null, counterpart = null, savedIndex;
+if (scenario.startsWith('counterpart_') || scenario === 'unrelated_selected') {
+  current = 'native-v2';
+  counterpart = scenario === 'unrelated_selected' ? 'unrelated' : current;
+  selected = 1;
+  savedIndex = scenario === 'counterpart_wrong_index' ? 0 : 1;
+  if (scenario === 'counterpart_confirmed') nativeIds = expected;
+  if (scenario === 'counterpart_trimmed') { nativeIds = ['v2', 'v3', 'v4']; selected = 0; }
+  if (scenario === 'counterpart_repeat') {
+    expected = ['v1', 'v2', 'v3', 'v2', 'v4'];
+    nativeIds = expected;
+    selected = savedIndex = 3;
+  }
+  if (scenario === 'counterpart_other_playlist') nativePlaylist = 'OTHER';
+}
 const commands = [], listeners = [];
 const video = {paused: false, currentTime: 30, duration: 300};
 const endpoint = {clickTrackingParams: 'tracking', watchEndpoint: {
@@ -32,6 +49,7 @@ const endpoint = {clickTrackingParams: 'tracking', watchEndpoint: {
   playlistSetVideoId: 'set-v2', playerParams: 'music-config',
   watchEndpointMusicSupportedConfigs: {watchEndpointMusicConfig: {musicVideoType: 'ATV'}},
 }};
+if (scenario === 'counterpart_stale_endpoint') endpoint.watchEndpoint.videoId = 'v2';
 const forbidden = () => { throw Error('unexpected playback mutation'); };
 const api = {
   getVideoData: () => ({video_id: current}), getPlaylistId: () => playlist,
@@ -51,9 +69,14 @@ const app = {polymerController: {
 const queue = {queue: {store: {store: {getState: () => ({queue: available ? {
   items: nativeIds.map((id, i) => {
     const item = {playlistPanelVideoRenderer: {videoId: id,
-      navigationEndpoint: {watchEndpoint: {playlistId: nativePlaylist}}}};
+      navigationEndpoint: {watchEndpoint: {playlistId: nativePlaylist,
+        ...(i === selected ? {index: savedIndex} : {})}}}};
+    if (i === selected) return {playlistPanelVideoWrapperRenderer: {
+      primaryRenderer: item, counterpart: [{counterpartRenderer: {
+        playlistPanelVideoRenderer: {videoId: counterpart}}}],
+    }};
     return i % 2 ? {playlistPanelVideoWrapperRenderer: {primaryRenderer: item}} : item;
-  }), autoplay: false, selectedItemIndex: nativeIds.indexOf(current),
+  }), autoplay: false, selectedItemIndex: selected ?? nativeIds.indexOf(current),
 } : null})}}}};
 const toggle = {
   id: 'automix', localName: 'tp-yt-paper-toggle-button', checked: true,
@@ -93,12 +116,27 @@ vm.runInContext(code, context);
 const observer = window.__tcRadioSession;
 const update = (refresh = true, ids = expected) => observer.update({playlist: 'PLSESSION', videoIds: ids, refresh});
 const assertPlayback = () => {
-  assert.equal(current, 'v2');
+  assert.equal(current, counterpart ? 'native-v2' : 'v2');
   assert.equal(video.currentTime, 30);
   assert.equal(video.paused, false);
 };
 
-if (scenario === 'native_then_page') {
+if (scenario === 'counterpart_refresh') {
+  assert.equal(update().refresh, 'requested');
+  assert.equal(commands.length, 1);
+  const watch = commands[0].queueUpdateCommand.fetchContentsCommand.watchEndpoint;
+  assert.equal(watch.videoId, current, 'refresh retains the actual native upload');
+  assert(!('index' in watch) && !('startTimeSeconds' in watch));
+  nativeIds = expected;
+  assert.equal(update().playback_synced, true);
+  assert.equal(commands.length, 1);
+} else if (['counterpart_confirmed', 'counterpart_trimmed', 'counterpart_repeat'].includes(scenario)) {
+  assert.equal(update().playback_synced, true);
+  assert.equal(commands.length, 0);
+} else if (counterpart) {
+  assert.equal(update().playback_synced, false);
+  assert.equal(commands.length, 0, 'unproven, stale or mismatched slots cannot authorize a refresh');
+} else if (scenario === 'native_then_page') {
   // A fresh browse page and the embedded API must not hide a stale native future.
   pageIds = expected;
   let result = update();

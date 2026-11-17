@@ -71,8 +71,8 @@ def refresh_cleanup(store, now=None, *, summary=None) -> dict | None:
     reads the cached number. The home page never pays for the scan."""
     if summary is None:
         with store.read_snapshot() as snapshot:
-            payload = analysis.cleanup_summary(snapshot.store).as_payload()
-            if not snapshot.publish(lambda: store.rec_proposals.put_proposals(CLEANUP_SURFACE, payload, now)):
+            payload = analysis.cleanup_summary(analysis.prepare_cleanup(snapshot.store)).as_payload()
+            if not snapshot.publish_ordered(lambda: store.rec_proposals.put_proposals(CLEANUP_SURFACE, payload, now)):
                 return None
         return payload
     payload = summary.as_payload()
@@ -82,7 +82,7 @@ def refresh_cleanup(store, now=None, *, summary=None) -> dict | None:
 
 def cleanup_page(store, now):
     """Analyze cleanup and keep the home card's cached summary honest in one call."""
-    result = analysis.analyze_cleanup(store)
+    result = analysis.analyze_cleanup(analysis.prepare_cleanup(store))
     if not getattr(store, 'activity_paused', False):
         refresh_cleanup(store, now, summary=result.summary())
     return result

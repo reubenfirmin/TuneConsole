@@ -113,7 +113,7 @@ def test_ordering_facets_preserve_independent_genre_and_year_support(query, meta
 def test_catalog_queries_receive_resolved_duration(query):
     query.eligibility.maximum_duration.return_value = 600
     query.repository.library_songs.return_value = [{'key': 'song'}]
-    assert query.library_songs() == [{'key': 'song'}]
+    assert query.library_songs() == [{'key': 'song', 'artist_ids': []}]
     query.repository.library_songs.assert_called_once_with(maximum_duration=600)
 
 

@@ -3,10 +3,11 @@ from contextlib import ExitStack
 import json
 
 from yt_playlist.core import metadata_native, metadata_evidence, metadata_runtime, profile_files, vibe_versions
-from yt_playlist.core.preparation import metadata_destinations
 from yt_playlist.core.db_revisions import column_group_reads, keyed_reads
 from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core.metadata_file_contract import owner_key
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.repos import profile_file_writes
 
 MAX_MASKED_SOURCE_LINKS = 4096
 
@@ -47,18 +48,11 @@ class MusicalProfilesRepo(Repo):
         # A format cutover changes which immutable source references are read.
         dependencies.add(('metadata_runtime_state', 'group:format'))
         if metadata_runtime.active(self.conn):
-            row = self.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
-            return dependencies, ('runtime', row[0] if row else None)
-        if not metadata_native.available(self.conn):
-            dependencies.update((table, 'key:1') for table in (
-                metadata_destinations.publication.table('head'), metadata_destinations.table('head')))
-            identity = metadata_destinations.selected(self.conn)
-            references = () if identity is None else metadata_destinations.source_references(self.conn,key,identity)
-            if identity is not None:
-                dependencies.add((metadata_destinations.table('native'), 'key:' + key))
-                dependencies.update((metadata_destinations.table('deliveries'), 'key:' + str(row[1]))
-                                    for row in references)
-            return dependencies, (identity, references)
+            reference = metadata_native.source_reference(self.conn, key)
+            dependencies.add(('metadata_file_references', 'key:' + owner_key('native', (key,))))
+            if reference.get('file'):
+                dependencies.add(('metadata_file_writes', 'key:' + str(reference['file'][0])))
+            return dependencies, ('runtime', reference['revision'], reference.get('file'))
         dependencies.add(('musical_source_observations', 'key:' + key))
         references = self.conn.execute(
             'SELECT o.id,o.delivery_id FROM musical_source_observations s '
@@ -83,8 +77,8 @@ class MusicalProfilesRepo(Repo):
                 return None
             if typed and observation_ids is not None:
                 if metadata_runtime.active(self.conn):
-                    current = ('runtime', self.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?',
-                                                            (key,)).fetchone()[0])
+                    reference = metadata_native.source_reference(self.conn, key, store=self._store)
+                    current = ('runtime', reference['revision'], reference.get('file'))
                 else:
                     current = tuple(row[0] for row in self.conn.execute(
                         'SELECT observation_id FROM musical_source_observations WHERE source_key=? ORDER BY field', (key,)))
@@ -92,29 +86,15 @@ class MusicalProfilesRepo(Repo):
                 # pinning. Retry with their new scope rather than reading outside it.
                 if current != observation_ids:
                     return None
-            identity = None if typed else metadata_destinations.selected(self.conn,store=self._store)
-            prepared = identity is not None
-            if not typed and observation_ids is not None:
-                # Selection can change after dependency selection, including
-                # the first selection of a previously unprepared source.
-                if identity != observation_ids[0]:
-                    return None
-                references = (metadata_destinations.source_references(self.conn,key,identity,store=self._store)
-                              if prepared else ())
-                if references != observation_ids[1]:
-                    return None
-            if not typed and not prepared:
+            if not typed:
                 size = self.conn.execute('SELECT length(CAST(payload AS BLOB)) FROM rec_musical_sources WHERE source_key=?',
                                          (key,)).fetchone()[0]
                 if size > max_bytes:
                     raise WorkBudgetExceeded('Source profile input exceeds byte budget')
-            source = self.conn.execute('SELECT '+('provider,scope,entity_id' if prepared else '*')+
+            source = self.conn.execute('SELECT *'+
                 ' FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
             if typed:
                 reference = metadata_native.source_reference(self.conn, key, max_bytes, store=self._store)
-            elif prepared:
-                reference = {'prepared': metadata_destinations.native_references(
-                    self.conn, identity=identity, source=key, max_bytes=max_bytes, store=self._store)}
             else:
                 reference = {'raw': source['payload']}
             # Guard another publisher of the same source, including a missing cache row.
@@ -134,6 +114,7 @@ class MusicalProfilesRepo(Repo):
             self.conn.execute('INSERT INTO rec_musical_source_profiles VALUES (?,?,?,?,?) '
                 'ON CONFLICT(source_key) DO UPDATE SET payload=excluded.payload,version=excluded.version,'
                 'digest=excluded.digest,prepared_at=excluded.prepared_at', (key, payload, version, digest, now))
+            profile_file_writes.complete(self.conn, 'source', references)
             profile_files.install_references(self.conn, 'source', references)
             for rid in ids:
                 self.conn.execute('INSERT INTO rec_content_pending(identity_key) '
@@ -230,6 +211,7 @@ class MusicalProfilesRepo(Repo):
                     if cursor.rowcount:
                         published_keys.add(key)
                 changed = changed or cursor.rowcount > 0
+            profile_file_writes.complete(self.conn, 'recording', references)
             profile_files.install_references(self.conn, 'recording',
                 [row for row in references if row[0] in published_keys])
         return changed
@@ -244,6 +226,30 @@ class MusicalProfilesRepo(Repo):
         if not profile_files.available(self.conn):
             return None
         return {key: profile_files._identity(self.conn, kind, key) for key in keys}
+
+    @synchronized
+    def reserve_files(self, records):
+        if not records:
+            return []
+        with self.conn.atomic():
+            return profile_file_writes.reserve(self.conn, records)
+
+    @synchronized
+    def file_required(self, kind, reference):
+        if kind not in profile_files.KINDS:
+            raise ValueError('Invalid profile kind')
+        if not profile_files.available(self.conn):
+            return False
+        if type(reference) is int:
+            if not profile_file_writes.native(self.conn):
+                return False
+            clause = 'file_id=?'
+        else:
+            clause = 'publication=?'
+            if profile_file_writes.native(self.conn):
+                clause += ' AND file_id IS NULL'
+        return self.conn.execute(f'SELECT 1 FROM {kind}_profile_files WHERE {clause} LIMIT 1',
+                                 (reference,)).fetchone() is not None
 
     @snapshot_read
     def readiness_rows(self, keys):

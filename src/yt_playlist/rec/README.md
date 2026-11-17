@@ -74,24 +74,27 @@ predictions from distinct measured recordings with matching canonical credits an
 specific subgenres. Broad genres do not form prediction cohorts. Predictions and
 repeated uploads never add measurement votes; missing evidence uses the heuristic.
 
-The inactive joint candidate lives in `vibe_joint_model` and
-`vibe_joint_calibrated`; `vibe_joint_preparation` and `progressive` own bounded
-background preparation. Product code never imports experiments. Its qualification
-mapping remains empty until the recorded statistical and lifecycle gates pass.
+The joint model lives in `vibe_joint_model` and `vibe_joint_calibrated`;
+`vibe_joint_state` admits the reviewed configuration, and the preparation
+controllers and `progressive` own bounded background work. Product code never
+imports experiments.
 Shared generation storage, uncertainty and compatibility are specified by the
 [FAO owner contract](../../../experiments/retained_copy/FAO-OWNERS.md#shared-vibe-model-candidate-819).
 
-The shared Emotify model supplies classification. Six independent specialists
-supply within-vibe suitability. Their scores are not comparable probabilities
-and never enter a mixed six-way maximum. Radio intensity retains the shared
-Energize/Release channels. Human popup labels are development targets, excluded
+Six independent specialists supply within-vibe suitability. Their scores are not
+comparable probabilities and never produce an overall six-way winner. Radio
+intensity keeps the stronger activation/force policy, using the Energize and
+Release specialists and retaining both components' support and provenance.
+Human popup labels are development targets, excluded
 from runtime preferences, inference and propagation.
 
 [Audio experiment history](../../../experiments/audio_lab/README.md)
 owns recipes, training inputs, adoption decisions and rejected
-alternatives. Optional-model failure retains that vibe's shared score and other
-working specialists. Model identity changes queue rescoring without audio
-extraction or fitting.
+alternatives. An unavailable specialist leaves its measurement absent; other
+specialists continue independently. Provider evidence, qualified pooling and
+supported metadata remain available. Model identity changes queue bounded
+rescoring without audio extraction. Retired shared-model artifacts and code
+live only in `experiments/audio_lab_tools/legacy/` for historical research.
 
 | Relation | Purpose |
 | --- | --- |
@@ -106,18 +109,41 @@ current sample links without rewriting historical prediction ownership.
 ### Audio model settings
 
 All six specialists default active on compatible captures. Optional-model failure
-retains that vibe's shared score and the other specialists. Set
-`YT_PLAYLIST_AUDIO_VIBE_<NAME>_MODE=off` to restore its shared score;
+leaves that measurement absent and preserves the other specialists. Set
+`YT_PLAYLIST_AUDIO_VIBE_<NAME>_MODE=off` to disable its measurements;
 `YT_PLAYLIST_AUDIO_VIBE_<NAME>_MODEL` overrides the artifact path (empty disables
-it). Use `FOCUS` for the `concentrate` vibe. `YT_PLAYLIST_AUDIO_VIBE_MODEL` selects
-the shared model; disabling it also disables specialists. Environment values
+it). Use `FOCUS` for the `concentrate` vibe. Environment values
 override the checkout's ignored `.env.local`.
 
 Common bounded artifact reads, validation and prediction helpers belong to
-`audio_vibe_runtime`. Each specialist owns its target mapping, weights,
-aggregation and artifact contract. Production calls `apply()`; research routing
-lives in `experiments/audio_lab_tools/cruise/cruise_specialist.py`. Legacy correction
-formats `audio-vibe-corrections-1/2/3` remain supported.
+`audio_vibe_runtime`. Each specialist owns its native targets, within-excerpt
+source mapping and artifact contract. Controllers capture models once, then run
+detached inference independently. Retired correction formats remain available
+only in the historical research tools.
+
+`audio_vibe_arc` owns all temporal heuristics and their version. Production runs
+the shared classifier and each eligible specialist separately on every excerpt,
+then applies this policy in actual song-position order. Independent model sources
+may be combined within one excerpt. Their native evidence and excerpt scores
+remain separate until temporal scoring; no song-level mean embedding or native
+attribute mean supplies this production path. The shared classification is
+normalized after temporal scoring; independent specialist suitability is not.
+The multi-excerpt `score()` helpers retain the historical research replay API;
+production invokes those helpers with exactly one excerpt at a time.
+
+The initial policy reuses the provisional heuristic: Relax, Focus and Cruise
+retain the least suitable observed excerpt; Release retains its observed peak;
+Energize and Uplift use the greater of the upper median and final fit, minus a
+quarter of any first-to-last decline. Shape classification uses a .1 change.
+These are adjustable product rules, not validated musical truth or probabilities.
+They describe sampled passages and never interpolate the unheard gaps. Changing
+the policy version queues existing bounded recording preparation and downstream
+prediction refresh while compatible installed scores remain readable.
+
+Capture timing remains a heuristic at 30 seconds, halfway and two-thirds, using
+ten-second excerpts. This does not establish a preferred 20/30-second cutoff or
+an optimal schedule. The [extension contract](../../../extension/README.md#audio-collection-and-preview)
+defines bounded lateness, partial coverage and interruption handling.
 
 ## Road Trip and setup
 

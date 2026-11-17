@@ -1,0 +1,12 @@
+{% macro artist_credit(subject, css='alink', album=false, choice=false) -%}
+  {%- set links = artist_links(subject, album) -%}
+  <span data-artist-credit>
+  {%- if links -%}
+    {%- for link in links -%}
+      {% if not loop.first %}, {% endif %}{% if link.href %}<a class="{{ css }}" href="{{ link.href }}"{% if choice %} data-choice-action="open"{% endif %}>{{ link.name }}</a>{% else %}<span class="{{ css }}">{{ link.name }}</span>{% endif %}
+    {%- endfor -%}
+  {%- else -%}
+    <span class="{{ css }}">{{ subject.artist or '' }}</span>
+  {%- endif -%}
+  </span>
+{%- endmacro %}

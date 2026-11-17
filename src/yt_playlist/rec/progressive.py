@@ -106,10 +106,14 @@ def _fit_memory(corpus, inputs, discoveries, model, genres, k, previous_bytes):
 def maintenance_view(store):
     """Cheap persisted status; viewing the page never queues or performs fitting."""
     state = _state(store, FIT_STATE)
+    return maintenance_values(state, bool(store.settings.get_setting('rec_content_model')))
+
+
+def maintenance_values(state, has_model):
     blocked = (state.get('reason') in {'matrix-memory-budget', 'corpus-memory-budget'}
                or (state.get('reason') == 'fit-time-budget' and state.get('attempts', 0) >= 3))
     return {**state, 'blocked': blocked,
-            'has_model': bool(store.settings.get_setting('rec_content_model'))}
+            'has_model': has_model}
 
 
 def _delta(reader, rows, raw_model):
@@ -118,12 +122,17 @@ def _delta(reader, rows, raw_model):
         return {}
     if not reader.rec_model.content_generation(keys=[])['coherent']:
         return {}
-    model = json.loads(raw_model)
     keys = [r[0] for r in rows]
     pools = reader.rec_model.content_vector_pools(keys)
     decoded = [(key,json.loads(raw)) for key,_revision,raw,_digest,_different in rows]
     axes = reader.genres.feature_axes(features['genre'] for _key,payload in decoded
                                       for features in payload.values() if isinstance(features,dict) and 'genre' in features)
+    return reader.rec_model.prepare_training_deltas(content_deltas(decoded, raw_model, pools, axes))
+
+
+def content_deltas(decoded, raw_model, pools, axes):
+    """Calculate additions/removals in a bounded page against its fixed encoder."""
+    model = json.loads(raw_model)
     changes = {}
     for scope, table in (('library', 'rec_content_vectors'), ('discovered', 'rec_discovered_content_vectors')):
         previous = pools[scope]
@@ -141,7 +150,88 @@ def _delta(reader, rows, raw_model):
         if upserts or removed:
             changes[table] = VectorChanges(tuple(upserts), tuple(removed),
                 model_version=embeddings.version(table, {'rec_content_model': raw_model}))
-    return reader.rec_model.prepare_training_deltas(changes)
+    return changes
+
+
+def basis_reason(previous, *, changed, has_model, has_evidence, coherent, genre_revision, modes, now):
+    if not has_model:
+        return 'initial-evidence' if has_evidence else None
+    if not coherent:
+        return 'encoder-repair'
+    if genre_revision != genre_catalog.REVISION:
+        return 'genre-revision'
+    if previous and previous.get('modes') != modes:
+        return 'grouping-settings'
+    if not changed:
+        return None
+    if changed >= _threshold(previous.get('rows', 0), minimum=1):
+        return 'accumulated-evidence'
+    if now - previous.get('at', now) >= 900:
+        return 'aged-evidence'
+    return None
+
+
+def full_due_values(previous, config, fitted, artist_fitted, changed, evidence_changed, now):
+    if not previous or config != previous.get('config') or not fitted or not artist_fitted:
+        return True
+    return bool(evidence_changed >= 4 or changed >= _threshold(previous['rows'])
+                or (now is not None and (changed or evidence_changed)
+                    and now - (previous['at'] if previous.get('at') is not None else now) >= 900))
+
+
+def corpus_inputs(corpus):
+    content, audio, keys, discoveries = {}, {}, [], []
+    for key, payload, _digest in corpus:
+        check_stopping()
+        features = payload['library']
+        if features is not None:
+            keys.append(key)
+            if features['genre'] or features['year']:
+                content[key] = (features['genre'], features['year'])
+            if features['audio']:
+                audio[key] = features['audio']
+        if payload['discovered'] is not None:
+            discoveries.append({'identity_key': key, **payload['discovered']})
+    return content_model.ContentInputs(keys, content, audio), discoveries
+
+
+def encode_basis(inputs, discoveries, axes, generation):
+    fingerprint = content_model.input_fingerprint(inputs, genre_axes=axes)
+    keys, matrix, model = content_model.build_library_content(inputs, genre_axes=axes)
+    return {'model': json.dumps(model), 'generation': generation,
+            'revision': genre_catalog.REVISION, 'inputs': fingerprint,
+            'library': [(key, matrix[i].tobytes()) for i, key in enumerate(keys)],
+            'discovered': content_model.encode_discovered(discoveries, model, genre_axes=axes)}, keys, matrix
+
+
+class SourceTurns:
+    """Fair bounded source/recording admissions, independent of persistence."""
+    def __init__(self):
+        self.source_turn, self.vibe_turn = True, False
+
+    def capture(self, commands, now):
+        if commands.capturing():
+            return commands.advance()
+        commands.repair(now)
+        if commands.joint_active():
+            return commands.vibe()
+        if commands.joint_scoring():
+            commands.fanout()
+            if pending := commands.pending():
+                return commands.start(pending, now)
+        if self.source_turn:
+            self.source_turn = False
+            self.vibe_turn = not self.vibe_turn
+            if not self.vibe_turn and commands.vibe():
+                return True
+            if commands.musical(now):
+                return True
+            if commands.musical_pending():
+                return False
+        self.source_turn = True
+        if pending := commands.pending():
+            return commands.start(pending, now)
+        return commands.vibe()
 
 
 class Preparation:
@@ -152,8 +242,7 @@ class Preparation:
         self.next_maintenance_at = 0
         self._repair_needed = False
         self._repair_after = None
-        self._source_turn = True
-        self._vibe_turn = False
+        self.turns = SourceTurns()
         self._capturing = None
         self._capturing_pending = None
         self._capturing_expires_at = 0
@@ -235,23 +324,13 @@ class Preparation:
     def _basis_reason(self, now):
         previous = _state(self.store, BASIS_STATE)
         changed = self.store.prepared_content.changed_since(previous.get('serial', 0))
-        if not self.store.settings.get_setting('rec_content_model'):
-            return 'initial-evidence' if self.store.prepared_content.changed_since(-1) else None
-        if not self.store.rec_model.content_generation(keys=[])['coherent']:
-            return 'encoder-repair'
-        if self.store.settings.get_setting('rec_content_genre_revision') != genre_catalog.REVISION:
-            return 'genre-revision'
-        if previous and previous.get('modes') != [rec_params.get_param(self.store, key) for key in MODE_PARAMS]:
-            return 'grouping-settings'
-        if not changed:
-            return None
-        # A small basis is cheap and must learn from a single useful recording.
-        # The larger collaborative fit retains its four-change floor.
-        if changed >= _threshold(previous.get('rows', 0), minimum=1):
-            return 'accumulated-evidence'
-        if now - previous.get('at', now) >= 900:
-            return 'aged-evidence'
-        return None
+        has_model = bool(self.store.settings.get_setting('rec_content_model'))
+        return basis_reason(previous, changed=changed, has_model=has_model,
+            has_evidence=bool(self.store.prepared_content.changed_since(-1)) if not has_model else False,
+            coherent=self.store.rec_model.content_generation(keys=[])['coherent'] if has_model else True,
+            genre_revision=self.store.settings.get_setting('rec_content_genre_revision') if has_model else None,
+            modes=[rec_params.get_param(self.store, key) for key in MODE_PARAMS] if previous and has_model else [],
+            now=now)
 
     def due(self, now):
         """Retry a deferred basis even after the durable input queue has drained."""
@@ -261,45 +340,8 @@ class Preparation:
                 or (now >= self.retry_fit_at and self._basis_reason(now) is not None))
 
     def capture(self, now):
-        if self._capturing is not None:
-            return self._advance_capture()
-        # The audit is periodic even without new catalog writes. A lost queue
-        # entry cannot permanently strand an otherwise healthy installation.
-        self.repair(now)
-        # A bounded model cycle uses one accepted-original revision. Do not
-        # interleave our own source captures between its per-channel fits.
-        # External changes still invalidate each guarded snapshot normally.
-        if vibe_joint_preparation.active(self.store):
-            return vibe_preparation.step(self.store, self.batch,
-                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
-        if vibe_joint_preparation.scoring(self.store):
-            # The cycle's refresh fan-out must reach a recording batch before
-            # our next source write invalidates its newly published models.
-            # Existing generation references acknowledge delivery across a
-            # restart; one useful batch returns us to ordinary fair source turns.
-            self.store.vibe_predictions.fanout(self.batch)
-            pending = self.store.prepared_content.pending(self.batch)
-            if pending:
-                return self._start_capture(pending, now)
-        # Alternate source fan-out and recording captures. Each admission gets
-        # one time budget, and continual source updates cannot starve recordings.
-        if self._source_turn:
-            self._source_turn = False
-            self._vibe_turn = not self._vibe_turn
-            if not self._vibe_turn and vibe_preparation.step(self.store, self.batch,
-                    seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step):
-                return True
-            if musical_preparation.source_step(self.store, now, batch=self.batch,
-                                               seconds=self.budget.capture_seconds):
-                return True
-            if self.store.musical_profiles.pending():
-                return False
-        self._source_turn = True
-        pending = self.store.prepared_content.pending(self.batch)
-        if not pending:
-            return vibe_preparation.step(self.store, self.batch,
-                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
-        return self._start_capture(pending, now)
+        from yt_playlist.library.preparation_composition import source_commands
+        return self.turns.capture(source_commands(self), now)
 
     def _start_capture(self, pending, now):
         self._capturing_pending = pending
@@ -355,7 +397,7 @@ class Preparation:
             reader = snapshot.store
             rows = reader.prepared_content.capture(pending)
             source_inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
-            musical = musical_preparation.recordings(reader, rows, inputs=source_inputs)
+            musical = musical_preparation.recordings(rows, inputs=source_inputs)
             musical, vibe_updates = yield from vibe_preparation.recording_steps(
                 reader, rows, musical, source_inputs=source_inputs)
             raw_model = reader.settings.get_setting('rec_content_model')
@@ -398,18 +440,8 @@ class Preparation:
                 if corpus is None:
                     self._defer(now, 'corpus-memory-budget', max_rows=self.budget.max_rows)
                     return False
-                content, audio, keys, discoveries = {}, {}, [], []
-                for key, payload, _digest in corpus:
-                    check_stopping()
-                    features = payload['library']
-                    if features is not None:
-                        keys.append(key)
-                        if features['genre'] or features['year']:
-                            content[key] = (features['genre'], features['year'])
-                        if features['audio']:
-                            audio[key] = features['audio']
-                    if payload['discovered'] is not None:
-                        discoveries.append({'identity_key': key, **payload['discovered']})
+                inputs, discoveries = corpus_inputs(corpus)
+                keys, content, audio = inputs.keys, inputs.content, inputs.audio
                 if not content and not audio:
                     self._defer(now, 'empty-corpus', outcome='waiting')
                     return False
@@ -417,7 +449,6 @@ class Preparation:
                                                   *(row.get('genre') for row in discoveries)])
                 model = content_model.build_content_model(content, audio,genre_axes=axes)
                 dim = model['ncat'] + len(model['cont'])
-                inputs = content_model.ContentInputs(keys, content, audio)
                 genres = {key: value[0] for key, value in content.items()}
                 estimated, phases = _fit_memory(corpus, inputs, discoveries, model, genres,
                     rec_params.get_param(reader, 'modes_k'), reader.prepared_content.vector_storage_bytes())
@@ -426,12 +457,7 @@ class Preparation:
                     self._defer(now, 'matrix-memory-budget', rows=rows, dimensions=dim,
                                 estimated_bytes=estimated, phase_bytes=phases)
                     return False
-                fingerprint = content_model.input_fingerprint(inputs,genre_axes=axes)
-                encoded_keys, matrix, model = content_model.build_library_content(inputs,genre_axes=axes)
-                generation = {'model': json.dumps(model), 'generation': uuid.uuid4().hex,
-                    'revision': genre_catalog.REVISION, 'inputs': fingerprint,
-                    'library': [(key, matrix[i].tobytes()) for i, key in enumerate(encoded_keys)],
-                    'discovered': content_model.encode_discovered(discoveries, model,genre_axes=axes)}
+                generation, encoded_keys, matrix = encode_basis(inputs, discoveries, axes, uuid.uuid4().hex)
                 # Clustering retains the encoded matrix and genre labels, not
                 # the decoded corpus or audio/input dictionaries.
                 del corpus, inputs, content, audio, keys, discoveries
@@ -475,16 +501,14 @@ class Preparation:
         """A metadata write alone cannot admit an expensive complete model rebuild."""
         previous = _state(self.store, FULL_STATE)
         config = _config(self.store)
-        if (not previous or config != previous.get('config')
-                or not self.store.settings.get_setting('rec_fit_inputs')
-                or not self.store.settings.get_setting('rec_artist_fit_inputs')):
+        fitted = self.store.settings.get_setting('rec_fit_inputs')
+        artist_fitted = self.store.settings.get_setting('rec_artist_fit_inputs')
+        if full_due_values(previous, config, fitted, artist_fitted, 0, 0, now):
             return True
         _content, evidence = self.store.prepared_content.counters()
         changed = self.store.prepared_content.changed_since(previous['content'])
         evidence_changed = evidence - previous['evidence']
-        due = (evidence_changed >= 4 or changed >= _threshold(previous['rows'])
-               or (now is not None and (changed or evidence_changed)
-                   and now - (previous['at'] if previous.get('at') is not None else now) >= 900))
+        due = full_due_values(previous, config, fitted, artist_fitted, changed, evidence_changed, now)
         if not due and (changed or evidence_changed):
             self._record('waiting', 'accumulating-evidence')
         return bool(due)

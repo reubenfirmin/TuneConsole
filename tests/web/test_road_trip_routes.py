@@ -25,6 +25,7 @@ from tests.store_fixture_support import (
 )
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
+from yt_playlist.library import playlist_generated, playlist_navigation
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing')
@@ -157,7 +158,7 @@ def test_draft_serving_and_generated_save_are_measured_without_counting_progress
     assert scorecard.recommendation_scorecard(store, 999, 1001)["impressions"] == before
     generated = Mock(return_value={'new_ytm': 'PL_MEASURED', 'pid': 301, 'added': len(rows)})
     keys = Mock(return_value=[row['identity_key'] for row in rows])
-    monkeypatch.setattr(road_trip_route.playlist_generated, 'create_generated_playlist', generated)
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', generated)
     monkeypatch.setattr(store.playlists, 'get_playlist_track_keys', keys)
     assert c.post(f"/road_trip/draft/{rid}/save").status_code == 200
     generated.assert_called_once()
@@ -190,8 +191,8 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store, monkeypa
                                 "share": .33, "target": None, "artists": seeds}
                                for genre in ("Alternative Rock", "Indie Rock", "Singer-Songwriter")]
     store.road_trip.save_road_trip_draft(rid, state, 1000)
-    generated = Mock(return_value={'new_ytm': 'PL_REPAIRED', 'pid': 302, 'added': 0})
-    monkeypatch.setattr(road_trip_route.playlist_generated, 'create_generated_playlist', generated)
+    generated = Mock(return_value={'new_ytm': 'PL_REPAIRED', 'pid': 302, 'added': len(seeds)})
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', generated)
 
     html = c.get("/road_trip").text
 
@@ -300,7 +301,7 @@ def test_build_returns_your_half_immediately_then_fills_in_theirs(store, monkeyp
     assert "Adding their tracks" in r.text               # and the page says so, and polls
     assert "/progress" in r.text
 
-    from yt_playlist.core.update_lifecycle import acquire_restart_locks
+    from yt_playlist.library.update_composition import acquire_shutdown as acquire_restart_locks
     ctx = c.app.state.ctx
     assert acquire_restart_locks(ctx)[0] is None
     assert "Road Trip build" in ctx.work.active
@@ -663,9 +664,9 @@ def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch
         calls.append((args, kwargs))
         navigated.set()
 
-    monkeypatch.setattr(road_trip_route.playlist_navigation, "navigate_when_ready", navigate)
-    generated = Mock(return_value={'new_ytm': 'PL_NAVIGATE', 'pid': 303, 'added': 0})
-    monkeypatch.setattr(road_trip_route.playlist_generated, 'create_generated_playlist', generated)
+    monkeypatch.setattr(playlist_navigation, "navigate_when_ready", navigate)
+    generated = Mock(return_value={'new_ytm': 'PL_NAVIGATE', 'pid': 303, 'added': 2})
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', generated)
     response = c.post(f"/road_trip/draft/{rid}/save")
     assert response.status_code == 200
     generated.assert_called_once()
@@ -685,7 +686,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(native_
     if failure == "youtube":
         def failed(*args, **kwargs):
             raise RuntimeError("private provider details")
-        monkeypatch.setattr(road_trip_route.playlist_generated, "create_generated_playlist", failed)
+        monkeypatch.setattr(playlist_generated, "create_generated_playlist", failed)
     elif failure == "account":
         c.app.state.ctx.client_provider = lambda: {}
     else:

@@ -36,13 +36,17 @@ document.addEventListener('htmx:afterSwap', (e) => {
     return document.querySelector('tr[data-vid="' + sel + '"]');
   }
   var metaDone = false, metadataTable = null, metadataRequest = null, playsRequest = null;
+  var metadataRevision = 0, readsActive = true;
   function cancelReads() {
+    readsActive = false;
+    metadataRevision++; metaDone = false;
     metadataRequest?.abort(); metadataRequest = null;
     playsRequest?.abort(); playsRequest = null;
   }
   window.addEventListener('app-page-leaving', cancelReads);
   window.addEventListener('pagehide', cancelReads);
   document.addEventListener('playlist-track-added', function () {
+    metadataRevision++;
     metaDone = false;
     refreshCells();
     highlightCurrent();
@@ -57,6 +61,19 @@ document.addEventListener('htmx:afterSwap', (e) => {
     rows.forEach(function (r) { r.classList.remove('now-playing'); });
     if (!np) return false;
     var matches = np.video_id ? Array.from(rows).filter(r => r.getAttribute('data-vid') === np.video_id) : [];
+    var item = np.queue_item;
+    if (item && item.playlist && item.playlist === np.playlist_ytm_id) {
+      // The native item identifies the planned upload even when its counterpart
+      // has a different version title. Queue positions can differ from this
+      // local snapshot, so use them only to distinguish matching uploads.
+      var planned = Array.from(rows).filter(r => r.dataset.playlist === item.playlist &&
+        r.dataset.vid === item.video_id);
+      if (Number.isInteger(item.index)) {
+        var slot = planned.filter(r => Number(r.dataset.playlistIndex) === item.index);
+        if (slot.length) planned = slot;
+      }
+      if (planned.length) matches = planned;
+    }
     // YouTube can play another upload of the requested song. Prefer its exact
     // video ID, then require both title and artist rather than losing the row.
     // Keep version qualifiers so a live recording cannot select a studio row.
@@ -72,16 +89,24 @@ document.addEventListener('htmx:afterSwap', (e) => {
   }
 
   function refreshCells() {
+    if (!readsActive) return;
     var plId = (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1];
     var table = document.querySelector('tr[data-vid]')?.closest('table');
     if (table !== metadataTable) {
       metadataRequest?.abort(); metadataRequest = null;
+      metadataRevision++;
       metadataTable = table; metaDone = false;
     }
     if (!plId || !table || metaDone || metadataRequest) return;
+    var revision = metadataRevision;
     var request = metadataRequest = new AbortController();
-    fetch('/playlist/' + plId + '/cells', {signal: request.signal}).then(function (r) { return r.json(); }).then(function (d) {
-      if (!table.isConnected || (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1] !== plId) return;
+    fetch('/playlist/' + plId + '/cells', {signal: request.signal}).then(function (r) {
+      if (!r.ok) throw new Error('Metadata read unavailable');
+      return r.json();
+    }).then(function (d) {
+      if (request.signal.aborted || metadataRequest !== request || revision !== metadataRevision ||
+          metadataTable !== table || !table.isConnected ||
+          (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1] !== plId) return;
       (d.cells || []).forEach(function (c) {
         var row = rowByVid(c.video_id); if (!row) return;
         if (c.genre) {
@@ -112,7 +137,11 @@ document.addEventListener('htmx:afterSwap', (e) => {
       }
       if (d.pending === 0) metaDone = true;   // everything resolved: stop refreshing cells
     }).catch(function () {}).finally(function () {
-      if (metadataRequest === request) metadataRequest = null;
+      if (metadataRequest !== request) return;
+      metadataRequest = null;
+      // Additions during this read share one follow-up for the current row set.
+      // A failed read of that same row set retries on the normal polling interval.
+      if (revision !== metadataRevision) refreshCells();
     });
   }
 
@@ -121,7 +150,7 @@ document.addEventListener('htmx:afterSwap', (e) => {
     highlight(data?.connected ? data.now_playing : null);
   }
   async function refreshPlays() {
-    if (playsRequest || document.hidden) return;
+    if (!readsActive || playsRequest || document.hidden) return;
     var rows = [...document.querySelectorAll('tr[data-vid]:has(.track-plays)')];
     var videos = [...new Set(rows.map(row => row.dataset.vid).filter(Boolean))];
     if (!videos.length) return;
@@ -133,6 +162,7 @@ document.addEventListener('htmx:afterSwap', (e) => {
           {signal: request.signal});
         if (!response.ok) continue;
         var counts = (await response.json()).plays || {};
+        request.signal.throwIfAborted();
         rows.forEach(function (row) {
           var count = counts[row.dataset.vid];
           if (!row.isConnected || !Number.isInteger(count) || count < 0) return;
@@ -146,7 +176,13 @@ document.addEventListener('htmx:afterSwap', (e) => {
   window.addEventListener('bridge-status', function (event) {
     highlight(event.detail?.connected ? event.detail.now_playing : null);
   });
-  document.addEventListener('htmx:afterSwap', function () { highlightCurrent(); refreshPlays(); });
+  function resumeReads() {
+    readsActive = true;
+    highlightCurrent(); refreshCells(); refreshPlays();
+  }
+  window.addEventListener('app-page-changed', resumeReads);
+  window.addEventListener('pageshow', resumeReads);
+  document.addEventListener('htmx:afterSwap', function () { highlightCurrent(); refreshCells(); refreshPlays(); });
   document.addEventListener('DOMContentLoaded', function () { highlightCurrent(); refreshCells(); }, {once: true});
   highlightCurrent();
   refreshCells();

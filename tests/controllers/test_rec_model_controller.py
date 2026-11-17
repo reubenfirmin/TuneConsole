@@ -31,6 +31,8 @@ def model():
     genres = create_autospec(Genres, instance=True, spec_set=True)
     vectors = create_autospec(Embeddings, instance=True, spec_set=True)
     recovery = create_autospec(collection_recovery.RecoveryFiles, instance=True, spec_set=True)
+    repo.reserve_checkpoint_file.return_value = 41
+    recovery.describe.return_value = ('digest', 12)
     vectors.retained.side_effect = recovery.retained.side_effect = nullcontext
     settings.get_setting.return_value = None
     repo.weight_records.return_value = {}
@@ -119,18 +121,20 @@ def test_unban_covers_retained_api_dislike_after_clock_moves_backwards(model):
 def test_checkpoint_writes_file_before_selecting_sql_reference(model):
     model.repository.checkpoint_facts.return_value = {'typed': True, 'header': None, 'weights': []}
     model.repository.parameter_values.return_value = {'rec_param:x': '.5'}
-    model.recovery.publish.return_value = ('file', 'digest', 12)
+    model.recovery.publish_reserved.return_value = ('file', 'digest', 12)
     order = Mock()
-    order.attach_mock(model.recovery.publish, 'file')
+    order.attach_mock(model.repository.reserve_checkpoint_file, 'reserve')
+    order.attach_mock(model.recovery.publish_reserved, 'file')
     order.attach_mock(model.repository.publish_checkpoint, 'sql')
     model.save_taste_settings('taste_settings_checkpoint_v1', ['rec_param:x'], 12)
-    assert [call[0] for call in order.mock_calls] == ['file', 'sql']
-    model.recovery.publish.assert_called_once_with('taste-checkpoint', 1, {'rec_param:x': '.5'})
+    assert [call[0] for call in order.mock_calls] == ['reserve', 'file', 'sql']
+    model.recovery.publish_reserved.assert_called_once_with(41, 'taste-checkpoint', 1, {'rec_param:x': '.5'},
+                                                          expected=('digest', 12))
 
 
 def test_checkpoint_file_failure_leaves_existing_sql_reference(model):
     model.repository.checkpoint_facts.return_value = {'typed': True, 'header': None, 'weights': []}
-    model.recovery.publish.side_effect = OSError('storage unavailable')
+    model.recovery.publish_reserved.side_effect = OSError('storage unavailable')
     with pytest.raises(OSError):
         model.save_taste_settings('taste_settings_checkpoint_v1', [], 12)
     model.repository.publish_checkpoint.assert_not_called()

@@ -143,10 +143,8 @@ def publish(store, value, *, costs=None):
     items = [item for lanes in prepared.get('pools', {}).values() for rows in lanes.values() for item in rows]
     items += [item for lanes in prepared.get('genres', {}).values() for groups in lanes.values()
               for rows in groups.values() for item in rows]
-    # These are inputs to one publication. Keep every real repository write,
-    # but let the supported outer owner commit the complete seed once instead
-    # of finishing one transaction per discovered recording. File syncs remain.
-    with measured(costs, 'subject_seed'), seed_costs(store, costs), store._lock, store.conn.atomic():
+    # Each metadata owner commits its file reservation before writing the body.
+    with measured(costs, 'subject_seed'), seed_costs(store, costs):
         seed_bundle_subjects(store, value, fresh=items)
     profiles = {item['key']: item['musical'] for item in items}
     with measured(costs, 'profile_publication'):
@@ -329,7 +327,7 @@ def test_vibe_candidate_retry_is_detached_invalidated_and_rechecks_dislikes(stor
     value['_vibes']['pools'] = {'energize': {'fresh': pool}}
     value['_vibes']['genres'] = {}
     items = value['_vibes']['pools']['energize']['fresh'][:12]
-    with measured(vibe_read_costs, 'retry_existing_subject_seed'), store._lock, store.conn.atomic():
+    with measured(vibe_read_costs, 'retry_existing_subject_seed'):
         for item in items:
             store.discovery.upsert_discovered_track(item['key'], item['video_id'], item['title'],
                 item['artist'], '', None, item['genre'], None, None, 1)

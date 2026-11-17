@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from yt_playlist.rec import album_feedback_state, choice_learning, home_vibe, musical_character, rec_params
+from yt_playlist.rec import album_feedback_state, artist_variety, choice_learning, home_vibe, musical_character, rec_params
 from yt_playlist.core.mix_choices import PRECISION
 
 DECAY_TICK_S = 3600
@@ -31,6 +31,7 @@ def ranking_configuration(store):
         with store.read_view() as reader:
             return ranking_configuration(reader)
     return {'records': store.rec_model.weight_records(),
+            'performing_artist_version': artist_variety.VERSION,
             'mix_choice_precision': PRECISION,
             'vibe_version': home_vibe.VERSION,
             'musical_profile_version': musical_character.VERSION,
@@ -45,42 +46,55 @@ def preferences(store, now, *, include_exposure=True):
         with store.read_view() as reader:
             return preferences(reader, now, include_exposure=include_exposure)
     return store.memoized_read(('candidate-preferences', now, home_vibe.VERSION,
-                                musical_character.VERSION, PRECISION, include_exposure),
+                                musical_character.VERSION, artist_variety.VERSION, PRECISION, include_exposure),
                                lambda: _preferences(store, now, include_exposure))
 
 
 def _preferences(store, now, include_exposure):
     ranking = ranking_configuration(store)
+    choices, bandit = store.rec_proposals.choice_refresh_inputs()
+    return preference_fingerprint(ranking, choices=choices, bandit=bandit,
+        choice_decay=choice_learning.transient_active(store, choices, now),
+        album_feedback=album_feedback_state.state(store),
+        models={key: store.settings.get_setting(key) for key in
+                ('rec_content_generation', 'rec_fit_inputs', 'rec_mode_fit_inputs')},
+        home={'genre_request': store.rec_proposals.get_proposals('home_genre_request'),
+              'vibe': store.settings.get_setting('home_mix_vibe'),
+              'tuning_at': store.settings.get_setting('home_mix_tuning_updated_at')},
+        now=now, exposure=({'card_views': store.rec_ledger.card_views('cards'),
+                           'mode_offers': store.modes.impression_counts()} if include_exposure else {}))
+
+
+def preference_fingerprint(ranking, *, choices, bandit, choice_decay, album_feedback, models,
+                           home, now, exposure):
+    """Freshness identity from captured inputs; wall-clock decay never needs a source write."""
     records = ranking['records']
     # Decay has no source-row mutation. Refresh at most hourly while there is
     # something to decay; permanent zero mutes do not fade back toward one.
     decaying = any(row['weight'] != 1 and row['updated_at'] is not None
                    and not (axis.startswith('genre:') and row['weight'] == 0)
                    for axis, row in records.items())
-    choices, bandit = store.rec_proposals.choice_refresh_inputs()
-    choice_decay = choice_learning.transient_active(store, choices, now)
     configuration = {**ranking,
                      'choices': choices.get('interest_version'),
                      'bandit': bandit.get('state_version'),
                      'bandit_active': bandit.get('expires_at') is None or now < bandit['expires_at'],
-                     'album_feedback': album_feedback_state.state(store),
-                     'models': {key: store.settings.get_setting(key) for key in
-                                ('rec_content_generation', 'rec_fit_inputs', 'rec_mode_fit_inputs')},
-                     'home': {'genre_request': store.rec_proposals.get_proposals('home_genre_request'),
-                              'vibe': store.settings.get_setting('home_mix_vibe'),
-                              'tuning_at': store.settings.get_setting('home_mix_tuning_updated_at')},
+                     'album_feedback': album_feedback,
+                     'models': models, 'home': home,
                      'decay_tick': int(now // DECAY_TICK_S) if decaying or choice_decay else None}
-    if include_exposure:
-        configuration.update(card_views=store.rec_ledger.card_views('cards'),
-                             mode_offers=store.modes.impression_counts())
+    configuration.update(exposure)
     fingerprint = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
     return fingerprint
 
 
 def due(store, now):
     deadline = store.settings.get_setting('rec_candidates_expire_at')
-    return ((bool(deadline) and float(deadline) <= now)
-            or store.settings.get_setting('rec_candidate_preferences') != preferences(store, now))
+    if deadline and float(deadline) <= now:
+        return True
+    return refresh_due(deadline, store.settings.get_setting('rec_candidate_preferences'), preferences(store, now), now)
+
+
+def refresh_due(deadline, previous, current, now):
+    return (bool(deadline) and float(deadline) <= now) or previous != current
 
 
 def prepared_settings(reader, now):

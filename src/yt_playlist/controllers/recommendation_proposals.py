@@ -1,4 +1,5 @@
 """Prepared recommendation documents and their serving projections."""
+from contextlib import contextmanager
 import hashlib
 import json
 
@@ -38,7 +39,12 @@ class RecommendationProposals:
                 raise ValueError('Album note output requires a release ID and an object')
             prepared = [(browse, encode(surface, browse, note)) for browse, note in value.items()]
             with self.files.retained():
-                durable = [(browse, self.files.publish(part)) for browse, part in prepared]
+                durable = []
+                for browse, part in prepared:
+                    integrity = self.files.describe(part)
+                    identity = self.note_repository.reserve_file(browse, integrity)
+                    reference = self.files.publish_reserved(identity, part, expected=integrity)
+                    durable.append((browse, identity, reference))
                 return self.note_repository.replace_outputs(durable, now)
         if surface in home_outputs.SURFACES:
             return self.home.put(surface, encoded, now, validate=False)
@@ -48,9 +54,15 @@ class RecommendationProposals:
         if surface in reports.SURFACES and self.report_repository.native():
             prepared = reports.prepare(surface, encoded, now)
             with self.files.retained():
-                durable = [(surface, str(position), *self.files.publish(part))
-                           for position, part in enumerate(prepared.parts)]
-                self.report_repository.publish(prepared, durable)
+                durable, file_ids = [], []
+                for position, part in enumerate(prepared.parts):
+                    key = str(position)
+                    integrity = self.files.describe(part)
+                    identity = self.report_repository.reserve_file(surface, key, integrity)
+                    reference = self.files.publish_reserved(identity, part, expected=integrity)
+                    durable.append((surface, key, *reference))
+                    file_ids.append(identity)
+                self.report_repository.publish(prepared, durable, file_ids=file_ids)
             return
         self.repository.put_encoded(surface, encoded, now)
 
@@ -217,3 +229,12 @@ class RecommendationProposals:
         if surface in reports.SURFACES or listening_outputs.owns(surface) or surface == 'album_notes':
             return self.put_encoded(surface, payload, now)
         return self.repository.publish_prepared_home(payload, now, surface=surface, input_revision=input_revision)
+
+    @contextmanager
+    def prepare_home(self, payload, now, *, surface='home_prepared'):
+        """Reserve and write display files before a guarded SQL publication."""
+        with self.files.retained():
+            yield self.home.prepare(surface, payload, now)
+
+    def publish_home(self, publication, *, input_revision=None):
+        return self.home.publish(publication, input_revision=input_revision)

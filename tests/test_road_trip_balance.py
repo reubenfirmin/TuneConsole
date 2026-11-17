@@ -242,8 +242,8 @@ def _mixed_library(monkeypatch, store, rock=4, other=36):
     songs += [{"key": f"kp{i}", "video_id": f"p{i}", "title": f"Pop {i}",
                "artist": f"Pop Artist {i}", "album": "", "thumbnail": None, "duration": 300,
                "genre": "Pop", "year": 2000, "liked": False} for i in range(other)]
-    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
-    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {s["key"]: i for i, s in enumerate(songs)})
+    monkeypatch.setattr(type(store.rec_query), "library_songs", lambda self: songs)
+    monkeypatch.setattr(type(store.rec_query), "play_counts", lambda self: {s["key"]: i for i, s in enumerate(songs)})
     monkeypatch.setattr(candidates, "other_input_songs", lambda *a, **k: ([], []))
 
 

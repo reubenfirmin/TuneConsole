@@ -6,7 +6,6 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.historical_captures import retained_capture
 from yt_playlist.core import catalog, listening
-from yt_playlist.core.migrations import v026_listening_observations, v103_entity_names
 from yt_playlist.rec import taste_analysis
 
 
@@ -18,6 +17,11 @@ def _legacy_metadata(store, keys):
                 'SELECT identity_key k,MIN(title) title,MIN(artist) artist,MIN(album) album,'
                 'MIN(video_id) vid,MIN(thumbnail) thumb FROM playable_library_tracks '
                 f'WHERE identity_key IN ({placeholders}) GROUP BY identity_key', keys)}
+
+
+def display_metadata(store, keys):
+    return {key: {field: value for field, value in row.items() if field != 'artist_ids'}
+            for key, row in store.rec_query.tracks_by_keys(keys).items()}
 
 
 def test_requested_metadata_keeps_playable_representative_and_selected_fields(store):
@@ -32,7 +36,7 @@ def test_requested_metadata_keeps_playable_representative_and_selected_fields(st
     keys = [store.tracks.catalog_subject(tid)['identity_key'] for tid in (unavailable, missing)]
     keys.extend(['cold|artist', 'unknown', *keys])
     expected = _legacy_metadata(store, keys)
-    assert store.rec_query.tracks_by_keys(iter(keys)) == expected
+    assert display_metadata(store, iter(keys)) == expected
     assert len(expected) == 1
     assert next(iter(expected.values())) == {'title': 'Edited title', 'artist': 'Edited artist',
                                             'album': 'Second', 'video_id': 'b', 'thumbnail': 'second-cover'}
@@ -69,7 +73,7 @@ def test_small_metadata_lookup_does_not_scan_unrequested_library(store):
     assert after == before
     assert large <= small * 2 + 500
     keys = ['wanted', *(f'unrelated-{n}' for n in range(1500))]
-    assert store.rec_query.tracks_by_keys(keys) == _legacy_metadata(store, keys)
+    assert display_metadata(store, keys) == _legacy_metadata(store, keys)
 
 
 @pytest.mark.parametrize('generated', [None, 0, 1])
@@ -93,9 +97,16 @@ def test_indexed_evidence_matches_original_projection(store, generated, independ
         listening.observe_day(store.conn, 1, 'ambiguous', '1990-01-01', 'independent', 'Pacific/Kiritimati', ts)
     retained_capture(store.conn, 1, ts, ['legacy', 'legacy'])
     retained_capture(store.conn, 1, ts + 86400, [])
-    original = v026_listening_observations.PROJECTIONS[2]
-    original = v103_entity_names.transform(original)
-    original = original[original.index(' AS') + 3:]
+    original = """SELECT e.* FROM listening_evidence e
+WHERE (e.event_id IS NOT NULL AND e.is_generated=0)
+   OR (e.event_id IS NULL AND (e.source<>'ytm_history' OR NOT EXISTS (
+       SELECT 1 FROM listening_evidence g WHERE g.event_id IS NOT NULL
+       AND g.is_generated=1 AND g.account_id=e.account_id
+       AND g.identity_key=e.identity_key AND g.day=e.day)
+       OR EXISTS (SELECT 1 FROM listening_evidence organic
+           WHERE organic.account_id=e.account_id AND organic.identity_key=e.identity_key
+           AND organic.day=e.day AND organic.is_generated=0
+           AND (organic.event_id IS NOT NULL OR organic.source<>'ytm_history'))))"""
     expected = Counter(map(tuple, store.conn.execute(original)))
     actual = Counter(map(tuple, store.conn.execute('SELECT * FROM eligible_listening_evidence')))
     assert actual == expected  # includes precision, source multiplicity, unknowns and timestamps

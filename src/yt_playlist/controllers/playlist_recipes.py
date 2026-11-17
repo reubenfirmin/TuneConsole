@@ -24,10 +24,17 @@ class PlaylistRecipes:
                     raise ValueError('Unsupported TV append recovery checkpoint')
                 append = policy.append_plan(recipe, self.repository.append_owner(owner['scope'],
                     recipe.get('tv_stream'), checkpoint.get('request_id')))
-            reference = self.files.publish('playlist-recipe', owner['id'], recipe)
+            integrity = self.files.describe('playlist-recipe', owner['id'], recipe)
+            file_id = self.repository.reserve_file('playlist-recipe', owner['id'], integrity)
+            reference = self.files.publish_reserved(file_id, 'playlist-recipe', owner['id'], recipe,
+                                                    expected=integrity)
             if append is not None:
-                append['reference'] = self.files.publish('tv-append', append['id'], append['checkpoint'])
-            self.repository.publish_recipe(owner, uuid.uuid4().hex, recipe, facets, reference, append, now)
+                integrity = self.files.describe('tv-append', append['id'], append['checkpoint'])
+                append['file_id'] = self.repository.reserve_file('tv-append', append['id'], integrity)
+                append['reference'] = self.files.publish_reserved(append['file_id'], 'tv-append', append['id'],
+                                                                append['checkpoint'], expected=integrity)
+            self.repository.publish_recipe(owner, uuid.uuid4().hex, recipe, facets, reference, append, now,
+                                           file_id=file_id)
 
     def get_recipe(self, scope):
         with self.files.retained():
@@ -63,8 +70,11 @@ class PlaylistRecipes:
                 return
             if state is not None and not isinstance(state, str):
                 raise ValueError('A saved canvas requires its serialized text')
-            reference = self.files.publish('playlist-canvas', owner['id'], state)
-            self.repository.publish_canvas(owner, uuid.uuid4().hex, reference, now)
+            integrity = self.files.describe('playlist-canvas', owner['id'], state)
+            file_id = self.repository.reserve_file('playlist-canvas', owner['id'], integrity)
+            reference = self.files.publish_reserved(file_id, 'playlist-canvas', owner['id'], state,
+                                                    expected=integrity)
+            self.repository.publish_canvas(owner, uuid.uuid4().hex, reference, now, file_id=file_id)
 
     def get_cluster_canvas(self, scope):
         with self.files.retained():

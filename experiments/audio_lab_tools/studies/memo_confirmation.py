@@ -83,7 +83,7 @@ def freeze(directory):
         'archive.json': DATA / 'discovery/memo2496-figshare.json',
         'named-priors.json': PREVIOUS / 'inputs/named-priors.json',
         'prior-deam.json': PREVIOUS / 'models/deam.embedding.json',
-        'shared.json': LAB.parent.parent / 'src/yt_playlist/rec/data/emotify-vibes.json'}
+        'shared.json': LAB.parent.parent / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'}
     inputs.update({f'adopted-{v}.json': LAB.parent.parent / f'src/yt_playlist/rec/data/{v}-vibes.json' for v in VIBES})
     known = []
     for p in sorted((LAB / 'local/per-vibe-20261029/all-sources-1/inputs').glob('*.json')):

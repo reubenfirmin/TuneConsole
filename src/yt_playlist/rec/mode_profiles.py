@@ -63,6 +63,20 @@ def describe_modes(store):
     if not modes:
         return {}
     labels = {**genre_catalog.family_labels(), "": "Untagged"}
+    snapshot = store.rec_model.content_generation()
+    profiles, current, model = profile_basis(modes, snapshot['model'], labels)
+    if not current:
+        return profiles
+    keys, vectors, _ = vector_reads.load_content_vectors(store, snapshot=snapshot)
+    dim = model['ncat'] + len(model['cont'])
+    if vectors is None or vectors.shape[1] != dim or any(len(m['centroid']) != dim for m in current):
+        return profiles
+    content, audio = store.rec_query.track_content(), store.rec_query.track_audio_features()
+    axes = store.genres.feature_axes(genre for genre, _year in content.values())
+    return profiles_from_inputs(profiles, current, model, keys, vectors, content, audio, axes, labels)
+
+
+def profile_basis(modes, raw_model, labels):
     profiles = {}
     for mode in modes:
         size = mode["size"]
@@ -71,24 +85,18 @@ def describe_modes(store):
             "genres": _breakdown(Counter(dict(mode["families"])), size, labels),
             "eras": [], "dated": 0, "sound": [],
         }
-    snapshot = store.rec_model.content_generation()
-    raw = snapshot["model"]
-    if not raw:
-        return profiles
-    model = json.loads(raw)
+    if not raw_model:
+        return profiles, [], None
+    model = json.loads(raw_model)
     space = content_model.content_model_fingerprint(model)
     current = [m for m in modes if m.get("space") == space]
-    if not current:
-        return profiles
-    keys, vectors, _ = vector_reads.load_content_vectors(store, snapshot=snapshot)
-    dim = model["ncat"] + len(model["cont"])
-    if vectors is None or vectors.shape[1] != dim or any(len(m["centroid"]) != dim for m in current):
-        return profiles
+    return profiles, current, model
+
+
+def profiles_from_inputs(profiles, current, model, keys, vectors, content, audio, genre_axes, labels):
+    profiles = dict(profiles)
     centers = np.stack([m["centroid"].astype(np.float64) for m in current])
     nearest = (vectors.astype(np.float64) @ centers.T).argmax(axis=1)
-    dao = store.rec_query
-    content, audio = dao.track_content(), dao.track_audio_features()
-    genre_axes = store.genres.feature_axes(genre for genre, _year in content.values())
     for index, mode in enumerate(current):
         members = [keys[i] for i in np.flatnonzero(nearest == index)]
         size = len(members)

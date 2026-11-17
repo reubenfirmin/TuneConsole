@@ -240,16 +240,15 @@ def test_reference_reuse_across_layouts_preserves_changed_constraints_and_live_o
         assert inspected.count('child') == 3
 
 
-def test_compiled_historical_layout_observes_current_source_text(tmp_path, monkeypatch):
+def test_current_layout_observes_current_source_text(tmp_path, monkeypatch):
     source = tmp_path / 'schema.sql'
     source.write_text('CREATE TABLE example(value TEXT);\n')
-    monkeypatch.setattr(schema_definition, 'SOURCE_DEFINITIONS', (source,))
-    monkeypatch.setattr(schema_definition, 'DEFINITION', source)
-    first = tuple(schema_definition.assembled_statements(version=85))
-    assert first == ('CREATE TABLE example(value TEXT);\n',)
-    assert tuple(schema_definition.assembled_statements(version=85)) == first
+    monkeypatch.setattr(schema_definition, 'CURRENT_DEFINITION', source)
+    first = tuple(schema_definition.statements())
+    assert first == ('CREATE TABLE example(value TEXT);',)
+    assert tuple(schema_definition.statements()) == first
     source.write_text('CREATE TABLE example(value INTEGER);\n')
-    assert tuple(schema_definition.assembled_statements(version=85)) != first
+    assert tuple(schema_definition.statements()) != first
     source.write_text('CREATE TABLE example(value TEXT\n')
     with pytest.raises(schema_definition.MigrationError, match='Incomplete current schema definition'):
-        tuple(schema_definition.assembled_statements(version=85))
+        tuple(schema_definition.statements())

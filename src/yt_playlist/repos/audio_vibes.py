@@ -10,6 +10,23 @@ from yt_playlist.core.audio_annotation_contract import FILE_FORMAT
 from yt_playlist.repos.base import Repo, synchronized
 
 
+def install_sample_files(conn, context=None):
+    """Add capture status without rewriting installed sample rows or files."""
+    columns = {row[1] for row in conn.execute('PRAGMA main.table_info(sample_attributes)')}
+    for name, declaration in (('content_digest', 'TEXT'), ('file_status', "TEXT NOT NULL DEFAULT 'ready'")):
+        if name not in columns:
+            conn.execute(f'ALTER TABLE sample_attributes ADD COLUMN {name} {declaration}')
+
+
+def validate_sample_files(conn):
+    from yt_playlist.core.schema_contract import MigrationError
+    columns = {row[1]: (row[2], row[3], row[4])
+               for row in conn.execute('PRAGMA main.table_info(sample_attributes)')}
+    if (columns.get('content_digest') != ('TEXT', 0, None)
+            or columns.get('file_status') != ('TEXT', 1, "'ready'")):
+        raise MigrationError('Incompatible sample file status')
+
+
 class AudioVibesRepo(Repo):
     @synchronized
     def base_metadata_inputs(self, video_id):
@@ -38,14 +55,15 @@ class AudioVibesRepo(Repo):
     @synchronized
     def sample_receipts(self, run_id):
         """Acknowledge published identities without loading their evidence payloads."""
-        return [dict(row) for row in self.conn.execute(
-            'SELECT id,point FROM sample_attributes WHERE run_id=? ORDER BY captured_at,id', (run_id,))]
+        return [{key: row[key] for key in ('id', 'point')} for row in self.sample_facts(run_id)]
 
     @synchronized
     def sample_facts(self, run_id):
-        return [dict(row) for row in self.conn.execute(
-            'SELECT id,run_id,point,video_id,filename FROM sample_attributes '
-            'WHERE run_id=? ORDER BY captured_at,id', (run_id,))]
+        # At most three sampling points belong to a run. SELECT * also reads
+        # retained layouts before their bounded status-column adoption.
+        rows = [dict(row) for row in self.conn.execute(
+            'SELECT * FROM sample_attributes WHERE run_id=? ORDER BY captured_at,id', (run_id,))]
+        return [row for row in rows if row.get('file_status', 'ready') == 'ready']
 
     @synchronized
     def sample_conflicts(self, run_id, sample_id):
@@ -53,8 +71,8 @@ class AudioVibesRepo(Repo):
                                                        (run_id, sample_id))]
 
     @synchronized
-    def save_sample(self, sample, filename, now, *, expected):
-        with self.conn.atomic(join=True):
+    def reserve_sample(self, sample, reference, now, *, expected):
+        with self.conn.atomic():
             self.conn.execute('UPDATE sample_attributes SET filename=filename WHERE 0')
             if self.sample_conflicts(sample['run_id'], sample['id']) != expected:
                 raise ValueError('This sampling point has already been saved')
@@ -62,8 +80,22 @@ class AudioVibesRepo(Repo):
             # New captured evidence supplies its actual playback identity.
             # Historical missing runs remain unresolved during migration.
             rid = sample_identity.recording(self.conn, sample, now)
-            self.conn.execute('INSERT INTO sample_attributes VALUES (?,?,?,?,?,?,?)',
-                (sample['id'], rid, sample['video_id'], sample['run_id'], sample['point'], filename, now))
+            self.conn.execute('INSERT INTO sample_attributes('
+                'id,recording_id,video_id,run_id,point,filename,captured_at,content_digest,file_status) '
+                "VALUES (?,?,?,?,?,?,?,?,'pending')",
+                (sample['id'], rid, sample['video_id'], sample['run_id'], sample['point'],
+                 reference['filename'], now, reference['content_digest']))
+
+    @synchronized
+    def complete_sample(self, sample_id, reference):
+        with self.conn.atomic():
+            retained = self.conn.execute('SELECT * FROM sample_attributes WHERE id=?', (sample_id,)).fetchone()
+            row = dict(retained) if retained else None
+            if (row is None or row['filename'] != reference['filename']
+                    or row.get('content_digest') != reference.get('content_digest')):
+                raise ValueError('The reserved sample changed before completion')
+            if row.get('file_status') == 'pending':
+                self.conn.execute("UPDATE sample_attributes SET file_status='ready' WHERE id=?", (sample_id,))
 
     @synchronized
     def annotation(self, run_id, *, kind, taxonomy_version):
@@ -106,13 +138,26 @@ class AudioVibesRepo(Repo):
 
     @synchronized
     def sample_owners(self, samples):
-        return {sample: row[0] for sample in samples if (row := self.conn.execute(
-            'SELECT run_id FROM sample_attributes WHERE id=?', (sample,)).fetchone())}
+        owners = {}
+        for sample in samples:
+            row = self.conn.execute('SELECT * FROM sample_attributes WHERE id=?', (sample,)).fetchone()
+            if row:
+                row = dict(row)
+                if row.get('file_status', 'ready') == 'ready':
+                    owners[sample] = row['run_id']
+        return owners
+
+    @synchronized
+    def reserve_annotation_file(self, run_id, taxonomy_version, revision, integrity):
+        from yt_playlist.repos import annotation_file_writes
+        with self.conn.atomic():
+            return annotation_file_writes.reserve(self.conn, run_id, taxonomy_version, revision, integrity)
 
     @synchronized
     def publish_annotation(self, run_id, sample_ids, vibes, taxonomy_version, now, *, state, revision,
-                           reference, evaluation, expected):
-        with self.conn.atomic(join=True):
+                           file_id, reference, evaluation, expected):
+        from yt_playlist.repos import annotation_file_writes
+        with self.conn.atomic():
             self.conn.execute('UPDATE audio_annotations SET sealed=sealed WHERE 0')
             audio_annotations.resolve_run(self.conn, run_id)
             previous = audio_annotations.latest(self.conn, run_id, kind='session',
@@ -122,13 +167,15 @@ class AudioVibesRepo(Repo):
             annotation_id = self.conn.execute('INSERT INTO audio_annotations('
                 'run_id,kind,taxonomy_version,revision,state,created_at,supersedes_id,resolution_status,'
                 'model_output_filename,model_output_digest,file_format) VALUES (?,\'session\',?,?,?,?,?,\'resolved\',?,?,?)',
-                (run_id, taxonomy_version, revision, state, now, expected, *reference, FILE_FORMAT)).lastrowid
+                (run_id, taxonomy_version, revision, state, now, expected, *reference[:2], FILE_FORMAT)).lastrowid
             self.conn.executemany('INSERT INTO audio_annotation_samples VALUES (?,?,?)',
                 ((annotation_id, sample, position) for position, sample in enumerate(sample_ids)))
             self.conn.executemany('INSERT INTO audio_annotation_vibes VALUES (?,?,?,?)',
                 ((annotation_id, taxonomy_version, vibe, position) for position, vibe in enumerate(vibes)))
             audio_annotations.write_evaluation(self.conn, annotation_id, evaluation)
             self.conn.execute('UPDATE audio_annotations SET sealed=1 WHERE id=?', (annotation_id,))
+            annotation_file_writes.complete(self.conn, file_id, run_id, taxonomy_version, revision,
+                                           reference, annotation_id)
             return annotation_id
 
     @synchronized

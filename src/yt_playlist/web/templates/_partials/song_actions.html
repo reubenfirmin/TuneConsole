@@ -1,5 +1,5 @@
 {# One menu and one action dialog per page, shared by every song launcher. #}
-<div x-data="songActions()" @song-menu-open.window="show($event.detail)">
+<div x-data="songActions()" @song-menu-open.window="show($event.detail)" @app-page-leaving.window="leavePage()">
   <div id="song-action-menu" class="song-action-menu" x-ref="menu" popover="auto"
        role="menu" aria-label="Song actions" @toggle="menuToggled($event)"
        @keydown="menuKey($event)">
@@ -45,7 +45,7 @@
           <svg x-show="result?.status === 'partial' || result?.added === false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 3v1"/></svg>
           <span x-text="result?.message"></span>
         </p>
-        <button type="button" class="song-dialog-close" :aria-label="mode === 'metadata' ? 'Close metadata dialog' : 'Close playlist dialog'" @click="closeDialog()" :disabled="busy">
+        <button type="button" class="song-dialog-close" :aria-label="mode === 'metadata' ? 'Close metadata dialog' : 'Close playlist dialog'" @click="closeDialog()" :disabled="busy && mode !== 'metadata'">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>
         </button>
       </header>
@@ -131,7 +131,7 @@
       <p class="song-action-error" role="status" x-show="error" x-text="error"></p>
       <p class="song-dialog-note" x-show="result?.guidance" x-text="result?.guidance"></p>
       <footer class="song-dialog-actions">
-        <button type="button" class="btn-ghost" @click="closeDialog()" :disabled="busy" x-text="result ? 'Done' : 'Cancel'"></button>
+        <button type="button" class="btn-ghost" @click="closeDialog()" :disabled="busy && mode !== 'metadata'" x-text="result ? 'Done' : 'Cancel'"></button>
         <button type="submit" class="btn-primary" x-show="!result"
                 :disabled="busy || loading || (mode === 'metadata' ? !metadataLoaded || !metadata.title.trim() : mode === 'create' ? !name.trim() : !selected)"
                 x-text="busy ? 'Saving…' : mode === 'metadata' ? 'Save changes' : mode === 'create' ? 'Create playlist' : 'Add song'"></button>

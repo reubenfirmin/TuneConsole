@@ -1,9 +1,14 @@
-<div class="setup-status" x-data="initialSetup()" @setup-status.window="apply($event.detail)"
+<div class="setup-status" data-setup-pending="{{ 'true' if setup_pending else 'false' }}"
+     x-data="initialSetup()" @setup-status.window="apply($event.detail)"
+     @setup-progress.window="applyProgress($event.detail)"
+     @setup-needed.window="if ($event.detail) { complete = false; window.setupStatus.start(); }"
      @bridge-status.window="connected = $event.detail.connected">
-  <div class="setup-banner" :class="{ 'is-working': running || training }" role="status" x-show="!complete" x-cloak>
+  <div class="setup-banner" role="status" x-show="!complete || running" x-cloak>
     <strong>Setting up your music</strong>
     <span class="setup-banner-step" x-text="summary"></span>
     <button type="button" @click="openDetails()">Details</button>
+    <progress class="setup-batch-progress" x-show="running && target > 0" x-cloak
+              :value="completed" :max="target || 1" aria-label="Current import batch"></progress>
   </div>
   <dialog class="setup-details" x-ref="details" aria-labelledby="setup-details-title"
           @click="if ($event.target === $el) $el.close()">

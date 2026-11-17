@@ -162,6 +162,34 @@ def test_missing_relational_score_uses_existing_profile_fallback(store, monkeypa
     assert vibe_serving.assemble(store, 1000, 'relax') == expected
 
 
+@pytest.mark.parametrize('change', ['removed_favorites', 'recent_listening'])
+def test_retained_comfort_rechecks_current_evidence(file_backed_store, vibe_menu_template, change):
+    from yt_playlist.rec import vibe_readiness
+
+    store = file_backed_store
+    lanes = vibe_menu_template.restore(store)
+    head = store.recommendations.head('home')['id']
+    with store.read_view() as reader:
+        assert vibe_readiness.ready(reader, 1000, 0)
+        assert any(card['lane'] == 'comfort' for card in vibe_serving.assemble(reader, 1000, 'relax'))
+    if change == 'removed_favorites':
+        account = store.conn.execute("SELECT id FROM accounts WHERE label='prepared favorites'").fetchone()[0]
+        playlist = store.playlists.get_playlist_for_account(account, 'LM')
+        store.playlists.set_playlist_tracks(playlist.id, [])
+    else:
+        account = store.accounts.upsert_account('Listening', 'fixture', None, True)
+        for track in lanes['comfort']:
+            store.history.record_play_event(account, track['key'], track['video_id'], 1001,
+                                            source_timezone='UTC')
+    with store.read_view() as reader:
+        assert not vibe_readiness.ready(reader, 1002, 0)
+        for preset in home_vibe.PRESETS:
+            actual = vibe_serving.assemble(reader, 1002, preset)
+            assert actual == vibe_pools.assemble(reader, 1002, preset)
+            assert all(card['lane'] != 'comfort' for card in actual)
+    assert store.recommendations.head('home')['id'] == head
+
+
 def test_retained_menus_follow_current_fits_without_republication(file_backed_store, vibe_menu_template):
     from yt_playlist.core import metadata_evidence
     from yt_playlist.rec import musical_preparation, vibe_preparation, vibe_readiness

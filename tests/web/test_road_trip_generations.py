@@ -8,6 +8,8 @@ from tests.web.test_road_trip_routes import (
 )
 from tests.web.test_road_trip_routes import road_trip_schema as _pristine_current_schema
 from yt_playlist.rec import road_trip
+from yt_playlist.controllers.road_trip_acquisition import RoadTripAcquisition
+from yt_playlist.controllers.road_trip_transitions import RoadTripTransitions
 from yt_playlist.web.routes import road_trip as routes
 from tests.home_fixture_support import without_metadata_providers
 from tests.store_fixture_support import (
@@ -42,30 +44,30 @@ def test_slow_worker_cannot_replace_or_finish_newer_work(store, monkeypatch, rep
     workers = []
     monkeypatch.setattr(routes, '_spawn', workers.append)
     if phase == 'mine':
-        start = road_trip.start_draft
+        start = RoadTripTransitions.start
 
         def own_facts_build(*args, **kwargs):
             state = start(*args, **kwargs)
             state.update(pending=[], building=True, own_facts_left=1)
             return state
 
-        monkeypatch.setattr(road_trip, 'start_draft', own_facts_build)
+        monkeypatch.setattr(RoadTripTransitions, 'start', own_facts_build)
     assert client.post(f'/road_trip/recipes/{rid}/build').status_code == 200
     first = store.road_trip.get_road_trip_draft(rid)
     entered, release = threading.Event(), threading.Event()
     failures = []
-    method = 'add_other_input' if phase == 'theirs' else 'fill_own_facts'
-    acquire = getattr(road_trip, method)
+    method = 'add' if phase == 'theirs' else 'fill'
+    acquire = getattr(RoadTripAcquisition, method)
 
-    def paused(state, *args):
+    def paused(owner, state, *args):
         if state['generation'] == first['generation']:
             entered.set()
             assert release.wait(5)
             if old_failure:
                 raise RuntimeError('Old acquisition failed')
-        return acquire(state, *args)
+        return acquire(owner, state, *args)
 
-    monkeypatch.setattr(road_trip, method, paused)
+    monkeypatch.setattr(RoadTripAcquisition, method, paused)
 
     def run_old():
         try:
@@ -141,11 +143,11 @@ def test_overlapping_edits_invalidate_queued_workers_and_current_failure_settles
     latest = store.road_trip.get_road_trip_draft(rid)
     calls = []
 
-    def failed(state, *_args):
+    def failed(owner, state, *_args):
         calls.append(state['generation'])
         raise RuntimeError('Current acquisition failed')
 
-    monkeypatch.setattr(road_trip, 'add_other_input', failed)
+    monkeypatch.setattr(RoadTripAcquisition, 'add', failed)
     for worker in workers[:-1]:
         worker()
     assert not calls and store.road_trip.get_road_trip_draft(rid) == latest
@@ -184,13 +186,13 @@ def test_repository_rejects_old_revision_and_deleted_draft(native_sql_calls, sto
 def test_remote_save_completion_does_not_replace_newer_or_deleted_draft(native_sql_calls, store, monkeypatch, replacement):
     from types import SimpleNamespace
     from yt_playlist.core.activity import Activity
-    from yt_playlist.web.road_trip_drafts import RoadTripDrafts
+    from yt_playlist.library.road_trip_composition import drafts
 
     store.accounts.upsert_account('main', 'cred', None, True)
     _stub_pools(monkeypatch, store)
     rid = _recipe(store)
     workers = []
-    owner = RoadTripDrafts(SimpleNamespace(store=store, now_fn=lambda: 1000, work=Activity()), workers.append)
+    owner = drafts(store, now=lambda: 1000, work=Activity(), spawn=workers.append)
     owner.build(rid, object())
     _, saving = owner.for_save(rid)
     if replacement == 'build':

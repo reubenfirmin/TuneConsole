@@ -8,7 +8,8 @@ from tests.retained_rating_support import observe_rating
 import pytest
 
 from tests.repository_mock_support import no_database, repository_store, transient_repository_store
-from yt_playlist.rec import embedding_vectors as embed, graduation, layers, rec_params, scoring, taste_viz, transient
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import embedding_vectors as embed, graduation, rec_params, scoring, taste_viz, transient
 
 
 @pytest.fixture

@@ -216,13 +216,13 @@ def test_maybe_check_update_swallows_errors(monkeypatch):
     class Ctx:
         store = FakeStore()
         now_fn = staticmethod(lambda: 1000.0)
+        update_checks = staticmethod(lambda: type('Checks', (), {'tick': staticmethod(boom)})())
         class logger:
             @staticmethod
             def warning(*a, **k): pass
 
-    def boom(store, now):
+    def boom(now):
         raise RuntimeError("kaboom")
-    monkeypatch.setattr(webapp.updatecheck, "check_latest", boom)
     webapp._maybe_check_update(Ctx)          # must not raise
 
 
@@ -233,12 +233,11 @@ def test_maybe_check_update_invokes_check(monkeypatch):
     class Ctx:
         store = FakeStore()
         now_fn = staticmethod(lambda: 4242.0)
+        update_checks = staticmethod(lambda: type('Checks', (), {
+            'tick': staticmethod(lambda now: seen.update(now=now))})())
         class logger:
             @staticmethod
             def warning(*a, **k): pass
 
-    monkeypatch.setattr(webapp.updatecheck, "check_latest",
-                        lambda store, now: seen.update(store=store, now=now))
     webapp._maybe_check_update(Ctx)
     assert seen["now"] == 4242.0
-    assert seen["store"] is Ctx.store

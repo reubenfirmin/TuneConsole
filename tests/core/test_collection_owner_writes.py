@@ -8,12 +8,10 @@ import threading
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.core.test_collection_feedback_publication import prepare
 from tests.repos.test_album_aliases import release
 from tests.prepared_fixture_support import historical_template
 from tests.store_fixture_support import _numbered_input, native_sql_calls, without_query_timing
 from yt_playlist.core import album_feedback_storage
-from yt_playlist.core.preparation import collection_feedback_publication
 from yt_playlist.core.store import Store
 from yt_playlist.rec import album_feedback, choice_evidence
 from yt_playlist.repos.collection import CollectionRepo
@@ -27,12 +25,10 @@ def context(store):
 
 
 def select(store, key):
-    owner = collection_feedback_publication.SOURCES[key]
-    owner.publish(store.conn, revision=prepare(store.conn, owner))
+    assert key in ('album_feedback', 'auth_expired_identities')
 
 
-FORMATS = [(version, state) for version in (79, 93) for state in ('source-only', 'partial', 'selected')]
-FORMATS.append((107, 'native'))
+FORMATS = [(107, 'native')]
 
 
 @pytest.fixture
@@ -43,7 +39,7 @@ def context_installed(request, tmp_path, monkeypatch, native_sql_calls, without_
         yield value
 
 
-@pytest.mark.parametrize('version', [79, 93, 107])
+@pytest.mark.parametrize('version', [107])
 def test_feedback_schema_input_keeps_numbered_history_and_real_guards(_bounded_installed_schema, version):
     source = _bounded_installed_schema(version).source
     assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
@@ -53,14 +49,7 @@ def test_feedback_schema_input_keeps_numbered_history_and_real_guards(_bounded_i
 
 
 def prepare_owner(store, key, state):
-    if state == 'selected':
-        select(store, key)
-    elif state == 'partial':
-        owner = collection_feedback_publication.SOURCES[key]
-        owner.worker.install(store.conn)
-        owner.worker.step(store.conn, batch_size=1)
-        assert owner.selected(store.conn) is None
-        assert owner.worker.progress(store.conn).prepared_revision is None
+    assert state == 'native'
 
 
 def seed_feedback_writers(store):
@@ -210,7 +199,7 @@ def test_overlapping_normal_feedback_writers_keep_each_release(
         other.conn.close()
 
 
-@pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_feedback_writer_prefix_has_private_sql_and_evidence(
         installed, feedback_writer_prefix, tmp_path):
     store, _ = installed
@@ -241,7 +230,7 @@ def test_feedback_writer_prefix_has_private_sql_and_evidence(
         other.conn.close()
 
 
-@pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_failed_feedback_sql_does_not_emit_response_and_retry_keeps_withdrawals_unique(installed, monkeypatch):
     store, _ = installed
     store.accounts.upsert_account('Main', 'main.json', None, True)
@@ -268,17 +257,3 @@ def test_failed_feedback_sql_does_not_emit_response_and_retry_keeps_withdrawals_
     withdrawn = [row for row in responses if row['kind'] == 'withdraw']
     assert len(feedback) == len(withdrawn) == 2
     assert {row['details']['action_id'] for row in withdrawn} == {row['id'] for row in feedback}
-
-
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-@pytest.mark.parametrize('state', ['source-only', 'selected'])
-def test_clearing_alias_keeps_unattributed_minimal_legacy_judgments(installed, state):
-    store, _ = installed
-    for browse in ('legacy-alias', 'current-alias'):
-        store.collection.observe_album_representation(browse, release())
-    unrelated = {'kind': 'known', 'at': 9}
-    store.settings.set_setting('album_feedback', json.dumps({
-        'legacy-alias': {'kind': 'reject', 'at': 10}, 'unrelated': unrelated}))
-    prepare_owner(store, 'album_feedback', state)
-    album_feedback.set_feedback(store, 'current-alias', 'clear', 11)
-    assert album_feedback_storage.original(store.conn) == {'unrelated': unrelated}

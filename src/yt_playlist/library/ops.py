@@ -28,6 +28,7 @@ from yt_playlist.library.liked_music import LikedMusic
 from yt_playlist.library.playlist_positions import retry_insertions
 from yt_playlist.library.playlist_deletion import pending_deletion, reconcile_deletion
 from yt_playlist.library.playlist_snapshot import http_status
+from yt_playlist.library.playlist_policy import equivalent_siblings, permission_fallback
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -70,13 +71,10 @@ class PlaylistOps:
         kept = self.store.playlists.get_playlist(keep)
         if kept is None:
             raise ActionInputError('playlist_missing')
-        keep_keys = self.store.playlists.get_playlist_track_keys(keep)
-        siblings = {}
-        for playlist in self.store.playlists.get_playlists():
-            if (playlist.playlist_scope_id != kept.playlist_scope_id
-                    and playlist.provider_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
-                    and self.store.playlists.get_playlist_track_keys(playlist.id) == keep_keys):
-                siblings.setdefault(playlist.playlist_scope_id, []).append(playlist)
+        playlists = self.store.playlists.get_playlists()
+        memberships = {p.id: self.store.playlists.get_playlist_track_keys(p.id) for p in playlists}
+        memberships.setdefault(keep, self.store.playlists.get_playlist_track_keys(keep))
+        siblings = equivalent_siblings(kept, playlists, memberships, analysis.SYSTEM_PLAYLIST_IDS)
         deleted, errors = 0, []
         clients = self._clients()
         for memberships in siblings.values():
@@ -103,7 +101,7 @@ class PlaylistOps:
                     # Only a definitive permission refusal, durably recorded by
                     # the deletion gate, permits another membership attempt. The
                     # next account repeats the complete verification and backup.
-                    if http_status(exc) == 403 and action is not None and action.status == 'delete_failed':
+                    if permission_fallback(http_status(exc), action.status if action else None):
                         if index + 1 < len(candidates):
                             continue
                         errors.append(f"{sib.provider_playlist_id}: no connected account has permission to delete it.")

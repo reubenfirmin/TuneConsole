@@ -90,7 +90,8 @@ def playlist_sequences(output):
 
 def finish_constraints(target, *, independent_execution):
     """Complete missing restrictions without retrying the failed warm operation."""
-    from yt_playlist.rec import audio_vibe_model, musical_character
+    from experiments.audio_lab_tools.legacy import audio_vibe_model
+    from yt_playlist.rec import musical_character
     from yt_playlist.rec.radio_candidates import RadioCandidates
     target = Path(target).resolve()
     verified = verify_paired(target)
@@ -190,7 +191,8 @@ def fresh_consumers(database, *, seconds, independent_execution):
     """Observe actual consumers after real membership, metadata and captures arrive."""
     from yt_playlist.core.activity import cancellable_work, WorkClosing, WorkBudgetExceeded
     from yt_playlist.core.store import Store
-    from yt_playlist.rec import (audio_vibe_model, home_vibe, mode_surfaces, musical_character,
+    from experiments.audio_lab_tools.legacy import audio_vibe_model
+    from yt_playlist.rec import (home_vibe, mode_surfaces, musical_character,
                                  musical_preparation, progressive, radio_tuning, vibe_preparation, vibe_pools)
     from yt_playlist.rec.radio_candidates import RadioCandidates
 

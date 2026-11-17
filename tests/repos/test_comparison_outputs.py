@@ -21,21 +21,21 @@ def test_native_comparison_retries_file_failure_and_survives_restart(file_store,
     original = {'run_id': 99, 'data': {'tuning': 'original', 'menus': []}}
     replacement = {'run_id': 99, 'data': {'tuning': 'replacement', 'menus': []}}
     files = store.rec_proposals.comparisons.files
-    publish = files.publish
+    publish = files.publish_reserved
 
-    def outside_transaction(encoded):
+    def outside_transaction(identity, encoded, **kwargs):
         assert not store.conn.in_transaction
-        return publish(encoded)
+        return publish(identity, encoded, **kwargs)
 
-    monkeypatch.setattr(files, 'publish', outside_transaction)
+    monkeypatch.setattr(files, 'publish_reserved', outside_transaction)
     store.rec_proposals.put_proposals(surface, original, 10)
     before = store.conn.execute('SELECT publication_id FROM model_pair_heads').fetchone()[0]
 
-    def disk_full(encoded):
+    def disk_full(identity, encoded, **kwargs):
         raise OSError('disk full')
 
     with monkeypatch.context() as patch:
-        patch.setattr(files, 'publish', disk_full)
+        patch.setattr(files, 'publish_reserved', disk_full)
         with pytest.raises(OSError, match='disk full'):
             store.rec_proposals.put_proposals(surface, replacement, 11)
     assert store.conn.execute('SELECT publication_id FROM model_pair_heads').fetchone()[0] == before

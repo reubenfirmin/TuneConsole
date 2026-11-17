@@ -1,0 +1,14 @@
+{% from '_partials/playback_art.html' import playback_art %}
+{% macro song_art(song={}, dynamic='') -%}
+{% if dynamic %}{{ playback_art(dynamic ~ '.thumbnail', dynamic ~ '.title', "'https://music.youtube.com/watch?v=' + encodeURIComponent(" ~ dynamic ~ '.video_id)', dynamic=True) }}
+{% else %}{{ playback_art(song.thumbnail, song.title, 'https://music.youtube.com/watch?v=' ~ (song.video_id|urlencode)) }}{% endif %}
+{%- endmacro %}
+
+{% macro playlist_add(song={}, dynamic='') -%}
+<button type="button" class="music-search-icon" data-song-action="add"
+        {% if dynamic %}:data-song="JSON.stringify({...{{ dynamic }}, album_browse: {{ dynamic }}.album_browse || {{ dynamic }}.album_browse_id})" :aria-label="'Add to playlist: ' + {{ dynamic }}.title"
+        {% else %}data-song='{{ song|tojson }}' aria-label="Add to playlist: {{ song.title }}"{% endif %}
+        title="Add to playlist" aria-haspopup="dialog">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h13M4 12h10M4 18h8m7-4v8m-4-4h8"/></svg>
+</button>
+{%- endmacro %}

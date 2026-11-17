@@ -14,7 +14,7 @@ import pytest
 from yt_playlist.core.activity import Activity
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
-from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_surfaces, surfaces
+from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_inputs, mode_surfaces, surfaces
 from tests import model_support
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
@@ -96,7 +96,7 @@ def ranking_inputs(monkeypatch):
         return {lane: [fresh if lane == 'fresh' else library]
                 for lane in ('wheelhouse', 'explore', 'comfort', 'fresh')}
 
-    monkeypatch.setattr(mode_surfaces, '_rank_pools', pools)
+    monkeypatch.setattr(mode_inputs, '_rank_pools', pools)
     monkeypatch.setattr(mode_surfaces.vibe_pools, 'prepare', lambda *args, **kwargs: None)
     monkeypatch.setattr(rec, 'ppr', SimpleNamespace(
         mode_rankings=lambda *args, **kwargs: {1: ['song|artist']}), raising=False)
@@ -207,19 +207,19 @@ def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(
 
 def test_mutation_during_calculation_finishes_and_serving_applies_current_exclusions(database, monkeypatch):
     store = database
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def mutate(reader, now, policies):
         result = calculate(reader, now, policies)
         seed_dislike(store, "song|artist", until=None, now=now)
         return result
 
-    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", mutate)
+    monkeypatch.setattr(mode_inputs, "_calculate_bundles", mutate)
     result = mode_surfaces.prepare_bundles(store, 100)
     assert result is not None and result['all']['temporal']
     assert store.recommendations.heads() != store._isolation_saved_heads
     assert not mode_surfaces.assemble_cards(store, 100, 0)
-    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", calculate)
+    monkeypatch.setattr(mode_inputs, "_calculate_bundles", calculate)
     assert mode_surfaces.prepare_bundles(store, 100) is not None
     assert "song|artist" not in {item['key'] for item in store.recommendations.candidate_page(
         'home', 'all', 'temporal', limit=4)['tracks']}
@@ -263,7 +263,7 @@ def test_build_fingerprints_models_once_and_stamps_each_pool_with_its_ranker(dat
 
 
 def test_bundle_publication_finishes_despite_home_views_during_calculation_and_staging(database, monkeypatch):
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def write_unrelated(reader, now, policies):
         result = calculate(reader, now, policies)
@@ -280,7 +280,7 @@ def test_bundle_publication_finishes_despite_home_views_during_calculation_and_s
         return stage(*args, **kwargs)
 
     monkeypatch.setattr(database.recommendations, 'stage', view_while_staging)
-    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", write_unrelated)
+    monkeypatch.setattr(mode_inputs, "_calculate_bundles", write_unrelated)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
     assert database.recommendations.heads() != database._isolation_saved_heads
     policy = database.recommendations.head('home')['policy_version']
@@ -291,7 +291,7 @@ def test_bundle_publication_finishes_despite_home_views_during_calculation_and_s
 
 def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, monkeypatch):
     account = database.accounts.upsert_account('Radio', 'credentials', None, True)
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def update_playback(reader, now, policies):
         result = calculate(reader, now, policies)
@@ -303,14 +303,14 @@ def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, m
         database.rec_proposals.put_proposals("trend_rollups", {"updated": now}, now)
         return result
 
-    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", update_playback)
+    monkeypatch.setattr(mode_inputs, "_calculate_bundles", update_playback)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
     assert database.recommendations.pool('home', '1', 'temporal') is not None
     assert database.rec_proposals.get_proposals("trend_rollups") == {"updated": 100}
 
 
 def test_changed_home_genres_leave_captured_style_pools_intact_and_next_round_due(database, monkeypatch):
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def change_preferences(reader, now, policies):
         result = calculate(reader, now, policies)
@@ -318,7 +318,7 @@ def test_changed_home_genres_leave_captured_style_pools_intact_and_next_round_du
             {'epoch': 1, 'include_genres': ['jazz']}, now)
         return result
 
-    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", change_preferences)
+    monkeypatch.setattr(mode_inputs, "_calculate_bundles", change_preferences)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
     assert database.recommendations.heads() != database._isolation_saved_heads
     assert candidate_refresh.due(database, 101)
@@ -329,7 +329,7 @@ def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypa
         database.conn.execute("DELETE FROM recommendation_heads WHERE surface IN ('home','fresh')")
     entry_id = database.conn.execute(
         "SELECT id FROM catalog_entries WHERE video_id='video'").fetchone()[0]
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def enrich_and_import(reader, now, policies):
         result = calculate(reader, now, policies)
@@ -338,7 +338,7 @@ def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypa
         database.tracks.upsert_track('imported', 'Imported song', 'Another artist', None, None)
         return result
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', enrich_and_import)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', enrich_and_import)
     result = mode_surfaces.prepare_bundles(database, 100)
     assert result is not None
     assert result['all']['temporal']
@@ -350,7 +350,7 @@ def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypa
 
 
 def test_replacing_model_during_ranking_keeps_the_captured_publication(database, monkeypatch):
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def replace_model(reader, now, policies):
         result = calculate(reader, now, policies)
@@ -358,7 +358,7 @@ def test_replacing_model_during_ranking_keeps_the_captured_publication(database,
             database.conn.execute("DELETE FROM recording_embedding_files WHERE space='content_library'")
         return result
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', replace_model)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', replace_model)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
     assert database.recommendations.heads() != database._isolation_saved_heads
     assert database.recommendations.pool('home', '1', 'temporal')

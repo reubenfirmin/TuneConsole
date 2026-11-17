@@ -5,6 +5,7 @@
 {% from "_partials/song_menu_button.html" import song_menu %}
 {% set play_url = 'https://music.youtube.com/watch?v=' ~ (t.video_id|urlencode) ~ '&list=' ~ (pl.provider_playlist_id|urlencode) %}
 <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
+    data-playlist="{{ pl.provider_playlist_id }}" data-playlist-index="{{ idx - 1 }}"
     data-album="{{ t.album|lower }}" data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}"
     data-year="{{ t.year or 0 }}" data-genre="{{ t.genre|lower }}" :class="{ rowdel: false }">
   <td class="num drag-handle" title="Drag to reorder"><div class="track-cell"><span class="rownum">{{ idx }}</span></div></td>
@@ -26,10 +27,10 @@
   </td>
   <td class="t-wrap" title="{{ t.artist }}">
     <div class="track-cell track-cell--text">
-    <a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a>
+    {% from '_partials/artist_links.html' import artist_credit with context %}{{ artist_credit(t) }}
     </div>
   </td>
-  <td class="t-wrap" title="{{ t.album }}"><div class="track-cell track-cell--text">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</div></td>
+  <td class="t-wrap" title="{{ t.album }}"><div class="track-cell track-cell--text">{% if t.album_browse %}<a class="alink" href="{{ album_url(t.album_browse) }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</div></td>
   <td class="num mono mb-year">
     <div class="track-cell">
     <span class="ydisplay">{% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">—</span>{% endif %}</span>

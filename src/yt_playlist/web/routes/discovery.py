@@ -9,8 +9,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from yt_playlist.rec import measurement, rec_params
-from yt_playlist.core.accounts import client_for
+from yt_playlist.web.context import Ctx
 
 
 def track_pool_summary(tracks):
@@ -62,21 +61,13 @@ def build(ctx) -> APIRouter:
 
     @router.get("/discovery")
     def discovery(request: Request):
-        days = rec_params.get_param(store, "discovery_gc_days")
-        now = ctx.now_fn()
-        tracks = store.discovery.discovery_track_view(now, days)
-        return templates.TemplateResponse(request, "discovery.html", {
-            "gc_days": days,
-            "tracks": tracks,
-            "track_summary": track_pool_summary(tracks),
-            "albums": store.discovery.discovery_album_view(now, days),
-            "artists": store.discovery.discovery_artist_view(now, days),
-            "now": now,
-        })
+        model = Ctx.discovery_actions(ctx).page(ctx.now_fn())
+        return templates.TemplateResponse(request, "discovery.html",
+            {**model, 'track_summary': track_pool_summary(model['tracks'])})
 
     @router.post("/discovery/impressions", status_code=204)
     def discovery_impressions(visible: VisibleImpressions):
-        store.discovery.record_discovery_impressions(visible.kind, visible.ids, str(visible.view_id), ctx.now_fn())
+        Ctx.discovery_actions(ctx).impressions(visible.kind, visible.ids, str(visible.view_id), ctx.now_fn())
         return Response(status_code=204)
 
     @router.post("/discovery/add")
@@ -84,24 +75,8 @@ def build(ctx) -> APIRouter:
         """Add a discovered item to your collection. Tracks Like into Liked Music (the container-free
         library add); on the next sync the track becomes a library track and the pool prune removes it.
         Returns an empty 200 so the row is swapped out client-side. Best-effort: no client -> 503."""
-        try:
-            client_for(store, ctx.client_provider())
-        except ValueError as exc:
-            return Response(str(exc),status_code=503)
-        if kind == "track":
-            row = store.discovery.discovered_tracks_by_keys([id]).get(id)
-            vid = row.get("video_id") if row else None
-            if not vid:
-                return Response("This track needs a YouTube video before it can be saved.", status_code=422)
-
-            try:
-                result = ctx.ops().set_rating(vid, "LIKE", acquisition={
-                    'title': row['title'], 'artist': row['artist'], 'album': row.get('album'), 'identity_key': id})
-            except Exception:  # noqa: BLE001 - a failed like must not 500 the page
-                ctx.logger.warning("discovery add (like) failed for %s", id, exc_info=True)
-                return Response("Couldn't save this track to Liked Music. Try again.", status_code=502)
-            if result.get('player_error'):
-                return Response(result['player_error'], status_code=200)
-        return Response(status_code=200)
+        result = Ctx.discovery_actions(ctx).acquire(kind, id)
+        status = {'unavailable': 503, 'missing_video': 422, 'unconfirmed': 502}.get(result['status'], 200)
+        return Response(result['message'], status_code=status)
 
     return router

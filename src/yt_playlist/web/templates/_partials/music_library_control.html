@@ -1,0 +1,9 @@
+{% macro library_control() %}
+<button type="button" class="music-search-icon music-search-add" :class="{'is-saved': state(item) === 'saved'}"
+        :disabled="['saving', 'checking', 'unavailable'].includes(state(item)) || (state(item) === 'saved' && !item.can_remove)"
+        :aria-pressed="state(item) === 'saved'" :aria-busy="['saving', 'checking'].includes(state(item))"
+        :aria-label="label(item) + ': ' + item.title" :title="label(item)" @click="save(item)">
+  <svg viewBox="0 0 24 24" :fill="state(item) === 'saved' ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14v19l-7-4-7 4z"/></svg>
+  <span class="music-search-action-note" x-show="['pending', 'retry', 'saving', 'checking'].includes(state(item))" x-text="label(item)"></span>
+</button>
+{% endmacro %}

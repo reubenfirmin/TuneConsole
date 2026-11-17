@@ -9,6 +9,10 @@ any page can open them through search or HTMX. `visualization-tooltips.css` and 
 script own the delegated pointer and keyboard readouts.
 `playback.css` owns the shared player and its mobile strip and desktop sidebar dock; it
 loads on every normal page, independently of Home's assets.
+`album-listening.js` and `album-listening.css` own the persistent artwork view for a
+deliberately started album. It opens after the shared playback snapshot confirms the
+requested queue. Both views render `_partials/playback_controls.html` in the same
+`playerStatus` scope; presentation adds no playback commands or polling.
 Feature styles follow; `artwork.css` supplies the final shared artwork shapes and template
 `page_styles` adds a page's own controls. There is no global override stylesheet.
 Use semantic tokens for colors and shared control sizes. A page may use local display sizes.
@@ -76,7 +80,7 @@ Scripts remain classic globals because server-rendered Alpine expressions call t
 `app.js` is the shell entry: topbar measurement, auth banner, omni-search and HTMX
 confirmation/error handling. `player-card.js` consumes the single `playbackStatus`
 owner; `playback-controls.js` owns playback links, keyboard shortcuts and media controls.
-`song-actions.js` and `genre-dialog.js` remain shared for fragment-mounted song dialogs.
+`song-actions.js` owns the shared song dialogs, metadata editing and genre lookup progress.
 Only library/table pages load `table-controls.js`; playlist and Move pages load
 `library-playlists.js`. Detail pages load `enrichment-panel.js`, and track surfaces
 load `track-tables.js` for suggestion staging, current-row highlighting and metadata

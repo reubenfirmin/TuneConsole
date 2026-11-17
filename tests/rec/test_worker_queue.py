@@ -325,7 +325,8 @@ def test_learning_admission_budget_survives_every_outcome(outcome):
 
 
 def test_successful_pool_build_coalesces_next_request_but_keeps_rating_work(scheduled, monkeypatch):
-    from yt_playlist.rec import candidate_refresh, fresh_pool, mode_surfaces
+    from yt_playlist.rec import candidate_refresh, fresh_pool
+    from yt_playlist.library import mode_composition
     worker, targets = scheduled
     now, calls = [100], []
     monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: now[0])
@@ -338,7 +339,8 @@ def test_successful_pool_build_coalesces_next_request_but_keeps_rating_work(sche
         store.rec_ledger.bump_card_view('cards', at)
         store.settings.set_values(captured)
         return {}
-    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', prepare)
+    monkeypatch.setattr(mode_composition, 'preparation', lambda owner:
+        SimpleNamespace(prepare=lambda now: prepare(owner, now)))
     monkeypatch.setattr(worker, 'trigger_home_refresh', lambda **kwargs: None)
     monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('ratings') or set())
     worker._refresh_bundles()

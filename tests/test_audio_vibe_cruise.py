@@ -19,7 +19,8 @@ from yt_playlist.rec import audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
+from yt_playlist.rec import audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
@@ -77,11 +78,11 @@ def test_bundled_model_changes_only_cruise_suitability(count, monkeypatch):
     original = deepcopy(rows)
     before = baseline(rows, monkeypatch)
     after = predictor.predict(rows, require_complete=False)
-    assert {k: v for k, v in after.items() if k not in ('suitability', 'individual_models')} == before
+    assert after['arc'] == before['arc']
     assert after['individual_models']['cruise']['sha256'] == '3927a3294ad7a1670ef7f81d5c6119943991a699de60a7d5a60022851ba304eb'
     candidate = cruise.score(cruise.load(cruise.DEFAULT_PATH), [row['embedding']['values'] for row in rows])
     assert after['suitability']['cruise'] == candidate['score']
-    assert after['suitability']['cruise'] != next(r['score'] for r in before['ranking'] if r['vibe'] == 'cruise')
+    assert 'cruise' not in before['suitability']
     assert after['individual_models']['cruise']['sample_count'] == count
     assert after['individual_models']['cruise']['score_semantics'] == 'independent_uncalibrated_suitability'
     for row in before['ranking']:
@@ -90,7 +91,7 @@ def test_bundled_model_changes_only_cruise_suitability(count, monkeypatch):
     assert rows == original
 
 
-def test_shadow_reports_candidate_but_preparation_uses_shared_scores(monkeypatch):
+def test_shadow_reports_candidate_without_publishing_a_measurement(monkeypatch):
     rows = samples()
     before = baseline(rows, monkeypatch)
     monkeypatch.setenv(cruise.MODE_KEY, 'shadow')
@@ -98,9 +99,7 @@ def test_shadow_reports_candidate_but_preparation_uses_shared_scores(monkeypatch
     assert after['suitability'] == {r['vibe']: r['score'] for r in before['ranking']}
     assert after['individual_models']['cruise']['mode'] == 'shadow'
     measured = vibe_preparation.measured({'samples': rows, 'metadata': {}}, [], {}, {})
-    assert {v: fit['score'] for v, fit in measured['fits'].items() if v not in INTENSITY_CHANNELS} == after['suitability']
-    for channel, vibe in INTENSITY_CHANNELS.items():
-        assert measured['fits'][channel]['score'] == after['suitability'][vibe]
+    assert measured is None
 
 
 @pytest.mark.parametrize('failure', ['missing', 'empty', 'malformed', 'oversize', 'checksum',
@@ -137,15 +136,16 @@ def test_unavailable_or_invalid_optional_model_preserves_shared_prediction(failu
 def test_missing_or_mixed_capture_provenance_does_not_apply_cruise(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert predictor.predict(rows)['suitability'] == {}
     rows[-1].pop('embedding')
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert predictor.predict(rows)['suitability'] == {}
 
 
-def test_shared_model_disable_also_disables_individual_model(monkeypatch):
-    monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
+def test_retired_shared_configuration_cannot_disable_a_specialist(monkeypatch):
     rows = samples()
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    before = predictor.predict(rows)
+    monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
+    assert predictor.predict(rows) == before
 
 
 def test_default_configuration_and_local_rollback(monkeypatch):
@@ -212,8 +212,7 @@ def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(s
     compact = musical_character.load(store, [own, neighbour])
     assert home_vibe.affinity({'key': own}, 'cruise', compact) == after['cruise']['score']
     # The independent Cruise head cannot alter radio's Energize/Release intensity.
-    assert musical_character.intensity_evidence({'musical': compact[own]}) == max(
-        ((before[v]['score'], before[v]['support']) for v in ('energize', 'release')), key=lambda v: v[0])
+    assert musical_character.provenance({'musical': compact[own]})['intensity_ensemble'] is None
     # A replaced artifact invalidates prepared measurements without a new capture.
     active_stamp = vibe_preparation.version()
     controlled(tmp_path, rows, valence=.2)

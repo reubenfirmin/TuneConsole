@@ -110,7 +110,10 @@
                   <span class="radio-proposed-pending" aria-hidden="true" x-show="isPendingSong(branch, song)" x-cloak><svg class="radio-song-spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" pathLength="100" stroke-dasharray="65 35"/></svg></span>
                 </button>
                 <span class="radio-proposed-info"><a class="radio-proposed-song" :href="trackUrl(song)"><strong x-text="song.title"></strong></a>
-                  <a class="radio-proposed-artist alink" :href="'/artist?name=' + encodeURIComponent(song.artist || '')" x-text="song.artist"></a>
+                  <span class="radio-proposed-artist" data-artist-credit>
+                    <template x-if="song.artist_links?.length"><span><template x-for="(credit, index) in song.artist_links" :key="index"><span><template x-if="index > 0"><span>, </span></template><a class="alink" :href="credit.href" x-text="credit.name"></a></span></template></span></template>
+                    <template x-if="!song.artist_links?.length"><span x-text="song.artist"></span></template>
+                  </span>
                 </span>
                 <span class="radio-saved-dot" x-show="branch.active && index === 0 && pendingSong?.slot !== branch.slot" title="Up next" aria-label="Up next"></span>
               </li>

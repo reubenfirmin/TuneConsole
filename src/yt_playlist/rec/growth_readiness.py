@@ -3,11 +3,10 @@
 These are menu-capacity policies, not model-quality estimates. Preparation and
 ranking remain with the feature owners; reading a gate never schedules work.
 """
-import math
+from yt_playlist.controllers.growth_readiness import GrowthReadiness
 
 from yt_playlist.rec import (album_choices, album_tuning, choice_evidence, fresh_pool, home_cache, home_cards,
                              home_prepared, mix_tuning)
-from yt_playlist.rec.vibe_support import supported as _supported
 
 # Enough ranked discoveries to fill one ordinary four-card row. Selection still
 # uses Fresh's existing diversity/exclusion rules, including for pool-only users.
@@ -22,41 +21,36 @@ MIN_STORY_GROUPS = 3
 
 def foundation(store, now):
     """Read prepared preference evidence and the current usable Fresh reserve."""
-    def read():
-        taste = bool(store.modes.list_summaries(active_only=True))
+    def contexts():
         for surface, field in ((home_prepared.SURFACE, 'choice_context'),
                                (album_choices.SURFACE, 'context')):
-            if taste:
-                break
             payload = (home_cache.read(store, surface, fields=(field,)) if surface in home_cache.SURFACES
                        else store.rec_proposals.proposal_fields(surface, (field,))) or {}
             try:
                 context = choice_evidence.resolve_context(store, payload.get(field) or {})
             except ValueError:
                 continue  # Collected evidence is pending preparation, not a broken Home.
-            policy = context.get('policy') or {}
-            if (policy.get('content_generation') != store.settings.get_setting('rec_content_generation')
-                    or policy.get('collaborative_inputs') != store.settings.get_setting('rec_fit_inputs')):
-                continue
-            saved = (context.get('layers') or {}).get('saved') or {}
-            taste = taste or any((value or {}).get('titles') for value in saved.values())
+            yield context
+    def reserve():
         bundles = (None if getattr(store, '_recommendation_files', False)
                    else store.rec_proposals.fresh_candidates())
-        tracks = fresh_pool.pick(store, now, size=POOL_TRACKS, minimum=1, bundles=bundles)
-        ranked = {track['key'] for track in tracks
-                  if type(track.get('score')) in (int, float) and math.isfinite(track['score'])}
-        return bool(taste and len(ranked) >= POOL_TRACKS)
-    return store.memoized_read(('growth-foundation', 1, int(now // 60)), read)
+        return fresh_pool.pick(store, now, size=POOL_TRACKS, minimum=1, bundles=bundles)
+    command = GrowthReadiness(modes=lambda: store.modes.list_summaries(active_only=True),
+        contexts=contexts, configuration=lambda: (store.settings.get_setting('rec_content_generation'),
+            store.settings.get_setting('rec_fit_inputs')), reserve=reserve, album_menu=lambda: [])
+    return store.memoized_read(('growth-foundation', 1, int(now // 60)), lambda: command.foundation(POOL_TRACKS))
 
 
 def albums(store, now):
-    payload = album_choices.load(store, now)
-    if not payload:
-        return False
-    tuning = album_tuning.state(store, now)
-    _, menu, _ = album_choices.selection(store, payload['items'], now,
-        tuning['values'], home_cards._epoch(store, 'album_choices'), tuning['genres'])
-    return len(menu) >= MIN_ALBUMS
+    def menu():
+        payload = album_choices.load(store, now)
+        if not payload:
+            return []
+        tuning = album_tuning.state(store, now)
+        _, selected, _ = album_choices.selection(store, payload['items'], now,
+            tuning['values'], home_cards._epoch(store, 'album_choices'), tuning['genres'])
+        return selected
+    return GrowthReadiness(modes=None, contexts=None, configuration=None, reserve=None, album_menu=menu).albums(MIN_ALBUMS)
 
 
 def discover(collections):

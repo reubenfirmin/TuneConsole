@@ -29,70 +29,12 @@ def resolve_identity(store, brand_id):
 
 
 def handle_play_event(ctx, msg, now) -> bool:
-    """Persist one {type:'play'} bridge frame. Returns True when a NEW play was recorded (a
-    same-track re-report, e.g. a likeStatus change, merges into the previous event instead)."""
-    title = (msg.get("title") or "").strip()
-    artist = (msg.get("artist") or "").strip()
-    if (msg.get('brandKnown') is False or msg.get("paused")
-            or msg.get("muted") or msg.get("tabMuted") or msg.get("volume") == 0):
-        return False
-    store = ctx.store
-    ident = resolve_identity(store, (msg.get("brandId") or "").strip())
-    if ident is None:
-        return False
-    if playback_feedback.deferred(store):
-        playback_feedback.capture(store, 'live', ident, msg, now)
-        return True
-    return persist_play_event(ctx, msg, now, ident)
+    from yt_playlist.library.playback_composition import observations
+    return observations(ctx.store, getattr(ctx, 'rec_worker', None)).observe('live', msg, now)
 
 
 def persist_play_event(ctx, msg, now, ident, *, inline_analytics=False):
-    """Project a live observation, retaining its original account and clock."""
-    store = ctx.store
-    title = (msg.get('title') or '').strip()
-    artist = (msg.get('artist') or '').strip()
-    metadata_verified = msg.get('metadataVerified') is not False
-    if not metadata_verified:
-        # The native player can identify an upload before the player bar hydrates its
-        # credits. Use its existing catalog identity without importing uploader/stale
-        # metadata, a rating, or a guessed association with a different upload.
-        key = (store.tracks.identity_key_for_video(msg.get('videoId'))
-               if msg.get('videoVerified') is True and msg.get('videoId') else None)
-        if not key:
-            return False
-    else:
-        if not title:
-            return False
-        key = make_key(title, artist)
-        if msg.get('videoId'):
-            key = store.tracks.observe_track(msg['videoId'],title,artist,now=now)
-    status = (msg.get("likeStatus") or "").strip() if metadata_verified else ''
-    rating = store.tracks.item_rating(ident, msg.get("videoId"))
-    confirmed = rating is not None and rating["source"] == "api"
-    if confirmed:
-        # An API write does not refresh YTM's player bar. Its old readout must not undo the
-        # confirmed result; another confirmed action or a library sync can reconcile it.
-        status = rating["status"]
-    from yt_playlist.rec import choice_evidence
-    context_choice = choice_evidence.album_playback_context(store, msg, now, account_id=ident)
-    new = store.history.record_play_event(ident, key, (msg.get("videoId") or None), now,
-                                  playlist_ytm_id=(msg.get("playlist") or None),
-                                  like_status=(status or None),source_timezone=msg.get('timeZone'),
-                                  context_choice=bool(context_choice))
-    if new:
-        store.settings.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
-        choice_evidence.record_playback(store, msg, now, account_id=ident)
-        from yt_playlist.rec.listening_analytics import capture_start
-        # Retained ratings predate this play. An unhydrated indifferent player
-        # readout cannot establish that an unobserved song was previously unliked.
-        initial = rating['status'] if rating else (status if status in _STATUSES else None)
-        capture_start(store, ident, msg.get('videoId'), msg.get('playlist') or None,
-                      initial, now, album=bool(context_choice), inline=inline_analytics)
-    # A title alone cannot attribute an account's rating to an exact upload.
-    if status in _STATUSES and msg.get('videoId'):
-        if not confirmed:
-            ratings.record_observations(store, ident, {msg['videoId']: status},
-                                        source='action', now=now)
-        else:
-            ratings.reconcile_recordings(store, {key})
-    return new
+    from yt_playlist.controllers.playback_observations import Observation
+    from yt_playlist.library.playback_composition import observations
+    return observations(ctx.store, getattr(ctx, 'rec_worker', None)).project(
+        Observation('live', ident, msg, now), inline_analytics=inline_analytics)

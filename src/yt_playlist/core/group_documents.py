@@ -7,12 +7,13 @@ from pathlib import Path
 import tempfile
 
 from .evidence_ledger import canonical
-from . import policy_documents, fao
+from . import policy_documents, fao, file_pack
+from .group_paths import record_path, record_id
 
 FORMAT = 'musical-group-document-1'
 KINDS = ('definition', 'generation', 'lineage')
 PACK_BYTES = 256 * 1024
-MAX_BYTES = 8 * 1024 * 1024
+MAX_BYTES = file_pack.MAX_BYTES
 HEADER = b'TuneConsole musical groups 1\n'
 BACKUP_FORMAT = 'musical-group-backup-1'
 OWNERS = (('group_versions', ('id',), 'definition', 'definition'),
@@ -35,11 +36,25 @@ class GroupFiles:
         prefix = {'generation': 'metadata', 'definition': 'definition', 'lineage': 'evidence'}[kind]
         return read(*(row[prefix + '_' + field] for field in ('filename', 'digest', 'bytes', 'offset')), kind)
 
-    def write(self, documents):
-        return list(publish_many(self.root, documents))
+    def describe(self, documents):
+        records = []
+        for kind, value in documents:
+            encoded = encode(kind, value)
+            records.append(dict(kind=kind, value=value, digest=hashlib.sha256(encoded).hexdigest(), size=len(encoded)))
+        return records
 
-    def write_policy(self, value):
-        return next(policy_documents.publish_many(self.policy_root, [value]))
+    def write_reserved(self, records):
+        references = []
+        with self.retained(), ExitStack() as retained:
+            for record in records:
+                encoded = encode(record['kind'], record['value'])
+                if len(encoded) != record['size'] or hashlib.sha256(encoded).hexdigest() != record['digest']:
+                    raise ValueError('Musical group document changed after reservation')
+                path = record_path(self.root, record['file_id'])
+                pending = retained.enter_context(fao.prepare(path, fao.Content(HEADER + encoded, max_bytes=MAX_BYTES + len(HEADER))))
+                pending.publish()
+                references.append((str(path), record['digest'], record['size'], len(HEADER)))
+        return references
 
     def policy(self, reference):
         if reference is None:
@@ -73,15 +88,19 @@ def publish_many(root, documents, *, age=None):
     """Yield filename/digest/size/offset for each bounded (kind, object) record."""
     def encoded_records():
         for kind, value in documents:
-            if kind not in KINDS or not isinstance(value, dict):
-                raise ValueError('Invalid musical group document')
-            encoded = canonical({'format': FORMAT, 'kind': kind, 'value': value})
-            if len(encoded) > MAX_BYTES:
-                raise ValueError('Musical group document exceeds its file byte budget')
-            yield encoded
+            yield encode(kind, value)
 
     yield from policy_documents.pack_encoded(root, encoded_records(),
         header=HEADER, pack_bytes=PACK_BYTES, age=age)
+
+
+def encode(kind, value):
+    if kind not in KINDS or not isinstance(value, dict):
+        raise ValueError('Invalid musical group document')
+    encoded = canonical({'format': FORMAT, 'kind': kind, 'value': value})
+    if len(encoded) > MAX_BYTES:
+        raise ValueError('Musical group document exceeds its file byte budget')
+    return encoded
 
 
 def read(filename, digest, size, offset, kind, *, with_age=False):
@@ -90,12 +109,8 @@ def read(filename, digest, size, offset, kind, *, with_age=False):
         raise ValueError('Invalid musical group file reference')
     with fao.read(filename) as stream:
         age = stream.info
-        if stream.read(len(HEADER)) != HEADER:
-            raise ValueError('Invalid musical group pack')
-        stream.seek(offset)
-        encoded = stream.read(size)
-    if len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
-        raise ValueError('Musical group document does not match its digest')
+        encoded = file_pack.PackReader(stream, header=HEADER, max_bytes=MAX_BYTES,
+                                      max_pack_bytes=MAX_BYTES + len(HEADER)).read(offset, size, digest)
     value = json.loads(encoded)
     if (not isinstance(value, dict) or set(value) != {'format', 'kind', 'value'}
             or value['format'] != FORMAT or value['kind'] != kind or not isinstance(value['value'], dict)
@@ -173,11 +188,21 @@ def export(conn, root):
     pending, entries, chunks, used = [], [], [], 0
 
     def copy_batch():
+        files_by_owner = {}
+        native = [row for row in pending if record_id(row[3]) is not None]
+        legacy = [row for row in pending if record_id(row[3]) is None]
+        for table, key, kind, filename, digest, size, offset in native:
+            read(filename, digest, size, offset, kind)
+            target = record_path(root, record_id(filename))
+            fao.write(target, fao.read(filename, max_bytes=MAX_BYTES + len(HEADER)))
+            files_by_owner[table, key] = (str(target), digest, size, offset)
         values = (((kind, value), age)
-                  for _table, _key, kind, filename, digest, size, offset in pending
+                  for _table, _key, kind, filename, digest, size, offset in legacy
                   for value, age in [read(filename, digest, size, offset, kind, with_age=True)])
+        for row, file in zip(legacy, policy_documents.repack(root, values, publish_many), strict=True):
+            files_by_owner[row[0], row[1]] = file
         for (table, key, _kind, _filename, digest, size, _offset), file in zip(
-                pending, policy_documents.repack(root, values, publish_many)):
+                pending, (files_by_owner[row[0], row[1]] for row in pending), strict=True):
             filename, copied, copied_size, offset = file
             if (copied, copied_size) != (digest, size):
                 raise ValueError('Musical group backup changed its content')
@@ -231,8 +256,10 @@ def restore(conn, manifest):
             raise ValueError('Invalid musical group backup owner key')
         relative = Path(entry['relative_filename'])
         digest = relative.stem
-        if (not _digest(digest) or relative != Path(digest[:2]) / (digest + '.json')
-                or str(relative) != entry['relative_filename']):
+        identity = record_id(relative)
+        valid = (relative == record_path(Path(), identity) if identity is not None
+                 else _digest(digest) and relative == Path(digest[:2]) / (digest + '.json'))
+        if not valid or str(relative) != entry['relative_filename']:
             raise ValueError('Invalid musical group backup path')
     actual = {(entry['owner'], tuple(entry['key'])): (entry['digest'], entry['byte_size']) for entry in entries}
     if len(actual) != len(entries):
@@ -244,15 +271,25 @@ def restore(conn, manifest):
         expected = {(table, key): (digest, size) for table, key, _kind, _filename, digest, size, _offset in references(conn)}
         if expected != actual:
             raise ValueError('Musical group backup does not match the restored database')
-        values = (((owners[entry['owner']][2], value), age) for entry in entries
+        legacy = [entry for entry in entries if record_id(entry['relative_filename']) is None]
+        values = (((owners[entry['owner']][2], value), age) for entry in legacy
                   for value, age in [read(path.parent.parent / entry['relative_filename'],
                     entry['digest'], entry['byte_size'], entry['offset'], owners[entry['owner']][2], with_age=True)])
         targets = []
-        for entry, file in zip(entries, policy_documents.repack(directory(conn), values, publish_many)):
+        for entry, file in zip(legacy, policy_documents.repack(directory(conn), values, publish_many), strict=True):
             filename, digest, size, offset = file
             if (digest, size) != (entry['digest'], entry['byte_size']):
                 raise ValueError('Musical group restore changed its content')
             targets.append((entry['owner'], tuple(entry['key']), filename, offset))
+        for entry in entries:
+            identity = record_id(entry['relative_filename'])
+            if identity is None:
+                continue
+            source = path.parent.parent / entry['relative_filename']
+            read(source, entry['digest'], entry['byte_size'], entry['offset'], owners[entry['owner']][2])
+            target = record_path(directory(conn), identity)
+            fao.write(target, fao.read(source, max_bytes=MAX_BYTES + len(HEADER)))
+            targets.append((entry['owner'], tuple(entry['key']), str(target), entry['offset']))
         for table, key, filename, offset in targets:
             keys, prefix, _kind = owners[table]
             conn.execute(f'UPDATE {table} SET {prefix}_filename=?,{prefix}_offset=? WHERE '

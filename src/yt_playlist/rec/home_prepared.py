@@ -18,7 +18,7 @@ from yt_playlist.core.read_memo import preparation_memo
 from yt_playlist.core import home_outputs, home_revisit_progress, json_cache
 from yt_playlist.core.work_diagnostics import maintenance_job
 from yt_playlist.rec import (album_choices, artist_start, choice_evidence, discover, fresh_pool, home_cache, home_cards, home_themes, home_vibe,
-                             mode_eval, mode_surfaces, rec_params, recipes, surfaces, taste_analysis,
+                             mode_eval, mode_selection, mode_surfaces, rec_params, surfaces, taste_analysis,
                              transient, mix_tuning)
 from yt_playlist.rec import group_learning, group_serving, musical_character, stored_home
 
@@ -172,10 +172,11 @@ def tuning_key(store, now=None):
 
 def _tuning_key(store, now, vibe):
     from yt_playlist.rec import candidate_refresh
+    from yt_playlist.rec.artist_variety import VERSION as artist_policy
     genres = store.rec_proposals.get_proposals("home_genre_request") or {}
     if not mix_tuning.genre_active(store, genres):
         genres = {}
-    return _digest({"musical_policy": musical_character.VERSION, "vibe_policy": home_vibe.VERSION,
+    return _digest({"artist_policy": artist_policy, "musical_policy": musical_character.VERSION, "vibe_policy": home_vibe.VERSION,
                     "group_policy": group_serving.policy(store),
                     "leans": store.rec_model.get_leans(),
                     "preferences": candidate_refresh.preferences(store, now, include_exposure=False),
@@ -295,9 +296,10 @@ def prepare_discovery(store, now):
 
             payload = reader.memoized_read(('discovery', int(now // MAX_AGE_S)), calculate)
             encoded = json.dumps(payload, separators=(',', ':'))
-            published = snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
-                    encoded, now, surface=DISCOVERY_SURFACE, input_revision=snapshot._changes),
-                    allow_stale_tables=_PREPARATION_CHURN_TABLES)
+            with store.rec_proposals.prepare_home(encoded, now, surface=DISCOVERY_SURFACE) as publication:
+                published = snapshot.publish(lambda: store.rec_proposals.publish_home(
+                        publication, input_revision=snapshot._changes),
+                        allow_stale_tables=_PREPARATION_CHURN_TABLES)
     except WorkBudgetExceeded:
         if not published:
             _LOG.debug('Discovery preparation deferred; keeping the last display pool')
@@ -328,22 +330,22 @@ def prepare_revisit(store, now):
                     value = snapshot.store.memoized_read(('home-revisit', field, int(now // MAX_AGE_S)),
                         lambda: targets[offset](snapshot.store))
 
-                    def publish():
-                        latest = store.rec_proposals.get_proposals(REVISIT_SURFACE) or {}
-                        next_remaining = [pending for pending in remaining if pending != field]
-                        # Retain the cursor across shutdown/restart as well as
-                        # worker turns. A completed sibling is never re-admitted
-                        # merely because a later component has unfinished work.
-                        # Progress is independent of display content: an unchanged
-                        # result still completes its unit without replacing a head.
-                        if latest.get(field) != value:
-                            payload = {key: item for key, item in latest.items() if key != 'remaining'}
-                            store.rec_proposals.put_proposals(REVISIT_SURFACE, {**payload, field: value}, now)
-                        store.rec_proposals.save_revisit_remaining(next_remaining)
-                        remaining[:] = next_remaining
+                    latest = snapshot.store.rec_proposals.get_proposals(REVISIT_SURFACE) or {}
+                    next_remaining = [pending for pending in remaining if pending != field]
+                    changed = latest.get(field) != value
+                    payload = {key: item for key, item in latest.items() if key != 'remaining'}
+                    prepared = (store.rec_proposals.prepare_home(json.dumps({**payload, field: value}), now,
+                                surface=REVISIT_SURFACE) if changed else nullcontext(None))
+                    with prepared as publication:
+                        def publish():
+                            # An unchanged component still advances the durable cursor.
+                            if publication is not None:
+                                store.rec_proposals.publish_home(publication, input_revision=snapshot._changes)
+                            store.rec_proposals.save_revisit_remaining(next_remaining)
+                            remaining[:] = next_remaining
 
-                    if not snapshot.publish(publish, allow_stale_tables=_PREPARATION_CHURN_TABLES):
-                        completed = False
+                        if not snapshot.publish(publish, allow_stale_tables=_PREPARATION_CHURN_TABLES):
+                            completed = False
         if completed:
             store.maintenance_diagnostics.record('completed', phase=REVISIT_PHASE)
     except WorkBudgetExceeded:
@@ -433,69 +435,28 @@ def _prepare(store, now):
                            _digest(selection_data['plays']))}
         service = home_cards.HomeCards(reader, _NoJobs(), _LOG, genre_options=options,
                                       selection_data=selection_data)
-        menus = {m['epoch']: m for m in previous.get('menus', [])} if reusable else {}
-        cursor = previous.get('next_menu', 0) if reusable else 0
-        # Cover different modes and temporal bands, including both ranker allocations,
-        # rather than predetermining the next several choices using today's feedback.
-        for index in range(MAX_MENUS if mids or adaptive else 1):
-            check_cancellable_work()
-            offset = (cursor + index) % MAX_MENUS
-            start = (offset // 3 + (offset % 3) * 4) % len(mids) if mids else 0
-            order = tuple(mids[start:] + mids[:start]) if mids else None
-            result = reader.memoized_read(('home-complete-set', selection_data['preparation']['checkpoint'],
-                                          offset, order),
-                lambda: service.cards(home_cards.CardsRequest(now, epoch=offset,
-                                                              mode_order=order, record=False)))
-            if result.choice_context and not collections['choice_context']:
-                collections['choice_context'] = {
-                    **choice_evidence.freeze_context(reader, result.choice_context),
-                    'group_generation': result.choice_context['group_generation']}
-            menu = asdict(result)
-            # The generation context is shared once by all menus in this batch.
-            menu.pop('choice_context', None)
-            for proto in menu["protos"]:
-                proto["experiment_id"] = home_cards.experiment_id(proto)
-                proto.setdefault("recipe", {})
-                proto["recipe"]["experiment_id"] = proto["experiment_id"]
-            # Slots must reference the same final offers that carry experiment attribution.
-            by_lane = {p["lane"]: p for p in menu["protos"]}
-            for slot in menu["slots"]:
-                if slot["proto"]:
-                    slot["proto"] = by_lane[slot["proto"]["lane"]]
-            menus[offset] = menu
-            # Reserve publication time; never insist on three menus after an
-            # expensive setup. Each successful batch is immediately usable.
-            if time.monotonic() - started >= PREPARE_BUDGET_S * 0.5:
-                break
-        complete = {key: menu for key, menu in menus.items() if len(menu['protos']) >= 4}
-        if len(complete) < len(menus) and _has_complete_menu(reader, previous, now):
-            # A partial candidate publication is useful preparation, but cannot
-            # retire the only complete serving board. Keep generations separate
-            # so retained offers keep their original attribution and roots.
-            if not complete:
-                store.maintenance_diagnostics.record('deferred', reasons=('incomplete_menus',),
-                                                     phase='rec: Home collections')
-                return None
-            menus = complete
-        payload = {"schema": SCHEMA, "built_at": now, "tuning": tuning,
-            "generation": generation, "next_menu": (offset + 1) % MAX_MENUS,
-            "menus": [menus[k] for k in sorted(menus)], "genre_options": options,
-            "modes": [{**m, "centroid": list(map(float, m["centroid"]))} for m in modes],
-            "group_policy": 'adaptive' if adaptive else 'legacy',
-            "play_exposure": transient.play_facet_leans(reader, now),
-            "fingerprint": fingerprint, **collections}
-        encoded = json_cache.encode(payload, references=home_outputs.policy_references(payload))
-        if len(encoded.encode()) > MAX_BYTES:
-            raise ValueError("Prepared Home collections exceeded their size budget")
-        # Files are complete before the guarded SQL publication starts.
-        with home_cache.writing(store):
-            publication = home_cache.prepare(store, target, encoded, now)
-            check_cancellable_work()
-            if not snapshot.publish(lambda: home_cache.publish(
-                    store, publication, input_revision=snapshot._changes),
-                                    allow_stale_tables=_PREPARATION_CHURN_TABLES):
-                return None
-        return payload
+        from yt_playlist.controllers.home_preparation import HomePreparation
+
+        def calculate(offset, order):
+            return reader.memoized_read(('home-complete-set', selection_data['preparation']['checkpoint'], offset, order),
+                lambda: service.cards(home_cards.CardsRequest(now, epoch=offset, mode_order=order, record=False)))
+
+        def publish(encoded, published_at):
+            with home_cache.writing(store):
+                publication = home_cache.prepare(store, target, encoded, published_at)
+                check_cancellable_work()
+                return snapshot.publish(lambda: home_cache.publish(store, publication, input_revision=snapshot._changes),
+                                        allow_stale_tables=_PREPARATION_CHURN_TABLES)
+
+        commands = HomePreparation(calculate=calculate, freeze=lambda value: choice_evidence.freeze_context(reader, value),
+            has_complete=lambda payload, at: _has_complete_menu(reader, payload, at),
+            encode=lambda payload: json_cache.encode(payload, references=home_outputs.policy_references(payload)),
+            publish=publish, check=check_cancellable_work, elapsed=lambda: time.monotonic() - started,
+            deferred=lambda reason: store.maintenance_diagnostics.record('deferred', reasons=(reason,), phase='rec: Home collections'),
+            max_menus=MAX_MENUS, budget=PREPARE_BUDGET_S, max_bytes=MAX_BYTES, schema=SCHEMA)
+        return commands.prepare(previous=previous, reusable=reusable, mode_ids=mids, modes=modes, adaptive=adaptive,
+            now=now, tuning=tuning, generation=generation, options=options, fingerprint=fingerprint,
+            collections=collections, play_exposure=transient.play_facet_leans(reader, now))
 
 
 def _has_complete_menu(store, payload, now):
@@ -932,7 +893,7 @@ def _prepared_choice(store, payload, now, epoch, tuning, *, record, readiness_on
         context = (payload.get("fingerprint") or {}).get("transient", {})
         size_power = rec_params.get_param(store, "bandit_size_power")
         priorities = {m["mode_id"]: priorities[m["mode_id"]] * max(1, m["size"]) ** size_power
-                      * mode_surfaces._mode_mood_weight(m, context) for m in modes}
+                      * mode_selection._mode_mood_weight(m, context) for m in modes}
         def score(menu):
             if payload.get('group_policy') == 'adaptive':
                 # The prepared graph menus already conserve broad-area mass.
@@ -955,9 +916,17 @@ def _prepared_choice(store, payload, now, epoch, tuning, *, record, readiness_on
                 "generation": payload.get("generation"), "at": now}}
     if isinstance(payload, _DisplayPayload):
         chosen = payload.restore_menu(chosen)
-    # Exposure metadata belongs to the response. Tracks, order, descriptions
-    # and counterfactuals remain exactly as the producer published them.
-    return payload, chosen, deepcopy(chosen['protos']), held
+    # Exposure metadata and live eligibility checks belong to the response;
+    # keep the stored offer intact.
+    protos = deepcopy(chosen['protos'])
+    # Listening can change while a prepared menu is held. A comfort card's
+    # promise is eligibility, so never keep a newly heard song in that offer.
+    from yt_playlist.rec.eligibility import comfort_tracks
+    for proto in protos:
+        if proto['lane'] == 'comfort':
+            proto['tracks'] = comfort_tracks(store, proto['tracks'], now)
+    protos = [proto for proto in protos if proto['lane'] != 'comfort' or proto['tracks']]
+    return payload, chosen, protos, held
 
 
 def _matches_genre_request(protos, requested):

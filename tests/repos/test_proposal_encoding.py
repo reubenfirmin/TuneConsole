@@ -4,7 +4,7 @@ import json
 import pytest
 
 from yt_playlist.core import json_cache, policy_config
-from yt_playlist.rec import home_prepared, mode_surfaces, candidate_refresh
+from yt_playlist.rec import home_prepared, mode_inputs, mode_surfaces, candidate_refresh
 from yt_playlist.repos import policy_storage
 from yt_playlist.core.proposal_codec import encode_proposals
 from tests.publication_support import plan, publish, stage
@@ -250,17 +250,17 @@ def test_bundle_preparation_encodes_before_guarded_publication(store, monkeypatc
             lane: policies.stamp(items, lane) for lane, items in value.items()}
             for key, value in bundles.items()}
         return prepared, policies.stamp(bundles['all']['fresh'], 'fresh')
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate)
     monkeypatch.setattr(candidate_refresh, 'prepared_settings', lambda *args: {'prepared': 'yes'})
-    from yt_playlist.core import recommendation_outputs
-    original = recommendation_outputs.publish
+    files = store.recommendations.files
+    original = files.publish_reserved
     writes = []
     def write(*args, **kwargs):
         assert not store._lock.held_by_current_thread
         assert not store.conn.in_transaction
         writes.append(True)
         return original(*args, **kwargs)
-    monkeypatch.setattr(recommendation_outputs, 'publish', write)
+    monkeypatch.setattr(files, 'publish_reserved', write)
     result = mode_surfaces.prepare_bundles(store, 10)
     assert [item['key'] for item in result['all']['wheelhouse']] == [item['key'] for item in bundles['all']['wheelhouse']]
     assert writes and len(store.recommendations.page('home', 'all', 'wheelhouse')) == 100

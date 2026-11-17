@@ -3,6 +3,7 @@
 This owner may call providers. It never allocates a mix, changes draft state, or
 writes playlists; the draft application service passes its snapshots to the mixer.
 """
+import json
 import math
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from threading import Lock
 from time import monotonic
 from typing import Protocol
 
-from yt_playlist.providers import deezer, lastfm, musicbrainz
+from yt_playlist.providers import deezer, genres, lastfm, musicbrainz
 from yt_playlist.integrations.base import IntegrationUnavailable
 from yt_playlist.rec.road_trip_axes import canonical_genre
 from yt_playlist.util import genre_map, net
@@ -83,6 +84,11 @@ def own_candidates(store, now, state=None):
     muted = store.rec_model.muted_artists()
     by_artist = store.rec_query.artist_genre_years()
     learned = (state or {}).get("own_facts") or {}
+    return own_rows(songs, plays, hard, muted, by_artist, learned)
+
+
+def own_rows(songs, plays, hard, muted, by_artist, learned):
+    """Interpret eligible library rows without acquiring any inputs."""
     out = []
     for song in songs:
         if song["key"] in hard or song["artist"] in muted:
@@ -93,6 +99,7 @@ def own_candidates(store, now, state=None):
                                song["duration"], "mine", song["genre"] or extra.get("genre") or fallback.get("genre") or "",
                                song["year"] or extra.get("year") or fallback.get("year"), plays.get(song["key"], 0))
         candidate["engagement"] = candidate["plays"] + (LIKE_BONUS if song["liked"] else 0)
+        candidate['artist_ids'] = song.get('artist_ids', [])
         out.append(candidate)
     out.sort(key=lambda candidate: candidate["engagement"])
     for index, candidate in enumerate(out):
@@ -138,10 +145,12 @@ def artist_genre(store, artist):
     key = lastfm.api_key(store)
     if not key:
         return None  # Missing credentials must never poison a later configured lookup.
-    cache_key = (artist.casefold(), _credential_version(key))
+    matcher = genres.snapshot(store)
+    vocabulary = sha256(json.dumps([dict(matcher.canon), dict(matcher.keys)], sort_keys=True).encode()).digest()
+    cache_key = (artist.casefold(), _credential_version(key), vocabulary)
     with lastfm.access(store):
         return _metadata_cached(_ARTIST_GENRE_CACHE, cache_key,
-                                lambda: (lastfm.artist_genre(artist, key), True))
+                                lambda: (lastfm.artist_genre(artist, key, matcher=matcher), True))
 
 
 def _credential_version(key):
@@ -308,14 +317,9 @@ def acquire_input(client: MusicClient, store, request: InputRequest) -> Candidat
 
 
 def to_candidates(rows, store=None):
-    out = []
-    for row in rows:
-        facts = track_facts(store, row["title"], row["artist"])
-        genre = artist_genre(store, row["artist"]) or row["genre"] or facts.get("genre") or ""
-        candidate = _candidate(row["video_id"], row["title"], row["artist"], row["album"], row["thumbnail"],
-                               row["duration"] or facts.get("duration"), "theirs", genre, facts.get("year"))
-        candidate["input"] = row.get("input")
-        out.append(candidate)
+    facts = [track_facts(store, row['title'], row['artist']) for row in rows]
+    artist_genres = {row['artist']: artist_genre(store, row['artist']) for row in rows}
+    out = candidate_rows(rows, facts, artist_genres)
     if store is not None:
         axes = store.genres.feature_axes(candidate['genre'] for candidate in out)
         for candidate in out:
@@ -323,10 +327,25 @@ def to_candidates(rows, store=None):
     return out
 
 
+def candidate_rows(rows, metadata, artist_genres):
+    out = []
+    for row, facts in zip(rows, metadata, strict=True):
+        genre = artist_genres.get(row['artist']) or row['genre'] or facts.get('genre') or ''
+        candidate = _candidate(row["video_id"], row["title"], row["artist"], row["album"], row["thumbnail"],
+                               row["duration"] or facts.get("duration"), "theirs", genre, facts.get("year"))
+        candidate["input"] = row.get("input")
+        out.append(candidate)
+    return out
+
+
 def rank_other(cands, store=None):
-    def popularity(candidate):
-        return track_facts(store, candidate["title"], candidate["artist"]).get("popularity")
-    return _rank_scores(sorted(cands, key=lambda candidate: -(popularity(candidate) or 0)), popularity)
+    popularity = {c['video_id']: track_facts(store, c['title'], c['artist']).get('popularity') for c in cands}
+    return rank_rows(cands, popularity)
+
+
+def rank_rows(cands, popularity):
+    value = lambda candidate: popularity.get(candidate['video_id']) or 0
+    return _rank_scores(sorted(cands, key=lambda candidate: -value(candidate)), value)
 
 
 def other_cap(artists, genres, limit):

@@ -2,7 +2,7 @@
 import logging
 import re
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
-from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.base import AccessState, IntegrationUnavailable
 from yt_playlist.integrations.musicbrainz import MusicBrainzIAO, TIMEOUT_S
 from yt_playlist.util.matching import is_remix, normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult
@@ -15,7 +15,7 @@ _iao = MusicBrainzIAO()
 
 
 def access(store=None):
-    return _iao.context(store.enrichment_state if store is not None else None)
+    return _iao.context(AccessState.for_store(store))
 
 
 def available(store=None) -> bool:
@@ -27,13 +27,18 @@ def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
 
 
-def probe(track, store=None) -> EnrichmentResult:
+def probe(track, store=None, *, matcher=None) -> EnrichmentResult:
     """Look up metadata without applying it; the IAO can persist access cooldowns."""
+    if matcher is None and store is not None:
+        matcher = genres.snapshot(store)
     observations = []
+    credits = []
     with access(store):
         genre, year, mbid, release_ids, isrcs = enrich_full(track["title"], track["artist"],
-                                                        observations=observations)
+                                                        observations=observations, matcher=matcher, credits=credits)
     fields = {}
+    if credits:
+        fields['artist_credits'] = credits
     if genre:
         fields["genre"] = genre
     if year:
@@ -112,16 +117,16 @@ def _earliest_year(recordings):
     return min(rg) if rg else None
 
 
-def _top_label(obj):
+def _top_label(obj, matcher=None):
     """Vote order chooses the style; a documented child tag can refine its broad parent."""
     tags = []
     for field in ("genres", "tags"):
         items = sorted(obj.get(field) or [], key=lambda x: int(x.get("count") or 0), reverse=True)
         tags.extend(item.get('name') for item in items)
-    return genres.pick_genre(tags)
+    return genres.pick_genre(tags, matcher)
 
 
-def _artist_genre(mbid, *, observations=None, match_evidence=None):
+def _artist_genre(mbid, *, observations=None, match_evidence=None, matcher=None):
     """Artist-level genre (MusicBrainz keeps most genre data on artists, not recordings).
 
     Re-enrichment shares fresh raw evidence: tagged responses live for a day, empty responses
@@ -138,7 +143,7 @@ def _artist_genre(mbid, *, observations=None, match_evidence=None):
         logger.debug("MB artist lookup failed for %s: %s", mbid, e)
         return None
     _retain_tags(observations, art, 'artist', mbid, match_evidence)
-    return _top_label(art)
+    return _top_label(art, matcher)
 
 
 def _retain_tags(observations, data, scope, mbid, match):
@@ -182,13 +187,10 @@ def _search_recordings(title, artist):
 def _recording_search(title, artist):
     """One recording search with the parens-stripped retry (a remaster / live / remix suffix often
     blocks the match). The IAO shares successful responses across callers."""
-    recs = [r for r in _search_recordings(title, artist) if _matches_recording(r, title, artist)]
-    if not recs:
-        stripped = _strip_parens(title)
-        if stripped and stripped != title:
-            recs = [r for r in _search_recordings(stripped, artist)
-                    if _matches_recording(r, title, artist)]
-    return recs
+    from yt_playlist.controllers.provider_acquisition import musicbrainz_search
+    from types import SimpleNamespace
+    policy = SimpleNamespace(_matches_recording=_matches_recording, _strip_parens=_strip_parens)
+    return musicbrainz_search(policy, _search_recordings, title, artist)
 
 
 def _matches_recording(recording, title, artist):
@@ -228,7 +230,7 @@ def _release_ids(recordings):
     return ids
 
 
-def enrich_full(title, artist, *, observations=None):
+def enrich_full(title, artist, *, observations=None, matcher=None, credits=None):
     """(genre, year, mb_recording_id, release_ids, isrcs) from one recording search.
 
     release_ids keys Cover Art Archive (which is keyed by release, not recording). It rides along
@@ -238,13 +240,24 @@ def enrich_full(title, artist, *, observations=None):
         recs = _recording_search(title, artist)
     except IntegrationUnavailable:
         return None, None, None, [], []
-    genre, year = _genre_year(recs, title=title, observations=observations)
+    genre, year = _genre_year(recs, title=title, observations=observations, matcher=matcher)
+    if credits is not None:
+        from yt_playlist.providers.artist_credits import musicbrainz
+        credits.extend(musicbrainz(recs))
     return (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs),
             (recs[0].get("isrcs") or []) if recs else [])
 
 
-def _genre_year(recordings, *, title="", observations=None):
-    """Derive (genre, year) from a recordings list (best match first), or (None, None) if empty."""
+def _genre_year(recordings, *, title="", observations=None, matcher=None):
+    from yt_playlist.controllers.provider_acquisition import musicbrainz_genre_year
+    from types import SimpleNamespace
+    policy = SimpleNamespace(project=project, _top_label=_top_label, logger=logger)
+    return musicbrainz_genre_year(policy, _get, recordings, title=title,
+                                 observations=observations, matcher=matcher)
+
+
+def project(recordings, full, artist, *, observations=None, matcher=None):
+    """Project supplied matched recordings and details without provider access."""
     if not recordings:
         return (None, None)
     rec = recordings[0]                          # best match drives genre/artist
@@ -252,25 +265,16 @@ def _genre_year(recordings, *, title="", observations=None):
     credit = rec.get("artist-credit") or []
     first = credit[0] if credit else None        # MB sometimes returns bare join-phrase strings here
     artist_mbid = (first.get("artist") or {}).get("id") if isinstance(first, dict) else None
-    genre = None
+    genre = _top_label(full, matcher)
     mbid = rec.get("id")
     match = {'method': 'title_artist_match', 'recording_mbid': mbid,
              'search_score': rec.get('score')}
-    if mbid:
-        try:
-            full = _get(f"recording/{mbid}", {"inc": "genres+tags+releases+isrcs", "fmt": "json"})
-            rec["isrcs"] = full.get("isrcs") or rec.get("isrcs") or []
-            _retain_tags(observations, full, 'recording', mbid, match)
-            genre = _top_label(full)
-            year = year or _earliest_year([full])
-        except IntegrationUnavailable:
-            return genre, year  # Preserve search evidence without another vendor request.
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception as e:  # noqa: BLE001
-            logger.debug("MB lookup failed for %s: %s", mbid, e)
-    if not genre and not is_remix(title or rec.get("title")):
-        genre = _artist_genre(artist_mbid, observations=observations, match_evidence=match)
+    if mbid and full:
+        _retain_tags(observations, full, 'recording', mbid, match)
+        year = year or _earliest_year([full])
+    if not genre and artist:
+        _retain_tags(observations, artist, 'artist', artist_mbid, match)
+        genre = _top_label(artist, matcher)
     return (genre, year)
 
 

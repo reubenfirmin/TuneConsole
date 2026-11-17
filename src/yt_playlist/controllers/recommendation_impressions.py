@@ -20,7 +20,7 @@ class RecommendationImpressions:
             facts = [served_facts.extract(trace) for trace in traces]
             with self.files.retained():
                 # Reserve monotonic IDs in SQL, then publish files, then their owners.
-                # Interrupted attempts leave expirable files and gaps in the sequence.
+                # Interrupted attempts retain pending SQL owners and expirable files.
                 reserved = self.repository.reserve_impression_ids(rows)
                 self.files.publish_many([(identity, rows[index][9], traces[index]) for identity, index in reserved])
                 prepared = [(identity, (*rows[index][:8], served_facts.compact_provenance(rows[index][8]), rows[index][9]),

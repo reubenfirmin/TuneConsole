@@ -9,12 +9,14 @@ import json
 import os
 import sys
 
-from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.base import AccessState
 from yt_playlist.integrations.github import GitHubReleasesIAO
+from yt_playlist.controllers.updates import UpdateChecks
+from yt_playlist.core.update_rules import CHECK_INTERVAL_S, out_of_date as _out_of_date, version_tuple as _ver_tuple
 
 PACKAGE = "yt-playlist"
 
-_CHECK_INTERVAL_S = 4 * 3600       # every four hours
+_CHECK_INTERVAL_S = CHECK_INTERVAL_S
 _github = GitHubReleasesIAO()
 
 
@@ -68,41 +70,22 @@ def schedule_first_check(store, now):
     Persist the deadline so restarting during onboarding does not reset the delay.
     Existing installations with a checked or cached release keep their schedule.
     """
-    if (store.settings.get_setting("latest_version_checked_at") is None
-            and store.settings.get_setting("latest_version_seen") is None
-            and store.settings.get_setting("latest_version_check_after") is None):
-        store.settings.set_setting("latest_version_check_after", str(now + _CHECK_INTERVAL_S))
+    checks(store.settings, AccessState.for_store(store)).schedule_first(now)
 
 
 def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
     """At most once per interval_s, refresh the cached latest release. Always stamps the check time
     (so a persistent failure retries at most once per interval). Access errors are silent;
     explicit work cancellation propagates without stamping a completed check."""
-    last = store.settings.get_setting("latest_version_checked_at")
-    if last is None:
-        first_due = store.settings.get_setting("latest_version_check_after")
-        if first_due is not None:
-            try:
-                if now < float(first_due):
-                    return
-            except (TypeError, ValueError):
-                pass
-    if last is not None:
-        try:
-            if now - float(last) < interval_s:
-                return
-        except (TypeError, ValueError):
-            pass
-    try:
-        with _github.context(getattr(store, 'enrichment_state', None)):
-            latest = _fetch_latest_release()
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception:                       # noqa: BLE001 - offline/HTTP/parse must not surface
-        latest = None
-    store.settings.set_setting("latest_version_checked_at", str(now))
-    if latest:
-        store.settings.set_setting("latest_version_seen", latest)
+    checks(store.settings, AccessState.for_store(store)).check(now, interval_s=interval_s)
+
+
+def checks(settings, access):
+    """Bind host metadata and release I/O to the detached command owner."""
+    def latest():
+        with _github.context(access):
+            return _fetch_latest_release()
+    return UpdateChecks(settings, latest, current_version=current_version, install_kind=install_kind)
 
 
 def install_kind() -> str:
@@ -120,20 +103,6 @@ def install_kind() -> str:
     return "release"
 
 
-def _ver_tuple(v):
-    """Base version 'X.Y.Z' -> a 3-int tuple for ordering (pads/truncates to 3 parts)."""
-    parts = [int(p) for p in str(v).split(".")]
-    return tuple((parts + [0, 0, 0])[:3])
-
-
-def _out_of_date(current: str, latest: str) -> bool:
-    """True iff current < latest. Both are sanitized base versions (X.Y.Z). Non-numeric -> not out of date."""
-    try:
-        return _ver_tuple(current) < _ver_tuple(latest)
-    except (ValueError, TypeError):
-        return False
-
-
 def update_nudge(store):
     """Nag payload dict when the backend is behind the latest seen release and the user has not
     dismissed that exact version, else None. Keys: current, latest, kind. `kind` is a neutral
@@ -142,14 +111,4 @@ def update_nudge(store):
     A source/editable checkout (is_dev_install) is never nagged: it runs HEAD code, its reported
     version is a stale hatch-vcs snapshot, and it is not managed by any package manager, so 'you are
     behind, reinstall a release' would be both wrong and unactionable."""
-    if is_dev_install():
-        return None
-    latest = store.settings.get_setting("latest_version_seen")
-    if not latest:
-        return None
-    current = current_version()
-    if not _out_of_date(current, latest):
-        return None
-    if store.settings.get_setting("backend_update_dismissed_version") == latest:
-        return None
-    return {"current": current, "latest": latest, "kind": install_kind()}
+    return checks(store.settings, AccessState.for_store(store)).offer()

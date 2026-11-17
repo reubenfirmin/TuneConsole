@@ -214,3 +214,35 @@ def test_playback_inbox_capture_preserves_pending_body_and_source_bytes(tmp_path
     assert playback_inbox.Inbox.body(row) == {'videoId': 'original'}
     assert before == (queue.path.read_bytes(), Path(original['filename']).read_bytes())
     assert report['playback_inbox'] == dict(rows=1, legacy=False, source_total_changes=0)
+
+
+@pytest.mark.parametrize('failure', ['file', 'status'])
+def test_playback_inbox_snapshot_keeps_interrupted_reservations_isolated(tmp_path, monkeypatch, failure):
+    from tests.library_image import feedback
+    from yt_playlist.core import playback_inbox
+    source, target = tmp_path / 'source.db', tmp_path / 'candidate'
+    target.mkdir()
+    queue = playback_inbox.Inbox(source, 'controlled')
+    owner, method = (queue.files, 'publish') if failure == 'file' else (queue.repository, 'complete')
+
+    def interrupted(*args):
+        raise OSError('interrupted capture')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner, method, interrupted)
+        with pytest.raises(OSError, match='interrupted capture'):
+            queue.capture('player', 1, {'videoId': 'original'}, 1)
+    before = queue.path.read_bytes()
+    with feedback.admission(source) as admitted:
+        feedback.capture(admitted, target, {})
+    with sqlite3.connect(target / 'state.db.playback-feedback.sqlite3') as copied:
+        copied.row_factory = sqlite3.Row
+        row = dict(copied.execute('SELECT * FROM playback_feedback_inbox').fetchone())
+    assert row['file_status'] == 'pending'
+    assert Path(row['filename']).is_relative_to('/library')
+    private = target / Path(row['filename']).relative_to('/library')
+    assert private.exists() is (failure == 'status')
+    if private.exists():
+        row['filename'] = str(private)
+        assert queue.body(row) == {'videoId': 'original'}
+    assert queue.path.read_bytes() == before

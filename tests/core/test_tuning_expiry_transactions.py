@@ -9,7 +9,7 @@ from tests.core.test_predecessor_writes import installed
 from yt_playlist.rec import mix_tuning, onboarding, surfaces, taste_analysis, taste_viz
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('calculation', ['fingerprint', 'transparency', 'cold', 'radio'])
 def test_expired_tuning_keeps_caller_draft_and_expiry_in_its_transaction(installed, calculation):
     store, _ = installed
@@ -46,7 +46,7 @@ def test_expired_tuning_keeps_caller_draft_and_expiry_in_its_transaction(install
     assert store.conn.execute("SELECT name FROM genre_catalog WHERE key='expiry-genre'").fetchone()[0] == 'Original genre'
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_failed_expiry_preserves_draft_and_retries_until_caller_commit(installed, monkeypatch):
     store, _ = installed
     with store.conn:

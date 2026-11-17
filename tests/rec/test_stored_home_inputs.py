@@ -4,7 +4,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.legacy_recommendation_fixture_support import recommendations
+from tests.enrichment_support import seed_discovered_enrichment
 from tests.repos.test_typed_recommendation_publication import publish, plan
 from tests.rec.test_stored_fresh import fresh
 from tests.store_fixture_support import native_sql_calls
@@ -95,8 +96,8 @@ def test_genre_options_keep_rare_tail_without_duplicate_mode_votes(home, monkeyp
 def test_genre_options_resolve_current_metadata_after_preparation(home, monkeypatch):
     store, _, _ = home
     forbid_bundle_and_files(monkeypatch)
-    with store.conn:
-        store.conn.execute("UPDATE recordings SET genre='ambient' WHERE id>=261")
+    for index in range(258, 260):
+        seed_discovered_enrichment(store, f'fresh-{index}', 'ambient', None)
     options = home_themes.genre_options(store, genre_plays={})
     assert {option['family'] for option in options} == {'rock-classic', 'ambient'}
 

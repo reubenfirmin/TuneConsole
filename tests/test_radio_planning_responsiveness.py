@@ -1,6 +1,8 @@
 """Radio planning must keep status, Stop and foreground readers available."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import sys
 import threading
+import traceback
 
 import pytest
 from fastapi import FastAPI
@@ -10,6 +12,19 @@ from tests.radio_session_support import poc, play
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes.bridge import build as bridge_routes
+
+
+def responsive_selection(pool, controller, branch, menu_id):
+    future = pool.submit(controller.select, branch['id'], menu_id)
+    try:
+        return future.result(timeout=.5)
+    except TimeoutError:
+        # Capture before releasing the private planner. A future's bare timeout
+        # loses whether selection was waiting on the live lock, SQL or files.
+        frames = sys._current_frames()
+        stacks = ['Thread ' + thread.name + ':\n' + ''.join(traceback.format_stack(frames[thread.ident]))
+                  for thread in threading.enumerate() if thread.ident in frames]
+        pytest.fail('Selection blocked while private planning was held:\n' + '\n'.join(stacks))
 
 
 @pytest.mark.parametrize('stop', [False, True])
@@ -90,7 +105,7 @@ def test_late_direction_plan_preserves_published_state_and_newer_actions(poc, mo
                 assert pool.submit(controller.stop).result(timeout=.5)['ok']
             elif change == 'selection':
                 branch = state['directions'][2]
-                result = pool.submit(controller.select, branch['id'], state['menu_id']).result(timeout=.5)
+                result = responsive_selection(pool, controller, branch, state['menu_id'])
                 assert result['ok'] and result['pending_slot'] == branch['slot']
             elif change == 'feedback':
                 with controller.lock:
@@ -165,7 +180,7 @@ def test_tuning_plans_privately_without_blocking_status_or_newer_actions(poc, mo
                 assert pool.submit(controller.stop).result(timeout=.5)['ok']
             elif change == 'selection':
                 branch = state['directions'][2]
-                assert pool.submit(controller.select, branch['id'], state['menu_id']).result(timeout=.5)['ok']
+                assert responsive_selection(pool, controller, branch, state['menu_id'])['ok']
             elif change == 'feedback':
                 with controller.lock:
                     controller.listening.reject(session, songs[10])

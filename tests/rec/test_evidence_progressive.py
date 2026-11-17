@@ -201,13 +201,9 @@ def test_expired_slice_returns_to_next_queued_worker_job(library, monkeypatch):
         worker.shutdown()
 
 
-@pytest.mark.parametrize('unsafe', ['cutover', 'installed-64'])
-def test_real_recovery_still_fences_writes(library, unsafe):
+def test_real_recovery_still_fences_writes(library):
     app = create_app(library, lambda: {}, background_work=False)
-    if unsafe == 'cutover':
-        library.activity_paused = True
-    else:
-        library._rebuild_source_version = 64
+    library.activity_paused = True
     try:
         assert library.activity_paused and app.state.ctx.storage_maintenance.status()['active']
         with TestClient(app, base_url='http://127.0.0.1') as client:
@@ -215,4 +211,3 @@ def test_real_recovery_still_fences_writes(library, unsafe):
         assert library.settings.get_setting('lastfm_api_key') is None
     finally:
         library.activity_paused = False
-        library._rebuild_source_version = None

@@ -96,8 +96,9 @@ class EvidenceLedger:
                     used = int(stream.read())
                 except ValueError:
                     recovered = True
-                    used = sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*.json"))
-                    used += sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*/*.json"))
+                    used = sum(fao.read(path).info.logical_bytes for owner in self.KINDS
+                               for path in (self.directory / owner).glob('*.json'))
+                    used += sum(fao.read(path).info.logical_bytes for path in self.paths())
                 def save(value):
                     stream.seek(0)
                     stream.truncate()
@@ -116,12 +117,25 @@ class EvidenceLedger:
         token = hashlib.sha256(str(identity).encode("utf-8")).hexdigest()
         return self.directory / kind / token[:2] / (token + ".json")
 
+    def _read_bytes(self, path):
+        return fao.read(path).bytes
+
+    def paths(self, kind=None):
+        return sorted(path for owner in ([kind] if kind is not None else self.KINDS)
+                      for path in (self.directory / owner).glob('*/*.json'))
+
+    def path_kind(self, path):
+        return path.parts[-3]
+
     def get(self, kind, identity):
         try:
-            value = json.loads(fao.read(self._path(kind, identity)).bytes)
-            return self.project_opportunity(value) if kind == 'opportunity' else value
+            return self.read_path(self._path(kind, identity))
         except FileNotFoundError:
             return None
+
+    def read_path(self, path):
+        value = json.loads(self._read_bytes(path))
+        return self.project_opportunity(value) if self.path_kind(path) == 'opportunity' else value
 
     def contains(self, kind, identity):
         return self._path(kind, identity).exists()
@@ -143,11 +157,11 @@ class EvidenceLedger:
             os.fsync(stream.fileno())
         _sync_directory(self.directory)
 
-    def put(self, kind, identity, value, *, artifact=None):
+    def put(self, kind, identity, value, *, artifact=None, _budget_state=None):
         """Publish once; identical retries reuse the record, conflicting IDs fail explicitly."""
         encoded = canonical(value)
         path = self._path(kind, identity)
-        with self._budget() as (used, save):
+        with self._budget() if _budget_state is None else nullcontext(_budget_state) as (used, save):
             existing = path.exists()
             # A collector may have released a shared component since a producer
             # read its manifest. Validate references under the publication lock,
@@ -157,7 +171,7 @@ class EvidenceLedger:
                     and any(not self._path('artifact', component).is_file() for component in dependencies)):
                 raise ValueError('Listening context component is no longer retained')
             if existing:
-                if fao.read(path).bytes != encoded:
+                if self._read_bytes(path) != encoded:
                     raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}")
                 if kind == 'artifact':
                     # Reusing an old immutable manifest starts a fresh preparation
@@ -201,12 +215,12 @@ class EvidenceLedger:
         """An immutable inventory for background replay; request paths use exact-ID lookup."""
         if kind not in self.KINDS:
             raise ValueError("Unsupported evidence kind")
-        paths = sorted((self.directory / kind).glob("*/*.json"))
+        paths = self.paths(kind)
         records = []
         for path in paths:
             check_cancellable_work()
             try:
-                value = json.loads(fao.read(path).bytes)
+                value = json.loads(self._read_bytes(path))
                 value = self.project_opportunity(value) if kind == 'opportunity' else value
                 if value is not None:
                     records.append(value)
@@ -222,7 +236,8 @@ class EvidenceLedger:
     def _maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None,
                  protected_opportunities=(), pressure_before=None, compacted_contexts=(),
                  context_before=None, context_byte_budget=0, required_bytes=0, pending_protection=None,
-                 retire_references=None, progress=None):
+                 retire_references=None, progress=None, _budget_state=None, _inventory=None,
+                 _defer_reconciliation=False):
         """Retire old unanswered menus and orphan artifacts; preserve choice/correction inputs.
 
         At 90% capacity, retire the oldest unanswered menus until 30% is free.
@@ -230,12 +245,12 @@ class EvidenceLedger:
         A pending publication may reclaim optional acknowledged diagnostic graphs
         before considering unanswered menus. Protected roots always survive.
         """
-        with self._budget() as (_used, save), ExitStack() as leases:
+        with self._budget() if _budget_state is None else nullcontext(_budget_state) as (_used, save), ExitStack() as leases:
             from .evidence_inventory import Inventory
             from .evidence_retirement import Retirements
-            retirements = Retirements(self.directory)
+            retirements = Retirements(self.directory, path=getattr(self, 'retirement_path', None))
             had_retirements = bool(retirements.offers or retirements.checkpoints)
-            inventory = Inventory(self, progress=progress).scan()
+            inventory = Inventory(self, progress=progress).scan() if _inventory is None else _inventory
             # Inventory decodes immutable evidence and saves completed prefixes.
             # It must not exclude serving readers for that potentially long
             # calculation. The budget lease fences other writers/collectors;
@@ -248,11 +263,11 @@ class EvidenceLedger:
             offers = {}
             events = []
             for path, entry in inventory.items():
-                if path.parts[-3] == 'opportunity':
+                if self.path_kind(path) == 'opportunity':
                     row = self.project_opportunity(entry['data'])
                     if row is not None:
                         offers[row['id']] = row
-                elif path.parts[-3] == 'response':
+                elif self.path_kind(path) == 'response':
                     events.append(entry['data'])
             durable = {event["opportunity_id"] for event in events
                        if event["kind"] not in {"visible", "open"}}
@@ -271,9 +286,9 @@ class EvidenceLedger:
             # SQL owners. Its durable intent supplies the missing association.
             retired.update(resuming - protected)
             orphan_before = before if orphan_before is None else orphan_before
-            artifacts = [path for path in inventory if path.parts[-3] == 'artifact']
+            artifacts = [path for path in inventory if self.path_kind(path) == 'artifact']
             sizes = {path: entry['size'] for path, entry in inventory.items()}
-            edges = {path: entry['data'] for path, entry in inventory.items() if path.parts[-3] == 'artifact'}
+            edges = {path: entry['data'] for path, entry in inventory.items() if self.path_kind(path) == 'artifact'}
 
             def closure(roots):
                 pending, seen = list(roots), set()
@@ -297,7 +312,7 @@ class EvidenceLedger:
             # diagnostics, even while their opportunities belong to an active trial.
             compacted_contexts = (set(compacted_contexts) if compacted_contexts is not None else
                 {entry['data']['source_context'] for path, entry in inventory.items()
-                 if path.parts[-3] == 'checkpoint' and entry['data']['acknowledged']})
+                 if self.path_kind(path) == 'checkpoint' and entry['data']['acknowledged']})
             if progress is not None:
                 progress['checkpoints'] = len(compacted_contexts)
             mandatory = {offer['context'] for oid, offer in offers.items() if oid not in retired
@@ -331,7 +346,7 @@ class EvidenceLedger:
             removed = {path for oid in retired for path in retired_paths(oid)}
             removed.update(path for path in artifacts if not references[path])
             for path, entry in inventory.items():
-                if path.parts[-3] == 'report' and entry['data'] < before:
+                if self.path_kind(path) == 'orphan' or self.path_kind(path) == 'report' and entry['data'] < before:
                     removed.add(path)
             used = sum(size for path, size in sizes.items() if path not in removed)
             reclaimed_optional_paths = set()
@@ -388,7 +403,7 @@ class EvidenceLedger:
             surviving_contexts = {offer['context'] for oid, offer in offers.items() if oid not in retired}
             retired_checkpoints = {}
             for path, entry in inventory.items():
-                if path.parts[-3] == 'checkpoint' and entry['data']['source_context'] not in surviving_contexts:
+                if self.path_kind(path) == 'checkpoint' and entry['data']['source_context'] not in surviving_contexts:
                     removed.add(path)
                     retired_checkpoints[path] = entry['data']['source_context']
             for identity in retirements.checkpoints - surviving_contexts:
@@ -440,8 +455,9 @@ class EvidenceLedger:
                                     if all(not path.exists() for path in retired_paths(oid))}
                 completed_checkpoints = {identity for path, identity in retired_checkpoints.items()
                                          if path in planned and not path.exists() and isinstance(identity, str)}
-                retirements.reconcile(completed_offers, completed_checkpoints, retire_references)
-                if retire_references is not None and not (completed_offers or completed_checkpoints):
+                if not _defer_reconciliation:
+                    retirements.reconcile(completed_offers, completed_checkpoints, retire_references)
+                if not _defer_reconciliation and retire_references is not None and not (completed_offers or completed_checkpoints):
                     # Preserve ordinary dictionary orphan collection on idle turns.
                     retire_references([], [])
                 deferred = bool(retirements.offers or retirements.checkpoints
@@ -455,7 +471,11 @@ class EvidenceLedger:
             # surviving file while readers are excluded.
             used = sum(sizes.values()) - sum(sizes.get(path, 0) for path in removed)
             save(used)
-            return {"used_bytes": used, "budget_bytes": self.byte_budget, "deferred": deferred,
+            reconciliation = ({'_retirement_offers': completed_offers, '_retirement_checkpoints': completed_checkpoints,
+                               '_removed': removed,
+                               '_unlink_deferred': any(path.exists() for path in planned)}
+                              if _defer_reconciliation else {})
+            return {**reconciliation, "used_bytes": used, "budget_bytes": self.byte_budget, "deferred": deferred,
                     "required_bytes": required_bytes,
                     "available_bytes": max(0, self.byte_budget - used),
                     "shortfall_bytes": max(0, used + required_bytes - self.byte_budget),

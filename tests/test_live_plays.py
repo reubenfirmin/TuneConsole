@@ -161,7 +161,8 @@ def test_live_play_and_history_backfill_share_browser_date(store):
 
 def test_selected_album_playback_is_context_evidence_not_organic_track_learning(store):
     from yt_playlist.core import album_playback_context
-    from yt_playlist.rec import choice_evidence, layers
+    from yt_playlist.library import listening_composition as layers
+    from yt_playlist.rec import choice_evidence
 
     s = _configure_accounts(store, with_brand=True)
     s.tracks.upsert_track('v1', 'Song', 'Artist', None, None)

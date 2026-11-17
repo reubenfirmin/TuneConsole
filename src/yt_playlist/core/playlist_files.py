@@ -2,7 +2,7 @@
 import hashlib
 
 from . import recommendation_outputs
-from .collection_recovery import RecoveryFiles
+from .collection_files import RecoveryFiles
 from .schema_contract import MigrationError
 
 

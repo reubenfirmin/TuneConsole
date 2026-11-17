@@ -47,7 +47,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     from tests.conftest import only_provider
     # stub MusicBrainz so the test never hits the network (one enrich_full yields genre, year, MBID)
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist, *, observations=None: {"S0": ("rock", "1998", None, [], []),
+                        lambda title, artist, *, observations=None, matcher=None, credits=None: {"S0": ("rock", "1998", None, [], []),
                                                "S1": ("jazz", "2003", None, [], [])}.get(title, (None, None, None, [], [])))
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
@@ -77,7 +77,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
 
     # re-run after MusicBrainz gains a genre for v2. It fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist, *, observations=None: ("ambient", "2010", None, [], []) if title == "Sx"
+                        lambda title, artist, *, observations=None, matcher=None, credits=None: ("ambient", "2010", None, [], []) if title == "Sx"
                         else (None, None, None, [], []))
     jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
@@ -133,6 +133,7 @@ def test_discogs_fills_genre_and_year(discogs_store, monkeypatch):
         {"id": 102, "title": "Underworld - Born Slippy", "year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
         {"id": 103, "title": "Unrelated Artist - Different Song", "year": "1952", "genre": ["Classical"]},
     ] if "Born Slippy" in q else [])
+    monkeypatch.setattr(dc, 'release_details', lambda release_id, *, tok=None: {})
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Born Slippy", "Underworld", "Al", 200, 1),
@@ -159,7 +160,7 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
     import yt_playlist.providers.lastfm as lf
     monkeypatch.setenv("LASTFM_API_KEY", "testkey")
     # stub the Last.fm lookup: (genre, year) per track; one fully unknown
-    monkeypatch.setattr(lf, "enrich", lambda title, artist, key, *, observations=None:
+    monkeypatch.setattr(lf, "enrich", lambda title, artist, key, *, observations=None, matcher=None, credits=None:
                         {"S0": ("Trip Hop", None), "S1": ("House", "2010")}.get(title, (None, None)))
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)

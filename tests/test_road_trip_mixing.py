@@ -25,7 +25,7 @@ def test_passenger_overlap_uses_current_library_once(store, monkeypatch, library
                 "artist": "Guest Artist", "album": "Album", "thumbnail": None, "duration": 240,
                 "genre": "Rock", "year": 1995, "liked": False}]
     songs = list(library) if library_at_acquisition else []
-    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+    monkeypatch.setattr(type(store.rec_query), "library_songs", lambda self: songs)
     monkeypatch.setattr(candidates, "other_input_songs", lambda *args, **kwargs: ([{
         "video_id": "shared-video", "title": "Shared", "artist": "Guest Artist", "album": "Album",
         "thumbnail": None, "duration": 240, "genre": "Rock"}], []))

@@ -8,7 +8,6 @@ from tests.repository_mock_support import no_database
 from yt_playlist.controllers.album_aliases import AlbumAliases
 from yt_playlist.controllers.albums import Albums
 from yt_playlist.controllers.discovery import Discovery
-from yt_playlist.controllers.retained_originals import RetainedOriginals
 from yt_playlist.core.album_aliases import compatible
 from yt_playlist.repos.album_aliases import AlbumAliasesRepo
 
@@ -19,13 +18,12 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def aliases():
     repository = create_autospec(AlbumAliasesRepo, instance=True, spec_set=True)
     albums = create_autospec(Albums, instance=True, spec_set=True)
-    originals = create_autospec(RetainedOriginals, instance=True, spec_set=True)
     discovery = create_autospec(Discovery, instance=True, spec_set=True)
-    controller = AlbumAliases(repository, albums, originals, discovery, Mock(), nullcontext)
+    controller = AlbumAliases(repository, albums, discovery, Mock(), nullcontext)
     repository.fingerprint_inputs.return_value = {'shared': False, 'digest': None}
     repository.remember_fingerprint.return_value = [1]
     albums.observe.return_value = 2
-    repository.merge_inputs.return_value = {'conflict': False, 'original': {'albums': [{'id': 2}]},
+    repository.merge_inputs.return_value = {'conflict': False,
         'target': {'tracks': [], 'revisions': [], 'state': None},
         'retired': {'tracks': [], 'revisions': [], 'state': None}}
     return controller
@@ -36,27 +34,24 @@ def release():
             'tracks': [{'videoId': 'video', 'title': 'Song', 'duration': '3:00', 'isExplicit': False}]}
 
 
-def test_alias_identity_publishes_after_originals_and_independent_owners(aliases):
+def test_alias_identity_publishes_after_discovery_and_feedback_owners(aliases):
     calls = Mock()
-    for name, collaborator in [('originals', aliases.originals), ('discovery', aliases.discovery),
+    for name, collaborator in [('discovery', aliases.discovery),
                                ('feedback', aliases.merge_feedback), ('repository', aliases.repository)]:
         calls.attach_mock(collaborator, name)
     assert aliases.observe('B', release(), now=100)
     names = [call[0] for call in calls.mock_calls]
-    assert names.index('originals.retain') < names.index('discovery.merge_albums') < names.index('feedback')
+    assert names.index('discovery.merge_albums') < names.index('feedback')
     assert names.index('feedback') < names.index('repository.apply_merge')
     aliases.discovery.merge_albums.assert_called_once_with(2, 1)
     aliases.merge_feedback.assert_called_once_with(1, 2, 100)
     target, retired, digest, now = aliases.repository.apply_merge.call_args.args
     assert (target, retired, now) == (1, 2, 100)
-    assert aliases.originals.retain.call_args.args[:4] == (
-        'album', 'album_alias_reconciliation', '2', '{"albums": [{"id": 2}]}')
-    assert digest in aliases.originals.retain.call_args.args[4]
 
 
-@pytest.mark.parametrize('stage', ['originals', 'discovery', 'feedback'])
+@pytest.mark.parametrize('stage', ['discovery', 'feedback'])
 def test_owner_failure_cannot_publish_alias_identity(aliases, stage):
-    operation = {'originals': aliases.originals.retain, 'discovery': aliases.discovery.merge_albums,
+    operation = {'discovery': aliases.discovery.merge_albums,
                  'feedback': aliases.merge_feedback}[stage]
     operation.side_effect = OSError('interrupted')
     with pytest.raises(OSError, match='interrupted'):
@@ -94,7 +89,6 @@ def test_conflicting_retained_evidence_prevents_merge(aliases, reason):
     else:
         inputs['retired']['tracks'] = [{'video_id': 'video', 'is_full': True, 'position': 0}]
     assert aliases.observe('B', release())
-    aliases.originals.retain.assert_not_called()
     aliases.repository.apply_merge.assert_not_called()
 
 

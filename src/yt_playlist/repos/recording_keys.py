@@ -1,7 +1,7 @@
 """Recording aliases and their stored references, without document I/O."""
 from yt_playlist.core import album_tracklists, listening_summaries
 from yt_playlist.core.catalog_keys import resolve_recording
-from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 
 
 class RecordingKeysRepo(Repo):
@@ -61,7 +61,7 @@ class RecordingKeysRepo(Repo):
             from yt_playlist.core.association_work import complete
             complete(self.conn, association, 'keys')
 
-    @snapshot_read
+    @lookup_read
     def key_candidates(self, key):
         direct = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
         return {'direct': resolve_recording(self.conn, direct[0]) if direct else None,
@@ -82,7 +82,7 @@ class RecordingKeysRepo(Repo):
                     (recording, key))
                 self.conn.execute('DELETE FROM mood_event_unresolved_seeds WHERE legacy_key=?', (key,))
 
-    @snapshot_read
+    @lookup_read
     def listening_keys(self, recording):
         if not listening_summaries.available(self.conn):
             return []

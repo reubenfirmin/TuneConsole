@@ -254,7 +254,7 @@ def test_catalog_ingestion_calls_other_components_only_after_its_identity_transa
         assert not writing, 'Catalog identity transactions cannot include another component'
 
     tracks.repository.catalog_transaction.side_effect = transaction
-    for operation in (tracks.keys.add_alias, tracks.metadata_choices.select, tracks.artists.observe,
+    for operation in (tracks.keys.add_alias, tracks.metadata_choices.select_fields, tracks.artists.observe,
                       tracks.albums.link, tracks.keys.resolve_listening):
         operation.side_effect = independent
     assert tracks.upsert_track('video', 'Song', 'Artist', 'Album', 180, album_browse_id='release', created_at=10) == 7
@@ -267,7 +267,8 @@ def test_catalog_refresh_retains_selected_provider_fields_and_original_reset_val
     catalog_inputs(tracks, sources={'title': 'youtube', 'artist': 'youtube', 'orig_title': 'youtube',
         'orig_artist': 'youtube', 'album': 'user', 'duration_s': 'youtube'})
     tracks.upsert_track('video', 'Changed title', 'Changed credit', 'Changed album', 181, created_at=10)
-    assert [call.args for call in tracks.metadata_choices.select.call_args_list] == [(7, 'duration_s', 181, 'youtube')]
+    tracks.metadata_choices.select_fields.assert_called_once_with(
+        7, {'duration_s': 181}, 'youtube', now=10, observations={'title': 21, 'artist': 22, 'album': 23})
     tracks.metadata_choices.capture_fields.assert_called_once()
 
 

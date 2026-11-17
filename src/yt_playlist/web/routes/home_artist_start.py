@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from yt_playlist.rec import artist_start, home_cards
+from yt_playlist.rec import artist_start
 
 
 class Selection(BaseModel):
@@ -41,19 +41,18 @@ def build(ctx):
     @router.post('/home/onboard/artists/select')
     def select(selection: Selection):
         try:
-            related = catalog.select(store, selection.browse_id, selection.selected, ctx.now_fn())
+            result = catalog.choose(store, selection.browse_id, selection.selected, ctx.now_fn())
         except (artist_start.CatalogUnavailable, TimeoutError) as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        return {**catalog.state(store), 'related': related}
+        return result
 
     @router.get('/home/onboard/artists/listen')
     def listen(request: Request):
-        context = catalog.listen_context(store)
+        context = catalog.listen_context(store, ctx.now_fn())
         return ctx.templates.TemplateResponse(request, '_partials/artist_first_listen.html', {
-            'proto': home_cards._proto(store, 'artist_start', 'My first set', context['tracks'], ctx.now_fn())
-                     if context['ready'] else None,
+            'proto': context['proto'],
             'artists': context['choices']})
 
     return router

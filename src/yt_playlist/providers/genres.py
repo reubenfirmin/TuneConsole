@@ -2,9 +2,16 @@
 import functools
 
 from yt_playlist.util import genre_catalog
+from yt_playlist.util.genre_matching import GenreMatcher, build_canon
 
 _active = None
 _active_keys = None
+
+
+def snapshot(store):
+    """Capture one immutable vocabulary for a whole enrichment command."""
+    from yt_playlist.controllers.enrichment_configuration import EnrichmentConfiguration
+    return EnrichmentConfiguration(None, store.genres).matcher()
 
 
 def builtin_names():
@@ -13,21 +20,6 @@ def builtin_names():
 
 def canonical_name(name):
     return genre_catalog.canonical_name(name)
-
-
-def build_canon(names):
-    records, labels = genre_catalog.catalog()
-    enabled, custom = {}, {}
-    for name in names:
-        key = genre_catalog.normalize(name)
-        if not key:
-            continue
-        if label := labels.get(key):
-            enabled[label[0]] = records[label[0]]["name"]
-        else:
-            custom.setdefault(key, name)
-    return {**{key: enabled[value[0]] for key, value in labels.items() if value[0] in enabled},
-            **custom}
 
 
 def set_active(names):
@@ -98,21 +90,22 @@ def _canon():
     return _active if _active is not None else _builtin_canon()
 
 
-def all_genres():
-    return sorted(set(_canon().values()), key=str.casefold)
+def all_genres(matcher=None):
+    return sorted(set((matcher.canon if matcher is not None else _canon()).values()), key=str.casefold)
 
 
-def match_tag(tag):
-    return _canon().get(genre_catalog.normalize(tag))
+def match_tag(tag, matcher=None):
+    return (matcher.canon if matcher is not None else _canon()).get(genre_catalog.normalize(tag))
 
 
-def pick_genre(tags):
+def pick_genre(tags, matcher=None):
     """Refine the first recognized tag when the provider also supplies a documented subgenre."""
     selected = None
     for tag in tags:
-        genre = match_tag(tag)
-        key = (_active_keys or {}).get(genre_catalog.normalize(genre or ''),genre)
-        parent = (_active_keys or {}).get(genre_catalog.normalize(selected or ''),selected)
+        genre = match_tag(tag, matcher)
+        keys = matcher.keys if matcher is not None else (_active_keys or {})
+        key = keys.get(genre_catalog.normalize(genre or ''),genre)
+        parent = keys.get(genre_catalog.normalize(selected or ''),selected)
         if genre and (selected is None or genre_catalog.is_subgenre(key, parent)):
             selected = genre
     return selected

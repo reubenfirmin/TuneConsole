@@ -1,5 +1,6 @@
 """Track details retain exact-upload collection facts and honest listening precision."""
 from contextlib import closing
+from datetime import datetime, timezone
 from tests.enrichment_support import seed_audio
 from urllib.parse import parse_qs, urlsplit
 
@@ -8,7 +9,7 @@ import pytest
 from tests.home_fixture_support import without_metadata_providers
 from tests.store_fixture_support import native_sql_calls, without_query_timing
 from tests.test_song_actions import SONG, _pristine_current_schema, songs, store  # noqa: F401 - shared fixtures
-from yt_playlist.web.track_links import track_url
+from yt_playlist.util.navigation import track_url
 
 
 pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing',
@@ -95,7 +96,7 @@ def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(so
 def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference(songs, monkeypatch):
     import json
     from tests.musical_support import prepare_profiles
-    from yt_playlist.core.audio_vibe_contract import PREDICTION_VERSION
+    from yt_playlist.core.audio_vibe_contract import PREDICTION_VERSION, serving_prefix
     from yt_playlist.rec import musical_profiles
     store = songs['store']
     prepare_profiles(store)
@@ -109,7 +110,7 @@ def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference
     # Controlled scores travel through the real normalized serving repository,
     # including three distinct original contributors for the inherited estimate.
     def measured(vibe, score, source):
-        return {'version': 'audio-specialist-v2', 'artist': artist, 'genre': None,
+        return {'version': serving_prefix() + 'audio-specialist-v2', 'artist': artist, 'genre': None,
                 'evidence': {'input_digest': 'fixture-input', 'source': source,
                              'fits': {vibe: {'score': score, 'support': 1}}}}
     tracks = {k: measured('relax', .63, 'provider_measurement') for k in contributors}
@@ -236,20 +237,37 @@ def test_ledger_shares_confirmed_recording_without_inventing_exact_plays(songs):
     store.tracks.associate_youtube_item('same-recording', track['recording_id'], source='test',
                                       evidence={'verified': True}, now=1, same_recording=True)
     key = store.tracks.identity_key_for_video('same-recording')
-    at = 1792785600  # 2026-10-23 20:00 UTC
-    store.history.record_play_event(songs['main_id'], key, 'same-recording', at, source_timezone='UTC')
-    store.history.record_history_plays(songs['main_id'], at + 60, [key], source_timezone='UTC')
-    store.history.record_history_plays(songs['main_id'], at + 120, [key], source_timezone='UTC')
+    main = songs['main_id']
+    other = store.playlists.get_playlist(songs['destination']).account_id
+    calendar = 'America/Costa_Rica'
+    at = datetime(2026, 10, 24, 1, tzinfo=timezone.utc).timestamp()  # October 23 in the account calendar
+    items = [(key, 'Today')]
+    store.history.record_history_plays(main, at + 60, items, source_timezone=calendar)
+    preview = songs['http'].get('/track/owned-song').text
+    assert preview.count('<strong>History observation</strong>') == 1
+    assert '<strong>Played</strong>' not in preview
+
+    for played_at in (at, at + 3600):
+        store.history.record_play_event(main, key, 'same-recording', played_at, source_timezone=calendar)
+    store.history.record_history_plays(main, at + 120, items, source_timezone=calendar)
+    store.history.record_history_plays(other, at + 120, items, source_timezone=calendar)
+    store.history.record_history_plays(main, at + 86400, items, source_timezone=calendar)
     other_key = store.tracks.observe_track('unrelated', 'Owned Song (live)', 'Artist & Friends')
-    store.history.record_play_event(songs['main_id'], other_key, 'unrelated', at + 5000, source_timezone='UTC')
+    store.history.record_play_event(main, other_key, 'unrelated', at + 5000, source_timezone=calendar)
     rows, more = store.tracks.track_play_ledger(track['recording_id'])
-    assert not more and len(rows) == 2
-    assert {row['kind'] for row in rows} == {'play', 'observation'}
-    assert next(row for row in rows if row['kind'] == 'observation')['precision'] == 'calendar_day'
+    assert not more
+    assert [row['played_at'] for row in rows if row['kind'] == 'play'] == [at + 3600, at]
+    assert [(row['identity'], row['day'], row['precision']) for row in rows if row['kind'] == 'observation'] == [
+        ('Main', '2026-10-24', 'calendar_day'), ('Other account', '2026-10-23', 'calendar_day')]
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM listening_observations WHERE recording_id=? AND account_id=? "
+        "AND day='2026-10-23' AND source='ytm_history'", (track['recording_id'], main)).fetchone()[0] == 1
     body = songs['http'].get('/track/owned-song').text
-    assert 'Another upload of this recording' in body
-    assert 'History observation' in body and 'Last observed' in body
-    assert body.count('<strong>Played</strong>') == 1
+    assert body.count('Another upload of this recording') == 2
+    assert body.count('<strong>Played</strong>') == 2
+    assert body.count('<strong>History observation</strong>') == 2
+    refresh = songs['http'].get('/track/owned-song/history')
+    assert refresh.status_code == 200 and refresh.text.strip() in body
 
 
 def test_ledger_keeps_unknown_history_precision_and_paginates(songs):
@@ -268,7 +286,7 @@ def test_ledger_keeps_unknown_history_precision_and_paginates(songs):
                                      'VALUES (?,?)', (songs['main_id'], 1800000000)).lastrowid
         store.conn.execute('INSERT INTO listening_observations(account_id,raw_identity_key,recording_id,'
             'source_day,day,source,precision,first_observed_at,last_observed_at,capture_id,capture_item_id) '
-            "VALUES (?,?,?,'2026-10-23','2026-10-23','youtube_history','legacy_unknown',?,?,?,?)",
+            "VALUES (?,?,?,'2023-11-14','2023-11-14','ytm_history','legacy_unknown',?,?,?,?)",
             (songs['main_id'], track['identity_key'], track['recording_id'], 1800000000, 1800000000, capture, 1))
     body = songs['http'].get('/track/owned-song').text
     assert 'Play time unknown' in body

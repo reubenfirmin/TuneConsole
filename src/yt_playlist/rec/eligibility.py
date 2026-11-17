@@ -1,6 +1,19 @@
 """Current exclusions shared by fresh assembly and bounded prepared-offer validation."""
 
 
+def comfort_tracks(store, tracks, now):
+    """Recheck listening and favorite status for the bounded prepared selection."""
+    from yt_playlist.rec import rec_params
+    keys = {track['key'] for track in tracks}
+    if not keys:
+        return []
+    eligible = {row['key'] for row in store.rec_candidates.comfort_candidates(now,
+        min_plays=rec_params.get_param(store, 'comfort_min_plays'),
+        recency_full_days=rec_params.get_param(store, 'comfort_recency_full_days'),
+        keys=keys, limit=len(keys))}
+    return [track for track in tracks if track['key'] in eligible]
+
+
 def home_exclusions(store, keys, now):
     """Feedback and canonical artist/genre bans.
 

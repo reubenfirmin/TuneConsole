@@ -1,7 +1,6 @@
 import pytest
 
 from yt_playlist.core.runtime import Runtime
-from yt_playlist.core import runtime as runtime_mod
 
 
 def _configured(store, tmp_path):
@@ -15,13 +14,13 @@ def _configured(store, tmp_path):
 def test_failed_save_retains_file_and_runtime_and_can_reconcile_committed_bindings(store, tmp_path, monkeypatch, failure):
     rt = _configured(store, tmp_path)
     before, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.accounts.get_accounts()
-    original_replace = runtime_mod.os.replace
+    original_replace = rt.files.publish
     original_validate = rt._validate_clients
     original_bindings = store.accounts.repository.replace_accounts
     if failure == "publish":
         def fail(*args):
             raise OSError("publication failed")
-        monkeypatch.setattr(runtime_mod.os, "replace", fail)
+        monkeypatch.setattr(rt.files, "publish", fail)
     elif failure == "reload":
         def fail(*args):
             raise ValueError("candidate client cannot load")
@@ -40,7 +39,7 @@ def test_failed_save_retains_file_and_runtime_and_can_reconcile_committed_bindin
     assert rt.configured and rt._provider is provider
     assert set(rt.clients()) == {i.id for i in accounts}
     assert list(tmp_path.glob(".config.toml.*")) == []
-    monkeypatch.setattr(runtime_mod.os, 'replace', original_replace)
+    monkeypatch.setattr(rt.files, 'publish', original_replace)
     monkeypatch.setattr(rt, '_validate_clients', original_validate)
     monkeypatch.setattr(store.accounts.repository, 'replace_accounts', original_bindings)
     rt.load()

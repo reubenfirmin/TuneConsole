@@ -1,9 +1,6 @@
 """Exercise the extracted reconciliation against real storage boundaries."""
-import json
-
 import pytest
 
-from yt_playlist.core import legacy_evidence
 from yt_playlist.core.store import Store
 
 
@@ -29,10 +26,6 @@ def test_controller_reconciliation_merges_discovery_and_similarity_before_redire
     assert candidates[0]['offered_count'] == 1 and candidates[0]['found_at'] == 10
     assert candidates[0]['because'] == []
     assert store.artist_similarity.cached_similar(target, 30) == [['Neighbor', 20]]
-    for aid in (old, target):
-        raw = legacy_evidence.original(store.conn, 'artist', 'artist_reconcile:discovered_artists',
-                                       json.dumps([old, target, aid]))
-        assert json.loads(raw)['explanation']['because'] == ['captured']
 
 
 def test_reconciliation_retry_keeps_completed_feature_merge_without_double_counting(store, monkeypatch):
@@ -55,16 +48,8 @@ def test_reconciliation_retry_keeps_completed_feature_merge_without_double_count
     assert store.discovery.get_discovered_artists()[0]['offered_count'] == 1
 
 
-def test_retained_original_is_readable_and_insert_once(store):
-    old, _ = identities(store)
-    payload = json.dumps({'artist_id': old, 'exact': ['captured']})
-    store.originals.retain('artist', 'artist_reconcile:sample', 'sample', payload, 'identity evidence', now=10)
-    store.originals.retain('artist', 'artist_reconcile:sample', 'sample', 'changed', 'new input', now=20)
-    assert legacy_evidence.original(store.conn, 'artist', 'artist_reconcile:sample', 'sample') == payload
-
-
-@pytest.mark.parametrize('version', [79, 93, 102, 107])
-def test_reconciliation_and_retained_originals_keep_installed_formats_writable(tmp_path, _admitted_installed_schema, version):
+@pytest.mark.parametrize('version', [107])
+def test_reconciliation_keeps_installed_formats_writable(tmp_path, _admitted_installed_schema, version):
     template = _admitted_installed_schema(version)
     store = Store(tmp_path / 'installed.db')
     try:
@@ -85,7 +70,7 @@ def test_reconciliation_and_retained_originals_keep_installed_formats_writable(t
         store.conn.close()
 
 
-def test_artist_origin_collision_rebinds_sources_and_retains_their_originals(store):
+def test_artist_origin_collision_rebinds_sources_and_preserves_contributions(store):
     old, target = identities(store)
     entry = store.tracks.upsert_track('v', 'Song', 'Artist')
     recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
@@ -100,9 +85,6 @@ def test_artist_origin_collision_rebinds_sources_and_retains_their_originals(sto
     assert [tuple(row) for row in store.conn.execute('SELECT * FROM discovery_artist_sources')] == [(target, new_origin, .8)]
     assert store.conn.execute('SELECT first_found_at,last_found_at FROM discovery_sources').fetchone()[:] == (10, 20)
     assert store.conn.execute('SELECT id FROM discovery_origins').fetchone()[0] == new_origin
-    raw = legacy_evidence.original(store.conn, 'discovery', 'discovery_artist_origin_merge',
-                                   json.dumps([target, old_origin, new_origin]))
-    assert json.loads(raw) == dict(artist_id=target, origin_id=old_origin, score=.8)
 
 
 @pytest.mark.parametrize('feature', ['discovery', 'artist_state'])

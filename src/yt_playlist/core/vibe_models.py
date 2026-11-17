@@ -26,7 +26,9 @@ def collect(conn, now, limit=16):
 
 
 def references(conn):
-    return (directory(conn) / relative(generation) for generation in sql.referenced_generations(conn))
+    queries = sql.VibeModelQueries(conn)
+    return (directory(conn) / relative(queries.file_reference(generation) or generation)
+            for generation in sql.referenced_generations(conn))
 
 
 def same_receipt(conn, prediction, value):

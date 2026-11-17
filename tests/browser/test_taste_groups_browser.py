@@ -1,4 +1,5 @@
 """Music-group identity, composition and choice uncertainty stay distinct on small screens."""
+from pathlib import Path
 import numpy as np
 import pytest
 from playwright.sync_api import expect
@@ -8,7 +9,7 @@ from yt_playlist.rec import embedding_vectors as embed
 
 
 @pytest.mark.parametrize("width", [1440])
-def test_mix_groups_explain_composition_and_choice_uncertainty(live_app, store, page, width, tmp_path):
+def test_mix_groups_explain_composition_and_choice_uncertainty(live_app, store, page, width, tmp_path, request):
     _groups(store)
     keys = []
     vector = np.eye(5, dtype=np.float32)[2]
@@ -63,4 +64,24 @@ def test_mix_groups_explain_composition_and_choice_uncertainty(live_app, store, 
             interval = row.locator(".choice-interval").bounding_box()
             assert abs(legend["y"] - interval["y"]) < 1
     page.screenshot(path=str(tmp_path / f"taste-groups-{width}.png"), full_page=True)
+
+    page.get_by_role('tab', name='Overview', exact=True).click()
+    choices = page.locator('#taste-overview-panel .taste-choice-summary')
+    expect(choices.get_by_role('heading', name='You’ve been choosing', exact=True)).to_be_visible()
+    expect(choices.locator('.taste-choice-themes strong')).to_have_text(['Techno · 2010s'])
+    expect(choices.locator('.taste-choice-composition')).to_have_text(['Techno 100%'])
+    expect(choices).to_contain_text('22 selections · 61 offers')
+    expect(choices).to_contain_text('There isn’t a clear preference to compare yet')
+
+    for epoch in range(63, 123):
+        store.modes.log_impressions(epoch, [('fresh', 1)], 1)
+    page.reload()
+    expect(choices.get_by_role('heading', name='Your choices favor', exact=True)).to_be_visible()
+    expect(choices.locator('.taste-choice-themes strong')).to_have_text([
+        'Techno · 2010s', '2010s blend'])
+    expect(choices.locator('.taste-choice-composition')).to_contain_text(['Techno 100%', 'House 40%'])
+    expect(choices).to_contain_text('0 selections · 61 offers')
+    choices.scroll_into_view_if_needed()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(Path(request.config.getoption('output')) / f'taste-choice-overview-{width}.png'))
     assert errors == []

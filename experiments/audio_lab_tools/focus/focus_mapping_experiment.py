@@ -97,7 +97,7 @@ def freeze(directory, local):
     old, legacy = arrays(ref(FOCUS / 'inputs.npz')), arrays(ref(FOCUS / 'oof.npz'))
     focus_meta = load(ref(FOCUS / 'metadata.json'))
     ref(FOCUS / 'checkpoint.json')
-    production = EXPERIMENTS.parent / 'src/yt_playlist/rec/data/emotify-vibes.json'
+    production = EXPERIMENTS.parent / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'
     if load(production) != load(FOCUS / 'checkpoint.json'):
         raise ValueError('Shared production model changed; refresh controls')
     references[str(production)] = digest(production)

@@ -40,6 +40,38 @@ def selected_source(conn, entry_id, field):
     return row[0] if row else None
 
 
+def selected_sources(conn, entry_id, fields):
+    """Read one entry's finite source set without reloading its layout per field."""
+    fields = tuple(dict.fromkeys(fields))
+    if set(fields) - {*ITEM_FIELDS, *RECORDING_FIELDS}:
+        raise ValueError('Unknown metadata field')
+    subject = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+    if subject is None:
+        raise ValueError('Unknown catalog entry')
+    typed = metadata_evidence.available(conn)
+    from . import metadata_reads
+    published = not typed and metadata_reads.selected(conn) is not None
+    result = dict.fromkeys(fields)
+    for recording in (True, False):
+        selected = tuple(field for field in fields if (field in RECORDING_FIELDS) == recording)
+        if not selected:
+            continue
+        column, identity = ('recording_id', subject[0]) if recording else ('entry_id', entry_id)
+        placeholders = ','.join('?' for _ in selected)
+        if typed:
+            table = 'recording_metadata_selections' if recording else 'entry_metadata_selections'
+            sql = ('SELECT s.field,COALESCE(d.provider,o.legacy_source,s.legacy_source) '
+                   f'FROM {table} s LEFT JOIN metadata_observations o ON o.id=s.observation_id '
+                   'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id '
+                   f'WHERE s.{column}=? AND s.field IN ({placeholders})')
+        else:
+            table = 'recording_field_sources' if recording else 'item_field_sources'
+            table = metadata_reads.table(table) if published else table
+            sql = f'SELECT field,source FROM {table} WHERE {column}=? AND field IN ({placeholders})'
+        result.update(conn.execute(sql, (identity, *selected)).fetchall())
+    return result
+
+
 def select(conn, entry_id, field, value, source, *, now=None, observation_id=None):
     previous = provider_queries.identity(conn, entry_id, field)
     result = _select(conn, entry_id, field, value, source, now=now, observation_id=observation_id)

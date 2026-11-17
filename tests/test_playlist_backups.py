@@ -55,7 +55,10 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
             aid = executor.store_plan(store, executor.MergePlan(pid, keep, [], []),
                                       "delete", "SOURCE", 1)
             executor.execute_planned(store, aid, {iid: client}, 1000000)
-    backup, = (tmp_path / "backups").glob("SOURCE_*.json")
+    owner, = store.conn.execute('SELECT id,playlist_id,account_id,provider_playlist_id,file_status '
+                               "FROM playlist_backup_writes WHERE provider_playlist_id='SOURCE'").fetchall()
+    backup = tmp_path / 'backups' / (owner['id'] + '.json')
+    assert tuple(owner) == (backup.stem, pid, iid, 'SOURCE', 'ready')
     from yt_playlist.core import fao
     saved = json.loads(fao.read(backup).bytes.decode())
     assert [t["video_id"] for t in saved["tracks"]] == ["new", "one", "new"]
@@ -94,7 +97,7 @@ def test_incomplete_remote_read_preserves_playlist_and_publishes_nothing(
     assert not list(tmp_path.glob("backups/*"))
 
 
-@pytest.mark.parametrize("failure", ["fetch", "write", "publish", "fsync", "file_fsync",
+@pytest.mark.parametrize("failure", ["fetch", "write", "publish", "status", "fsync", "file_fsync",
                                      pytest.param("directory_fsync", marks=pytest.mark.skipif(
                                          os.name == "nt", reason="POSIX directory durability"))])
 def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
@@ -110,9 +113,12 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     if failure == "fetch":
         monkeypatch.setattr(client, "get_playlist", fail)
     elif failure == "write":
-        monkeypatch.setattr(playlist_backups.json, "dumps", fail)
+        from yt_playlist.core import playlist_backup_files
+        monkeypatch.setattr(playlist_backup_files.json, "dumps", fail)
     elif failure == "publish":
         monkeypatch.setattr(fao.os, "replace", fail)
+    elif failure == "status":
+        monkeypatch.setattr(store.playlist_backups.repository, 'complete', fail)
     elif failure == "fsync":
         monkeypatch.setattr(fao.os, "fsync", fail)
     else:
@@ -125,7 +131,7 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
                 fail()
             if (failure == "directory_fsync" and stat.S_ISDIR(info.st_mode)
                     and os.path.samestat(info, prior.parent.stat())
-                    and len(list(prior.parent.glob("SOURCE_*.json"))) == 2):
+                    and len(list(prior.parent.glob("*.json"))) == 2):
                 boundary_reached.append(failure)
                 fail()
             return fsync(fd)
@@ -137,16 +143,19 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
         assert boundary_reached == [failure]
     assert prior.read_bytes() == saved
     retained = set(prior.parent.iterdir())
-    if failure == "directory_fsync":
+    if failure in {"directory_fsync", "status"}:
         # The atomic rename completed, but its directory entry is not yet durable.
         assert len(retained - {prior, prior.parent / ".fao.lock"}) == 1
-        assert len(list(prior.parent.glob("SOURCE_*.json"))) == 2
+        assert len(list(prior.parent.glob("*.json"))) == 2
     else:
         assert retained == {prior, prior.parent / ".fao.lock"}
     assert not list(prior.parent.glob(".fao-pending-*"))
     assert not client.deleted
     assert store.playlists.get_playlist(pid) is not None
     assert store.actions.get_actions() == []
+    statuses = [row[0] for row in store.conn.execute('SELECT file_status FROM playlist_backup_writes')]
+    assert statuses.count('ready') == 1
+    assert statuses.count('pending') == (0 if failure in {'fetch', 'write'} else 1)
     if failure in {"file_fsync", "directory_fsync"}:
         monkeypatch.setattr(fao.os, "fsync", fsync)
         executor.delete_playlist(store, pid, client, 3)

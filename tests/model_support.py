@@ -6,7 +6,6 @@ Application lifecycle tests use rec.model_refresh for coherent publication inste
 import json
 
 from yt_playlist.core.activity import check_stopping
-from yt_playlist.core import embeddings
 from yt_playlist.rec import (artist_model, content_model, embedding_training as training,
                              embedding_vectors as vector_reads, taste_modes)
 from yt_playlist.util import genre_catalog
@@ -64,12 +63,8 @@ def build_artist_content_model(store):
         if vector is not None:
             rows.append((artist, vector.tobytes()))
     serialized = json.dumps(model)
-    with store.conn:
-        store.conn.execute('UPDATE settings SET value=value WHERE 0')
-        embeddings.publish(store.conn, 'rec_artist_content_vectors', rows, replace=True,
-                           model_version=embeddings.version('rec_artist_content_vectors',
-                               {'rec_artist_content_model': serialized}))
-        store.settings.set_setting("rec_artist_content_model", serialized)
+    store.settings.set_setting("rec_artist_content_model", serialized)
+    store.rec_model.replace_rec_artist_content_vectors(rows)
     return len(rows)
 
 

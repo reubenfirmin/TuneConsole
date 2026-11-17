@@ -9,8 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from logging import Logger
 from typing import Any, Protocol
-import hashlib
-import json
+from copy import deepcopy
 
 from yt_playlist.rec import (arc_energy, home_audit, home_themes, home_vibe, journeys, musical_character,
                              mix_tuning, ordering, rec_params, recipes, surfaces)
@@ -24,6 +23,7 @@ from yt_playlist.controllers.settings import Settings
 from yt_playlist.rec.mode_selection import PROTO_SIZE, ROTATION_POOL, CARD_LABELS as _CARD_LABELS
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
+from yt_playlist.core.version_policy import VersionPolicy
 
 _ROW_LANES = ("wheelhouse", "explore", "comfort", "fresh")
 
@@ -61,6 +61,7 @@ class CardsRequest:
     epoch: int | None = None
     mode_order: tuple | None = None
     record: bool = True
+    version_policy: VersionPolicy | None = None
 
 
 @dataclass
@@ -84,28 +85,32 @@ class PoolResult:
     pool: dict | None = None
 
 
-def experiment_id(proto):
-    """Account of the choice, independent of its current track order or cache generation."""
-    choice = {"lane": proto["lane"], "label": proto.get("label"), "note": proto.get("note"),
-              "genres": sorted(set(proto.get("genres") or []))}
-    return hashlib.sha256(json.dumps(choice, sort_keys=True).encode()).hexdigest()[:24]
+from yt_playlist.rec.home_card_values import experiment_id
 
 
 def _proto(store, lane, label, items, now, *, vibe=None, catalog=None):
-    when = datetime.fromtimestamp(now).strftime("%B %-d %Y")
     tracks = items[:PROTO_SIZE]
     counts = recipes.theme_counts(store, tracks, catalog=catalog)
     genres, _ = counts
+    note = recipes.theme_sentence(store, lane, tracks, counts=counts)
+    return project_proto(lane, label, tracks, now, genres, note, vibe=vibe)
+
+
+def project_proto(lane, label, tracks, now, genres, note, *, vibe=None):
+    """Present a starter from supplied tracks and acquired theme facts."""
+    when = datetime.fromtimestamp(now).strftime("%B %-d %Y")
     purpose = home_vibe.PRESETS.get(vibe, {}).get('label')
     name = f"{label} - {purpose} - {when}" if purpose else f"{label} - {when}"
     return {"lane": lane, "label": label, "name": name,
-            "note": recipes.theme_sentence(store, lane, tracks, counts=counts), "tracks": tracks,
+            "note": note, "tracks": tracks,
             "genres": list(genres), "feedback_surface": "for_you" if lane == "fresh" else None}
 
 
 def _order_by_journey(store, items, journey, seed, selection_data=None):
     catalog = (selection_data or {}).get('journey_catalog')
-    items = ordering.attach_genres(store, items, genres=catalog['genres'] if catalog is not None else None)
+    genres = (catalog['genres'] if catalog is not None
+              else store.rec_query.track_genres(ordering.genre_keys(items)))
+    items = ordering.attach_genres(items, genres=genres)
     field = ordering._field
     keys = [field(it, "key") or "" for it in items]
     dao = store.rec_query
@@ -126,11 +131,20 @@ def _order_by_journey(store, items, journey, seed, selection_data=None):
     # A prepared selection owns its profile until its next worker publication.
     profiles.update({field(it, 'key'): it['musical'] for it in items
                      if isinstance(it, dict) and 'musical' in it})
+    identities = store.artists.track_keys(keys=keys)
+    return journey_values(items, journey, seed, decades, lastp, plays, axes, profiles, identities=identities)
+
+
+def journey_values(items, journey, seed, decades, lastp, plays, axes, profiles, *, identities=None):
+    """Order a card with captured listening, musical and taxonomy facts."""
+    field = ordering._field
+    keys = [field(item, 'key') or '' for item in items]
     arc = arc_energy.arc_energies(keys, profiles)
 
     def feat(it):
         key, genre = field(it, "key") or "", field(it, "genre") or ""
         return {"artist": field(it, "artist") or "", "genre": genre,
+                'artist_ids': (identities or {}).get(key) or field(it, 'artist_ids'),
                 "family": axes.get(genre, ('', None))[0],
                 "energy": arc.get(key, .5), "decade": decades.get(key),
                 "plays": plays.get(key, 0), "recency": lastp.get(key, 0.0)}
@@ -188,7 +202,12 @@ def _complete_card(store, card, now, epoch, prepared, selection_data):
         shadow = {**shadow, 'tracks': _order_by_journey(store, shadow['tracks'], journey,
                                                       dj.get('seed', 0), selection_data)}
     proto = _proto(store, card['lane'], card['label'], tracks, now, vibe=vibe,
-                   catalog=(selection_data or {}).get('journey_catalog')) | {
+                   catalog=(selection_data or {}).get('journey_catalog'))
+    return complete_card_values(card, proto, shadow, vibe, journey, dj)
+
+
+def complete_card_values(card, proto, shadow, vibe, journey, dj):
+    proto = proto | {
         'mode_id': card['mode_id'], 'ranker': card['ranker'], 'experiment': card.get('experiment'),
         'counterfactual': shadow,
         'recipe': {'model': 'vibe' if vibe else 'mode', 'lane': card['lane'],
@@ -226,7 +245,8 @@ def _rolled_theme(store, lane, pool, now, preparation=None):
 
 def _carded(store, lane, label, pool, now, preparation=None):
     vibe = home_vibe.current(store, now)
-    pool = ordering.attach_genres(store, list(pool))
+    pool = list(pool)
+    ordering.attach_genres(pool, genres=store.rec_query.track_genres(ordering.genre_keys(pool)))
     recipe = _rolled_theme(store, lane, pool, now, preparation)
     focused = pool if vibe else recipes.theme_filter(store, pool, recipe.get("facets", {}))
     focused = home_vibe.rank(store, now, focused)
@@ -397,6 +417,8 @@ class HomeCards:
             proto["recipe"] = {**(proto.get("recipe") or {}),
                                "musical_version": musical_character.VERSION,
                                "vibe_policy": home_vibe.VERSION, "vibe": vibe}
+            if request.version_policy is not None:
+                proto['recipe']['version_policy'] = deepcopy(request.version_policy)
             proto["experiment_id"] = experiment_id(proto)
             proto["recipe"] = {**(proto.get("recipe") or {}), "experiment_id": proto["experiment_id"]}
         return CardsResult(protos, slots, notice, notice if not filters else None,

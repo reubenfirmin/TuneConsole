@@ -11,6 +11,7 @@ def reader():
         _read_only=True,
         settings=Mock(get_setting=Mock(return_value=None)),
         recommendations=Mock(),
+        artists=SimpleNamespace(credited_pages=lambda rows: rows),
         rec_model=Mock(muted_artists=Mock(return_value={'muted'}),
                        get_weights=Mock(return_value={}),
                        disliked_key_page=Mock(return_value=[]),
@@ -64,7 +65,7 @@ def test_home_selection_applies_diversity_to_supplied_ranked_rows():
     selected.ppr_counts['mode'] = 128
     filters = CandidateFilter(7, eligible=True)
     result = selected.select('mode', 'ppr', filters, (2, 1), family='jazz')
-    assert [row['key'] for row in result] == ['a', 'b', 'c']
+    assert [row['key'] for row in result] == ['a', 'b', 'c', 'same-album', 'same-artist']
     ordering.ranked.assert_called_once_with(filters, mode='mode', ranker='ppr', family='jazz', scale=128)
 
 
@@ -81,7 +82,7 @@ def test_group_pages_preserve_filters_caps_and_reach_the_later_tail():
     selected = stored_groups.Selection(source, 99, 100, ordering)
     result = selected.tracks('version', 'temporal', 1, ('jazz',), (), {'seen'}, 1, 1,
                              {'year_cuts': (1990, 2010)})
-    assert [item['key'] for item in result] == ['good', 'tail']
+    assert [item['key'] for item in result] == ['good', 'tail', 'same-album']
     assert all(item['serving_context']['vibe_affinity'] == .5 for item in result)
     assert source.recommendations.candidate_page.call_args_list == [
         call('home', 'all', 'temporal', generation=99, group_version='version', after=-1, limit=128),

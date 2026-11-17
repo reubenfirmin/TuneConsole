@@ -1,30 +1,29 @@
 """Coordinate provider evidence, retries and restartable configuration refreshes."""
 import json
-from uuid import uuid4
+from contextlib import nullcontext
 
 from yt_playlist.core import enrichment_state_policy as policy
 from yt_playlist.core import enrichment_selection_policy as selections, metadata_native, metadata_values
 from yt_playlist.core import native_metadata_policy as native
 from yt_playlist.core import enrichment_conflict_policy as conflicts
-from yt_playlist.core import legacy_journals
 from yt_playlist.core import provider_queries
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded
 from yt_playlist.core.evidence_ledger import canonical
-from yt_playlist.core.metadata_contract import Capture, clock
+from yt_playlist.core.metadata_contract import Capture, clock, ALTERNATIVE_SECONDS
 from yt_playlist.core.metadata_deliveries import Delivery
 from yt_playlist.core.metadata_observations import SubjectChanged
 from yt_playlist.core.metadata_runtime_files import MAX_BYTES
+from yt_playlist.core.metadata_file_contract import describe
 
 RECONCILE_BATCH = 64
 
 
 class EnrichmentState:
-    def __init__(self, repository, choices, files, delivery_files, deliveries, enrichment, provider_order, originals):
+    def __init__(self, repository, choices, files, delivery_files, deliveries, enrichment, provider_order):
         self.repository, self.choices = repository, choices
         self.files, self.delivery_files = files, delivery_files
         self.deliveries = deliveries
         self.enrichment, self.provider_order = enrichment, provider_order
-        self.originals = originals
 
     def subject_guard(self, entry_id, recording_id):
         return self.repository.subject_guard(entry_id, recording_id)
@@ -62,10 +61,11 @@ class EnrichmentState:
 
     def _record_native_source(self, subject, provider, scope, entity, values, run_id, now):
         key = native.source_key(provider, scope, entity)
-        with self.files.retained(), self.delivery_files.retained(), self.repository.state_transaction():
+        with self.files.retained(), self.delivery_files.retained():
             inputs = self.repository.native_source_inputs(subject, key)
             source = inputs['source']
-            previous = self.files.read('native', (key,), source['revision']) if source else {}
+            previous = self.files.read('native', (key,), source['revision'],
+                **({'reference': inputs['file']} if inputs.get('file') else {})) if source else {}
             head = inputs['head']
             if head is None:
                 legacy = inputs['legacy']
@@ -76,17 +76,23 @@ class EnrichmentState:
             update = native.runtime_update(subject, provider, source, previous, head, values, run_id, now)
             if update is None:
                 return
+            record = None
             if update['revision'] is not None:
-                self.files.publish('native', (key,), update['revision'], update['document'],
-                                   current_revision=source['revision'] if source else None)
-            self.repository.store_native_source(subject, key, provider, scope, entity, update, run_id)
+                record = describe('native', (key,), update['revision'], update['document'])
+                record['file_id'] = self.repository.reserve_file(record)
+            with self.files.write_reserved([record]) if record else nullcontext():
+                with self.repository.state_transaction():
+                    if self.repository.native_source_inputs(subject, key) != inputs:
+                        raise SubjectChanged('Native metadata source changed during file publication')
+                    self.repository.store_native_source(subject, key, provider, scope, entity, update, run_id,
+                        **({'file_record': record} if record else {}))
 
     def _record_native_delivery(self, subject, provider, scope, entity, values, run_id, now):
         identity = self.deliveries.record(Delivery(provider, run_id, scope, entity, now,
             subject['entry_id'], subject['recording_id'], subject['video_id'],
             response={'format': native.FORMAT, 'observations': values}))
         key = native.source_key(provider, scope, entity) if scope in native.MODEL_SCOPES else None
-        with self.delivery_files.retained(), self.repository.state_transaction():
+        with self.delivery_files.retained():
             for position, payload in enumerate(values):
                 inputs = self.repository.native_observation_inputs(subject, identity, position, key, payload['field'])
                 if inputs['existing']:
@@ -96,8 +102,11 @@ class EnrichmentState:
                     body = self.delivery_files.read(tuple(previous[name] for name in
                         ('raw_filename', 'raw_digest', 'raw_byte_size', 'raw_offset')))
                     changed = native.profile_value(metadata_native.decode_observation(previous, body)) != native.profile_value(payload)
-                self.repository.store_native_observation(subject, identity, position, payload, key, provider, run_id,
-                                                         source_exists=inputs['source'], changed=changed)
+                with self.repository.state_transaction():
+                    if self.repository.native_observation_inputs(subject, identity, position, key, payload['field']) != inputs:
+                        raise SubjectChanged('Native metadata observation changed during file read')
+                    self.repository.store_native_observation(subject, identity, position, payload, key, provider, run_id,
+                                                             source_exists=inputs['source'], changed=changed)
 
     def metadata_observations(self, identity_key, *, after_id=0, limit=100):
         policy.observation_page_bounds(after_id, limit)
@@ -107,7 +116,8 @@ class EnrichmentState:
             if layout == 'runtime':
                 result, used = [], 0
                 for row in rows:
-                    data = self.files.read('native', (row['source_key'],), row['revision'])
+                    data = self.files.read('native', (row['source_key'],), row['revision'],
+                        **({'reference': row['file']} if row.get('file') else {}))
                     for observation in policy.runtime_observations(row, data, after_id):
                         used += len(canonical({'value': observation['value'], 'provenance': observation['provenance']}))
                         if used > MAX_BYTES:
@@ -159,18 +169,18 @@ class EnrichmentState:
         if subject is None:
             if inputs['layout'] == 'runtime' or 'recording_id' in inputs:
                 raise ValueError('Provider attempt needs a current catalog input')
-            self._retain_unresolved_attempt(identity_key, provider, {'at': at, 'status': status, 'fields': fields}, video_id)
             return
         observations = {}
         if delivery_id is None and inputs['layout'] != 'legacy':
             delivery_id, observations = self.capture_provider_result(subject['entry_id'], provider, fields, run_id=run_id, now=at)
         if inputs['layout'] == 'evidence':
             observations = self.choices.result_evidence(subject['entry_id'], provider, delivery_id, fields, complete=True, run_id=run_id)
-        with self.files.retained(), self.repository.state_transaction():
+        with self.files.retained():
             current = self.repository.attempt_context(identity_key, provider, video_id, entry_id=subject['entry_id'],
                 delivery_id=delivery_id if inputs['layout'] == 'evidence' else None)
             if current['subject'] != subject or current['layout'] != inputs['layout']:
                 raise SubjectChanged('Provider attempt catalog subject changed during lookup')
+            record = None
             if current['layout'] == 'runtime':
                 selections.validate_capture(subject, provider, fields, delivery_id, run_id=run_id, complete=True)
                 previous = current['previous']
@@ -188,40 +198,27 @@ class EnrichmentState:
                 provider_id = current['provider_id']
                 if provider_id is None:
                     provider_id = self.repository.reserve_provider_identity(provider)
-                self.files.publish('alternatives', (subject['recording_id'], provider_id), at,
+                    current = {**current, 'provider_id': provider_id}
+                record = describe('alternatives', (subject['recording_id'], provider_id), at,
                     policy.attempt_document(subject, provider, result, run_id, error))
-            self.repository.store_attempt(current, provider, fields, result, delivery_id=delivery_id,
-                observations=observations, video_id=video_id)
+                record['file_id'] = self.repository.reserve_file(record)
+            with self.files.write_reserved([record]) if record else nullcontext():
+                with self.repository.state_transaction():
+                    checked = self.repository.attempt_context(identity_key, provider, video_id,
+                        entry_id=subject['entry_id'], delivery_id=delivery_id if inputs['layout'] == 'evidence' else None)
+                    if checked != current:
+                        raise SubjectChanged('Provider attempt changed during file publication')
+                    self.repository.store_attempt(current, provider, fields, result, delivery_id=delivery_id,
+                        observations=observations, video_id=video_id, **({'file_record': record} if record else {}))
         if not retry:
             self._complete_provider(subject['recording_id'], provider, fields, providers, at)
-
-    def _retain_unresolved_attempt(self, identity_key, provider, result, video_id):
-        source_id, reason = uuid4().hex, 'unresolved input identity'
-        payload = json.dumps({'identity_key': identity_key, 'video_id': video_id, 'provider': provider, **result})
-        with self.originals.retained(), self.repository.state_transaction():
-            inputs = self.repository.unresolved_attempt_inputs(source_id)
-            if inputs['reference'] is not None:
-                self.originals.read_receipt('metadata', inputs['reference'])
-                return
-            publication = reference = None
-            if inputs['layout'] == 'journal':
-                key = legacy_journals.key('enrichment_unresolved_attempt', source_id)
-                if key in self.originals.journal_entries('metadata', inputs['publication'], [key]):
-                    return
-                retention, basis = legacy_journals.disposition('metadata', 'enrichment_unresolved_attempt', payload, reason)
-                publication = self.originals.publish_journal('metadata', inputs['publication'], {key: {
-                    'payload': payload, 'reason': reason, 'archived_at': clock(None), 'subjects': {},
-                    'state': 'retained', 'retention': retention, 'disposition': basis}})
-            elif inputs['layout'] == 'receipt':
-                reference, = self.originals.publish_receipts('metadata', [payload])
-            self.repository.store_unresolved_attempt(inputs, identity_key, json.dumps({provider: result}),
-                publication=publication, reference=reference)
 
     def _attempt_alternatives(self, inputs, now):
         previous = inputs['previous']
         if previous is None or not policy.alternative_available({'provider_id': inputs['provider_id'], 'state': previous}, now):
             return {}
-        return self.files.read('alternatives', (inputs['recording_id'], inputs['provider_id']), float(previous['at']), missing=True) or {}
+        return self.files.read('alternatives', (inputs['recording_id'], inputs['provider_id']), float(previous['at']), missing=True,
+            **({'reference': inputs['file']} if inputs.get('file') else {})) or {}
 
     def _complete_provider(self, recording_id, provider, fields, providers, now):
         with self.files.retained(), self.delivery_files.retained():
@@ -244,8 +241,10 @@ class EnrichmentState:
         for row in inputs['rows']:
             state = row['state']
             if inputs['runtime']:
-                data = (self.files.read('alternatives', (state['recording_id'], row['provider_id']),
-                    float(state['at']), missing=True) or {}) if policy.alternative_available(row, now) else {}
+                data = {}
+                if policy.alternative_available(row, now):
+                    data = self.files.read('alternatives', (state['recording_id'], row['provider_id']),
+                        float(state['at']), missing=True, **({'reference': row['file']} if row.get('file') else {})) or {}
                 if video_id is not None and data.get('input_video_id') != video_id:
                     continue
                 fields = selections.scoped_fields(inputs['subject'], data) if inputs['subject'] else data.get('fields', {})
@@ -273,31 +272,41 @@ class EnrichmentState:
         with self.files.collecting() as acquired:
             if not acquired:
                 return 0
-            with self.repository.state_transaction():
-                state = self.repository.expiry_state()
-                removed, shard = self.files.expire_alternatives(state['gc_shard'], now)
-                self.repository.store_expiry_shard(shard)
-                if state['gc_after'] > now:
-                    return removed
-                rows = self.repository.expiry_page(state['gc_cursor'], limit=16)
-                for row in rows:
-                    for conflict in row['conflicts']:
-                        removed += self._expire_conflict(conflict, now)
-                    for source in row['sources']:
-                        removed += self.files.prune_revisions('native', (source['source_key'],), (source['revision'],))
-                self.repository.store_expiry_cursor(rows[-1]['recording_id'] if rows else 0, 0 if rows else now + 3600)
+            state = self.repository.expiry_state()
+            identities = self.repository.retire_expired_alternative_files(now - ALTERNATIVE_SECONDS, limit=128)
+            removed = self.files.delete_reserved(identities)
+            legacy_removed, shard = self.files.expire_alternatives(state['gc_shard'], now)
+            removed += legacy_removed
+            self.repository.store_expiry_shard(shard)
+            if state['gc_after'] > now:
                 return removed
+            rows = self.repository.expiry_page(state['gc_cursor'], limit=16)
+            for row in rows:
+                for conflict in row['conflicts']:
+                    removed += self._expire_conflict(conflict, now)
+                for source in row['sources']:
+                    owner, keep = (source['source_key'],), (source['revision'],)
+                    identities = self.repository.retire_file_revisions('native', owner, keep)
+                    removed += self.files.delete_reserved(identities)
+                    removed += self.files.prune_revisions('native', owner, keep)
+            self.repository.store_expiry_cursor(rows[-1]['recording_id'] if rows else 0, 0 if rows else now + 3600)
+            return removed
 
     def _expire_conflict(self, row, now):
         identity, revision = row['id'], row['revision']
-        data = self.files.read('conflicts', (identity,), revision)
+        data = self.files.read('conflicts', (identity,), revision,
+            **({'reference': row['file']} if row.get('file') else {}))
         current = {**data, 'candidates': conflicts.current_candidates(data, row['updated_at'], now)}
         keep = (revision,)
         if current != data:
-            self.files.publish('conflicts', (identity,), revision + 1, current, current_revision=revision)
-            self.repository.store_conflict_revision(identity, revision + 1)
+            record = describe('conflicts', (identity,), revision + 1, current)
+            record['file_id'] = self.repository.reserve_file(record)
+            with self.files.write_reserved([record]):
+                self.repository.store_conflict_revision(identity, revision + 1,
+                    expected_revision=revision, file_record=record)
             keep = revision, revision + 1
-        return self.files.prune_revisions('conflicts', (identity,), keep)
+        identities = self.repository.retire_file_revisions('conflicts', (identity,), keep)
+        return self.files.delete_reserved(identities) + self.files.prune_revisions('conflicts', (identity,), keep)
 
     def enrichment_cooldowns(self):
         return self.repository.enrichment_cooldowns()

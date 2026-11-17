@@ -10,6 +10,9 @@ editors must also be trusted. Incomplete edit histories are withheld; the user
 can create a fresh, reviewed ticket instead. This is a content admission filter,
 not a replacement for the agent's sandbox or instruction hierarchy.
 
+Do not use shell redirection. Invoke the whitelisted ./scripts/agent-tickets.py
+directly and use --output PATH to save the filtered JSON to a file.
+
     ./scripts/agent-tickets.py list --status Ready
     ./scripts/agent-tickets.py read 704
     ./scripts/agent-tickets.py read 704 --output /tmp/ticket-704.json
@@ -220,7 +223,8 @@ def read_ticket(number):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="List eligible issues by project status")
     listing.add_argument("--status", action="append", choices=STATUSES)
@@ -228,7 +232,7 @@ def main(argv=None):
     reading.add_argument("number", type=int)
     for command in (listing, reading):
         command.add_argument("--output", type=Path, metavar="PATH",
-                             help="Write filtered JSON to PATH instead of stdout")
+                             help="Save filtered JSON to PATH; use this instead of shell redirection")
     args = parser.parse_args(argv)
     try:
         if args.command == "read" and args.number < 1:

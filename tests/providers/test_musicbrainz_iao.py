@@ -103,8 +103,10 @@ def test_detail_failure_keeps_search_fields_without_artist_request(store, monkey
     install(monkeypatch, fetch, clock)
     with net.probe_errors() as errors:
         result = musicbrainz.probe({'title': 'Song', 'artist': 'Artist'}, store)
-    assert result.fields == {'year': '1995', 'mb_recording_id': 'right', 'mb_release_ids': ['release']}
+    assert result.fields == {'year': '1995', 'mb_recording_id': 'right', 'mb_release_ids': ['release'],
+        'artist_credits': [{'provider': 'musicbrainz', 'id': 'artist', 'name': 'Artist'}]}
     assert len(calls) == 2 and len(errors) == 1
+    assert all('/artist/' not in url for url in calls)
 
 
 def test_mb_dependency_outage_keeps_known_mbid_and_other_providers_usable(store, monkeypatch):

@@ -1,5 +1,6 @@
 """Shared mode sampling and card framing for legacy and typed pool readers."""
 import random
+from itertools import permutations
 
 import numpy as np
 
@@ -10,6 +11,17 @@ ROTATION_POOL = PROTO_SIZE * 25
 CARD_LABELS = {'wheelhouse': 'More in your wheelhouse', 'explore': 'From your catalog',
                'comfort': 'Comfort listening', 'fresh': 'Fresh songs'}
 BAND_LABELS = {0: 'Throwback', 1: 'Time Flies', 2: 'Recent Picks'}
+
+
+def allocate_lanes(chosen, lanes, depths, *, minimum=4):
+    """Assign scarce modes by credible-card coverage, capped depth and sampled order."""
+    priority = {mode: index for index, mode in enumerate(chosen)}
+    def score(modes):
+        sizes = [depths.get((lane, mode), 0) for lane, mode in zip(lanes, modes)]
+        return (sum(size >= minimum for size in sizes), sum(sizes),
+                tuple(-priority.get(mode, len(chosen)) for mode in modes))
+    candidates = chosen + [None] * max(0, len(lanes) - len(chosen))
+    return max(permutations(candidates, len(lanes)), key=score)
 
 
 def ranker_for(epoch, mode_id, share):

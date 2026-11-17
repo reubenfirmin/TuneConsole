@@ -1,4 +1,4 @@
-"""Current family edits through real recipe, draft, restart and reroll APIs."""
+"""Historical family relationships through recipe, draft, restart and reroll APIs."""
 import json
 
 import pytest
@@ -23,7 +23,7 @@ def _pristine_current_schema():
 def road_trip_vocabulary(monkeypatch):
     from tests.genre_catalog_support import bound_catalog
 
-    # Both genre identities and live family edits remain real. Full catalog
+    # Both genre identities and stored family relationships remain real. Full catalog
     # curation is below the recipe/draft/restart workflow under test.
     bound_catalog(monkeypatch, entries=GENRES)
 
@@ -52,7 +52,7 @@ def _assert_blend(state, order, banned):
     assert stats['mix_targets']['blend']<=stats['blend_count']
 
 
-@pytest.mark.parametrize('genre',['Jazz','Synth Pop'],ids=['default','edited'])
+@pytest.mark.parametrize('genre',['Jazz','Synth Pop'],ids=['default','historical-family'])
 @pytest.mark.parametrize('legacy',[False,True],ids=['captured','legacy-draft'])
 def test_current_family_survives_finalize_reload_and_single_slot_reroll(tmp_path,genre,legacy,consumer_store):
     path = tmp_path/'trip.db'
@@ -63,7 +63,8 @@ def test_current_family_survives_finalize_reload_and_single_slot_reroll(tmp_path
         for video in ('a','b','c'):
             _song(store,video,genre)
         if genre=='Synth Pop':
-            store.genres.set_genre_family('synth pop','jazz')
+            with store.conn:
+                store.conn.execute("UPDATE genre_catalog SET family_key='jazz',family_source='custom' WHERE key='synth pop'")
         recipe_id = store.road_trip.save_road_trip_recipe(None,'Trip',100,[],['Jazz'],15,1000)
         state = road_trip.start_draft(store,store.road_trip.get_road_trip_recipe(recipe_id),1000,seed=7)
         road_trip.finish_draft(state,store,1000)
@@ -107,10 +108,13 @@ def test_family_change_after_capture_refreshes_labels_without_redrawing(store):
     road_trip.finish_draft(state,store,1000)
     assert state['stats']['yours_count']==3
     order = list(state['picks'])
-    store.genres.set_genre_family('synth pop','jazz')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET family_key='jazz',family_source='custom' WHERE key='synth pop'")
     road_trip.normalized(state,store,1001)
     _assert_blend(state,order,[])
-    store.genres.set_genre_family('synth pop',original_family)
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET family_key=?,family_source='custom' WHERE key='synth pop'",
+                           (original_family,))
     road_trip.normalized(state,store,1002)
     assert state['picks']==order and not state['blend_available']
     assert state['stats']['blend_count']==0 and state['stats']['yours_count']==3
@@ -127,7 +131,8 @@ def test_family_edit_immediately_before_reroll_refreshes_both_groups(store):
     assert state['stats']['yours_count']==3 and not state['blend_available']
     order = list(state['picks'])
     _song(store,'replacement','Jazz')
-    store.genres.set_genre_family('synth pop','jazz')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET family_key='jazz',family_source='custom' WHERE key='synth pop'")
     road_trip.reroll_slot(state,store,1,1001)
     _assert_blend(state,[order[0],'replacement',order[2]],[order[1]])
 
@@ -135,19 +140,31 @@ def test_family_edit_immediately_before_reroll_refreshes_both_groups(store):
 @pytest.mark.parametrize('size', [20, 6000])
 def test_draft_start_reads_the_full_library_once_and_batches_family_queries(store, monkeypatch, size):
     store.accounts.upsert_account('Main', 'unused.json', None, True)
-    store.genres.set_genre_family('synth pop', 'jazz')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET family_key='jazz',family_source='custom' WHERE key='synth pop'")
     songs = [{'key': f'song {i}|artist {i}', 'video_id': f'v{i}', 'title': f'Song {i}',
               'artist': f'Artist {i}', 'album': '', 'thumbnail': None, 'duration': 300,
               'genre': 'Synth Pop' if i % 2 else 'Jazz', 'year': 2000, 'liked': False}
              for i in range(size)]
     reads = []
-    def library():
+    def library(self):
         reads.append(len(songs))
         return songs
-    monkeypatch.setattr(store.rec_query, 'library_songs', library)
+    monkeypatch.setattr(type(store.rec_query), 'library_songs', library)
     recipe_id = store.road_trip.save_road_trip_recipe(None, 'Trip', 100, [], ['Jazz'], 15, 1000)
     recipe = store.road_trip.get_road_trip_recipe(recipe_id)
     statements = []
+    from contextlib import contextmanager
+    original = type(store).read_view
+    @contextmanager
+    def traced(self, *args, **kwargs):
+        with original(self, *args, **kwargs) as reader:
+            reader.conn.set_trace_callback(statements.append)
+            try:
+                yield reader
+            finally:
+                reader.conn.set_trace_callback(None)
+    monkeypatch.setattr(type(store), 'read_view', traced)
     store.conn.set_trace_callback(statements.append)
     try:
         state = road_trip.start_draft(store, recipe, 1000, seed=7)

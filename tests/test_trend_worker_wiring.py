@@ -6,29 +6,36 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.rec import (
-    mode_surfaces, model_refresh, model_selection, rec_worker,
+    model_refresh, model_selection, rec_worker,
 )
+from yt_playlist.library import mode_composition
 
 
 @pytest.mark.parametrize("module,method,warning", [
     (model_refresh, "rebuild", None),
     (model_selection, "maintain", "automatic model comparison failed"),
-    (mode_surfaces, "prepare_bundles", "rec bundle preparation failed"),
+    (mode_composition, "preparation", "rec bundle preparation failed"),
 ], ids=["models", "model-selection", "mode-bundles"])
 @pytest.mark.parametrize("fail", [False, True], ids=["success", "failure"])
 def test_rebuild_materializes_views_under_a_guard(store, monkeypatch, caplog, module, method, warning, fail):
     monkeypatch.setattr(model_refresh, "rebuild", lambda *args, **kwargs: {})
     monkeypatch.setattr(model_selection, "maintain", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mode_surfaces, "prepare_bundles", lambda store, now: {})
+    monkeypatch.setattr(mode_composition, "preparation", lambda owner:
+        SimpleNamespace(prepare=lambda now: {}))
     calls = []
 
     def materialize(actual_store, now, **kwargs):
         calls.append((actual_store, now))
+        logging.getLogger('yt_playlist.database').warning('Slow SQL: unrelated diagnostic during rebuild')
         if fail:
             raise RuntimeError("injected materialization failure")
         return {}
 
-    monkeypatch.setattr(module, method, materialize)
+    if module is mode_composition:
+        monkeypatch.setattr(module, method, lambda owner:
+            SimpleNamespace(prepare=lambda now: materialize(owner, now)))
+    else:
+        monkeypatch.setattr(module, method, materialize)
     ctx = SimpleNamespace(store=store, now_fn=lambda: 1234.0, logger=logging.getLogger("test.rebuild"))
     worker = rec_worker.RecWorker(ctx, debounce_s=0)
     monkeypatch.setattr(worker, "trigger_home_refresh", lambda: None)
@@ -48,7 +55,7 @@ def test_rebuild_materializes_views_under_a_guard(store, monkeypatch, caplog, mo
                 worker.rebuild()
         # Successful bundles hand off shadow grouping after the direct rebuild.
         # It owns Activity while queued/running, without showing a model spinner.
-        handoff = not (fail and module in (model_refresh, mode_surfaces))
+        handoff = not (fail and module in (model_refresh, mode_composition))
         if handoff:
             assert groups_started.wait(5)
             assert not worker.busy
@@ -56,7 +63,7 @@ def test_rebuild_materializes_views_under_a_guard(store, monkeypatch, caplog, mo
             assert not worker.work.wait(0)
         else:
             assert not groups_started.is_set() and not worker.work.active
-        assert worker.jobs.retry['bundles'].dirty == (fail and module is mode_surfaces)
+        assert worker.jobs.retry['bundles'].dirty == (fail and module is mode_composition)
     finally:
         release_groups.set()
         worker.shutdown()
@@ -65,7 +72,12 @@ def test_rebuild_materializes_views_under_a_guard(store, monkeypatch, caplog, mo
     assert calls == [(store, 1234.0)]
     assert not worker.busy and not worker.work.active
     assert worker.work.wait(0)
+    assert ('yt_playlist.database', logging.WARNING,
+            'Slow SQL: unrelated diagnostic during rebuild') in caplog.record_tuples
+    records = [record for record in caplog.records if record.name == ctx.logger.name]
     if fail and warning:
-        assert len(caplog.messages) == 1 and warning in caplog.messages[0]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert warning in records[0].getMessage()
     else:
-        assert not caplog.messages
+        assert not records

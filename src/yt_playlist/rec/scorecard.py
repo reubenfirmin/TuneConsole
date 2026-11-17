@@ -28,6 +28,12 @@ def served_recommendation(store, impression_id):
 def experiment_report(store, start, end, now):
     mature_end = min(end, now - 24 * 3600)
     inputs, shadows = store.rec_ledger.experiment_inputs(start, end, max(start, mature_end))
+    return experiment_facts(inputs, shadows, start, end, now)
+
+
+def experiment_facts(inputs, shadows, start, end, now):
+    """Interpret captured mature assignments without querying the evidence ledger."""
+    mature_end = min(end, now - 24 * 3600)
     report = summarize(inputs, start, max(start, mature_end))
     provenance = {}
     # Inspect the exact mature live rows summarized above. Old cohorts outside

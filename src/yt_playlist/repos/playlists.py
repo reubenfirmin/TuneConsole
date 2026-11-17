@@ -1,6 +1,6 @@
 """PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
 from yt_playlist.core.playlist_scopes import ensure,resolve
-from yt_playlist.core import entity_names, playlist_scope_state as scope_state
+from yt_playlist.core import playlist_scope_state as scope_state
 from yt_playlist.core.action_errors import ActionInputError
 
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
@@ -79,14 +79,12 @@ class PlaylistRepo(Repo):
             "SELECT id, first_seen, content_hash, last_changed FROM playlists "
             "WHERE account_id=? AND provider_playlist_id=?", (account_id, provider_playlist_id)).fetchone()
         if row is None:
-            membership = entity_names.owner(self.conn, 'playlist_membership_refs')
-            playlist = entity_names.owner(self.conn, 'playlists')
             membership_id = self.conn.execute(
-                f'INSERT INTO {membership.table}({membership.column("playlist_scope_id")},{membership.column("account_id")}) VALUES (?,?)',
+                'INSERT INTO playlist_membership_refs(playlist_scope_id,account_id) VALUES (?,?)',
                 (ref,account_id)).lastrowid
             self.conn.execute(
-                f'INSERT INTO {playlist.table}(id,{playlist.column("account_id")},{playlist.column("provider_playlist_id")},title,track_count,'
-                f'content_hash,first_seen,last_seen,last_changed,thumbnail,created_at,created_at_source,{playlist.column("playlist_scope_id")}) '
+                'INSERT INTO playlists(id,account_id,provider_playlist_id,title,track_count,'
+                'content_hash,first_seen,last_seen,last_changed,thumbnail,created_at,created_at_source,playlist_scope_id) '
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (membership_id,account_id, provider_playlist_id, title, track_count, content_hash, now, now, now, thumbnail,
                  created_at, "local" if created_at is not None else None,ref))

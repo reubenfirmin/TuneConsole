@@ -1,6 +1,5 @@
 """Engineering contracts for shared consumers, not a listening-quality verdict."""
 from copy import deepcopy
-from contextlib import nullcontext
 from tests.derived_rating_support import seed_dislike
 import json
 import logging
@@ -18,7 +17,6 @@ from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, initialize_consumer, reuse_reporting_reader)
 from yt_playlist.core.store import Store
 from yt_playlist.core import catalog
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.util import genre_catalog, genre_map
 from yt_playlist.rec import (fresh_pool, home_cards, home_prepared, home_vibe, library_pool,
                              mix_tuning, mode_surfaces, musical_character, musical_profiles,
@@ -45,6 +43,8 @@ def controlled_profiles(monkeypatch):
             preset: {'score': energy if preset in ('energize', 'release') else 1 - energy,
                      'support': .8, 'source': 'provider_measurement'}
             for preset in home_vibe.PRESETS}}
+        profile['vibes']['intensity_fits'] = {
+            preset: profile['vibes']['fits'][preset] for preset in ('energize', 'release')}
         profiles[key] = profile
         return musical_character.compact(profile)
 
@@ -60,7 +60,9 @@ def character_consumer(monkeypatch, controlled_profiles):
         settings=SimpleNamespace(get_setting=lambda key: None),
         recommendations=SimpleNamespace(framing=lambda *args, **kwargs: {}),
         musical_profiles=MusicalProfiles.__new__(MusicalProfiles),
+        artists=SimpleNamespace(track_keys=lambda *, keys: {}),
         rec_query=SimpleNamespace(track_genres=lambda keys: {}, track_decades=lambda keys: {},
+            artist_genre_years_for=lambda artists: {},
             track_audio_features=lambda: {}, library_keys=lambda: set()),
         genres=SimpleNamespace(feature_axes=lambda genres:
             {genre: (genre_map.family(genre), None) for genre in genres}),
@@ -79,28 +81,26 @@ def _prepare_opportunities(store, *, controlled=None):
     # Publication/edit/exclusion owners need a full 12-track card and contrasting
     # genres, rather than preparing 128 profiles for the same state transition.
     count, good_start = (64, 40) if controlled is not None else (24, 12)
-    # All existing candidates form one input batch. Keep actual metadata and
-    # evidence while avoiding a separate transaction for every subject/field.
-    with (atomic_write(store) if controlled is None else nullcontext()):
-        for lane in ('library', 'fresh'):
-            items = []
-            for i in range(count):
-                key = f'{lane}-{i}'
-                good = i >= good_start
-                genre = ('Metal' if i % 2 else 'Techno') if good else 'Jazz'
-                audio = {'energy': .05 if good else .95, 'mood_relaxed': .95 if good else .05}
-                item = dict(key=key, video_id=key, title=key, artist=f'Artist {key}', album='',
-                            genre=genre, score=.1 if good else 10, year='2000')
-                if controlled:
-                    item['musical'] = controlled(key, audio['energy'])
-                elif lane == 'library':
-                    seed_catalog_track(store, key, key, item['artist'], video_id=key, genre=genre,
-                                       **audio)
-                else:
-                    store.discovery.upsert_discovered_track(key, key, key, item['artist'], '', None,
-                                                           genre, '2000', None, 1, audio=audio)
-                items.append(item)
-            pools[lane] = items
+    # Metadata owners commit their reservations before writing file bodies.
+    for lane in ('library', 'fresh'):
+        items = []
+        for i in range(count):
+            key = f'{lane}-{i}'
+            good = i >= good_start
+            genre = ('Metal' if i % 2 else 'Techno') if good else 'Jazz'
+            audio = {'energy': .05 if good else .95, 'mood_relaxed': .95 if good else .05}
+            item = dict(key=key, video_id=key, title=key, artist=f'Artist {key}', album='',
+                        genre=genre, score=.1 if good else 10, year='2000')
+            if controlled:
+                item['musical'] = controlled(key, audio['energy'])
+            elif lane == 'library':
+                seed_catalog_track(store, key, key, item['artist'], video_id=key, genre=genre,
+                                   **audio)
+            else:
+                store.discovery.upsert_discovered_track(key, key, key, item['artist'], '', None,
+                                                       genre, '2000', None, 1, audio=audio)
+            items.append(item)
+        pools[lane] = items
     # Prepare profiles before the sole publication; prepare_vibes would publish
     # these same ordinary pools a second time after their initial publication.
     if controlled is None:
@@ -188,7 +188,8 @@ def publish_recording_profiles(store, now):
     with store.read_snapshot() as snapshot:
         pending = snapshot.store.prepared_content.pending()
         rows = snapshot.store.prepared_content.capture(pending)
-        profiles = musical_preparation.recordings(snapshot.store, rows)
+        profiles = musical_preparation.recordings(
+            rows, inputs=musical_preparation.load_inputs(snapshot.store, rows))
         assert profiles
         assert snapshot.publish_ordered(lambda: store.musical_profiles.publish_recordings(profiles, now))
 
@@ -246,7 +247,7 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
             value, support = musical_character.intensity_evidence(track)
             assert context['intensity'] == value
             assert context['intensity_support'] == support
-            assert context['intensity_source'] == 'provider_measurement'
+            assert context['intensity_source'] == 'specialist_ensemble'
             assert context['intensity_vibe'] in ('energize', 'release')
             fit = track['musical']['vibes']['fits'][context['intensity_vibe']]
             assert (value, support) == (fit['score'], fit['support'])
@@ -405,7 +406,9 @@ def test_actual_taste_scores_break_close_fit_ties_independently_of_pool_order_an
 def test_clicked_library_fallback_prepares_the_shared_pools(store, monkeypatch):
     store.settings.set_setting(home_vibe.SETTING, 'release')
     calls = []
-    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', lambda s, now: calls.append((s, now)))
+    from yt_playlist.library import mode_composition
+    monkeypatch.setattr(mode_composition, 'preparation', lambda owner:
+        SimpleNamespace(prepare=lambda now: calls.append((owner, now))))
     library_pool.prepare(store, 1000, {'lane': 'explore', 'include_genres': ['jazz'], 'avoid_genres': []})
     assert calls == [(store, 1000)]
 

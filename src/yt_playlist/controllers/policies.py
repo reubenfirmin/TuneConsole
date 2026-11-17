@@ -42,6 +42,7 @@ class Policies:
                         raise ValueError('Conflicting shared recommendation policy version' if body
                                          else 'Conflicting recommendation policy version')
                     prepared[body][version] = dict(body=body, version=version, value=value, digest=digest,
+                                                   size=len(canonical({'format': policy_documents.FORMAT, 'configuration': value})),
                                                    created=created, base=base)
             facts = self.repository.records(prepared[False], set(prepared[True]) |
                 {record['base'] for record in prepared[False].values() if record['base'] is not None})
@@ -66,12 +67,16 @@ class Policies:
                                                 'configuration': record['value']})) for record in pending)
                 if count + added_count > capacity[0] or size + added_bytes > capacity[1]:
                     raise policy_config.PolicyCapacityFull(count, size, added_count, added_bytes)
-            references = self.files.publish_many([record['value'] for record in pending])
+            identities = self.repository.reserve_files(pending)
+            if len(identities) != len(pending):
+                raise ValueError('Policy reservation changed its record count')
+            pending = [record | {'file_id': identity} for record, identity in zip(pending, identities, strict=True)]
+            references = retained.enter_context(self.files.write_reserved(pending))
             if len(references) != len(pending):
                 raise ValueError('Policy publication changed its record count')
             installed = []
             for record, (filename, digest, size, offset) in zip(pending, references, strict=True):
-                if digest != record['digest']:
+                if digest != record['digest'] or size != record['size'] or offset != 0:
                     raise ValueError('Policy publication changed a configuration')
                 installed.append({key: value for key, value in record.items() if key != 'value'} |
                                  dict(filename=filename, size=size, offset=offset))
@@ -154,10 +159,16 @@ class Policies:
             return 0
         with self.guard(), self.files.retained():
             rows, bodies = self.repository.history_records(before, versions)
-            publication, archived = self.files.archive_many(self.repository.history_publication(), rows, bodies)
-            if archived:
-                self.repository.publish_history(publication, archived)
-            return len(archived)
+            records = self.files.archive_records(rows, bodies)
+            if not records:
+                return 0
+            identities = self.repository.reserve_history(records)
+            if len(identities) != len(records):
+                raise ValueError('Historical policy reservation changed its record count')
+            records = [record | {'file_id': identity} for record, identity in zip(records, identities, strict=True)]
+            with self.files.write_archive_reserved(records):
+                self.repository.publish_history(records)
+            return len(records)
 
     def maintain_history(self, now):
         if not self.repository.history_available():
@@ -167,9 +178,11 @@ class Policies:
             versions = self.repository.expiring_history(now - policy_config.HISTORY_RETAIN_DAYS * 86400,
                                                        policy_config.HISTORY_BATCH)
             if versions:
-                with self.files.retained():
-                    publication, versions = self.files.expire_history(self.repository.history_publication(), versions)
-                    self.repository.expire_history(publication, versions)
-            self.files.collect_history(self.repository.history_publication(),
-                now - policy_config.HISTORY_FILE_GRACE_DAYS * 86400, limit=policy_config.HISTORY_FILE_SCAN_LIMIT)
+                self.repository.expire_history(versions)
+            with self.files.history_garbage(self.repository.history_publication(),
+                    now - policy_config.HISTORY_FILE_GRACE_DAYS * 86400,
+                    limit=policy_config.HISTORY_FILE_SCAN_LIMIT) as candidates:
+                for path, info, identity in candidates:
+                    if identity is None or not self.repository.history_file_required(identity):
+                        self.files.remove_history(path, info)
         return converted + len(versions)

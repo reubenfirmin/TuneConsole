@@ -72,10 +72,16 @@ def validate(conn):
 
 def configurations(conn):
     """Stream a stable archive without decompressing a leaf for every policy."""
+    from yt_playlist.repos.policy_history_files import reference
     with policy_documents.retained_reader(directory(conn)):
         for version,saved in file_map.items(directory(conn),head(conn)):
-            if saved.get('state')=='archived':
+            state = conn.execute('SELECT state FROM recommendation_policy_history WHERE version=?', (version,)).fetchone()
+            if saved.get('state')=='archived' and state and state[0]=='archived' and reference(conn, version) is None:
                 yield version,_configuration(saved)
+        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='policy_history_files'").fetchone():
+            for version, in conn.execute("SELECT version FROM recommendation_policy_history WHERE state='archived'"):
+                if reference(conn, version) is not None:
+                    yield version, configuration(conn, version)
 
 
 def candidates(conn, now, limit=128):
@@ -169,6 +175,11 @@ def expire(conn, now, limit=128):
 def references(conn, *, root=None):
     if available(conn):
         yield from file_map.pages(directory(conn) if root is None else root,head(conn))
+        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='policy_history_files'").fetchone():
+            from .policy_paths import record_path
+            for identity, in conn.execute('SELECT f.id FROM policy_history_files f JOIN recommendation_policy_history h '
+                    "ON f.version=h.version WHERE f.file_status='ready' AND h.state='archived'"):
+                yield record_path(directory(conn) if root is None else root, identity)
 
 
 def collect(conn, now, limit=16):

@@ -5,13 +5,18 @@ from yt_playlist.core import recommendation_outputs, recommendation_pools, recom
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core import listening_subject_reads
-from yt_playlist.core.preparation import listening_views
+from yt_playlist.core import listening_views
 from yt_playlist.library.rating_policy import LIKED_EXISTS
 from .base import Repo, lookup_read, snapshot_read, synchronized
-from . import recommendation_publication as publication, proposal_cache
+from . import recommendation_publication as publication, proposal_cache, recommendation_file_writes
 
 
 class RecommendationPublicationsRepo(Repo):
+    def reserve_file(self, build, surface, chunk_key, integrity):
+        with proposal_cache._write(self) as conn:
+            publication._touch(conn, build)
+            return recommendation_file_writes.reserve(conn, 'prepared_outputs', surface, chunk_key, integrity)
+
     def native_clicked_pools(self):
         return self._store._clicked_library_pools
 
@@ -132,7 +137,8 @@ class RecommendationPublicationsRepo(Repo):
             raise ValueError('Recommendation manifest write exceeds its batch budget')
         with proposal_cache._write(self) as conn:
             publication._touch(conn, build)
-            for output, file in files:
+            for output, file, identity in files:
+                recommendation_file_writes.complete(conn, identity, 'prepared_outputs', output.surface, output.chunk_key, file)
                 publication._output(conn, plan, build.generation_id, output, file)
 
     def ready(self, plan, build):

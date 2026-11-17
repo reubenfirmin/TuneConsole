@@ -306,7 +306,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         metadataVerified: msg.metadataVerified !== false,
         videoVerified: msg.videoVerified === true,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
-        playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
+        playlist: msg.playlist || "", queueItem: msg.queueItem, albumBrowseId: msg.albumBrowseId || "",
         position: msg.position, duration: msg.duration,
         brandId: msg.brandId || "", brandKnown: msg.brandKnown, paused: !!msg.paused, muted: !!msg.muted,
         tabMuted: !!msg.tabMuted, timeZone: msg.timeZone});
@@ -316,7 +316,7 @@ function createPlayback({origin, appOrigin, musicTabs, sensors, send, warn}) {
         metadataVerified: msg.metadataVerified !== false,
         videoVerified: msg.videoVerified === true,
         thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
-        playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused,
+        playlist: msg.playlist || "", queueItem: msg.queueItem, albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused,
         position: msg.position, duration: msg.duration,
         muted: !!msg.muted, tabMuted: !!msg.tabMuted});
     } else if (msg.type === "pevent") send(msg);

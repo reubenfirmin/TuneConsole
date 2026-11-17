@@ -12,7 +12,7 @@
       </button>
     </div>
     <div class="artist-first-set-art" aria-hidden="true">
-      {% for artist in artists[:4] %}
+      {% for artist in (artists or proto.tracks)[:4] %}
       <img src="{{ artist.thumbnail or '/static/onboarding-welcome.webp' }}" alt="" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='/static/onboarding-welcome.webp'">
       {% endfor %}
     </div>
@@ -26,5 +26,5 @@
 </section>
 {% else %}
 <h2>A little more music first.</h2>
-<p class="artist-start-intro">Choose three artists with songs available on YouTube Music. You can change a pick or try it again.</p>
+<p class="artist-start-intro">Add a song or choose three artists with songs available on YouTube Music.</p>
 {% endif %}

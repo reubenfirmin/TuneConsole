@@ -73,6 +73,36 @@ def _admission(source):
 
 
 @contextmanager
+def read_sql_snapshot(source):
+    """Pin committed SQL for a mechanical read that needs no application repositories.
+
+    Publication still rechecks its lease inside every writer transaction. These
+    inspections do not publish by a revision guard, so constructing every domain
+    controller and its temporary projections for each read serves no purpose.
+    Compatibility and memory stores retain their established snapshot setup.
+    """
+    if source._db_path is None or getattr(source, '_schema_compatibility', False):
+        with source.read_snapshot() as snapshot:
+            yield snapshot.store.conn
+        return
+    # A SQL-only inspection does not read retained artifacts. Its connection
+    # owns the database handle lease; callers that read files own those domain
+    # fences explicitly, rather than fencing every artifact domain here.
+    with _admission(source):
+        reader = source._make_reader(bind_repositories=False)
+        try:
+            with source._lock:
+                check_cancellable_work()
+                if source.conn.in_transaction:
+                    raise RuntimeError('Cannot snapshot uncommitted changes')
+                reader.conn.execute('BEGIN')
+                reader.conn.execute('SELECT 1 FROM settings LIMIT 1').fetchone()
+            yield reader.conn
+        finally:
+            reader.conn.close()
+
+
+@contextmanager
 def read_view(source, make_reader, *, tracked=False, seconds=...):
     """Bound admission and query time; never retain a connection after the call."""
     # Explicit worker computations may retain a snapshot while doing substantial

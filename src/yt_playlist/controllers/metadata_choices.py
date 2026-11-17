@@ -1,10 +1,12 @@
 """Publish explicit metadata decisions before installing their SQL head."""
 from dataclasses import replace
+from contextlib import nullcontext
 from collections.abc import Mapping
 from uuid import uuid4
 
 from yt_playlist.core.metadata_contract import clock
 from yt_playlist.core import metadata_values, enrichment_selection_policy
+from yt_playlist.core.metadata_file_contract import describe
 from yt_playlist.core.metadata_deliveries import Delivery
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.util.genre_catalog import normalize
@@ -24,41 +26,63 @@ class MetadataChoices:
         return prepared
 
     def choose(self, entry, field, value=None, *, withdraw=False, source='user', now=None):
+        with self.files.retained():
+            choice = self._reserve_choice(entry, field, value, withdraw=withdraw, source=source, at=clock(now))
+            with self.files.write_reserved([choice['file']]) if choice['file'] else nullcontext():
+                with self.repository.transaction():
+                    return self._store_choice(choice)
+
+    def _reserve_choice(self, entry, field, value, *, withdraw, source, at):
         metadata_values.scope(field)
         if type(withdraw) is not bool or not isinstance(source, str) or not source:
             raise ValueError('Invalid metadata choice operation or source')
-        at = clock(now)
         prepared = metadata_values.Value('withdrawn') if withdraw else self._prepare(field, value)
-        with self.repository.transaction():
+        with self.repository.reservation():
             inputs = self.repository.input(entry, field)
             track = inputs['track']
             identity = revision = None
+            record = None
             if inputs['layout'] == 'runtime':
                 previous = inputs['choice']
                 identity = previous['id'] if previous else self.repository.reserve_identity()
                 revision = previous['revision'] + 1 if previous else 1
-                self.files.publish('choices', (identity,), revision, {
+                record = describe('choices', (identity,), revision, {
                     'entry_id': track['id'], 'recording_id': track['recording_id'],
                     'input_video_id': track['video_id'], 'field': field, 'value': value,
-                    'withdrawn': withdraw, 'source': source, 'at': at},
-                    current_revision=previous['revision'] if previous else None)
-            result = self.repository.store(inputs, field, value, prepared, withdraw=withdraw,
-                source=source, at=at, identity=identity, revision=revision)
-            self._resume_query(field, track)
-            return result
+                    'withdrawn': withdraw, 'source': source, 'at': at})
+                record['file_id'] = self.repository.reserve_file(record)
+            return dict(inputs=inputs, field=field, value=value, prepared=prepared, withdraw=withdraw,
+                        source=source, at=at, identity=identity, revision=revision, file=record)
+
+    def _store_choice(self, choice):
+        record = choice['file']
+        result = self.repository.store(choice['inputs'], choice['field'], choice['value'], choice['prepared'],
+            withdraw=choice['withdraw'], source=choice['source'], at=choice['at'],
+            identity=choice['identity'], revision=choice['revision'],
+            **({'file_record': record} if record else {}))
+        self._resume_query(choice['field'], choice['inputs']['track'])
+        return result
 
     def select(self, entry, field, value, source, *, now=None, observation_id=None):
+        self.select_fields(entry, {field: value}, source, now=now, observations={field: observation_id})
+
+    def select_fields(self, entry, fields, source, *, now=None, observations=None):
+        """Select one captured import together, preserving each field's exact evidence."""
+        if not fields:
+            return
         at = clock(now)
-        prepared = self._prepare(field, value)
-        inputs = self.repository.input(entry, field)
-        delivery = None
-        if inputs['layout'] == 'evidence' and observation_id is None:
-            delivery = self.deliveries.capture_state(inputs['track']['id'], source, 'selected-field:' + field,
-                {'format': 'catalog-field-capture-1', 'field': field, 'value': value}, now=at)
+        prepared = {field: (value, self._prepare(field, value)) for field, value in fields.items()}
+        inputs = self.repository.selection_input(entry)
+        deliveries, observations = {}, observations or {}
+        if inputs['layout'] == 'evidence':
+            for field, value in fields.items():
+                if observations.get(field) is None:
+                    deliveries[field] = self.deliveries.capture_state(inputs['track']['id'], source, 'selected-field:' + field,
+                        {'format': 'catalog-field-capture-1', 'field': field, 'value': value}, now=at)
         with self.repository.transaction():
-            self.repository.store_base(inputs, field, value, prepared, source, at,
-                                       delivery_id=delivery, observation_id=observation_id)
-            self._resume_query(field, inputs['track'])
+            self.repository.store_bases(inputs, prepared, source, at, deliveries=deliveries, observations=observations)
+            if fields.keys() & {'title', 'artist'}:
+                self._resume_query('title', inputs['track'])
 
     def capture_fields(self, entry, provider, fields, *, purpose, body, now=None):
         if not isinstance(fields, Mapping) or len(fields) > len(metadata_values.ITEM_FIELDS) + len(metadata_values.RECORDING_FIELDS):
@@ -136,15 +160,19 @@ class MetadataChoices:
                 delivery = self.deliveries.capture_state(entry, 'youtube', 'selected-field:' + field,
                     {'format': 'catalog-field-capture-1', 'field': field, 'value': value}, now=at)
             restored[field] = inputs, prepared, delivery
-        with self.repository.transaction():
-            for field, operation, value in edits:
-                if operation == 'restore':
-                    inputs, prepared, delivery = restored[field]
-                    self.repository.store_base(inputs, field, value, prepared, 'youtube', at, delivery_id=delivery)
-                    self._resume_query(field, inputs['track'])
-                    self.choose(entry, field, withdraw=True, now=at)
-                else:
-                    self.choose(entry, field, value, now=at)
+        with self.files.retained():
+            choices = [self._reserve_choice(entry, field, None if operation == 'restore' else value,
+                        withdraw=operation == 'restore', source='user', at=at)
+                       for field, operation, value in edits]
+            records = [choice['file'] for choice in choices if choice['file']]
+            with self.files.write_reserved(records) if records else nullcontext():
+                with self.repository.transaction():
+                    for (field, operation, value), choice in zip(edits, choices, strict=True):
+                        if operation == 'restore':
+                            inputs, prepared, delivery = restored[field]
+                            self.repository.store_base(inputs, field, value, prepared, 'youtube', at, delivery_id=delivery)
+                            self._resume_query(field, inputs['track'])
+                        self._store_choice(choice)
 
     def _resume_query(self, field, track):
         if field in ('title', 'artist'):

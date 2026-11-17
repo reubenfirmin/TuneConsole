@@ -1,6 +1,5 @@
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
 
 @dataclass
 class AccountConfig:
@@ -46,7 +45,12 @@ def validate_accounts(identities) -> None:
 
 
 def load_accounts(path) -> list[AccountConfig]:
-    data = tomllib.loads(Path(path).read_text())
+    from yt_playlist.core.config_files import ConfigFiles
+    return parse_accounts(ConfigFiles().read(path).decode('utf-8'))
+
+
+def parse_accounts(content) -> list[AccountConfig]:
+    data = tomllib.loads(content)
     entries = data.get("identity", [])
     out = [AccountConfig(
         label=e["label"], credential_ref=e["credential_ref"],

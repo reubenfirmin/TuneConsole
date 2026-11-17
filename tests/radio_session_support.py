@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
-from yt_playlist.library import playlist_generated
+from yt_playlist.library import generated_acquisition
 from yt_playlist.web import radio_session
 from yt_playlist.web.radio_session import PlaylistRadio
 
@@ -106,6 +106,7 @@ def uncontended_poc(completed_radio_store, monkeypatch):
 class Playlist:
     def __init__(self):
         self.ids = []
+        self.creations = []
         self.adds = []
         self.removes = []
         self.fail_add = False
@@ -200,6 +201,7 @@ def radio_controller(monkeypatch, store, pool):
             self.comparison = getattr(now_source, 'comparison', comparison)
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now
+            self.eligibility_at = now
             self.encoding_model = store.settings.get_setting("rec_content_model")
             self.now_posterior, self.now_gain = {}, 0.
             self.by_video = {t["video_id"]: t for t in pool}
@@ -239,7 +241,8 @@ def radio_controller(monkeypatch, store, pool):
         def seed_offer(self, n=16):
             return pool[:n]
 
-        def next_track(self, history, *, target=None, feedback=None, excluded=(), current=None):
+        def next_track(self, history, *, target=None, feedback=None, excluded=(), current=None,
+                       destination=(), recipe=None, policy='upload'):
             used = {t["video_id"] for t in history} | set(excluded)
             ordered = list(reversed(pool)) if self.tuning["comfort"] < .5 else pool
             return next((t for t in ordered if t["video_id"] not in used and t['key'] not in self.blocked), None)
@@ -249,17 +252,18 @@ def radio_controller(monkeypatch, store, pool):
 
     monkeypatch.setattr(radio_session, "RadioCandidates", Candidates)
 
-    def create(store, title, tracks, client, now, identity):
+    def create(store, title, tracks, client, now, identity, *, recipe=None):
         assert title.startswith("Radio Session · ")
         assert identity == store.accounts.get_master_account().id
         remote.ids = [t["video_id"] for t in tracks]
+        remote.creations.append(tuple(remote.ids))
         bridge.native_ids = list(remote.ids)
         pid = store.playlists.upsert_playlist(identity, "PLSESSION", title, len(tracks), "", now)
         track_ids = store.tracks.track_ids_for_videos(remote.ids)
         store.playlists.set_playlist_tracks(pid, [track_ids[video] for video in remote.ids])
         return {"new_ytm": "PLSESSION", "pid": pid, "added": len(tracks)}
 
-    monkeypatch.setattr(playlist_generated, "create_generated_playlist", create)
+    monkeypatch.setattr(generated_acquisition, "create_generated_playlist", create)
     yield controller, remote, frames, workers, pool
     # Fixture disposal is not an explicit user Stop. A restart may have
     # replaced this controller's checkpoint; do not persist its stale session.

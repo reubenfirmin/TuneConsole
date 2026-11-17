@@ -39,7 +39,7 @@ def test_discovery_acknowledges_only_durable_publication(file_backed_store, monk
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', checkpoint)
     monkeypatch.setattr(home_prepared.discover, 'pick_discovered_albums', albums)
     if expires == 'never':
-        publish = store.rec_proposals.publish_prepared_home
+        publish = store.rec_proposals.home.repository.publish
         stopping = [False]
         # Exercise both failures at the real pre-commit boundary, without
         # adding another database fixture or another parametrized test case.
@@ -51,7 +51,7 @@ def test_discovery_acknowledges_only_durable_publication(file_backed_store, monk
                 stopping[0] = True
 
             with monkeypatch.context() as patch:
-                patch.setattr(store.rec_proposals, 'publish_prepared_home', fail_before_commit)
+                patch.setattr(store.rec_proposals.home.repository, 'publish', fail_before_commit)
                 with pytest.raises(OSError if failure == 'write' else activity.WorkClosing), \
                         activity.cancellable_work(lambda: stopping[0]):
                     home_prepared.prepare_discovery(store, time.time())

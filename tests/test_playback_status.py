@@ -50,7 +50,7 @@ let response = () => Promise.resolve({ok: true, json: async () => snapshot('one'
 function fetch(url, options) {
   calls.push({url, options});
   if (url === '/bridge/status') return response(options);
-  if (url.endsWith('/cells')) return Promise.resolve({json: async () => ({cells: [], pending: 1})});
+  if (url.endsWith('/cells')) return Promise.resolve({ok: true, json: async () => ({cells: [], pending: 1})});
   if (url === '/sync/active' || url === '/sync/recent') return Promise.resolve({json: async () => ({})});
   throw Error('Unexpected request ' + url);
 }

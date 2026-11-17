@@ -138,3 +138,11 @@
   background: var(--surface-2); box-shadow: none;
   color: var(--cta); border-color: var(--cta);
 }
+/* The introduction leaves the festival in place behind it. */
+.onboarding-welcome { width: min(34rem, calc(100% - 3rem)); padding: 2rem;
+  background: var(--surface-card); color: var(--text); border: 1px solid var(--border-strong);
+  border-radius: var(--radius); box-shadow: 0 1.5rem 5rem rgb(0 0 0 / .4); }
+.onboarding-welcome::backdrop { background: rgb(0 0 0 / .7); }
+.onboarding-welcome h2 { margin: .6rem 0 1rem; font-size: var(--type-2xl); line-height: 1.15; }
+.onboarding-welcome p { color: var(--dim); line-height: 1.6; }
+.onboarding-welcome .btn { margin-top: .8rem; }

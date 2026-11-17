@@ -19,8 +19,7 @@ def owns(key):
 
 
 def scope(conn,account,remote,*,legacy=False):
-    from . import entity_names
-    known = conn.execute(f'SELECT id FROM {entity_names.accounts(conn)} WHERE id=?',(account,)).fetchone() if account is not None else None
+    known = conn.execute('SELECT id FROM accounts WHERE id=?',(account,)).fetchone() if account is not None else None
     if not known and not legacy:
         raise ValueError('New workflow receipts require their retained account')
     return (known[0],playlist_scopes.ensure(conn,remote,known[0]) if remote else None) if known else (None,None)
@@ -45,7 +44,6 @@ def gc_save(conn,account,remote,value,*,legacy=False):
 
 
 def write_facts(conn, kind, account, target):
-    from . import entity_names
     if kind == 'gc':
         table = 'playlist_gc_attempts'
         prior = conn.execute('SELECT * FROM playlist_gc_attempts WHERE captured_account_id=? AND provider_playlist_id_snapshot=?',
@@ -54,7 +52,7 @@ def write_facts(conn, kind, account, target):
         table = 'spotify_transfer_receipts'
         prior = conn.execute('SELECT * FROM spotify_transfer_receipts WHERE source_kind=? AND captured_account_id IS ? AND fingerprint=?',
                              (kind, account, target)).fetchone()
-    known = conn.execute(f'SELECT id FROM {entity_names.accounts(conn)} WHERE id=?', (account,)).fetchone() if account is not None else None
+    known = conn.execute('SELECT id FROM accounts WHERE id=?', (account,)).fetchone() if account is not None else None
     return {'prior': dict(prior) if prior else None, 'known': known[0] if known else None,
             'next_id': conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM '+table).fetchone()[0]}
 

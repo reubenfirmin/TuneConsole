@@ -3,6 +3,13 @@ import pytest
 from yt_playlist.providers import credentials, deepseek, discogs, lastfm
 
 
+def test_precedence_is_detached_and_takes_env_and_setting_as_plain_values():
+    assert credentials.precedence('env', 'setting', 'file') == 'env'
+    assert credentials.precedence(None, 'setting', 'file') == 'setting'
+    assert credentials.precedence(None, None, 'file') == 'file'
+    assert credentials.precedence(None, None, None) is None
+
+
 @pytest.mark.parametrize('resolve,env_name,setting_name', [
     (lastfm.api_key, 'LASTFM_API_KEY', 'lastfm_api_key'),
     (discogs.token, 'DISCOGS_TOKEN', 'discogs_token'),

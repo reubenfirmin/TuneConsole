@@ -1,14 +1,13 @@
 """Retained receipt identities and byte verification, independent of journals."""
-import hashlib
 import json
 from pathlib import Path
 
-from . import fao
+from . import fao, file_pack
 from .evidence_ledger import canonical
 
 
 FORMAT = 'legacy-evidence-1'
-MAX_BYTES = 8 * 1024 * 1024
+MAX_BYTES = file_pack.MAX_BYTES
 DOMAINS = {
     'catalog': 'legacy_catalog_evidence',
     'artist': 'artist_identity_evidence',
@@ -78,14 +77,9 @@ def read(domain, filename, digest, size, offset, *, kind='original', with_age=Fa
         raise ValueError('Invalid retained evidence filename')
     with fao.read(path) as stream:
         age = stream.info
-        if offset:
-            expected_header = header(domain)
-            if offset < len(expected_header) or stream.read(len(expected_header)) != expected_header:
-                raise ValueError('Retained evidence pack has a different owner')
-            stream.seek(offset)
-        encoded = stream.read(size + (not offset))
-    if (len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest
-            or not offset and path.stem != digest):
+        encoded = file_pack.PackReader(stream, header=header(domain), max_bytes=MAX_BYTES,
+                                      max_pack_bytes=MAX_BYTES).read(offset, size, digest)
+    if not offset and path.stem != digest:
         raise ValueError('Retained evidence content changed')
     value = json.loads(encoded)
     if (not isinstance(value, dict) or set(value) != {'format', 'owner', 'kind', 'value'}
