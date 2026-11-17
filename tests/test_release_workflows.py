@@ -303,6 +303,13 @@ def test_browser_image_matches_locked_playwright_and_avoids_per_shard_os_install
     assert not any("playwright install" in step.get("run", "") for step in jobs["browser"]["steps"])
 
 
+def test_pr_browser_shards_report_timings_without_a_runtime_limit():
+    browser = workflow("ci")["jobs"]["browser"]
+    command = next(step["run"] for step in browser["steps"] if step.get("name") == "Run the live-browser suite")
+    assert "--ci-shard-report=" in command
+    assert "--test-time-limit" not in command
+
+
 def test_tests_and_measurements_can_only_run_on_prs():
     definition = workflow("ci")
     assert set(definition["on"]) == {"pull_request"}

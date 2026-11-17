@@ -145,6 +145,8 @@ are partitioned using verified timing artifacts, falling back to
 `.github/test-durations.json`. The coverage job checks that completed cases
 equal normal collection exactly once. Browser jobs use the Playwright image
 pinned to `uv.lock`. Per-shard artifacts retain JUnit, timings and failure traces.
+CI reports browser elapsed time and file durations. The coverage job accepts a
+complete passing matrix regardless of elapsed time.
 
 Automatic selection compares the measured run's date, rather than its later
 export date. A newer passing run can replace exported historical measurements.
@@ -159,9 +161,8 @@ python3 ci_test_shards.py evidence/ baseline --total=8 --browser-total=4 \
 
 The refresh requires complete, consistent, exactly-once receipts from both
 suites and includes all three test phases. It retains failed case IDs and prints
-the projected loads. These diagnostic estimates do not establish passing
-coverage or browser budget acceptance. Normal CI verification still requires
-passing shards; automatic artifacts come only from successful PR workflows.
+the projected loads for planning. Normal CI verification requires passing
+shards, and automatic timing artifacts come from successful PR workflows.
 
 Compare complete, clean runs on the same revision using retained metrics:
 
