@@ -1,5 +1,4 @@
 """Individual release responses; callers own the transaction and serving lock."""
-import json
 import math
 from uuid import uuid4
 
@@ -26,13 +25,6 @@ def rows(conn, *, account_id=None):
 
 @collection_recovery.pinned_read
 def original(conn, *, account_id=None):
-    if not available(conn):
-        from .published_documents import ALBUM_FEEDBACK as owner
-        revision = owner.selected(conn)
-        if revision is not None:
-            return json.loads(owner.value(conn,revision) or '{}')
-        row = conn.execute("SELECT value FROM settings WHERE key='album_feedback'").fetchone()
-        return json.loads(row[0]) if row and row[0] else {}
     return {row['source_browse_id']: {'kind':row['response'],'at':row['created_at'],
                 'opportunity_id':row['opportunity_id'],'action_id':row['action_id']}
             for row in rows(conn,account_id=account_id)}
@@ -65,25 +57,6 @@ def replace(conn, browse_id, response, now, *, opportunity_id=None, account_id=N
             'opportunity_id,action_id) VALUES (?,?,?,?,?,?,?)',
             (account_id,album_id,browse_id,response,now,opportunity_id,action_id))
     return previous,action_id
-
-
-def import_legacy(conn, original):
-    """No account was recorded in the old map; migration must not invent one."""
-    if not isinstance(original,dict):
-        raise ValueError('Legacy album feedback must be a map')
-    for browse,item in original.items():
-        if (not isinstance(browse,str) or not browse or not isinstance(item,dict)
-                or item.get('kind') not in {'more','known','reject'}
-                or type(item.get('at')) not in (int,float) or not math.isfinite(item['at'])
-                or set(item)-{'kind','at','opportunity_id','action_id'}):
-            raise ValueError('Unsupported legacy album feedback; original retained')
-    for browse,item in sorted(original.items(),key=lambda row:(row[1]['at'],row[0])):
-        album_id = albums.observe(conn,browse)
-        conn.execute('UPDATE album_feedback SET withdrawn_at=? WHERE album_id=? AND account_id IS NULL '
-                     'AND withdrawn_at IS NULL',(item['at'],album_id))
-        conn.execute('INSERT INTO album_feedback(album_id,source_browse_id,response,created_at,opportunity_id,'
-            'action_id,legacy_author_unknown) VALUES (?,?,?,?,?,?,1)',
-            (album_id,browse,item['kind'],item['at'],item.get('opportunity_id'),item.get('action_id')))
 
 
 def merge(conn, target, retired, now):

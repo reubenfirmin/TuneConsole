@@ -4,8 +4,7 @@ import uuid
 
 from . import catalog, collection_recovery, genre_identity, taste_axes
 
-CHECKPOINT = 'taste_settings_checkpoint_v1'
-BASELINE = 'taste_comparison_baseline_v2'
+from .taste_settings import CHECKPOINT, BASELINE
 KEYS = frozenset({CHECKPOINT,BASELINE})
 
 

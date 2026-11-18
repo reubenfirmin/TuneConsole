@@ -41,22 +41,24 @@ def test_artist_pivot_preserves_identity_and_constructs_associated_links(search)
     ]
     repository.artist_tracks.return_value = [track('song', video='a/b?c')]
     repository.artist_albums.return_value = [{'album': 'LP', 'browse': 'a&b', 'thumb': None}]
-    repository.artist_playlists.return_value = [{'pid': 9, 'title': 'Mix', 'thumb': None}]
+    repository.artist_playlists.return_value = [{'pid': 9, 'ytm': 'PLmix', 'title': 'Mix', 'thumb': None}]
     result = search.omni_search('  ritmo  ')
     assert result['primary_artist'] == {'artist_id': 2, 'name': 'Ritmo', 'thumbnail': None}
     assert [(row['artist_id'], row['href'], row['sub']) for row in section(result, 'artist')] == [
         (2, '/artist?artist_id=2', '3 tracks'), (7, '/artist?artist_id=7', '1 track')]
-    assert section(result, 'tracks_by')[0]['href'] == '/track/a%2Fb%3Fc'
+    assert section(result, 'songs')[0]['href'] == '/track/a%2Fb%3Fc'
     assert section(result, 'albums_by')[0]['href'] == '/album?browse=a%26b'
     assert section(result, 'playlists_featuring')[0]['href'] == '/playlist/9'
-    assert not section(result, 'tracks_by')[0]['external']
+    assert not section(result, 'songs')[0]['external']
+    assert section(result, 'albums_by')[0]['play_url'] == 'https://music.youtube.com/browse/a%26b'
+    assert section(result, 'playlists_featuring')[0]['play_url'] == 'https://music.youtube.com/playlist?list=PLmix'
     repository.artist_tracks.assert_called_once_with(2, limit=50)
     repository.artist_playlists.assert_called_once_with(2, excluded_group='Generated', limit=50)
 
 
 def test_direct_matches_need_no_artist_pivot(search):
     search.repository.song_matches.return_value = [track('Caliente')]
-    search.repository.playlist_matches.return_value = [{'pid': 2, 'title': 'Mix', 'thumb': None}]
+    search.repository.playlist_matches.return_value = [{'pid': 2, 'ytm': 'PL2', 'title': 'Mix', 'thumb': None}]
     result = search.omni_search('caliente')
     assert result['primary_artist'] is None
     assert section(result, 'songs')[0]['label'] == 'Caliente'
@@ -69,11 +71,13 @@ def test_deduplication_uses_identity_and_playlist_id_before_sampling(search):
     repository.artist_matches.return_value = [{'artist_id': 2, 'artist': 'Ritmo', 'n': 3, 'thumb': None}]
     repository.artist_tracks.return_value = [track('same')]
     repository.song_matches.return_value = [track('same', video='alternate'), track('different')]
-    repository.artist_playlists.return_value = [{'pid': 1, 'title': 'Mix', 'thumb': None}]
-    repository.playlist_matches.return_value = [{'pid': 1, 'title': 'Mix', 'thumb': None},
-                                               {'pid': 2, 'title': 'Mix', 'thumb': None}]
+    repository.artist_playlists.return_value = [{'pid': 1, 'ytm': 'PL1', 'title': 'Mix', 'thumb': None}]
+    repository.playlist_matches.return_value = [{'pid': 1, 'ytm': 'PL1', 'title': 'Mix', 'thumb': None},
+                                               {'pid': 2, 'ytm': 'PL2', 'title': 'Mix', 'thumb': None}]
     result = search.omni_search('ritmo')
-    assert [row['label'] for row in section(result, 'songs')] == ['different']
+    assert {row['label'] for row in section(result, 'songs')} == {'same', 'different'}
+    assert len(section(result, 'songs')) == 2
+    assert not section(result, 'tracks_by')
     assert [row['href'] for row in section(result, 'playlists')] == ['/playlist/2']
 
 
@@ -90,3 +94,20 @@ def test_failed_query_does_not_return_partial_sections(search):
     with pytest.raises(RuntimeError, match='read cancelled'):
         search.omni_search('ritmo')
     search.repository.playlist_matches.assert_not_called()
+
+
+@pytest.mark.parametrize('query', ['shpongle', 'song title', 'evening mix'])
+@pytest.mark.parametrize('missing', [None, 'artist', 'song', 'album', 'playlist'])
+def test_section_hierarchy_is_stable_for_query_types_and_missing_sections(search, query, missing):
+    repository = search.repository
+    repository.artist_matches.return_value = [{'artist_id': 2, 'artist': 'Shpongle', 'n': 3, 'thumb': None}]
+    repository.song_matches.return_value = [track('song title')]
+    repository.artist_albums.return_value = [{'album': 'Release', 'browse': 'MPRErelease', 'thumb': None}]
+    repository.playlist_matches.return_value = [{'pid': 3, 'ytm': 'PLmix', 'title': 'Evening mix', 'thumb': None}]
+    if missing:
+        getattr(repository, {'artist': 'artist_matches', 'song': 'song_matches',
+                             'album': 'artist_albums', 'playlist': 'playlist_matches'}[missing]).return_value = []
+    kinds = [part['rows'][0]['type'] for part in search.omni_search(query)['sections']]
+    expected = [kind for kind in ['artist', 'track', 'album', 'playlist']
+                if kind != ('track' if missing == 'song' else missing) and not (missing == 'artist' and kind == 'album')]
+    assert kinds == expected

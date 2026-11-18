@@ -7,8 +7,8 @@ from yt_playlist.util.matching import normalize
 
 
 class RecordingKeys:
-    def __init__(self, repository, originals, recipes, road_trips, calendar):
-        self.repository, self.originals = repository, originals
+    def __init__(self, repository, recipes, road_trips, calendar):
+        self.repository = repository
         self.recipes, self.road_trips = recipes, road_trips
         self.calendar = calendar
 
@@ -45,9 +45,6 @@ class RecordingKeys:
 
     def prepare_reassociation(self, old_key, new_key, recording):
         inputs = self.repository.rekey_inputs(recording)
-        for row in inputs['feedback']:
-            self.originals.retain('recommendation', 'feedback_reassociation', f"{recording}:{row['rowid']}:{old_key}",
-                json.dumps(row), 'verified association or alias disambiguation; learning is not replayed')
         modes = []
         for row in inputs['modes']:
             try:

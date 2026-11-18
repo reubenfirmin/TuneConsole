@@ -200,13 +200,13 @@ def test_overlap_ignore_excludes_playlist(route_store, monkeypatch):
     assert "Big Mixtape" in c.get("/cleanup").text                       # back
 
 def test_system_playlist_excluded_from_overlaps(store):
-    from yt_playlist.library.analysis import find_overlaps
+    from yt_playlist.library.analysis import find_overlaps, prepare_cleanup
     iid = store.accounts.upsert_account("main", "cred", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 2, "h", 1.0)   # system
     a = store.playlists.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "S1", "X", None, 1); t2 = store.tracks.upsert_track("v2", "S2", "X", None, 1)
     store.playlists.set_playlist_tracks(lm, [t1, t2]); store.playlists.set_playlist_tracks(a, [t1])
-    assert find_overlaps(store) == []   # Liked Music never generates overlaps
+    assert find_overlaps(prepare_cleanup(store)) == []   # Liked Music never generates overlaps
 
 
 def test_undo_via_dupe_delete(store, monkeypatch, tmp_path):

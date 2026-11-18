@@ -15,7 +15,7 @@ from threadpoolctl import threadpool_limits
 
 from experiments.audio_lab_tools.training import train_vibes as trainer
 from yt_playlist.core import audio_embedding, audio_vibe_metadata
-from yt_playlist.rec import audio_vibe_model as model
+from experiments.audio_lab_tools.legacy import audio_vibe_model as model
 
 
 # Keep the search explicit and bounded. All candidates use the same inputs and

@@ -13,6 +13,7 @@ from tests.home_fixture_support import home_page_bytecode, publish_cards, return
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
     bounded_consumer_schema, native_sql_calls, uncontended_file_consumer_store as store)
+from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.recommendation_invalidation import clear_model_display
 from yt_playlist.rec import discover, fresh_pool, home_cards, home_prepared, home_vibe, surfaces
 from yt_playlist.web.app import create_app
@@ -98,6 +99,26 @@ def client_for(store, busy="idle", *, prepare=True):
     app.state.ctx.rec_worker._model_active = busy == "rebuild"
     app.state.ctx.rec_worker._discovering = busy == "discovery"
     return TestClient(app, base_url="http://127.0.0.1")
+
+
+@pytest.mark.parametrize('retained', [True, False])
+def test_album_choices_only_loads_radio_for_readiness(store, monkeypatch, retained):
+    store.accounts.upsert_account('main', 'cred', None, True)
+    if retained:
+        returning_listener(store, 'albums')
+    client = client_for(store, prepare=False)
+    calls = []
+
+    def bootstrap():
+        calls.append(True)
+        if retained:
+            raise WorkBudgetExceeded('controlled Radio read timeout')
+        return {}
+
+    monkeypatch.setattr(client.app.state.ctx.radio, 'bootstrap', bootstrap)
+    response = client.get('/home/album-choices', headers={'HX-Request': 'true'})
+    assert response.status_code == (200 if retained else 409)
+    assert len(calls) == (0 if retained else 1)
 
 
 @pytest.fixture

@@ -2,15 +2,21 @@
 import json
 from contextlib import contextmanager
 
-from yt_playlist.core import catalog, metadata_observations, metadata_native, metadata_attempts, legacy_journals
-from yt_playlist.core.legacy_evidence_contract import FORMAT as ORIGINAL_FORMAT
+from yt_playlist.core import catalog, metadata_observations, metadata_native, metadata_attempts
 from yt_playlist.core import provider_frontiers
 from yt_playlist.core import metadata_runtime, metadata_reads
-from yt_playlist.core.preparation import metadata_destinations, metadata_publication
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
 from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.repos import metadata_file_writes
 
 class EnrichmentStateRepo(Repo):
+    @synchronized
+    def reserve_file(self, record):
+        if self.conn.in_transaction:
+            raise ValueError('Metadata file reservation requires its own transaction')
+        with self.conn.atomic():
+            return metadata_file_writes.reserve(self.conn, record)
+
     @contextmanager
     def state_transaction(self):
         with atomic_write(self._store):
@@ -69,13 +75,17 @@ class EnrichmentStateRepo(Repo):
             if legacy is not None and legacy['observed_at'] is None:
                 legacy = None
         return {'source': dict(source) if source else None, 'head': dict(head) if head else None,
-                'legacy': dict(legacy) if legacy else None}
+                'legacy': dict(legacy) if legacy else None,
+                'file': metadata_file_writes.reference(self.conn, 'native', (key,), source['revision']) if source else None}
 
     @synchronized
-    def store_native_source(self, inputs, key, provider, scope, entity, update, run_id):
+    def store_native_source(self, inputs, key, provider, scope, entity, update, run_id, *, file_record=None):
         with self.conn.atomic(join=True):
             self._check_subject(inputs)
             if update['revision'] is not None:
+                if file_record is None:
+                    raise ValueError('Native metadata source requires its reserved file')
+                metadata_file_writes.complete(self.conn, file_record, kind='native', owner=(key,), revision=update['revision'])
                 self.conn.execute('INSERT INTO rec_musical_sources(source_key,provider,scope,entity_id,revision) VALUES (?,?,?,?,?) '
                     'ON CONFLICT(source_key) DO UPDATE SET revision=excluded.revision',
                     (key, provider, scope, entity, update['revision']))
@@ -137,7 +147,8 @@ class EnrichmentStateRepo(Repo):
                 'FROM rec_musical_sources s JOIN rec_musical_links l ON l.source_key=s.source_key '
                 'JOIN recordings r ON r.id=l.recording_id WHERE r.identity_key=? AND s.rowid>=? '
                 'ORDER BY s.rowid LIMIT ?', (key, after_id // 64, limit))
-            return {'layout': 'runtime', 'rows': [dict(row) for row in rows]}
+            return {'layout': 'runtime', 'rows': [dict(row) | {'file': metadata_file_writes.reference(
+                self.conn, 'native', (row['source_key'],), row['revision'])} for row in rows]}
         if metadata_native.available(self.conn):
             rows = self.conn.execute('SELECT o.*,d.provider,d.input_entry_id AS entry_id,'
                 'd.input_recording_id AS recording_id,d.observed_at,d.delivery_key,'
@@ -147,12 +158,8 @@ class EnrichmentStateRepo(Repo):
                 'ORDER BY o.id LIMIT ?', (key, after_id, limit)).fetchall()
             return {'layout': 'native', 'rows': [{**dict(row), 'reference': tuple(row[name] for name in
                 ('raw_filename', 'raw_digest', 'raw_byte_size', 'raw_offset'))} for row in rows]}
-        recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?',(key,)).fetchone()
-        rows = metadata_destinations.native_references(self.conn,recording=recording[0] if recording else None,after=after_id,limit=limit)
-        if rows is not None:
-            return {'layout': 'prepared', 'rows': rows}
         rows = self.conn.execute(
-            'SELECT f.* FROM '+metadata_publication.read_table(self.conn,'metadata_findings')+' f WHERE f.recording_id='
+            'SELECT f.* FROM metadata_findings f WHERE f.recording_id='
             '(SELECT id FROM recordings WHERE identity_key=?) AND f.id>? '
             'AND f.provenance_json IS NOT NULL ORDER BY f.id LIMIT ?', (key, after_id, limit))
         return {'layout': 'legacy', 'rows': [{**dict(row), 'value': json.loads(row['value_json']),
@@ -195,43 +202,29 @@ class EnrichmentStateRepo(Repo):
         provider_id = metadata_runtime.provider_id(self.conn, provider, create=False) if layout == 'runtime' else None
         return {'layout': layout, 'subject': dict(entry) if entry else None, 'recording_id': row['id'],
                 'cycle': row['cycle'], 'previous': dict(previous) if previous else None,
-                'provider_id': provider_id, 'attempt': dict(attempt) if attempt else None}
-
-    @synchronized
-    def unresolved_attempt_inputs(self, source_id):
-        journal = legacy_journals.available(self.conn)
-        receipts = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='metadata_legacy_evidence'").fetchone() is not None
-        reference = self.conn.execute('SELECT filename,content_digest,byte_size,file_offset FROM metadata_legacy_evidence '
-            "WHERE kind='enrichment_unresolved_attempt' AND source_id=?", (source_id,)).fetchone() if receipts else None
-        return {'source_id': source_id, 'layout': 'journal' if journal else 'receipt' if receipts else 'inline',
-                'publication': legacy_journals.head(self.conn, 'metadata') if journal else None,
-                'reference': tuple(reference) if reference else None}
-
-    @synchronized
-    def store_unresolved_attempt(self, inputs, identity_key, payload, *, publication=None, reference=None):
-        with self.conn.atomic(join=True):
-            if inputs['layout'] == 'inline':
-                self.conn.execute("INSERT OR REPLACE INTO legacy_enrichment_attempts VALUES (?,?,?)",
-                                  (identity_key, payload, 'unresolved input identity'))
-            elif inputs['layout'] == 'journal':
-                self.conn.execute('INSERT INTO legacy_archive_heads VALUES (?,?) ON CONFLICT(domain) '
-                    'DO UPDATE SET publication=excluded.publication', ('metadata', bytes.fromhex(publication)))
-            else:
-                self.conn.execute('INSERT INTO metadata_legacy_evidence(kind,source_id,reason,filename,content_digest,'
-                    'byte_size,file_offset,format_version,resolution_status) VALUES (?,?,?,?,?,?,?,?,?)',
-                    ('enrichment_unresolved_attempt', inputs['source_id'], 'unresolved input identity',
-                     *reference, ORIGINAL_FORMAT, 'unresolved'))
+                'provider_id': provider_id, 'attempt': dict(attempt) if attempt else None,
+                'file': metadata_file_writes.reference(self.conn, 'alternatives', (row['id'], provider_id),
+                    float(previous['at'])) if layout == 'runtime' and previous and provider_id else None}
 
     @synchronized
     def reserve_provider_identity(self, provider):
-        return metadata_runtime.provider_id(self.conn, provider)
+        if self.conn.in_transaction:
+            raise ValueError('Metadata provider reservation requires its own transaction')
+        with self.conn.atomic():
+            return metadata_runtime.provider_id(self.conn, provider)
 
     @synchronized
-    def store_attempt(self, inputs, provider, fields, result, *, delivery_id=None, observations=None, video_id=None):
+    def store_attempt(self, inputs, provider, fields, result, *, delivery_id=None, observations=None, video_id=None,
+                      file_record=None):
         subject, layout = inputs['subject'], inputs['layout']
         recording, cycle = inputs['recording_id'], inputs['cycle']
         with self.conn.atomic(join=True):
             self._check_subject(subject)
+            if layout == 'runtime':
+                if file_record is None:
+                    raise ValueError('Provider attempt requires its reserved file')
+                metadata_file_writes.complete(self.conn, file_record, kind='alternatives',
+                    owner=(recording, inputs['provider_id']), revision=result['at'])
             if layout == 'legacy':
                 self.conn.execute('INSERT INTO provider_attempts(recording_id,input_video_id,provider,at,status,fields_json) '
                     'VALUES (?,?,?,?,?,?)', (recording, video_id or '', provider, result['at'], result['status'], json.dumps(fields)))
@@ -246,9 +239,12 @@ class EnrichmentStateRepo(Repo):
                     + columns + ') VALUES (?,?,?,?,?,?' + placeholder + ')',
                     (recording, subject['video_id'] or '', provider, result['at'], result['status'], delivery_id)).lastrowid
                 self.conn.executemany('INSERT INTO provider_attempt_fields(attempt_id,field,observation_id) VALUES (?,?,?)',
-                    [(identity, field, observations.get('mb_year' if field == 'year' else field)) for field in fields])
+                    [(identity, field, observations.get('mb_year' if field == 'year' else field))
+                     for field in fields if field != 'artist_credits'])
                 if result['reset_fields']:
                     self.conn.execute('DELETE FROM provider_state_fields WHERE recording_id=? AND provider=?', (recording, provider))
+                    from yt_playlist.core import provider_credit_fields
+                    provider_credit_fields.reset(self.conn, recording, provider)
             has_json = any(row[1] == 'fields_json' for row in self.conn.execute('PRAGMA table_info(enrichment_provider_state)'))
             columns, placeholder = (',fields_json', ",'{}'") if has_json else ('', '')
             self.conn.execute('INSERT INTO enrichment_provider_state(recording_id,provider,cycle,at,status,failures,retry_at,error'
@@ -260,7 +256,11 @@ class EnrichmentStateRepo(Repo):
                 self.conn.executemany('INSERT INTO provider_state_fields(recording_id,provider,field,delivery_id,observation_id) '
                     'VALUES (?,?,?,?,?) ON CONFLICT(recording_id,provider,field) DO UPDATE SET '
                     'delivery_id=excluded.delivery_id,observation_id=excluded.observation_id',
-                    [(recording, provider, field, delivery_id, observations.get('mb_year' if field == 'year' else field)) for field in fields])
+                    [(recording, provider, field, delivery_id, observations.get('mb_year' if field == 'year' else field))
+                     for field in fields if field != 'artist_credits'])
+                if 'artist_credits' in fields:
+                    from yt_playlist.core import provider_credit_fields
+                    provider_credit_fields.record(self.conn, identity, recording, provider, delivery_id)
 
     @synchronized
     def completion_inputs(self, recording_id, provider):
@@ -275,7 +275,10 @@ class EnrichmentStateRepo(Repo):
             states = []
             for row in rows:
                 state = dict(row)
-                states.append({'provider_id': state.pop('provider_id'), 'state': state})
+                provider_id = state.pop('provider_id')
+                states.append({'provider_id': provider_id, 'state': state,
+                    'file': metadata_file_writes.reference(self.conn, 'alternatives',
+                        (recording_id, provider_id), float(state['at'])) if provider_id else None})
             return {'states': {'runtime': True, 'subject': None, 'rows': states}}
         if metadata_attempts.available(self.conn):
             return {'answers': metadata_attempts.completed_genres(self.conn, recording_id)}
@@ -301,19 +304,25 @@ class EnrichmentStateRepo(Repo):
             if entry_id is not None and rows:
                 recording, video = metadata_runtime.subject(self.conn, entry_id)
                 subject = {'entry_id': entry_id, 'recording_id': recording, 'video_id': video}
-            return {'runtime': True, 'subject': subject,
-                    'rows': [{'provider_id': row.pop('provider_id'), 'state': row} for row in rows]}
+            result = []
+            for row in rows:
+                provider_id = row.pop('provider_id')
+                result.append({'provider_id': provider_id, 'state': row,
+                    'file': metadata_file_writes.reference(self.conn, 'alternatives',
+                        (recording_id, provider_id), float(row['at'])) if provider_id else None})
+            return {'runtime': True, 'subject': subject, 'rows': result}
 
         rows = self.conn.execute(
-            f"SELECT s.* FROM {metadata_publication.read_table(self.conn,'enrichment_provider_state')} s JOIN recordings r ON r.id=s.recording_id "
+            "SELECT s.* FROM enrichment_provider_state s JOIN recordings r ON r.id=s.recording_id "
             "WHERE s.recording_id=? AND (? OR s.cycle=COALESCE(r.last_enriched_at,-1))",
             (recording_id, include_previous)).fetchall()
         typed = metadata_attempts.available(self.conn)
         result = []
         for row in rows:
             if typed:
+                from yt_playlist.core import provider_credit_fields
                 references = self.conn.execute('SELECT f.field,f.delivery_id,d.raw_filename,d.raw_digest,d.raw_byte_size,d.raw_offset '
-                    'FROM provider_state_fields f JOIN metadata_deliveries d ON d.id=f.delivery_id '
+                    'FROM ' + provider_credit_fields.state_source(self.conn) + ' f JOIN metadata_deliveries d ON d.id=f.delivery_id '
                     'WHERE f.recording_id=? AND f.provider=? ORDER BY f.field', (recording_id, row['provider']))
                 fields = {'deliveries': [self._delivery_field(reference) for reference in references]}
             else:
@@ -331,12 +340,6 @@ class EnrichmentStateRepo(Repo):
         reference = metadata_reads.operational_reference(self.conn, owner, key)
         if reference is not None:
             return {'prepared': reference}
-        revision = metadata_publication.selected(self.conn)
-        if revision is not None and self.conn.execute('SELECT 1 FROM '+metadata_publication.table('evidence')+
-                ' WHERE stage=? AND owner=? AND source_key=?', (revision, owner, key)).fetchone():
-            return {'values': {row['field']: json.loads(row['raw_value']) for row in self.conn.execute(
-                'SELECT field,raw_value FROM '+metadata_publication.table('operational_fields')+
-                ' WHERE stage=? AND owner=? AND source_key=? ORDER BY position', (revision, owner, key))}}
         return {'values': json.loads(raw)}
 
     @synchronized
@@ -351,6 +354,8 @@ class EnrichmentStateRepo(Repo):
         for (recording,) in self.conn.execute('SELECT id FROM recordings WHERE id>? ORDER BY id LIMIT ?', (cursor, limit)).fetchall():
             conflicts = [dict(row) for row in self.conn.execute('SELECT * FROM metadata_runtime_conflicts '
                 'WHERE recording_id=? OR entry_id IN (SELECT id FROM catalog_entries WHERE recording_id=?)', (recording, recording))]
+            for conflict in conflicts:
+                conflict['file'] = metadata_file_writes.reference(self.conn, 'conflicts', (conflict['id'],), conflict['revision'])
             sources = [dict(row) for row in self.conn.execute('SELECT s.source_key,s.revision FROM rec_musical_sources s '
                 'JOIN rec_musical_links l ON l.source_key=s.source_key WHERE l.recording_id=?', (recording,))]
             rows.append({'recording_id': recording, 'conflicts': conflicts, 'sources': sources})
@@ -358,15 +363,50 @@ class EnrichmentStateRepo(Repo):
 
     @synchronized
     def store_expiry_shard(self, shard):
-        self.conn.execute('UPDATE metadata_runtime_state SET gc_shard=? WHERE id=1', (shard,))
+        with self.conn.atomic():
+            self.conn.execute('UPDATE metadata_runtime_state SET gc_shard=? WHERE id=1', (shard,))
 
     @synchronized
-    def store_conflict_revision(self, identity, revision):
-        self.conn.execute('UPDATE metadata_runtime_conflicts SET revision=? WHERE id=?', (revision, identity))
+    def store_conflict_revision(self, identity, revision, *, expected_revision, file_record):
+        with self.conn.atomic():
+            changed = self.conn.execute('UPDATE metadata_runtime_conflicts SET revision=? WHERE id=? AND revision=?',
+                (revision, identity, expected_revision)).rowcount
+            if changed != 1:
+                raise metadata_observations.SubjectChanged('Metadata conflict changed during expiry')
+            metadata_file_writes.complete(self.conn, file_record, kind='conflicts', owner=(identity,), revision=revision)
 
     @synchronized
     def store_expiry_cursor(self, cursor, after):
-        self.conn.execute('UPDATE metadata_runtime_state SET gc_cursor=?,gc_after=? WHERE id=1', (cursor, after))
+        with self.conn.atomic():
+            self.conn.execute('UPDATE metadata_runtime_state SET gc_cursor=?,gc_after=? WHERE id=1', (cursor, after))
+
+    @synchronized
+    def retire_expired_alternative_files(self, cutoff, *, limit):
+        if not metadata_file_writes.available(self.conn):
+            return []
+        with self.conn.atomic():
+            identities = [row[0] for row in self.conn.execute('SELECT r.file_id FROM metadata_file_references r '
+                'JOIN metadata_file_writes f ON f.id=r.file_id '
+                'JOIN metadata_runtime_providers p ON p.id=json_extract(r.owner_key,\'$[1]\') '
+                'JOIN enrichment_provider_state s ON s.recording_id=f.owner_id AND s.provider=p.name '
+                "WHERE r.kind='alternatives' AND s.at<=? ORDER BY r.file_id LIMIT ?", (cutoff, limit))]
+            self.conn.executemany('DELETE FROM metadata_file_references WHERE file_id=?', [(identity,) for identity in identities])
+            return identities
+
+    @synchronized
+    def retire_file_revisions(self, kind, owner, keep, *, limit=128):
+        from yt_playlist.core.metadata_file_contract import owner_key, revision_key
+        if kind not in ('native', 'conflicts') or not keep:
+            raise ValueError('Metadata revision collection requires a current revision')
+        if not metadata_file_writes.available(self.conn):
+            return []
+        with self.conn.atomic():
+            identities = [row[0] for row in self.conn.execute(
+                'SELECT file_id FROM metadata_file_references WHERE kind=? AND owner_key=? '
+                f'AND revision_key NOT IN ({",".join("?" for _ in keep)}) ORDER BY file_id LIMIT ?',
+                (kind, owner_key(kind, owner), *(revision_key(revision) for revision in keep), limit))]
+            self.conn.executemany('DELETE FROM metadata_file_references WHERE file_id=?', [(identity,) for identity in identities])
+            return identities
 
     @synchronized
     def enrichment_cooldowns(self):
@@ -376,7 +416,7 @@ class EnrichmentStateRepo(Repo):
     def retry_status_inputs(self, provider, ready_sql):
         row = self.conn.execute(
             "SELECT COUNT(*) OVER () AS count,s.error,MAX(s.retry_at,COALESCE(c.retry_at,0)) retry_at "
-            f"FROM {metadata_publication.read_table(self.conn,'enrichment_provider_state')} s JOIN recordings r ON r.id=s.recording_id "
+            "FROM enrichment_provider_state s JOIN recordings r ON r.id=s.recording_id "
             "LEFT JOIN enrichment_provider_cooldowns c ON c.provider=s.provider "
             "LEFT JOIN enrichment_provider_config cfg ON cfg.provider=s.provider "
             "WHERE s.status='retry' AND s.cycle=COALESCE(r.last_enriched_at,-1) "
@@ -553,14 +593,15 @@ class EnrichmentStateRepo(Repo):
                 (key, key, video_id, video_id)).fetchall()
             result = []
             for row in rows:
+                from yt_playlist.core import provider_credit_fields
                 references = self.conn.execute('SELECT f.field,a.delivery_id,d.raw_filename,d.raw_digest,d.raw_byte_size,d.raw_offset '
-                    'FROM provider_attempt_fields f JOIN provider_attempts a ON a.id=f.attempt_id '
+                    'FROM ' + provider_credit_fields.attempt_source(self.conn) + ' f JOIN provider_attempts a ON a.id=f.attempt_id '
                     'JOIN metadata_deliveries d ON d.id=a.delivery_id WHERE f.attempt_id=? ORDER BY f.field', (row['id'],))
                 result.append({'provider': row['provider'], 'at': row['at'], 'status': row['status'],
                                'fields': {'deliveries': [self._delivery_field(reference) for reference in references]}})
             return {'runtime': False, 'rows': result}
         rows = self.conn.execute(
-            f"SELECT p.* FROM {metadata_publication.read_table(self.conn,'provider_attempts')} p WHERE "
+            "SELECT p.* FROM provider_attempts p WHERE "
             "(p.recording_id=(SELECT id FROM recordings WHERE identity_key=?) OR "
             "p.input_video_id IN (SELECT y.video_id FROM youtube_items y JOIN recordings r "
             "ON r.id=y.recording_id WHERE r.identity_key=?)) "

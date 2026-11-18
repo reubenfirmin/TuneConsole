@@ -3,7 +3,7 @@ import mimetypes
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from jinja2 import Environment
+from jinja2 import Environment, FileSystemLoader
 from playwright.sync_api import expect
 import pytest
 
@@ -34,16 +34,18 @@ def playback_bridge(monkeypatch, request, playwright):
 
 def _card(h, width=1280):
     base = h.worker.evaluate("TC_CONFIG.appOrigin")
-    fragment = Environment().from_string((ROOT /
-        "src/yt_playlist/web/templates/_partials/now_playing.html").read_text()).render()
+    fragment = Environment(loader=FileSystemLoader(ROOT / "src/yt_playlist/web/templates")).get_template(
+        "_partials/now_playing.html").render()
     html = '''<!doctype html><head><style>[x-cloak]{display:none!important}</style>
         <link rel="stylesheet" href="/static/tokens.css">
         <link rel="stylesheet" href="/static/components.css">
         <link rel="stylesheet" href="/static/playback.css">
+        <link rel="stylesheet" href="/static/album-listening.css">
         <script src="/static/playback-status.js"></script>
         <script src="/static/playback-controls.js"></script>
         <script src="/static/app.js"></script>
         <script src="/static/player-card.js"></script>
+        <script src="/static/album-listening.js"></script>
         <script defer src="/static/vendor/alpine.min.js"></script></head>
         <body><div id="toasts" class="toasts"></div><div class="sidebar-dock-slot"></div>
         <div class="global-now-playing-slot">''' + fragment + "</div></body>"

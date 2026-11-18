@@ -5,6 +5,7 @@ generation checks and job lifetime. No job handles, clients or library handles b
 Optional fields are populated lazily; normalization retains unknown fields from older saved drafts.
 """
 from typing import NotRequired, TypedDict
+from yt_playlist.core.version_policy import VersionPolicy
 
 from yt_playlist.rec import road_trip_axes as axes
 from yt_playlist.rec.road_trip_mix import AVG_TRACK_S, _apportion_percentages, _mix_source, _mix_weights
@@ -49,6 +50,7 @@ class DraftState(TypedDict):
     blend_available: NotRequired[bool]
     mix_version: NotRequired[int]
     build_error: NotRequired[str | None]
+    version_policy: NotRequired[VersionPolicy]
 
 
 def normalize_shape(state: DraftState) -> DraftState:

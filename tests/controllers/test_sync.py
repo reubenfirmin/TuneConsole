@@ -20,7 +20,9 @@ def sync():
     repository.has_attempt_state.return_value = True
     settings = create_autospec(Settings, instance=True, spec_set=True)
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
-    files.publish.return_value = ('result.json', 'digest', 123)
+    repository.reserve_file.return_value = 41
+    files.describe.return_value = ('digest', 123)
+    files.publish_reserved.return_value = ('result.json', 'digest', 123)
     return LibrarySync(repository, settings, files, Mock())
 
 
@@ -28,9 +30,12 @@ def test_completion_publishes_prepared_progress_without_database_callbacks(sync)
     result = sync.finish_attempt(200, {'status': 'complete', 'accounts': {}, 'resources': {}},
                                  expected_revision=17)
     assert result == {'status': 'complete', 'accounts': {}, 'resources': {}, 'last_attempt_at': 200}
-    sync.recovery.publish.assert_called_once_with('library-sync', 1, result)
+    sync.repository.reserve_file.assert_called_once_with(('digest', 123))
+    sync.recovery.publish_reserved.assert_called_once_with(41, 'library-sync', 1, result,
+                                                         expected=('digest', 123))
     sync.repository.finish_attempt.assert_called_once_with(
-        200, result, reference=('result.json', 'digest', 123), expected_revision=17, last_success=200)
+        200, result, reference=('result.json', 'digest', 123), file_id=41, expected_revision=17,
+        last_success=200, checkpoint=False)
     sync.settings.publish_values.assert_not_called()
 
 
@@ -48,13 +53,14 @@ def test_stale_attempt_fails_before_file_publication(sync):
     sync.repository.require_revision.side_effect = ValueError('superseded')
     with pytest.raises(ValueError, match='superseded'):
         sync.finish_attempt(200, {'status': 'complete'}, expected_revision=17)
-    sync.recovery.publish.assert_not_called()
+    sync.recovery.publish_reserved.assert_not_called()
+    sync.repository.reserve_file.assert_not_called()
     sync.repository.finish_attempt.assert_not_called()
     sync.repository.ensure_attempt.assert_not_called()
 
 
 def test_file_failure_never_installs_a_success_receipt(sync):
-    sync.recovery.publish.side_effect = OSError('file interrupted')
+    sync.recovery.publish_reserved.side_effect = OSError('file interrupted')
     with pytest.raises(OSError, match='file interrupted'):
         sync.finish_attempt(200, {'status': 'complete', 'accounts': {}, 'resources': {}})
     sync.repository.finish_attempt.assert_not_called()
@@ -69,7 +75,7 @@ def test_legacy_partial_attempt_preserves_global_success(sync):
     assert values['last_sync_outcome'] == 'partial'
     assert 'last_sync_at' not in values
     sync.repository.finish_attempt.assert_not_called()
-    sync.recovery.publish.assert_not_called()
+    sync.recovery.publish_reserved.assert_not_called()
 
 
 def test_file_protection_lives_until_recovery_has_been_read(sync):
@@ -100,7 +106,8 @@ def test_file_protection_lives_until_recovery_has_been_read(sync):
 def test_attempt_record_precedes_file_and_completion(sync):
     calls = []
     sync.repository.ensure_attempt.side_effect = lambda now: calls.append('record')
-    sync.recovery.publish.side_effect = lambda *args: calls.append('file') or ('result.json', 'digest', 123)
+    sync.repository.reserve_file.side_effect = lambda integrity: calls.append('reserve') or 41
+    sync.recovery.publish_reserved.side_effect = lambda *args, **kwargs: calls.append('file') or ('result.json', 'digest', 123)
     sync.repository.finish_attempt.side_effect = lambda *args, **kwargs: calls.append('complete')
     sync.finish_attempt(200, {'status': 'complete', 'accounts': {}, 'resources': {}})
-    assert calls == ['record', 'file', 'complete']
+    assert calls == ['record', 'reserve', 'file', 'complete']

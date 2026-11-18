@@ -41,25 +41,22 @@ def notice_app(store):
 
 
 @pytest.mark.parametrize('width',[1536])
-def test_history_notice_with_available_cards_and_writable_library(notice_app,store,page,width):
+def test_history_cleanup_with_available_cards_keeps_library_quiet_and_writable(notice_app,store,page,width):
     url,maintenance = notice_app
-    maintenance.ready.clear()
-    maintenance.report = {'analytics_pending':True}
+    store._evidence_recovery_pending = True
     store.rec_proposals.put_proposals('home_prepared',{'schema':1,'protos':[
         {'label':'Available mix','tracks':[{'videoId':'prepared-track'}]}]},1)
     page.set_viewport_size({'width':width,'height':900})
     page.goto(url+'/playlists')
     banner = page.locator('#storage-maintenance')
-    expect(banner).to_be_visible()
-    expect(banner).to_have_text('Optimizing app storage; some recommendations are temporarily unavailable.')
-    expect(banner).to_have_attribute('role','status')
+    expect(banner).to_be_hidden()
+    status = page.request.get(url + '/storage-maintenance/status').json()
+    assert status['evidence_maintenance']['pending'] and status['recording'] and not status['active']
     assert page.request.post(url+'/settings/lastfm-key',form={'key':'accepted-during-history'}).status==204
     assert store.settings.get_setting('lastfm_api_key')=='accepted-during-history'
-    assert banner.evaluate('el => el.scrollWidth <= el.clientWidth')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=f'/tmp/tuneconsole-686-history-{width}.png',full_page=True)
-    maintenance.report['analytics_pending'] = False
-    maintenance.ready.set()
+    store._evidence_recovery_pending = False
     expect(banner).to_be_hidden()
 
 

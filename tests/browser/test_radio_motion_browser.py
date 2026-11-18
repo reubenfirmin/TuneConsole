@@ -408,23 +408,40 @@ def test_artwork_resumes_its_saved_shape_after_visiting_another_page(page, radio
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
     drawing = page.evaluate('''() => {
       const model = Alpine.$data(document.querySelector('.radio-home'));
+      model.artworkPhase = 15;
+      // The drawing can keep moving while the destination loads. Read its
+      // phase at the last synchronous boundary before the old page is disposed.
+      window.addEventListener('app-page-leaving', () => {
+        window.leavingPhase = model.artworkPhase;
+      }, {once: true});
       return {playlistId: model.artworkPlaylistId, seed: model.artworkSeed};
     }''')
     assert drawing['playlistId'] == api.ready['playlist_id']
-    page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase = 15')
     page.get_by_role('link', name='Playlists', exact=True).click()
     # Navigation replaces the page after fetching it; click completion alone
     # does not establish that the old component has saved and disposed itself.
     expect(page.get_by_role('heading', name='Playlists', exact=True)).to_be_visible()
     saved = page.evaluate('JSON.parse(sessionStorage.getItem("radio-artwork"))')
     assert saved['playlistId'] == drawing['playlistId'] and saved['seed'] == drawing['seed']
-    assert 15 <= saved['phase'] < 15.01
+    assert saved['phase'] == page.evaluate('window.leavingPhase')
+    assert saved['phase'] >= 15
+
+    page.evaluate('''() => {
+      window.addEventListener('app-page-changed', () => {
+        const model = Alpine.$data(document.querySelector('.radio-home'));
+        // Capture the first restored drawing before a motion frame can advance it.
+        Alpine.effect(() => {
+          if (model.artworkPlaylistId && !window.resumedArtwork) {
+            window.resumedArtwork = {playlistId: model.artworkPlaylistId,
+              phase: model.artworkPhase, seed: model.artworkSeed};
+          }
+        });
+      }, {once: true});
+    }''')
     page.get_by_role('link', name='Home', exact=True).click()
     page.get_by_role('tab', name='On air', exact=True).click()
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
-    resumed = page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase')
-    assert saved['phase'] <= resumed < saved['phase'] + .01
-    assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkSeed') == saved['seed']
+    assert page.evaluate('window.resumedArtwork') == saved
     expect(page.locator('#radio-landscape-0')).to_have_css('transition-duration', '0s')
 
 

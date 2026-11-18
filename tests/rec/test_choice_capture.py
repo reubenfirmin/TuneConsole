@@ -239,7 +239,7 @@ def test_worker_reclaims_acknowledged_diagnostics_for_the_actual_failed_allocati
     # Controlled protected byte pressure keeps this diagnostic graph below the
     # ten-percent ceiling, while leaving too little space for a new publication.
     ledger.put('forecast', 'capacity-fixture', {'padding': 'p' * 400_000})
-    used = sum(fao.read(path).info.logical_bytes for path in ledger.directory.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for path in ledger.files.paths())
     ledger.byte_budget = used + 1
     ordinary = choices.maintain_storage(store, 2000)
     assert ordinary['optional_context_bytes'] > 0 and not ordinary['full']
@@ -285,7 +285,7 @@ def test_preparation_reclaims_capacity_and_keeps_original_inputs(capture, monkey
     assert all(learned.values())
     responses = ledger.records('response')
     ledger.put('forecast', 'preparation-capacity-fixture', {'padding': 'p' * 4_000_000})
-    ledger.byte_budget = sum(fao.read(path).info.logical_bytes for path in ledger.directory.glob('*/*/*.json')) + 1
+    ledger.byte_budget = sum(fao.read(path).info.logical_bytes for path in ledger.files.paths()) + 1
     ordinary = choices.maintain_storage(store, 2000)
     assert ordinary['optional_context_bytes'] > 200_000
     context = {'at': 2000, 'groups': groups, 'layers': {'saved': 'new preparation' * 100}}
@@ -299,7 +299,7 @@ def test_preparation_reclaims_capacity_and_keeps_original_inputs(capture, monkey
         assert ledger.get('opportunity', offer['id']) == offer
         assert checkpoint(ledger, offer['context']) == learned[offer['context']]
     assert ledger.records('response') == responses
-    used = sum(fao.read(path).info.logical_bytes for path in ledger.directory.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for path in ledger.files.paths())
     assert int((ledger.directory / '.budget').read_text()) == used <= ledger.byte_budget
 
 
@@ -354,7 +354,8 @@ def test_ledger_retention_preserves_response_admitted_after_protection_inventory
         boundaries.append('admission')
 
     def after_inventory(inventory):
-        assert inventory.ledger is ledger
+        assert inventory.ledger.directory == ledger.directory
+        assert inventory.ledger.references == ledger.repository.references()
         rows = scan(inventory)
         assert not any(path.parts[-3] == 'response' for path in rows)
         boundaries.append('inventory')

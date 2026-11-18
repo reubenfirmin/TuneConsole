@@ -1,0 +1,13 @@
+{% macro playback_art(thumbnail, title, play_url, kind='', dynamic=False, dynamic_kind='', album_browse='') -%}
+<span class="pl-cover{{ ' art-' ~ kind if kind in ('artist', 'album', 'playlist') else '' }}"{% if dynamic_kind %} :class="'art-' + ({{ dynamic_kind }})"{% endif %}>
+  {% if dynamic %}
+  <img class="pl-thumb" :src="{{ thumbnail }} || '/static/onboarding-welcome.webp'" alt="" referrerpolicy="no-referrer" @error="$el.remove()">
+  <a class="pl-play" :href="{{ play_url }}" :aria-label="'Play ' + ({{ title }})" :title="'Play ' + ({{ title }})" target="_blank" rel="noopener"
+     {% if dynamic_kind and album_browse %}:data-album-listening="{{ dynamic_kind }} === 'album' ? JSON.stringify({browse: {{ album_browse }}, title: {{ title }}, thumbnail: {{ thumbnail }} || ''}) : null"{% endif %}>▶</a>
+  {% else %}
+  <img class="pl-thumb" src="{{ thumbnail or '/static/onboarding-welcome.webp' }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+  {% if play_url %}<a class="pl-play" href="{{ play_url }}" aria-label="Play {{ title }}" title="Play {{ title }}" target="_blank" rel="noopener"
+     {% if kind == 'album' and album_browse %}data-album-listening='{{ dict(browse=album_browse, title=title, thumbnail=thumbnail)|tojson }}'{% endif %}>▶</a>{% endif %}
+  {% endif %}
+</span>
+{%- endmacro %}

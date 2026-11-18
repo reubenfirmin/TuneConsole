@@ -12,7 +12,8 @@ from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift, audio_vibe_energize as energize
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
+from yt_playlist.rec import audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 SPECIALISTS = (cruise, release, relax, uplift, energize)
@@ -50,14 +51,13 @@ def test_energize_preserves_four_specialists_classification_and_input(count, mon
     rows = samples()[:count]
     untouched = deepcopy(rows)
     before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
-    assert {k: v for k, v in before.items() if k not in ('suitability', 'individual_models')} == {
-        k: v for k, v in after.items() if k not in ('suitability', 'individual_models')}
+    assert after['arc'] == before['arc']
     assert set(after['individual_models']) == {'cruise', 'release', 'relax', 'uplift', 'energize'}
     for vibe in ('cruise', 'release', 'relax', 'uplift'):
         assert after['individual_models'][vibe] == before['individual_models'][vibe]
     assert after['individual_models']['energize']['sample_count'] == count
-    assert after['suitability']['energize'] != before['suitability']['energize']
-    for vibe in shared.LABELS:
+    assert 'energize' not in before['suitability']
+    for vibe in before['suitability']:
         if vibe != 'energize':
             assert after['suitability'][vibe] == before['suitability'][vibe]
     assert all(module.apply(rows, after) == after for module in SPECIALISTS)
@@ -150,14 +150,14 @@ def test_optional_failure_preserves_four_specialists_and_shared(failure, tmp_pat
 def test_provenance_excerpt_bounds_and_disabled_shared(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert predictor.predict(rows)['suitability'] == {}
     model = energize.load(energize.DEFAULT_PATH)
     for values in ([], [[.2] * 200] * 129, [[float('nan')] * 200], [[1e7] * 200], [[.2] * 199]):
         with pytest.raises(ValueError):
             energize.score(model, values)
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert set(predictor.predict(rows)['suitability']) == {'cruise', 'release', 'relax', 'uplift', 'energize'}
 
 
 def test_default_active_local_rollback_and_identity(monkeypatch):
@@ -220,12 +220,11 @@ def test_bounded_refresh_preserves_intensity_lineage_feedback_and_rollback(speci
     for key in keys:
         after = fits(store, key)
         assert set(after) == set(shared.LABELS)
-        assert active[key]['vibes']['intensity_fits'] == old_profiles[key]['vibes']['intensity_fits']
+        assert active[key]['vibes']['intensity_fits']['energize']['score'] == after['energize']['score']
         for vibe in shared.LABELS:
             if vibe != 'energize':
                 assert after[vibe] == before[key][vibe]
-        assert musical_character.intensity_evidence({'musical': active[key]}) == musical_character.intensity_evidence(
-            {'musical': old_profiles[key]})
+        assert musical_character.provenance({'musical': active[key]})['intensity_ensemble']['components']['energize']['score'] == after['energize']['score']
         assert home_vibe.affinity({'key': key}, 'energize', active) == after['energize']['score']
     measured = vibe_preparation.measured({'samples': rows, 'metadata': {}}, [], {}, {})['fits']
     shared_scores = {r['vibe']: r['score'] for r in predictor.predict(rows)['ranking']}

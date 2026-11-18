@@ -2,15 +2,18 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from tests.repos.test_bundle_storage import recommendations
 from tests.repos.test_typed_recommendation_publication import collect, plan, publish as publish_plan
-from yt_playlist.rec import measurement, mode_surfaces
+from yt_playlist.rec import measurement, mode_inputs, mode_surfaces
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.core import policy_config, recommendation_pools as pools
 from yt_playlist.rec import recommendation_retirement
+from yt_playlist.controllers import mode_preparation
+from yt_playlist.library import mode_composition
 
 
 @pytest.fixture
@@ -125,7 +128,8 @@ def test_hourly_admission_waits_for_cleanup_without_consuming_hour(recommendatio
         calls.append('cleanup')
         raise OSError('cannot clear old generation')
     monkeypatch.setattr(recommendation_retirement, 'drain', blocked)
-    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', lambda *args: calls.append('ranking') or {})
+    monkeypatch.setattr(mode_composition, 'preparation', lambda owner:
+        SimpleNamespace(prepare=lambda now: calls.append('ranking') or {}))
     with pytest.raises(OSError, match='old generation'):
         mode_surfaces.prepare_scheduled(store, 10000)
     assert calls == ['cleanup'] and candidate_refresh.check_due(store, 10000)
@@ -249,8 +253,8 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
         items = captured.stamp([{'key': 'one', 'score': .8}], 'wheelhouse')
         lanes = {'wheelhouse': items}
         return {'all': lanes, '_meta': {'full_pools': True}}, []
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
-    monkeypatch.setattr(mode_surfaces, 'encode_proposals', lambda *args: pytest.fail('Encoded the obsolete bundle'))
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate)
+    monkeypatch.setattr(mode_preparation, 'encode_proposals', lambda *args: pytest.fail('Encoded the obsolete bundle'))
     if capacity == 'invalid-batch':
         monkeypatch.setattr(policy_config, 'MAX_BATCH_BYTES', 4)
         with pytest.raises(ValueError, match='publication budget'):

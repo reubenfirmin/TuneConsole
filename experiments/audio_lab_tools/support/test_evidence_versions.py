@@ -7,10 +7,13 @@ import sqlite3
 
 from experiments.audio_lab_tools.support import evidence_audit
 from experiments.audio_lab_tools.training import emotify_input_comparison as comparison
-from tests.rec.test_vibe_prediction import capture, drain, fits, qualified_candidate, track
-from tests.repos.test_recording_vibes import installed_v107_template, versioned_store
+from tests.rec.test_vibe_prediction import capture, controlled_measurements, drain, fits, qualified_candidate, track
+from tests.repos.test_recording_vibes import installed_v107_template, normalized_vibe_schema, versioned_store
 from yt_playlist.core import profile_files, vibe_versions
-from yt_playlist.rec import audio_vibe_model, vibe_preparation
+from experiments.audio_lab_tools.legacy import audio_vibe_model
+from yt_playlist.rec import vibe_preparation
+from yt_playlist.rec import audio_vibe_specialists
+from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 
 
 def test_readonly_reports_resolve_versions_and_preserve_saved_state(
@@ -22,7 +25,7 @@ def test_readonly_reports_resolve_versions_and_preserve_saved_state(
     model.write_text(json.dumps({'labels': list(comparison.VIBES)}))
     model_hash = hashlib.sha256(model.read_bytes()).hexdigest()
     monkeypatch.setattr(audio_vibe_model, 'DEFAULT_PATH', model)
-    monkeypatch.setattr(audio_vibe_model, 'identity', lambda: model_hash)
+    monkeypatch.setattr(audio_vibe_specialists, 'identity', lambda: model_hash)
     _entry, original = track(store, 'original')
     track(store, 'target')
     samples = capture(store, 'original')
@@ -39,9 +42,9 @@ def test_readonly_reports_resolve_versions_and_preserve_saved_state(
     evidence_audit.snapshot(database, audit)
     report = json.loads((audit / 'snapshot.json').read_text())
     measured = report['cases']['vibe:audio_measurement']['current_vibes']
-    expected_channels = set(comparison.VIBES) | {'shared_release', 'shared_energize'}
+    expected_channels = set(comparison.VIBES) | set(INTENSITY_CHANNELS)
     assert {row['vibe'] for row in measured} == expected_channels
-    assert len(measured) == 8  # Six trained targets plus two shared intensity channels.
+    assert len(measured) == 8  # Six purpose scores plus activation and force.
     assert {row['inputs_version'] for row in measured} == {expected_version}
     assert {row['model_version'] for row in measured} == {expected_version}
     assert all('inputs_version_id' not in row for row in measured)

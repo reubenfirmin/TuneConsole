@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from yt_playlist.rec import artist_start, home_cards
+from yt_playlist.rec import artist_start
 
 
 class Selection(BaseModel):
@@ -12,15 +12,13 @@ class Selection(BaseModel):
 
 def build(ctx):
     router = APIRouter()
-    catalog = artist_start.ArtistCatalog(ctx.client_provider)
-    store = ctx.store
 
-    def state():
-        choices = store.discovery.starter_artists()
-        songs = store.discovery.starter_tracks()
-        return {'selected': choices, 'songs': len(songs), 'minimum': artist_start.MIN_ARTISTS,
-                'complete': not artist_start.required(store),
-                'ready': len(choices) >= artist_start.MIN_ARTISTS and bool(songs)}
+    def trigger_refresh():
+        if ctx.rec_worker:
+            ctx.rec_worker.trigger_mode_refresh()
+
+    catalog = artist_start.ArtistCatalog(ctx.client_provider, trigger_refresh=trigger_refresh)
+    store = ctx.store
 
     @router.get('/home/onboard/artists/search')
     def search(q: str = ''):
@@ -31,7 +29,7 @@ def build(ctx):
 
     @router.get('/home/onboard/artists/state')
     def current_state():
-        return state()
+        return catalog.state(store)
 
     @router.get('/home/onboard/artists/suggestions')
     def suggestions():
@@ -43,22 +41,18 @@ def build(ctx):
     @router.post('/home/onboard/artists/select')
     def select(selection: Selection):
         try:
-            related = catalog.select(store, selection.browse_id, selection.selected, ctx.now_fn())
+            result = catalog.choose(store, selection.browse_id, selection.selected, ctx.now_fn())
         except (artist_start.CatalogUnavailable, TimeoutError) as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        if selection.selected and ctx.rec_worker:
-            ctx.rec_worker.trigger_mode_refresh()
-        return {**state(), 'related': related}
+        return result
 
     @router.get('/home/onboard/artists/listen')
     def listen(request: Request):
-        tracks = store.discovery.starter_tracks()
-        choices = store.discovery.starter_artists()
-        ready = len(choices) >= artist_start.MIN_ARTISTS and bool(tracks)
+        context = catalog.listen_context(store, ctx.now_fn())
         return ctx.templates.TemplateResponse(request, '_partials/artist_first_listen.html', {
-            'proto': home_cards._proto(store, 'artist_start', 'My first set', tracks, ctx.now_fn()) if ready else None,
-            'artists': choices})
+            'proto': context['proto'],
+            'artists': context['choices']})
 
     return router

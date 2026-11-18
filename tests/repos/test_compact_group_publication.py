@@ -10,22 +10,21 @@ from threading import Event
 
 import pytest
 
-from tests.core.test_compact_groups_migration import historical_groups, apply
+from tests.recommendation_support import seed_compact_group_history
+from tests.store_fixture_support import initialize_consumer, bounded_consumer_schema
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, roots
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import group_content, group_documents, group_plan, group_reads as group_queries, group_storage
 from yt_playlist.core.db_revisions import Revisions
-from yt_playlist.core.migrations import v072_compact_groups as migration
-from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.store import Store
 from yt_playlist.repos import compact_group_publication as compact, group_publication as publication
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
 
 
-def third_generation(conn):
-    prepared = migration._prepared(conn, conn.execute(
-        "SELECT * FROM rec_group_generations WHERE generation='second'").fetchone())
+def third_generation(second):
+    prepared = deepcopy(second)
+    prepared.pop('_stage_owner', None)
     prepared.update(generation='third', at=3, serial=3, _stage_parent='second')
     prepared['unknown'] = [('unknown-old-key', 'unmeasured')]
     prepared['edges'] = [('one', 'two', .8, .7), ('one', 'unknown-old-key', .6, .5)]
@@ -53,14 +52,10 @@ def compacted_groups(pristine, path):
             patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
             patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
             patch.delenv('DEEPSEEK_API_KEY', raising=False)
-            with historical_groups(path, pristine) as conn:
-                prepared = third_generation(conn)
-                apply(conn)
-            # Close the predecessor before retaining the immutable source. Do
-            # not admit this historical schema through current-schema startup.
             source = Store(path)
             resources.callback(source.conn.close)
-            bind_compact_store(source)
+            initialize_consumer(source, pristine)
+            prepared = third_generation(seed_compact_group_history(source))
             template = capture_template(source, prepared)
         yield template
 
@@ -70,7 +65,11 @@ def restored_groups(template, path):
     store = Store(path)
     try:
         prepared = template.restore(store)
-        store._bind_repositories()
+        from yt_playlist.repos import group_file_writes, policy_file_writes
+        with store.conn:
+            group_file_writes.install(store.conn)
+            policy_file_writes.install(store.conn)
+        bind_compact_store(store)
         assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
         assert store._snapshot_revisions.conn is store.conn
         yield store, prepared
@@ -80,14 +79,12 @@ def restored_groups(template, path):
 
 @pytest.fixture(scope='module')
 def bounded_compact_group_template(tmp_path_factory):
-    """Replay the real compact-group input with its one required genre."""
+    """Publish compact-group history with its one required genre."""
     path = tmp_path_factory.mktemp('retention-group-input') / 'source.db'
     with ExitStack() as resources:
-        with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as source:
+        with pytest.MonkeyPatch.context() as patch:
             bound_catalog(patch, entries=(('house', 'House'),))
-            source.execute('PRAGMA foreign_keys=ON')
-            runner.migrate(source, registry=registry.MIGRATIONS[:69])
-            source.execute('PRAGMA query_only=ON')
+            source = resources.enter_context(bounded_consumer_schema((('house', 'House'),)))
             template = resources.enter_context(compacted_groups(source, path))
         yield template
 
@@ -611,11 +608,70 @@ def test_group_publication_file_io_runs_outside_the_sql_transaction(database, mo
             return original(*args, **kwargs)
         return outside
 
-    for method in ('write', 'write_policy', 'read', 'policy'):
+    for method in ('describe', 'write_reserved', 'read', 'policy'):
         monkeypatch.setattr(files, method, checked(getattr(files, method)))
     store.taste_groups.publish(prepared)
     assert store.taste_groups.head_generation() == 'third'
     assert not store.conn.in_transaction
+
+
+@pytest.mark.parametrize('boundary', ['file', 'status'])
+def test_native_file_interruption_retains_the_previous_head_and_resumes_committed_prefix(database, monkeypatch, boundary):
+    from yt_playlist.core import fao
+    from yt_playlist.core.group_paths import record_id
+    from yt_playlist.repos import group_file_writes
+    store, prepared = database
+    prepared = changed(prepared)
+    with monkeypatch.context() as patch:
+        if boundary == 'file':
+            def interrupted(records):
+                assert not store.conn.in_transaction
+                with closing(sqlite3.connect(store._db_path)) as observer:
+                    assert observer.execute("SELECT count(*) FROM group_file_writes WHERE file_status='pending'").fetchone()[0] == 1
+                raise OSError('interrupted group file')
+            patch.setattr(store.taste_groups.files, 'write_reserved', interrupted)
+        else:
+            complete = group_file_writes.complete
+            def interrupted(conn, kind, reference):
+                complete(conn, kind, reference)
+                if kind == 'lineage':
+                    raise OSError('interrupted group status')
+            patch.setattr(group_file_writes, 'complete', interrupted)
+        with pytest.raises(OSError, match='interrupted group'):
+            store.taste_groups.publish(prepared)
+    assert store.taste_groups.head_generation() == 'second'
+    assert store.conn.execute("SELECT count(*) FROM group_file_writes WHERE file_status='pending'").fetchone()[0] == 1
+    assert not store.conn.in_transaction
+    store.taste_groups.publish(prepared)
+    assert store.taste_groups.head_generation() == 'third'
+    assert store.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.5, .8)}
+    for _table, _key, kind, filename, digest, size, offset in group_documents.references(store.conn):
+        identity = record_id(filename)
+        if identity is not None:
+            assert store.conn.execute('SELECT kind,content_digest,byte_size,file_status FROM group_file_writes WHERE id=?',
+                (identity,)).fetchone()[:] == (kind, digest, size, 'ready')
+            assert fao.read(filename).bytes.startswith(group_documents.HEADER)
+
+
+def test_native_backup_restore_preserves_file_ids_and_original_age(database, tmp_path):
+    from yt_playlist.core import fao
+    from yt_playlist.core.group_paths import record_id
+    store, prepared = database
+    store.taste_groups.publish(changed(prepared))
+    originals = {record_id(filename): (fao.read(filename).bytes, fao.read(filename).info.ctime_ns)
+                 for _table, _key, _kind, filename, _digest, _size, _offset in group_documents.references(store.conn)
+                 if record_id(filename) is not None}
+    assert originals
+    with store.read_snapshot() as snapshot:
+        manifest = group_documents.export(snapshot.store.conn, tmp_path / 'native-backup')
+    for filename in {row[3] for row in group_documents.references(store.conn)}:
+        fao.delete(filename)
+    group_documents.restore(store.conn, manifest)
+    restored = {record_id(filename): (fao.read(filename).bytes, fao.read(filename).info.ctime_ns)
+                for _table, _key, _kind, filename, _digest, _size, _offset in group_documents.references(store.conn)
+                if record_id(filename) is not None}
+    assert restored == originals
+    assert store.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.5, .8)}
 
 
 def test_real_offer_learning_reuses_the_same_external_alias_in_two_generations(database):

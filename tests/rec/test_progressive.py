@@ -4,6 +4,7 @@ from tests.enrichment_support import seed_enrichment
 import json
 import logging
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -18,8 +19,8 @@ from tests.store_fixture_support import (
 from yt_playlist.core import catalog as catalog_writes
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
-from yt_playlist.rec import content_model, embedding_training, embedding_vectors, model_refresh, rec_params
-from yt_playlist.rec import musical_preparation, vibe_preparation, vibe_joint_preparation
+from yt_playlist.rec import artist_model, content_model, embedding_training, embedding_vectors, mode_discovery, model_refresh, rec_params
+from yt_playlist.rec import musical_preparation, vibe_preparation, vibe_joint_state
 from yt_playlist.rec.progressive import BASIS_STATE, Budget, Preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
@@ -58,7 +59,7 @@ def live_metadata_library(native_sql_calls, svd_cache_store, monkeypatch):
     bound_catalog(monkeypatch, entries=entries)
     # test_vibe_prediction's ordinary qualified-release case owns joint-audio
     # fitting; this case owns the content basis while metadata keeps changing.
-    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda *args, **kwargs: False)
+    monkeypatch.setattr(vibe_joint_state, 'qualified', lambda *args, **kwargs: False)
     return svd_cache_store
 
 
@@ -211,16 +212,16 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store, mon
     before = store.rec_model.content_generation()
     key = store.tracks.identity_key_for_video('v0')
     audio(store, ids[0], 190)
-    writes, write = [], fao.write
+    writes, prepare = [], fao.prepare
 
     def off_lock(path, *args, **kwargs):
         if path.suffix == '.bin':
             assert not store._lock.held_by_current_thread
             assert not store.conn.in_transaction
             writes.append(path)
-        return write(path, *args, **kwargs)
+        return prepare(path, *args, **kwargs)
 
-    monkeypatch.setattr(fao, 'write', off_lock)
+    monkeypatch.setattr(fao, 'prepare', off_lock)
     assert p.capture(1001)
     assert writes
     after = store.rec_model.content_generation()
@@ -425,17 +426,17 @@ def test_grouping_settings_are_not_held_behind_metadata_accumulation(
     assert _pristine_current_schema._revision_script
     assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
     # Joint audio-model qualification is independent of grouping scheduling.
-    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
+    monkeypatch.setattr(vibe_joint_state, 'qualified', lambda: False)
     # Keep both real fits and their publications. Numerical mode clustering is
     # below this scheduling contract; record the settings passed to that input.
     initial_groups = rec_params.get_param(store, 'modes_k')
     clustered_groups = []
 
-    def completed_modes(reader, *args, **kwargs):
-        clustered_groups.append(rec_params.get_param(reader, 'modes_k'))
-        return None
+    def completed_modes(keys, matrix, **kwargs):
+        clustered_groups.append(kwargs['k'])
+        return []
 
-    monkeypatch.setattr(model_refresh.taste_modes, 'prepare_modes', completed_modes)
+    monkeypatch.setattr(mode_discovery, 'discover_from_inputs', completed_modes)
     catalog(store, 96)
     p = Preparation(store)
     drain(p)
@@ -463,10 +464,14 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     # This case owns the track SVD cache, content-input conflicts and changed
     # track baskets. Independent artist fitting and mode clustering are lower
     # collaborators; retain the full catalog and actual track/content fits.
-    monkeypatch.setattr(model_refresh.artist_model, 'artist_content_profiles', lambda reader: {})
-    monkeypatch.setattr(model_refresh.artist_model, '_discovered_artist_profiles', lambda reader: {})
-    monkeypatch.setattr(model_refresh.artist_model, 'artist_baskets', lambda reader: [])
-    monkeypatch.setattr(model_refresh.taste_modes, 'prepare_modes', lambda *args, **kwargs: None)
+    profiles = Mock(return_value={})
+    discoveries = Mock(return_value={})
+    baskets = Mock(return_value=[])
+    clustering = Mock(return_value=[])
+    monkeypatch.setattr(artist_model, 'profiles_from_tracks', profiles)
+    monkeypatch.setattr(artist_model, '_discovered_artist_profiles', discoveries)
+    monkeypatch.setattr(artist_model, 'artist_baskets_from_tracks', baskets)
+    monkeypatch.setattr(mode_discovery, 'discover_from_inputs', clustering)
     cache = model_refresh.FitCache()
     train = embedding_training.build_vectors_from_baskets
     build = content_model.build_library_content
@@ -490,6 +495,8 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     assert model_refresh.rebuild(store, 1003, fit_cache=cache)
     assert calls == ['svd', 'svd']
     assert store.rec_model.rec_vectors_count() == len(ids)
+    assert profiles.call_count == discoveries.call_count == baskets.call_count == 4
+    assert clustering.call_count == 4
 
 
 def test_unresolved_metadata_capture_notifies_full_models_without_eager_rebuild(store):

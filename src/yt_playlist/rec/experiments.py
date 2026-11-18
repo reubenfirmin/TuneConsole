@@ -32,7 +32,7 @@ def decide(store, decision, cohort, reason, now):
         # Publication rejects a concurrent evidence/settings change atomically.
         def publish():
             store.settings.publish_values(dict(rows))
-        if not snapshot.publish(publish):
+        if not snapshot.publish_ordered(publish):
             raise ValueError("Listening evidence or experiment settings changed. Review the report and try again.")
     return {"state": "retained" if decision == "promote" else "retired",
             "share": 1.0 if decision == "promote" else 0.0, "decision": record}
@@ -42,6 +42,11 @@ def _prepare_decision(store, decision, cohort, reason, now):
     # Guard a concurrent allocation edit as well as the evidence/history reads.
     store.settings.get_setting(rec_params.SETTING_PREFIX + "ppr_ab_share")
     report = scorecard.experiment_report(store, max(0, now - 90 * 86400), now, now)
+    return decision_values(report, decisions(store), decision, cohort, reason, now)
+
+
+def decision_values(report, history, decision, cohort, reason, now):
+    """Evaluate captured live evidence and encode the bounded retained decision."""
     arms = report["live"]
     ppr, cosine = arms.get(cohort + ":ppr"), arms.get(cohort + ":cosine")
     powered = all(a and a["clusters"] >= report["min_clusters_per_arm"] for a in (ppr, cosine))
@@ -61,5 +66,5 @@ def _prepare_decision(store, decision, cohort, reason, now):
     record = {"decision": decision, "cohort": cohort, "reason": reason.strip(), "at": now,
               "powered": bool(powered), "live_evidence": {"ppr": ppr, "cosine": cosine},
               "basis": "live outcomes" if powered else "operator retirement; insufficient live evidence"}
-    return [("ppr_experiment_decisions", json.dumps((decisions(store) + [record])[-200:])),
+    return [("ppr_experiment_decisions", json.dumps((history + [record])[-200:])),
             (rec_params.SETTING_PREFIX + "ppr_ab_share", "1.0" if decision == "promote" else "0.0")], record

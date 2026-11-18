@@ -1,6 +1,6 @@
 """Conflict resolution uses mocked persistence and explicit file evidence."""
 from unittest.mock import create_autospec
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
@@ -9,6 +9,7 @@ from yt_playlist.controllers.enrichment import Enrichment
 from yt_playlist.controllers.metadata_choices import MetadataChoices
 from yt_playlist.core.metadata_contract import ALTERNATIVE_SECONDS
 from yt_playlist.core.metadata_runtime import Capture
+from yt_playlist.core.metadata_observations import SubjectChanged
 from yt_playlist.core.metadata_values import Value
 from yt_playlist.core.metadata_runtime_files import RuntimeMetadataFiles
 from yt_playlist.repos.enrichment import EnrichmentRepo
@@ -25,7 +26,10 @@ def enrichment():
     repo.conflict_inputs.return_value = {'entry_id': 7, 'recording_id': 2, 'layout': 'evidence', 'conflicts': []}
     repo.provider_inputs.return_value = {'entry_id': 7, 'recording_id': 2, 'video_id': 'video',
         'layout': 'runtime', 'attempts': False, 'sources': {}, 'genre': None, 'provider_at': None}
-    return Enrichment(repo, choices, create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True))
+    repo.reserve_file.return_value = 257
+    files = create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True)
+    files.write_reserved.side_effect = lambda records: nullcontext()
+    return Enrichment(repo, choices, files)
 
 
 @pytest.mark.parametrize(('previous', 'answers', 'expected'), [
@@ -205,7 +209,9 @@ def test_runtime_reuse_does_not_extend_an_expired_offer(enrichment):
     enrichment.repository.reserve_conflict_identity.return_value = 12
     enrichment.files.read.return_value = {'at': 100}
     enrichment.upsert_conflict(7, 'genre', [{'provider': 'a', 'value': 'Rock'}], now=now)
-    enrichment.files.publish.assert_called_once_with('conflicts', (12,), 1, {'candidates': []}, current_revision=None)
+    record, = enrichment.files.write_reserved.call_args.args[0]
+    assert (record['kind'], record['owner'], record['revision'], record['file_id'], record['data']) == (
+        'conflicts', (12,), 1, 257, {'candidates': []})
     enrichment.choices.capture_fields.assert_not_called()
 
 
@@ -214,9 +220,20 @@ def test_failed_runtime_document_does_not_advance_the_sql_head(enrichment):
     facts['layout'] = 'runtime'
     enrichment.repository.alternative_references.return_value = {}
     enrichment.repository.reserve_conflict_identity.return_value = 12
-    enrichment.files.publish.side_effect = OSError('publication failed')
+    enrichment.files.write_reserved.side_effect = OSError('publication failed')
     with pytest.raises(OSError, match='publication failed'):
         enrichment.upsert_conflict(7, 'genre', [{'provider': 'a', 'value': 'Rock'}], now=10)
+    enrichment.repository.store_conflict.assert_not_called()
+
+
+def test_conflict_changed_during_file_publication_does_not_replace_newer_head(enrichment):
+    facts = {**enrichment.repository.conflict_inputs.return_value, 'layout': 'runtime'}
+    enrichment.repository.conflict_inputs.side_effect = [facts, facts, {**facts, 'recording_id': 3}]
+    enrichment.repository.alternative_references.return_value = {}
+    enrichment.repository.reserve_conflict_identity.return_value = 12
+    with pytest.raises(SubjectChanged, match='changed during file publication'):
+        enrichment.upsert_conflict(7, 'genre', [{'provider': 'a', 'value': 'Rock'}], now=10)
+    enrichment.files.write_reserved.assert_called_once()
     enrichment.repository.store_conflict.assert_not_called()
 
 

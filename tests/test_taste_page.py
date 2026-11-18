@@ -175,7 +175,8 @@ def test_taste_page_has_one_bar_of_section_tabs(store):
                    base_url="http://127.0.0.1")
     html = c.get("/taste").text
     assert 'aria-label="Taste Model sections"' in html
-    assert html.count('role="tablist"') == 1
+    page = html.split('<main id="app-page"', 1)[1].split('</main>', 1)[0]
+    assert page.count('role="tablist"') == 1
     assert html.index('id="taste-overview-tab"') < html.index('id="taste-experiment-tab"') < html.index('id="taste-profile-tab"')
     assert "Recommendations" in html
     assert "Model health" in html and "Feedback" in html

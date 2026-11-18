@@ -8,18 +8,143 @@ import json
 from collections import OrderedDict
 from pathlib import Path
 import tempfile
+from contextlib import contextmanager
 
-from . import fao, file_collection, vibe_model_files, vibe_models
+from . import fao, file_collection, file_pack, vibe_model_files, vibe_models
 from .activity import check_stopping
 from .evidence_ledger import canonical
+from yt_playlist.repos.provenance_file_writes import HEAD_SQL as SQL
 
-CHUNK_ROWS = 128
-MAX_BYTES = 8 * 1024 * 1024
+CHUNK_ROWS = file_pack.MAX_ROWS
+MAX_BYTES = file_pack.MAX_BYTES
 
 
 class ProvenanceFiles:
     def __init__(self, root):
         self.root = Path(root)
+
+    @staticmethod
+    def describe(values):
+        grouped, originals, seen = {}, set(), set()
+        for pid, inputs, artists in values:
+            relative(pid)
+            if pid in seen:
+                raise ValueError('Duplicate calculation provenance')
+            seen.add(pid)
+            shared = vibe_model_files.is_receipt(inputs)
+            value = inputs if shared else {'inputs': sorted(set(inputs)), 'artists': sorted(set(artists))}
+            if not shared:
+                if any(type(identity) is not int or identity < 1 for identity in value['inputs'] + value['artists']):
+                    raise ValueError('Invalid calculation provenance subjects')
+                originals.update(value['inputs'])
+            grouped.setdefault(pid // CHUNK_ROWS, {})[str(pid)] = value
+        records = []
+        for calculations in grouped.values():
+            raw = canonical({'format': 1, 'calculations': calculations})
+            file_pack.validate(raw, len(calculations), max_bytes=MAX_BYTES, max_rows=CHUNK_ROWS)
+            markers = [(int(pid), hashlib.sha256(canonical(value)).digest()
+                        if vibe_model_files.is_receipt(value) else fingerprint(value['inputs']),
+                        len(canonical(value))) for pid, value in sorted(calculations.items(), key=lambda row: int(row[0]))]
+            records.append({'raw': raw, 'digest': hashlib.sha256(raw).digest(), 'size': len(raw),
+                            'markers': markers})
+        return records, sorted(originals)
+
+    def stage_reserved(self, records):
+        staged, markers = [], []
+        try:
+            for record in records:
+                raw = record['raw']
+                if (not 0 < len(raw) <= MAX_BYTES or len(raw) != record['size']
+                        or hashlib.sha256(raw).digest() != record['digest']):
+                    raise ValueError('Prediction provenance changed after reservation')
+                value = json.loads(raw)
+                calculations = _calculations(value)
+                expected, _roots = self.describe((int(pid), calculation if vibe_model_files.is_receipt(calculation)
+                    else calculation['inputs'], calculation['artists']) for pid, calculation in calculations.items())
+                if len(expected) != 1 or any(expected[0][key] != record[key]
+                                            for key in ('raw', 'digest', 'size', 'markers')):
+                    raise ValueError('Prediction provenance changed after reservation')
+                staged.append(fao.prepare(self.root / file_relative(record['file_id']), raw))
+                markers.extend((*marker, record['file_id']) for marker in record['markers'])
+            return staged, markers
+        except BaseException:
+            for publication in staged:
+                publication.close()
+            raise
+
+    def read(self, pid, file_id, digest, size):
+        content = fao.read(self.root / file_relative(file_id), max_bytes=MAX_BYTES)
+        with content as stream:
+            try:
+                raw = file_pack.PackReader(stream, header=b'', max_bytes=MAX_BYTES,
+                                          max_pack_bytes=MAX_BYTES).read(0, size, digest.hex())
+            except fao.CorruptFile as exc:
+                raise fao.CorruptFile('Prediction provenance differs from its reserved bytes') from exc
+        return _chunk_at(self.root, pid, content=fao.Content(raw), file_id=file_id)
+
+    @contextmanager
+    def garbage(self, *, limit=16):
+        if type(limit) is not int or not 1 <= limit <= 128:
+            raise ValueError('Provenance collection limit must be 1 to 128')
+        with file_collection.collector(self.root) as admitted:
+            if not admitted:
+                yield iter(())
+                return
+            with file_collection.collection(self, self.root, name='.record-collection.json',
+                    valid_shard=lambda name: _shard(name) or len(name) == 2 and all(c in '0123456789abcdef' for c in name),
+                    prefixes=('', 'by-id')) as work:
+                def candidates():
+                    for _ in range(limit):
+                        path = work.next()
+                        if path is None or path.suffix != '.json' or not _shard(path.stem):
+                            continue
+                        identity = int(path.stem)
+                        native = path.relative_to(self.root) == file_relative(identity) if identity else False
+                        if not native and path.relative_to(self.root) != relative(identity * CHUNK_ROWS + 1):
+                            continue
+                        try:
+                            content = fao.read(path, max_bytes=MAX_BYTES)
+                        except FileNotFoundError:
+                            continue
+                        yield path, content, identity if native else None, identity if not native else None
+                try:
+                    yield candidates()
+                finally:
+                    work.save()
+
+    @staticmethod
+    def prune(path, content, *, file_id, ready, owned, before):
+        if file_id is not None:
+            if not ready and content.info.ctime_ns / 1e9 <= before:
+                fao.delete(path, expected=content.info.identity, missing_ok=True)
+            return
+        records = _calculations(json.loads(content.bytes))
+        if any(int(key) // CHUNK_ROWS != int(path.stem) for key in records):
+            raise fao.CorruptFile('Prediction provenance differs from its chunk owner')
+        if not ready and records.keys() - owned and content.info.ctime_ns / 1e9 > before:
+            return
+        retained = {key: value for key, value in records.items() if key in ready}
+        if ready - retained.keys():
+            raise fao.CorruptFile('Required calculation provenance is missing')
+        if retained and retained != records:
+            fao.write(path, content.replacing(canonical({'format': 1, 'calculations': retained})))
+        elif not retained:
+            fao.delete(path, expected=content.info.identity, missing_ok=True)
+
+    @contextmanager
+    def history(self):
+        with file_collection.collector(self.root) as admitted:
+            if not admitted:
+                yield None
+                return
+            cursor = self.root / '.history-collection.json'
+            after = json.loads(fao.read(cursor).bytes)['after'] if cursor.exists() else 0
+            if type(after) is not int or after < 0:
+                raise ValueError('Invalid prediction history cursor')
+            yield after
+
+    def save_history(self, after):
+        fao.write(self.root / '.history-collection.json', canonical({'after': after}))
 
     def stage_many(self, values):
         grouped, markers, originals = {}, [], set()
@@ -40,20 +165,13 @@ class ProvenanceFiles:
                 records = _chunk_at(self.root, pid, content=source)
                 records.update(pending)
                 encoded = canonical({'format': 1, 'calculations': records})
+                file_pack.validate(encoded, len(records), max_bytes=MAX_BYTES, max_rows=CHUNK_ROWS)
                 staged.append(fao.prepare(path, source.replacing(encoded) if source is not None else encoded))
             return staged, markers, sorted(originals)
         except BaseException:
             for publication in staged:
                 publication.close()
             raise
-
-
-SQL = '''CREATE TABLE prediction_provenance (
-    prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,
-    input_fingerprint BLOB NOT NULL CHECK(length(input_fingerprint)=32),
-    byte_size INTEGER NOT NULL CHECK(byte_size>0),
-    state TEXT NOT NULL CHECK(state IN ('ready','expired'))
-)'''
 
 
 def allocation_sql():
@@ -101,7 +219,9 @@ def validate(conn):
     from .schema_contract import tokens as _tokens
     from .schema_inspection import definitions
     actual = definitions(conn, ['prediction_provenance'])
-    if 'prediction_provenance' not in actual or _tokens(actual['prediction_provenance']) != _tokens(SQL):
+    from yt_playlist.repos.provenance_file_writes import native_definition
+    if ('prediction_provenance' not in actual
+            or _tokens(actual['prediction_provenance']) not in (_tokens(SQL), _tokens(native_definition(SQL)))):
         raise ValueError('Incompatible prediction provenance owner')
 
 
@@ -185,20 +305,39 @@ def relative(pid):
     return Path(str(chunk // 256), str(chunk) + '.json')
 
 
-def _chunk(conn, pid, *, content=None):
-    return _chunk_at(directory(conn), pid, content=content)
+def file_relative(identity):
+    if type(identity) is not int or identity < 1:
+        raise ValueError('Invalid provenance file identity')
+    return Path('by-id', f'{identity % 256:02x}', str(identity) + '.json')
 
 
-def _chunk_at(root, pid, *, content=None):
-    path = root / relative(pid)
+def _chunk(conn, pid, *, content=None, file_id=None):
+    if file_id is not None:
+        row = conn.execute('SELECT content_digest,byte_size,file_status FROM provenance_file_writes WHERE id=?',
+                           (file_id,)).fetchone()
+        if row is None or row[2] != 'ready':
+            raise fao.CorruptFile('Required calculation file is not ready')
+        return ProvenanceFiles(directory(conn)).read(pid, file_id, row[0], row[1])
+    return _chunk_at(directory(conn), pid, content=content, file_id=file_id)
+
+
+def _chunk_at(root, pid, *, content=None, file_id=None):
+    path = root / (file_relative(file_id) if file_id is not None else relative(pid))
     try:
         value = json.loads((content if content is not None else fao.read(path, max_bytes=MAX_BYTES)).bytes)
     except FileNotFoundError:
         return {}
+    records = _calculations(value)
+    if any(relative(int(key)) != relative(pid) for key in records):
+        raise fao.CorruptFile('Prediction provenance differs from its chunk owner')
+    return records
+
+
+def _calculations(value):
     if not isinstance(value, dict) or value.get('format') != 1 or not isinstance(value.get('calculations'), dict):
         raise fao.CorruptFile('Invalid prediction provenance chunk')
     records = value['calculations']
-    if len(records) > CHUNK_ROWS or any(not key.isdigit() or relative(int(key)) != relative(pid) for key in records):
+    if len(records) > CHUNK_ROWS or any(not _shard(key) or int(key) < 1 for key in records):
         raise fao.CorruptFile('Prediction provenance differs from its chunk owner')
     return records
 
@@ -213,8 +352,9 @@ def _model_manifest(conn, generation):
             'recordings': {row['recording'] for row in value['inputs']}}
 
 
-def _read(conn, pid, load, installed, model_load=None):
-    row = (conn.execute('SELECT input_fingerprint,byte_size,state FROM prediction_provenance WHERE prediction_id=?', (pid,)).fetchone()
+def _read(conn, pid, load, installed, model_load=None, native=False):
+    row = (conn.execute('SELECT input_fingerprint,byte_size,state,' + ('file_id' if native else 'NULL') +
+                       ' FROM prediction_provenance WHERE prediction_id=?', (pid,)).fetchone()
            if installed else None)
     if row is None:
         if not conn.execute('SELECT 1 FROM predictions WHERE id=?', (pid,)).fetchone():
@@ -224,7 +364,7 @@ def _read(conn, pid, load, installed, model_load=None):
                 'artists': [r[0] for r in conn.execute('SELECT artist_id FROM prediction_artists WHERE prediction_id=? ORDER BY artist_id', (pid,))]}
     if row[2] == 'expired':
         return None
-    value = load(pid).get(str(pid))
+    value = load(pid, row[3]).get(str(pid))
     if vibe_model_files.is_receipt(value):
         try:
             normalized = vibe_model_files.receipt(value['generation'], value['artists'], value['mean_variance'],
@@ -249,13 +389,17 @@ def _read(conn, pid, load, installed, model_load=None):
 
 
 def read(conn, pid):
-    return _read(conn, pid, lambda identity: _chunk(conn, identity), available(conn))
+    from yt_playlist.repos.provenance_file_writes import native
+    return _read(conn, pid, lambda identity, file_id: _chunk(conn, identity, file_id=file_id),
+                 available(conn), native=native(conn))
 
 
 def read_many(conn, identities):
     """Verify each calculation while retaining at most one shared file chunk."""
     chunk, records = None, None
     installed = available(conn)
+    from yt_playlist.repos.provenance_file_writes import native
+    native_files = native(conn)
     manifests = OrderedDict()
     def model_load(generation):
         if generation not in manifests:
@@ -264,15 +408,15 @@ def read_many(conn, identities):
                 manifests.popitem(last=False)
         manifests.move_to_end(generation)
         return manifests[generation]
-    def load(pid):
+    def load(pid, file_id):
         nonlocal chunk, records
-        key = pid // CHUNK_ROWS
+        key = pid // CHUNK_ROWS, file_id
         if key != chunk:
-            records = _chunk(conn, pid)
+            records = _chunk(conn, pid, file_id=file_id) if file_id is not None else _chunk(conn, pid)
             chunk = key
         return records
     for pid in identities:
-        yield pid, _read(conn, pid, load, installed, model_load)
+        yield pid, _read(conn, pid, load, installed, model_load, native=native_files)
 
 
 def same_inputs(conn, pid, inputs):
@@ -313,6 +457,7 @@ def stage_many(conn, values):
             records = _chunk(conn,pid,content=source)
             records.update(pending)
             encoded = canonical({'format':1,'calculations':records})
+            file_pack.validate(encoded, len(records), max_bytes=MAX_BYTES, max_rows=CHUNK_ROWS)
             staged.append(fao.prepare(path, source.replacing(encoded) if source is not None else encoded))
         # Existing roots need no repeated write during the guarded publication.
         roots, ordered = [], sorted(originals)
@@ -370,8 +515,9 @@ def publish_many(conn, values):
                     raise ValueError('Calculation provenance cannot change')
             records[identity] = value
         encoded = canonical({'format': 1, 'calculations': records})
+        file_pack.validate(encoded, len(records), max_bytes=MAX_BYTES, max_rows=CHUNK_ROWS)
         fao.write(directory(conn) / relative(pid), encoded)
-        conn.executemany('INSERT INTO prediction_provenance VALUES (?,?,?,\'ready\') '
+        conn.executemany('INSERT INTO prediction_provenance(prediction_id,input_fingerprint,byte_size,state) VALUES (?,?,?,\'ready\') '
                          'ON CONFLICT(prediction_id) DO NOTHING',
                          [(int(identity), fingerprint(value['inputs']), len(canonical(value))) for identity, value in values.items()])
     if shared:
@@ -400,8 +546,11 @@ def prepare_batch(conn, limit=128):
 
 def references(conn):
     if available(conn):
-        for chunk, in conn.execute("SELECT DISTINCT prediction_id/128 FROM prediction_provenance WHERE state='ready'"):
-            yield directory(conn) / relative(chunk*CHUNK_ROWS+1)
+        from yt_playlist.repos.provenance_file_writes import native
+        column = 'file_id' if native(conn) else 'NULL'
+        for chunk, identity in conn.execute('SELECT DISTINCT prediction_id/128,' + column +
+                                          " FROM prediction_provenance WHERE state='ready'"):
+            yield directory(conn) / (file_relative(identity) if identity is not None else relative(chunk*CHUNK_ROWS+1))
 
 
 def maintain(conn, now, limit=128):
@@ -415,57 +564,5 @@ def maintain(conn, now, limit=128):
     return len(rows)
 
 
-def collect(conn, now, limit=16):
-    """Repack committed expiry only, under the owner's snapshot fence.
-
-    Never remove bytes before the SQL expiry transaction commits. A failed or
-    interrupted repack leaves either the old exact chunk or its verified subset.
-    """
-    if conn.in_transaction:
-        raise RuntimeError('Provenance collection requires committed expiry')
-    if type(limit) is not int or not 1 <= limit <= 128:
-        raise ValueError('Provenance collection limit must be 1 to 128')
-    root = directory(conn)
-    with file_collection.collection(conn, root, name='.collection.json', valid_shard=_shard) as work, file_collection.collector(root) as admitted:
-        if not admitted:
-            return 0
-        conn.execute('BEGIN IMMEDIATE')
-        try:
-            return _collect_reserved(conn,root,work,now,limit)
-        finally:
-            conn.rollback()
-
-
 def _shard(name):
     return isinstance(name, str) and name.isascii() and name.isdigit() and str(int(name)) == name
-
-
-def _collect_reserved(conn,root,work,now,limit):
-    examined = 0
-    for _ in range(limit):
-        path = work.next()
-        if path is None or path.suffix != '.json' or not _shard(path.stem):
-            continue
-        group = int(path.stem)
-        pid = group * CHUNK_ROWS + 1
-        if path.relative_to(root) != relative(pid):
-            continue
-        examined += 1
-        content = fao.read(path, max_bytes=MAX_BYTES)
-        records = _chunk(conn, pid, content=content)
-        ready = {str(r[0]) for r in conn.execute("SELECT prediction_id FROM prediction_provenance "
-            "WHERE state='ready' AND prediction_id>=? AND prediction_id<?", (group*CHUNK_ROWS, (group+1)*CHUNK_ROWS))}
-        owned = {str(r[0]) for r in conn.execute('SELECT prediction_id FROM prediction_provenance '
-            'WHERE prediction_id>=? AND prediction_id<?', (group*CHUNK_ROWS, (group+1)*CHUNK_ROWS))}
-        # Orphans from a rolled-back publication have a thirty-day grace.
-        if not ready and records.keys() - owned and not (content.info.ctime_ns / 1e9 <= now - 30*86400):
-            continue
-        retained = {key: value for key, value in records.items() if key in ready}
-        if ready - retained.keys():
-            raise fao.CorruptFile('Required calculation provenance is missing')
-        if retained and retained != records:
-            fao.write(path, content.replacing(canonical({'format': 1, 'calculations': retained})))
-        elif not retained:
-            fao.delete(path, missing_ok=True)
-    work.save()
-    return examined

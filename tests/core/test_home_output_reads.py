@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from yt_playlist.core import fao, home_outputs, json_cache, recommendation_outputs as files
+from yt_playlist.core import recommendation_content as content
 
 
 @pytest.mark.parametrize('surface,value', [
@@ -12,13 +13,13 @@ from yt_playlist.core import fao, home_outputs, json_cache, recommendation_outpu
 ])
 def test_output_read_decodes_each_physical_read_once(tmp_path, monkeypatch, surface, value):
     filename, digest, size = files.publish(tmp_path, files.encode(surface, '0', value))
-    decode, decoded = files._decode, []
+    decode, decoded = content.decode, []
 
     def counted(*args, **kwargs):
         decoded.append(True)
         return decode(*args, **kwargs)
 
-    monkeypatch.setattr(files, '_decode', counted)
+    monkeypatch.setattr(content, 'decode', counted)
     first = files.read(filename, digest, size, surface=surface, chunk_key='0')
     assert first == value
     assert len(decoded) == 1
@@ -49,12 +50,12 @@ def test_backup_read_keeps_validated_bytes_and_physical_age(tmp_path):
 def test_home_part_reuse_rechecks_the_physical_file(tmp_path, monkeypatch, change):
     encoded = files.encode('home_prepared', '0', 'A complete prepared menu')
     filename, digest, size = files.publish(tmp_path, encoded)
-    original = files._read
+    original = content.read_encoded
     reads = []
     def counted(*args, **kwargs):
         reads.append(args[0])
         return original(*args, **kwargs)
-    monkeypatch.setattr(files, '_read', counted)
+    monkeypatch.setattr(content, 'read_encoded', counted)
     def read():
         return files.read(filename, digest, size, surface='home_prepared', chunk_key='0')
     assert read() == read() == 'A complete prepared menu'
@@ -76,11 +77,11 @@ def test_home_part_reuse_rechecks_the_physical_file(tmp_path, monkeypatch, chang
 
 
 def test_home_part_reuse_has_a_total_byte_bound(tmp_path, monkeypatch):
-    monkeypatch.setattr(files, '_HOME_CACHE_BYTES', 100)
+    monkeypatch.setattr(content, '_HOME_CACHE_BYTES', 100)
     for index in range(4):
         filename, digest, size = files.publish(tmp_path, files.encode('home_tuned', str(index), 'x' * 60))
         assert files.read(filename, digest, size, surface='home_tuned', chunk_key=str(index)) == 'x' * 60
-        assert sum(item[1] for item in files._home_parts.values()) <= 100
+        assert sum(item[1] for item in content._home_parts.values()) <= 100
 
 
 @pytest.mark.parametrize('surface', ['home_tuned', 'home_choice'])

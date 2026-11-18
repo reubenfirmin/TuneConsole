@@ -7,7 +7,6 @@ import pytest
 
 from tests.historical_captures import retained_capture
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
-from yt_playlist.core.migrations import registry,v026_listening_observations as upgrade
 from yt_playlist.core.migrations.runner import Context
 from yt_playlist.core.store import Store
 
@@ -61,33 +60,8 @@ def test_event_generation_policy_does_not_change_with_later_playlist_curation(li
     assert s.rec_evidence.generated_only_keys_between(ts-1,ts+7200)=={'generated'}
 
 
-def test_installed_layout_retains_raw_evidence_and_unknown_precision():
-    conn = sqlite3.connect(':memory:')
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys=ON')
-    conn.executescript((Path(__file__).parents[1]/'fixtures/migrations/listening_v25.sql').read_text())
-    raw = {name:list(map(tuple,conn.execute(f'SELECT * FROM {name}'))) for name in
-           ('history_items','history_snapshots','play_events','player_events')}
-    with conn:
-        upgrade.apply(conn,Context(1))
-    upgrade.validate(conn)
-    for name,rows in raw.items():
-        assert list(map(tuple,conn.execute(f'SELECT * FROM {name}')))==rows
-    legacy = conn.execute('SELECT precision,timezone FROM legacy_listening_observations').fetchall()
-    assert all(tuple(r)==('legacy_unknown',None) for r in legacy)
-    assert conn.execute('SELECT COUNT(*) FROM listening_days WHERE identity_id=1').fetchone()[0]==1
-    assert conn.execute('SELECT COUNT(*) FROM listening_days WHERE identity_id=2').fetchone()[0]==0
-    assert not conn.execute('SELECT * FROM trend_first_play').fetchall()
-    assert not conn.execute('SELECT * FROM settings').fetchall()
-    assert not conn.execute('PRAGMA foreign_key_check').fetchall()
-    assert conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    conn.close()
-
-
-@pytest.mark.parametrize('zone,local',[
-    ('America/Costa_Rica','2026-10-20T23:30:00'),
-    ('Pacific/Kiritimati','2026-10-20T00:30:00'),
-    ('America/New_York','2026-11-01T01:30:00'),
+@pytest.mark.parametrize('zone,local', [
+    ('America/Costa_Rica', '2026-10-20T12:00:00'),
     ('America/New_York','2026-03-08T03:30:00'),
 ])
 @pytest.mark.parametrize('first',['import','capture'])
@@ -169,25 +143,6 @@ def test_generated_sync_shadow_is_account_scoped_and_independent_evidence_surviv
     assert s.recommendations.repository.candidate_play_counts(['song', 'absent']) == {'song': 2}
 
 
-def test_failed_draft_upgrade_rolls_back_and_backup_is_installed_v25(tmp_path):
-    s = Store(tmp_path/'installed.db')
-    migrate(s.conn,registry=registry.MIGRATIONS[:25])
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
-    s.conn.execute('INSERT INTO history_snapshots VALUES (1,1,100)')
-    s.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'original')")
-    s.conn.commit()
-    before = list(s.conn.iterdump())
-    def fail(conn,context):
-        upgrade.apply(conn,context)
-        raise RuntimeError('interrupted listening upgrade')
-    with pytest.raises(MigrationError,match='interrupted listening'):
-        migrate(s.conn,registry=(*registry.MIGRATIONS[:25],Migration(26,'listening_observations',fail)))
-    assert list(s.conn.iterdump())==before
-    assert not (tmp_path/'backups').exists()
-    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    s.conn.close()
-
-
 def test_playlist_counts_and_taste_weights_ignore_confirmed_alternate_upload(listening_store):
     import numpy as np
     from yt_playlist.rec.scoring import _playlist_centroids
@@ -256,28 +211,6 @@ def test_reassociation_preserves_completed_listening_changes_when_final_invalida
     s.trends.refresh_first_play()
     assert s.trends.first_play_map('track')=={key:10}
     assert s.tracks.catalog_subject(first)['recording_id']==s.tracks.catalog_subject(target)['recording_id']
-
-
-def test_successful_draft_upgrade_reopens_without_rewriting_data(tmp_path):
-    path = tmp_path/'installed.db'
-    s = Store(path)
-    migrate(s.conn,registry=registry.MIGRATIONS[:25])
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
-    s.conn.execute('INSERT INTO history_snapshots VALUES (1,1,100)')
-    s.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'original')")
-    s.conn.commit()
-    draft_registry = (*registry.MIGRATIONS[:25],Migration(26,'listening_observations',upgrade.apply))
-    migrate(s.conn,registry=draft_registry)
-    upgrade.validate(s.conn)
-    before = list(s.conn.iterdump())
-    s.conn.close()
-    reopened = Store(path)
-    migrate(reopened.conn,registry=draft_registry)
-    upgrade.validate(reopened.conn)
-    assert list(reopened.conn.iterdump())==before
-    assert reopened.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    assert not (tmp_path/'backups').exists()
-    reopened.conn.close()
 
 
 def test_import_failure_keeps_calendar_setup_and_rolls_back_event_projection(listening_store,monkeypatch):

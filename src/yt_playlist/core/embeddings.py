@@ -96,7 +96,7 @@ def row_facts(conn, name, *, keys=None):
         retired = 'artist_redirects'
     source = (f'{subject} s CROSS JOIN {table} e ON s.id=e.{column}' if keys is not None else
               f'{table} e JOIN {subject} s ON s.id=e.{column}')
-    sql = (f'SELECT {key},e.vector,e.dimensions,e.publication,e.position FROM {source} '
+    sql = (f'SELECT {key},e.vector,e.dimensions,e.publication,e.position,e.file_id FROM {source} '
            f'WHERE e.space=? AND NOT EXISTS(SELECT 1 FROM {retired} d WHERE d.retired_id=s.id)')
     args = [space]
     if keys is not None:
@@ -115,7 +115,8 @@ def row_facts(conn, name, *, keys=None):
             args.extend(subjects)
     # Source insertion order is part of the discovered cohort's tied rankings.
     sql += ' ORDER BY e.insertion_order' if space == 'content_discovery' else f' ORDER BY {key}'
-    return [tuple(row) for row in conn.execute(sql, args)]
+    return [(key, vector, dimensions, (publication, file_id) if file_id is not None else publication, position)
+            for key, vector, dimensions, publication, position, file_id in conn.execute(sql, args)]
 
 
 def count(conn, name):

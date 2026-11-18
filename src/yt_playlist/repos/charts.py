@@ -5,6 +5,7 @@ from contextlib import contextmanager
 
 from yt_playlist.library.rating_policy import LIKED_EXISTS
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.repos.album_navigation import track_album_browse_ids
 from yt_playlist.core import artists
 from yt_playlist.core.catalog_query import playable_tracks_sql
 
@@ -14,7 +15,6 @@ from yt_playlist.core.catalog_query import playable_tracks_sql
 # as ''. `year` floors the 4-digit mb_year to its decade ("1995" -> "1990").
 _CAT_EXPR = {
     "genre": "MIN(NULLIF(genre,''))",
-    "artist": "MIN(NULLIF(artist,''))",
     # year: take the first 4 chars of mb_year (substr ...,1,4); GLOB '[0-9]x4' gates it to a real
     # 4-digit year (else CASE yields NULL -> dropped); CAST to INTEGER, //10*10 floors to the decade,
     # CAST back to TEXT so it shares the string category column with the other dimensions.
@@ -41,8 +41,9 @@ class ChartsRepo(Repo):
         """Local artwork for chart categories, in one query per dimension."""
         if dimension == "artist":
             rows = self.conn.execute(
-                "SELECT artist cat, MIN(NULLIF(thumbnail,'')) thumbnail FROM tracks "
-                "WHERE artist<>'' GROUP BY artist").fetchall()
+                f"SELECT '@artist:'||ta.artist_id cat,MIN(NULLIF(t.thumbnail,'')) thumbnail "
+                f"FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id "
+                "GROUP BY ta.artist_id").fetchall()
         elif dimension == "album":
             rows = self.conn.execute(
                 "SELECT '@album:'||a.id cat,COALESCE(NULLIF(a.thumbnail,''),MIN(NULLIF(t.thumbnail,''))) thumbnail "
@@ -72,6 +73,10 @@ class ChartsRepo(Repo):
     def album_labels(self):
         return {f'@album:{r[0]}':r[1] for r in self.conn.execute(
             "SELECT a.id,a.title FROM albums a JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube'")}
+
+    @synchronized
+    def artist_labels(self):
+        return {f'@artist:{row[0]}': row[1] for row in self.conn.execute('SELECT id,name FROM artists')}
 
     @synchronized
     def playlist_labels(self):
@@ -106,6 +111,11 @@ class ChartsRepo(Repo):
             rows = self.conn.execute(
                 f"WITH membership AS ({_ALBUM_MEMBERSHIP.format(tracks=self.album_tracks_table)}) "
                 "SELECT '@album:'||aid cat,COUNT(*) c FROM membership GROUP BY aid").fetchall()
+        elif dimension == 'artist':
+            rows = self.conn.execute(
+                f"SELECT '@artist:'||ta.artist_id cat,COUNT(DISTINCT t.identity_key) c "
+                f"FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id "
+                "GROUP BY ta.artist_id").fetchall()
         else:
             rows = self.conn.execute(
                 f"WITH ident AS (SELECT identity_key, {_CAT_EXPR[dimension]} cat "
@@ -135,6 +145,13 @@ class ChartsRepo(Repo):
                 "SELECT '@album:'||m.aid cat,COUNT(*) c FROM listening_days hi "
                 "JOIN membership m ON m.ik=hi.identity_key "
                 f"WHERE {bounds} GROUP BY m.aid",args).fetchall()
+        elif dimension == 'artist':
+            rows = self.conn.execute(
+                f"WITH membership AS (SELECT DISTINCT t.identity_key,ta.artist_id FROM tracks t "
+                f"JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id) "
+                "SELECT '@artist:'||m.artist_id cat,COUNT(*) c FROM listening_days hi "
+                "JOIN membership m ON m.identity_key=hi.identity_key "
+                f"WHERE {bounds} GROUP BY m.artist_id", args).fetchall()
         else:
             rows = self.conn.execute(
                 f"WITH ident AS (SELECT identity_key, {_CAT_EXPR[dimension]} cat "
@@ -384,10 +401,12 @@ class ChartsRepo(Repo):
             f"       {_TRACK_PLAYS} plays, "
             f"      {LIKED_EXISTS} liked "
             f"FROM {'catalog_tracks' if catalog else 'tracks'} t " + selection, params).fetchall()
+        album_browse_ids = track_album_browse_ids(self.conn, self.album_tracks_table,
+            [r['tid'] for r in rows if not r['abrowse'] and r['album']])
         return [{"track_id": r["tid"], "video_id": r["vid"], "identity_key": r["ikey"], "title": r["title"], "artist": r["artist"],
                  "title_edited": bool(r["otitle"] is not None and r["title"] != r["otitle"]),
                  "artist_edited": bool(r["oartist"] is not None and r["artist"] != r["oartist"]),
-                 "album": r["album"] or "", "album_browse": r["abrowse"], "duration": r["dur"],
+                 "album": r["album"] or "", "album_browse": r["abrowse"] or album_browse_ids.get(r['tid']), "duration": r["dur"],
                  "available": r["avail"], "thumbnail": r["thumb"], "plays": r["plays"], "liked": bool(r["liked"]),
                  "genre": r["genre"] or "", "year": r["mb_year"] or ""} for r in rows]
 
@@ -399,7 +418,6 @@ class ChartsRepo(Repo):
         Incidental observations remain evidence without extending a complete release.
         """
         from yt_playlist.core import album_tracklists
-        from yt_playlist.core.preparation import album_publication
         published, order_key = None, 'o.id'
         if album_tracklists.available(self.conn):
             published = self.conn.execute(
@@ -409,13 +427,6 @@ class ChartsRepo(Repo):
             source = ("coalesce((SELECT min(s.entry_id) FROM album_occurrence_sources s JOIN catalog_entries e ON e.id=s.entry_id "
                 "WHERE s.occurrence_id=o.id AND (e.video_id=o.raw_source_ref OR e.source_ref=o.raw_source_ref)),"
                 "(SELECT min(s.entry_id) FROM album_occurrence_sources s WHERE s.occurrence_id=o.id))")
-        elif album_publication.selected(self.conn) is not None:
-            occurrence_join = ('JOIN '+album_publication.table('groups')+' g ON g.album_id=a.id JOIN '+album_publication.table('head')+
-                " h ON h.revision=g.stage AND h.active=1 AND g.status='complete' JOIN "+album_publication.table('tracks')+
-                ' o ON o.stage=g.stage AND o.album_id=a.id AND o.is_full=1 ')
-            published = self.conn.execute('SELECT 1 FROM album_provider_ids p JOIN albums a ON a.id=p.album_id '+occurrence_join+
-                "WHERE p.provider='youtube' AND p.provider_id=? LIMIT 1", (album_browse_id,)).fetchone()
-            source, order_key = 'o.entry_id', 'o.row_id'
         if published and published[0] is not None:
             rows = self.conn.execute(
                 f"WITH {_PLAY_COUNTS_CTE} "

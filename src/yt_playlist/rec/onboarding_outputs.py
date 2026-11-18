@@ -28,18 +28,21 @@ def starter_album(store):
     with several owned songs or listening days. An incidental track is never
     presented as a complete album tracklist.
     """
-    from yt_playlist.library.album_fetch import is_upload_album
-
-    def usable(album):
-        browse = album.get('browse') or ''
-        return (browse.startswith('MPRE') or is_upload_album(browse)) and bool(album.get('title'))
-
     with store.read_view() as reader:
-        saved = [album for album in reader.collection.get_saved_albums() if usable(album)]
-        if saved:
-            album = next((album for album in saved if album.get('type') != 'Single'), saved[0])
-            return {**album, 'saved': True, 'upload': is_upload_album(album['browse'])}
+        selected = select_starter_album(reader.collection.get_saved_albums(), saved=True)
+        if selected:
+            return selected
         # Count distinct owned recordings, not playlist occurrences or partial
         # imports. Catalog releases need not have been saved to be worth trying.
-        album = next((row for row in reader.readiness.familiar_albums() if usable(row)), None)
-    return {**album, 'saved': False, 'upload': is_upload_album(album['browse'])} if album else None
+        return select_starter_album(reader.readiness.familiar_albums(), saved=False)
+
+
+def select_starter_album(albums, *, saved):
+    """Detached release selection; an incidental track never supplies a tracklist."""
+    from yt_playlist.library.album_fetch import is_upload_album
+    usable = [album for album in albums if bool(album.get('title')) and (
+        (album.get('browse') or '').startswith('MPRE') or is_upload_album(album.get('browse') or ''))]
+    if not usable:
+        return None
+    album = next((album for album in usable if album.get('type') != 'Single'), usable[0]) if saved else usable[0]
+    return {**album, 'saved': saved, 'upload': is_upload_album(album['browse'])}

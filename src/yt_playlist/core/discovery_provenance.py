@@ -1,7 +1,7 @@
 """Typed discovery inputs and retained exposure facts. Callers own transactions."""
 import json
 
-from . import artist_keys, catalog_keys, collection_recovery, genre_identity, legacy_evidence
+from . import artist_keys, catalog_keys, collection_recovery, genre_identity
 
 
 SUBJECTS = {'track':'recording_id','artist':'artist_id','album':'album_id'}
@@ -31,8 +31,7 @@ def origin_fields(conn, token, *, account_id=None, import_key=None):
             captured_account = None
         if account_id is not None and captured_account!=account_id:
             raise ValueError('Discovery import account disagrees with its input')
-        from . import entity_names
-        if captured_account is not None and conn.execute(f'SELECT 1 FROM {entity_names.accounts(conn)} WHERE id=?',(captured_account,)).fetchone():
+        if captured_account is not None and conn.execute('SELECT 1 FROM accounts WHERE id=?',(captured_account,)).fetchone():
             fields.update(kind=kind,account_id=captured_account,
                 import_key=import_key,legacy_source_key=None,
                 resolution_status='resolved' if import_key is not None else 'legacy_account',resolution_reason=None)
@@ -216,19 +215,12 @@ def retain_legacy(conn, kind, identifier, count, first, last):
 
 
 def merge_subject(conn, kind, previous, target, *, reason):
-    """Fold interpretations; keep every captured predecessor under its evidence owner."""
+    """Fold visible impressions and legacy offer counts into the surviving subject."""
     column = SUBJECTS[kind]
     facts = [dict(r) for r in conn.execute('SELECT * FROM discovery_impressions WHERE '+column+' IN (?,?)',
         (previous,target))]
     legacy = [dict(r) for r in conn.execute('SELECT * FROM discovery_legacy_offers WHERE '+column+' IN (?,?)',
         (previous,target))]
-    for start in range(0,len(facts),512):
-        legacy_evidence.retain_many(conn,'discovery',[(
-            'discovery_impression_merge',json.dumps([kind,previous,target,r['id']]),json.dumps(r),reason)
-            for r in facts[start:start+512]])
-    if legacy:
-        legacy_evidence.retain(conn,'discovery_legacy_offer_merge',json.dumps([kind,previous,target]),
-            json.dumps(legacy),reason)
     for row in facts:
         if row[column]==previous:
             conn.execute('INSERT INTO discovery_impressions(view_id,'+column+',shown_at) VALUES (?,?,?) '
@@ -246,7 +238,6 @@ def merge_origins(conn, column, previous, target, *, reason):
     if column not in ('artist_id','album_id','genre_key'):
         raise ValueError('Unsupported discovery origin identity')
     for old in conn.execute('SELECT * FROM discovery_origins WHERE '+column+'=?',(previous,)).fetchall():
-        legacy_evidence.retain(conn,'discovery_origin_merge',json.dumps([old['id'],target]),json.dumps(dict(old)),reason)
         current = conn.execute('SELECT id FROM discovery_origins WHERE kind=? AND '+column+'=?',
             (old['kind'],target)).fetchone()
         if current is None:
@@ -257,11 +248,8 @@ def merge_origins(conn, column, previous, target, *, reason):
         oid = current[0]
         sources = conn.execute('SELECT * FROM discovery_sources WHERE origin_id=?',(old['id'],)).fetchall()
         for row in sources:
-            legacy_evidence.retain(conn,'discovery_source_origin_merge',json.dumps([row['id'],oid]),json.dumps(dict(row)),reason)
             retain(conn,row['recording_id'],oid,row['input_video_id'],row['last_found_at'],first_found_at=row['first_found_at'])
         for row in conn.execute('SELECT * FROM discovery_artist_sources WHERE origin_id=?',(old['id'],)).fetchall():
-            legacy_evidence.retain(conn,'discovery_artist_origin_merge',json.dumps([row['artist_id'],old['id'],oid]),
-                json.dumps(dict(row)),reason)
             retain_artist(conn,row['artist_id'],oid,row['score'])
             invalidate_explanation(conn,row['artist_id'])
         conn.execute('DELETE FROM discovery_sources WHERE origin_id=?',(old['id'],))
@@ -272,8 +260,6 @@ def merge_origins(conn, column, previous, target, *, reason):
 def reconcile_artist_sources(conn, previous, target, *, reason='canonical artist reconciliation'):
     for row in conn.execute('SELECT * FROM discovery_artist_sources WHERE artist_id IN (?,?)',
                             (previous,target)).fetchall():
-        legacy_evidence.retain(conn,'discovery_artist_source_merge',json.dumps([previous,target,row['artist_id'],row['origin_id']]),
-            json.dumps(dict(row)),reason)
         if row['artist_id']==previous:
             retain_artist(conn,target,row['origin_id'],row['score'])
     conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?',(previous,))
@@ -291,12 +277,6 @@ def reconcile_artist(conn, previous, target, *, source):
         rows = [dict(r) for r in conn.execute('SELECT * FROM '+table+' WHERE artist_id IN (?,?)',(previous,target))]
         if not rows:
             continue
-        for row in rows:
-            captured = dict(row)
-            if table=='discovered_artists':
-                captured['explanation'] = explanation(conn,row)
-            legacy_evidence.retain(conn,'artist_reconcile:'+table,json.dumps([previous,target,row['artist_id']]),
-                json.dumps(captured),source)
         winner = max(rows,key=lambda r:(r[clock] if r[clock] is not None else float('-inf'),r['artist_id']==target))
         if table=='discovered_artists':
             starts = [r['found_at'] for r in rows if r['found_at'] is not None]
@@ -345,12 +325,6 @@ def finish_reassociation(conn, video_id, previous, target, member, remaining, no
             'ON CONFLICT(recording_id) DO UPDATE SET found_at=min(coalesce(found_at,excluded.found_at),coalesce(excluded.found_at,found_at))',
             (target,entry,member['found_at']))
     for row in sources:
-        collision = conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? AND origin_id=? AND input_video_id IS ?',
-            (target,row['origin_id'],row['input_video_id'])).fetchone()
-        for captured in (row,collision):
-            if captured is not None:
-                legacy_evidence.retain(conn,'discovery_reassociation',json.dumps([association_id,captured['id']]),
-                    json.dumps(dict(captured)),'exact upload reassociation; retained source contribution')
         retain(conn,target,row['origin_id'],row['input_video_id'],row['last_found_at'],first_found_at=row['first_found_at'])
         conn.execute('DELETE FROM discovery_sources WHERE id=?',(row['id'],))
     if remaining is None:

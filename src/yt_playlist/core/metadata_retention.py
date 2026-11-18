@@ -9,9 +9,13 @@ from . import metadata_runtime
 RETIRED = frozenset(('metadata_deliveries', 'metadata_observations', 'metadata_legacy_records',
     'metadata_capture_heads', 'recording_metadata_selections', 'entry_metadata_selections', 'metadata_choice_heads',
     'metadata_conflicts', 'metadata_conflict_candidates', 'metadata_hints', 'provider_attempts', 'provider_attempt_fields',
-    'provider_state_fields', 'native_metadata_observations', 'musical_source_observations'))
+    'provider_state_fields', 'provider_attempt_credits', 'provider_state_credits',
+    'native_metadata_observations', 'musical_source_observations'))
 NULLS = {'artist_credit_observations': frozenset(('metadata_delivery_id',)),
-         'recording_identifiers': frozenset(('delivery_id', 'observation_id'))}
+         'recording_identifiers': frozenset(('delivery_id', 'observation_id')),
+         # The reservation still owns its ID, bytes and pending/ready status.
+         # Only its nullable link to retired installed history is released.
+         'delivery_file_writes': frozenset(('delivery_id',))}
 
 
 def plan(conn):

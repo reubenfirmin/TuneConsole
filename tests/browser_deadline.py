@@ -41,6 +41,9 @@ def supervise_journey(request, browser_name, report, *, seconds=120):
                '-o', 'faulthandler_timeout=90',
                '--junitxml=' + str(report / 'worker.xml'),
                '--output=' + str(report / 'playwright'), '--tracing=retain-on-failure']
+    channel = request.config.getoption('browser_channel')
+    if channel:
+        command.append('--browser-channel=' + channel)
     environment = child_environment()
     environment[WORKER] = node
     # All diagnostics live outside pytest's disposable fixture directories.

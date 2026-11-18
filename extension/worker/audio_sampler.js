@@ -1,10 +1,16 @@
-// Scheduling follows normal playback. Missed points use the next available excerpt.
+// A timing heuristic, independent of Vibe scoring. A missed point stays missed;
+// delayed captures must not masquerade as observations of distant song sections.
+const EXCERPT_SECONDS = 10;
 function samplingPoints(duration) {
   const points = [{key: 'thirty', seconds: 30, label: '30 seconds'}];
   if (Number.isFinite(duration) && duration > 0) points.push(
     {key: 'middle', seconds: duration / 2, label: 'Halfway'},
     {key: 'two_thirds', seconds: duration * 2 / 3, label: 'Two-thirds'});
-  return points.sort((a, b) => a.seconds - b.seconds);
+  return points.sort((a, b) => a.seconds - b.seconds).reduce((selected, point) => {
+    if (point.seconds >= 30 && (!selected.length
+        || point.seconds - selected.at(-1).seconds >= EXCERPT_SECONDS)) selected.push(point);
+    return selected;
+  }, []);
 }
 
 class AudioVibeSampler {
@@ -66,10 +72,15 @@ class AudioVibeSampler {
     this.run.retry_after ||= {};
     for (const point of points) {
       const previous = this.run.points[point.key];
-      if (['saved', 'too_short'].includes(previous)) continue;
+      if (['saved', 'too_short', 'missed'].includes(previous)) continue;
       if (['saving', 'waiting', 'capturing', 'analysing'].includes(previous)) return;
-      if (this.run.duration && Math.max(point.seconds, position) + 10 > this.run.duration + .1) {
+      if (this.run.duration && Math.max(point.seconds, position) + EXCERPT_SECONDS > this.run.duration + .1) {
         this.run.points[point.key] = 'too_short'; this.persist(); continue;
+      }
+      // One excerpt's duration is a bounded capture window, not a claim about
+      // an optimal musical schedule. Future nominal points retain their clocks.
+      if (position > point.seconds + EXCERPT_SECONDS) {
+        this.run.points[point.key] = 'missed'; this.persist(); continue;
       }
       if (position < point.seconds && !this.session.schedule) continue;
       // Retry the earlier failed excerpt before reserving the source for a
@@ -100,9 +111,21 @@ class AudioVibeSampler {
     const capture = this.active;
     this.active = null;
     if (!capture || value.observed_playback.video_id !== capture.run.video_id) return;
+    const sample = sampleMetadata(value, capture);
+    const start = sample.position_seconds, seconds = sample.analysed_seconds;
+    const previous = Object.values(capture.run.excerpts || {});
+    if (!Number.isFinite(start) || !Number.isFinite(seconds) || seconds <= 0
+        || start < capture.point.seconds || start > capture.point.seconds + EXCERPT_SECONDS
+        || previous.some(row => start < row.position_seconds + row.analysed_seconds
+          && start + seconds > row.position_seconds)) {
+      capture.run.points[capture.point.key] = 'missed';
+      this.persist(); return;
+    }
+    capture.run.excerpts ||= {};
+    capture.run.excerpts[capture.point.key] = {position_seconds: start, analysed_seconds: seconds};
     capture.run.points[capture.point.key] = 'saving';
     this.persist();
-    this.result(sampleMetadata(value, capture));
+    this.result(sample);
   }
 }
 

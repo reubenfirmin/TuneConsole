@@ -36,7 +36,7 @@ def playback_routes(monkeypatch, home_page_bytecode):
     monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
-@pytest.mark.parametrize('playback_library', [93], indirect=True)
+@pytest.mark.parametrize('playback_library', [107], indirect=True)
 @pytest.mark.parametrize('failure', [None, 'original_moved', 'reopening', 'repositories'])
 def test_queued_play_survives_install_or_rollback(playback_library, playback_routes, monkeypatch, failure):
     # Historical admission is below this cutover workflow. Actual close/reopen,

@@ -19,7 +19,9 @@ def recipes():
     files = create_autospec(PlaylistFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
     repo.document_owner.return_value = {'native': True, 'scope': 'TV', 'id': 8}
-    files.publish.return_value = ('file', 'digest', 12)
+    repo.reserve_file.side_effect = [41, 42]
+    files.describe.return_value = ('digest', 12)
+    files.publish_reserved.return_value = ('file', 'digest', 12)
     return PlaylistRecipes(repo, files, nullcontext)
 
 
@@ -47,17 +49,20 @@ def test_catalog_rekey_preserves_future_document_formats(recipes):
     recipes.set_recipe.assert_not_called()
 
 
-def test_recipe_and_append_files_exist_before_sql_publication(recipes):
+def test_recipe_and_append_file_records_commit_before_writes_and_selection(recipes):
     recipes.repository.append_owner.return_value = {'id': 9, 'prior': None}
     checkpoint = {'request_id': 'request', 'state': 'pending', 'at': 10,
                   'before': ['one', 'one'], 'additions': [{'video_id': 'two'}], 'items': []}
     value = {'media': 'video', 'facets': {'genres': ['house', 'house'], 'eras': ['2010']},
              'tv_stream': 'stream', 'tv_refill': checkpoint}
     order = Mock()
-    order.attach_mock(recipes.files.publish, 'file')
+    order.attach_mock(recipes.repository.reserve_file, 'reserve')
+    order.attach_mock(recipes.files.publish_reserved, 'file')
     order.attach_mock(recipes.repository.publish_recipe, 'sql')
     recipes.set_recipe('TV', value, 10)
-    assert [call[0] for call in order.mock_calls] == ['file', 'file', 'sql']
+    assert [call[0] for call in order.mock_calls] == ['reserve', 'file', 'reserve', 'file', 'sql']
+    assert [call.args[0] for call in recipes.files.publish_reserved.call_args_list] == [41, 42]
+    assert recipes.repository.publish_recipe.call_args.kwargs['file_id'] == 41
     args = recipes.repository.publish_recipe.call_args.args
     assert args[3] == [('genre', 0, 'genre:house', 'house'), ('genre', 1, 'genre:house', 'house'),
                        ('era', 0, 'era:2010', '2010')]
@@ -68,7 +73,8 @@ def test_recipe_and_append_files_exist_before_sql_publication(recipes):
 def test_invalid_recipe_does_not_write_files_or_select_sql_references(recipes, value):
     with pytest.raises(ValueError):
         recipes.set_recipe('TV', value, 10)
-    recipes.files.publish.assert_not_called()
+    recipes.files.publish_reserved.assert_not_called()
+    recipes.repository.reserve_file.assert_not_called()
     recipes.repository.publish_recipe.assert_not_called()
 
 
@@ -76,13 +82,13 @@ def test_completed_append_cannot_become_pending(recipes):
     recipes.repository.append_owner.return_value = {'id': 9, 'prior': {'state': 'complete', 'started_at': 1}}
     with pytest.raises(ValueError, match='completed TV append'):
         recipes.set_recipe('TV', {'tv_stream': 'stream', 'tv_refill': {'request_id': 'request', 'state': 'pending'}})
-    recipes.files.publish.assert_not_called()
+    recipes.files.publish_reserved.assert_not_called()
     recipes.repository.publish_recipe.assert_not_called()
 
 
 def test_second_file_failure_leaves_original_recipe_and_append_selected(recipes):
     recipes.repository.append_owner.return_value = {'id': 9, 'prior': None}
-    recipes.files.publish.side_effect = [('file', 'digest', 12), OSError('full')]
+    recipes.files.publish_reserved.side_effect = [('file', 'digest', 12), OSError('full')]
     with pytest.raises(OSError):
         recipes.set_recipe('TV', {'tv_stream': 'stream', 'tv_refill': {'request_id': 'request', 'state': 'pending'}})
     recipes.repository.publish_recipe.assert_not_called()
@@ -121,7 +127,7 @@ def test_missing_append_intent_is_not_reported_as_a_complete_recipe(recipes):
 
 
 def test_canvas_file_failure_leaves_original_sql_reference(recipes):
-    recipes.files.publish.side_effect = OSError('full')
+    recipes.files.publish_reserved.side_effect = OSError('full')
     with pytest.raises(OSError):
         recipes.set_cluster_canvas('TV', 'verbatim canvas')
     recipes.repository.publish_canvas.assert_not_called()

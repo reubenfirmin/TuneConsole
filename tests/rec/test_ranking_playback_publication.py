@@ -17,7 +17,7 @@ from yt_playlist.core import listening
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (candidate_refresh, discover, home_prepared,
-                             embedding_vectors, measurement, mode_surfaces, surfaces, taste_modes)
+                             embedding_vectors, measurement, mode_inputs, mode_surfaces, surfaces, taste_modes)
 
 
 @pytest.fixture(autouse=True)
@@ -140,7 +140,7 @@ def playback_schema():
 def library(tmp_path, playback_schema, monkeypatch):
     # Policy retirement has its own real maintenance owners in
     # test_policy_storage; it is below this coordination check.
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', completed_rankings)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', completed_rankings)
     monkeypatch.setattr(measurement, 'serving_policy', completed_policy)
     monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: True)
     # Captured preference fingerprints have independent coverage in
@@ -222,7 +222,7 @@ def test_bundle_publication_keeps_one_coherent_generation_during_playback(
                  if account.label == 'Other listener')
     other_evidence = tuple(row for row in evidence(library) if row[0] == other)
     old_heads = library.recommendations.heads()
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
     captured = []
 
     def calculate_while_playing(reader, now, policies):
@@ -234,7 +234,7 @@ def test_bundle_publication_keeps_one_coherent_generation_during_playback(
         captured.append(result[0])
         return result
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate_while_playing)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate_while_playing)
     # Detailed ranker/SQL profiling belongs to the independent real-ranker
     # control, rather than wrapping every cursor in these publication cases.
     started, cpu = time.monotonic(), time.thread_time()
@@ -280,7 +280,7 @@ def test_discovery_publishes_usable_tiles_during_listening_updates(library, monk
 
 @pytest.mark.parametrize('change', ['feedback', 'preferences', 'model', 'schema', 'external-writer'])
 def test_captured_rankings_finish_despite_input_changes_but_preserve_the_schema_boundary(library, monkeypatch, change):
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
     old_heads = library.recommendations.heads()
 
     def superseded(reader, now, policies):
@@ -303,7 +303,7 @@ def test_captured_rankings_finish_despite_input_changes_but_preserve_the_schema_
                 other.execute("UPDATE play_event_calendar SET day='1970-01-03'")
         return result
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', superseded)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', superseded)
     result = mode_surfaces.prepare_bundles(library, 2000)
     if change == 'schema':
         assert result is None
@@ -367,7 +367,7 @@ def test_real_rankers_finish_from_pinned_inputs_while_playback_arrives(ranker_li
             with library.read_snapshot() as snapshot:
                 before = evidence(snapshot.store)
                 policies = measurement.PoolPolicies(snapshot.store, 2000)
-                result, fresh = mode_surfaces._calculate_bundles(snapshot.store, 2000, policies)
+                result, fresh = mode_inputs._calculate_bundles(snapshot.store, 2000, policies)
                 assert evidence(snapshot.store) == before
         finally:
             stopped.set()
@@ -411,7 +411,7 @@ def test_published_rankings_apply_later_explicit_suppression(ranker_library, mon
 
     # Real scoring is owned immediately above; this case owns the real typed
     # publication and render-time verdict against its captured lower result.
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', captured_rankings)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', captured_rankings)
     result = mode_surfaces.prepare_bundles(library, 2000)
     assert result
     assert library.recommendations.head('home')['id'] == library.recommendations.head('fresh')['id']

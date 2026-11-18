@@ -18,8 +18,9 @@ def test_checkpoint_restore_uses_captured_axis_after_new_alias_and_merge(store):
     unresolved = store.conn.execute("SELECT id FROM taste_axes WHERE kind='unresolved_genre' AND value='Previously unresolved'").fetchone()[0]
     store.rec_model.set_weight('genre:synth pop',.7,lo=0,now=2)
     store.rec_model.save_taste_settings(taste_control_state.CHECKPOINT,[],3)
-    store.genres.set_genre_alias('Previously unresolved','drum bass')
-    store.genres.merge_genres('synth pop','drum bass',now=4)
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_alias VALUES ('previously unresolved','Previously unresolved','drum bass','custom')")
+        store.conn.execute("INSERT INTO genre_redirects VALUES ('synth pop','drum bass')")
     store.rec_model.reset_weights()
     assert store.rec_model.restore_taste_settings(taste_control_state.CHECKPOINT,[])
     assert store.conn.execute('SELECT weight FROM rec_weights WHERE axis_id=?',(unresolved,)).fetchone()[0]==.4

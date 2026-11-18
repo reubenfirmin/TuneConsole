@@ -127,7 +127,7 @@ def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, r
     only_provider(store, "musicbrainz")
     started, release = threading.Event(), threading.Event()
 
-    def enrich(title, artist, *, observations=None):
+    def enrich(title, artist, *, observations=None, matcher=None, credits=None):
         started.set()
         assert release.wait(timeout=10)
         return "Rock", "1998", None, [], []
@@ -343,6 +343,24 @@ def test_create_generated_playlist_stores_recipe_and_versions(store):
     r2 = playlist_generated.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
                                             fc, now=2.0, account_id=iid, recipe=recipe)
     assert r2["title"] == "Fresh songs - June 21 2026 #2"          # next version that day
+
+
+def test_create_and_record_logs_the_save_action_only_when_something_was_added(store, monkeypatch):
+    from yt_playlist.rec import measurement
+
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    fc = FakeClient()
+    tracks = [{"video_id": "v0", "title": "S0", "artist": "A"}]
+    fc._catalog.update(remote_catalog(tracks))
+    calls = []
+    monkeypatch.setattr(measurement, "record_action", lambda *a, **k: calls.append((a, k)))
+    result = playlist_generated.create_and_record(store, "Shared command", tracks, fc, 1.0, iid,
+        recipe={"model": "road_trip"})
+    assert result["added"] == 1
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[:3] == (store, "save", 1.0)
+    assert kwargs == {"playlist_id": result["pid"], "event_id": f"generate:{result['new_ytm']}", "generated": True}
 
 
 # --- garbage collection of unplayed generated playlists (daily worker) -------------------------

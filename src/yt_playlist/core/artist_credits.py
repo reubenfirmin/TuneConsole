@@ -54,10 +54,6 @@ class Credit:
         return hashlib.sha256(encoded).hexdigest()
 
 
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_master WHERE name='artist_credits'").fetchone() is not None
-
-
 def normalize_credit(display_credit, structured, source):
     """Validate provider credit text without consulting artist identities."""
     if (not isinstance(display_credit, str) or not isinstance(source, str) or not source
@@ -65,14 +61,15 @@ def normalize_credit(display_credit, structured, source):
         raise ValueError('Invalid ordered artist credit')
     members = []
     for value in structured:
-        if (not isinstance(value, dict) or value.keys() - {'name', 'id', 'browseId', 'role'}
+        if (not isinstance(value, dict) or value.keys() - {'name', 'id', 'browseId', 'role', 'provider'}
                 or not isinstance(value.get('name'), str) or not value['name']
                 or any(value.get(key) is not None and not isinstance(value[key], str)
-                       for key in ('id', 'browseId', 'role'))):
+                       for key in ('id', 'browseId', 'role', 'provider'))
+                or 'provider' in value and not value['provider']):
             raise ValueError('Unsupported structured artist credit; original evidence retained')
         provider_id = value.get('id') or value.get('browseId')
         # v21 captured YouTube browse IDs under the literal-credit source label.
-        provider = ('youtube' if source == 'legacy_literal' else source) if provider_id else None
+        provider = (value.get('provider') or ('youtube' if source == 'legacy_literal' else source)) if provider_id else None
         members.append(Member(None, value['name'], provider, value.get('id'), value.get('browseId'),
                               value.get('role'), sum(1 << i for i, k in enumerate(('id', 'browseId', 'role')) if k in value)))
     result = Credit(display_credit, tuple(members))
@@ -167,8 +164,7 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
             (not isinstance(delivery_key, str) or not delivery_key or len(delivery_key.encode()) > 4096)):
         raise ValueError('Invalid artist credit source delivery')
     from . import credit_retention
-    receipts = credit_retention.available(conn)
-    if delivery_key is not None and receipts:
+    if delivery_key is not None:
         replay = conn.execute('SELECT observation_id,credit_id,metadata_bound FROM artist_credit_replays '
             'WHERE entry_id=? AND source=? AND delivery_key=?', (entry_id, source, delivery_key)).fetchone()
         if replay:
@@ -201,7 +197,7 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
     else:
         old = head if head and head['credit_id'] == credit_id else None
     if old:
-        if delivery_key is not None and receipts:
+        if delivery_key is not None:
             observation = conn.execute('SELECT * FROM artist_credit_observations WHERE id=?', (old['id'],)).fetchone()
             credit_retention.prepare_receipt(conn, observation)
         conn.execute('UPDATE artist_credit_observations SET '
@@ -223,7 +219,7 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
     conn.execute('INSERT INTO artist_credit_capture_heads(entry_id,source,observation_id) VALUES (?,?,?) '
         'ON CONFLICT(entry_id,source) DO UPDATE SET observation_id=excluded.observation_id',
         (entry_id, source, observation))
-    if delivery_key is not None and receipts:
+    if delivery_key is not None:
         credit_retention.receipt(conn, entry_id, source, delivery_key, observation, credit_id,
                                  metadata_bound=metadata_delivery_id is not None)
     return observation, True
@@ -233,8 +229,7 @@ def select(conn, entry_id, observation_id):
     row = conn.execute('SELECT credit_id,source FROM artist_credit_observations WHERE id=? AND entry_id=?',
                        (observation_id, entry_id)).fetchone()
     if row is None:
-        from . import credit_retention
-        if credit_retention.available(conn) and conn.execute(
+        if conn.execute(
                 'SELECT 1 FROM artist_credit_replays WHERE observation_id=? AND entry_id=?',
                 (observation_id, entry_id)).fetchone():
             raise ValueError('Artist credit capture expired; refresh the selection')
@@ -249,30 +244,24 @@ def select(conn, entry_id, observation_id):
         'WHERE observation_id<>excluded.observation_id', (entry_id, observation_id))
 
 
-def projection_table(conn):
-    """Current owner, with explicit support for isolated pre-cutover adapters."""
-    return ('entry_artists' if conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='entry_artists'")
-            .fetchone() else 'track_artists')
-
-
 def update_projection(conn, entry_id, desired):
     """Write only changed ordered membership; unchanged ingest fires no artist triggers."""
     existing = {row['position']: tuple(row) for row in conn.execute(
-        f'SELECT position,artist_id,credit,source FROM {projection_table(conn)} WHERE entry_id=? ORDER BY position', (entry_id,))}
+        'SELECT position,artist_id,credit,source FROM entry_artists WHERE entry_id=? ORDER BY position', (entry_id,))}
     for value in desired:
         if existing.get(value[0]) != value:
-            conn.execute(f'INSERT INTO {projection_table(conn)}(entry_id,position,artist_id,credit,source) VALUES (?,?,?,?,?) '
+            conn.execute('INSERT INTO entry_artists(entry_id,position,artist_id,credit,source) VALUES (?,?,?,?,?) '
                 'ON CONFLICT(entry_id,position) DO UPDATE SET artist_id=excluded.artist_id,'
                 'credit=excluded.credit,source=excluded.source', (entry_id, *value))
     if any(position >= len(desired) for position in existing):
-        conn.execute(f'DELETE FROM {projection_table(conn)} WHERE entry_id=? AND position>=?', (entry_id, len(desired)))
+        conn.execute('DELETE FROM entry_artists WHERE entry_id=? AND position>=?', (entry_id, len(desired)))
 
 
 def reconcile_current(conn, previous, target, source, now):
     """Rebind current projections while retaining immutable retired identities."""
     after = None
     while True:
-        rows = conn.execute(f'SELECT DISTINCT entry_id FROM {projection_table(conn)} '
+        rows = conn.execute('SELECT DISTINCT entry_id FROM entry_artists '
             'WHERE artist_id=?' + (' AND entry_id>?' if after is not None else '') +
             ' ORDER BY entry_id LIMIT 128', (previous, *((after,) if after is not None else ()))).fetchall()
         if not rows:
@@ -291,7 +280,7 @@ def reconcile_current(conn, previous, target, source, now):
                 delivery_key=f'redirect:{previous}:{target}:{selected[0]}', kind='identity_reconciliation')
             # Account reconciliation does not turn the provider's original
             # current-source label into the reconciliation mechanism's label.
-            current = conn.execute(f'SELECT position,artist_id,credit,source FROM {projection_table(conn)} '
+            current = conn.execute('SELECT position,artist_id,credit,source FROM entry_artists '
                                    'WHERE entry_id=? ORDER BY position', (entry,)).fetchall()
             update_projection(conn, entry, [(p, target if a == previous else a, c, s) for p, a, c, s in current])
             conn.execute('UPDATE entry_artist_selections SET observation_id=? WHERE entry_id=?', (observation, entry))

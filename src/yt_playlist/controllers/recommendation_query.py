@@ -85,7 +85,14 @@ class RecommendationQuery:
                                if (era := decade(row['mb_year'], as_str=True)) is not None), 1))
 
     def library_songs(self):
-        return self.repository.library_songs(maximum_duration=self.eligibility.maximum_duration())
+        return self._credited(self.repository.library_songs(maximum_duration=self.eligibility.maximum_duration()))
+
+    def _credited(self, rows):
+        pairs = list(rows.items()) if isinstance(rows, dict) else [(row['key'], row) for row in rows]
+        identities = self.artists.track_keys(keys=[key for key, _ in pairs])
+        for key, row in pairs:
+            row['artist_ids'] = sorted(identities.get(key, ()))
+        return rows
 
     def key_for_video(self, video_id):
         return self.repository.key_for_video(video_id)
@@ -101,6 +108,9 @@ class RecommendationQuery:
 
     def track_artists(self, keys):
         return self.repository.track_artists(keys)
+
+    def artist_memberships(self, keys):
+        return self.artists.track_keys(keys=keys)
 
     def track_popularity(self, keys):
         return self.repository.track_popularity(keys)
@@ -131,10 +141,10 @@ class RecommendationQuery:
         return self.repository.track_audio_features()
 
     def tracks_by_keys(self, keys):
-        return self.repository.tracks_by_keys(keys)
+        return self._credited(self.repository.tracks_by_keys(keys))
 
     def group_candidates(self, keys):
-        return self.repository.group_candidates(keys)
+        return self._credited(self.repository.group_candidates(keys))
 
     def top_played_keys(self, limit=10):
         return self.repository.top_played_keys(limit)

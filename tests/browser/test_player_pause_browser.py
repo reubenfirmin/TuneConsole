@@ -12,12 +12,15 @@ from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 @pytest.mark.parametrize("path", ["/", "/artists"])
 @pytest.mark.parametrize("width", [1280])
 def test_pause_resume_reaches_global_player(live_app, page, path, width):
+    from tests.browser.welcome_support import dismiss_welcome
     page.set_viewport_size({"width": width, "height": 900})
     with connect(live_app.replace("http://", "ws://") + "/bridge/ws",
                  origin=EXTENSION_ORIGIN, open_timeout=5) as extension:
         extension.send(json.dumps({"type": "play", "videoId": "v_pause", "title": "Pause test",
                                    "artist": "Player artist", "paused": False}))
         page.goto(live_app + path)
+        if path == '/':
+            dismiss_welcome(page)
         widget = page.locator(".global-now-playing")
         equalizer = widget.locator(".hs-eq")
         expect(widget).to_be_visible()

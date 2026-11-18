@@ -114,12 +114,7 @@ def publication_preparation_input(request, monkeypatch):
 
 
 def _publication_preparation_input(store, monkeypatch):
-    if (hasattr(store, '_fixture_installed_template')
-            or hasattr(store, '_fixture_numbered_input_version')):
-        from yt_playlist.core.preparation import listening_subjects, rows
-
-        monkeypatch.setattr(rows, 'validate_version', lambda *args, **kwargs: None)
-        monkeypatch.setattr(listening_subjects, 'validate_version', lambda *args, **kwargs: None)
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
 
 
 def mock_preparation_schema(monkeypatch, job, conn):
@@ -380,42 +375,23 @@ def _numbered_input(version, tmp_path, monkeypatch, *, snapshot_guards=False):
 
 
 
-def install_numbered_input(conn, version, *, regular_owners=()):
+def install_numbered_input(conn, version, *, regular_owners=None):
     """Completed numbered SQL below an upgrade or publication test boundary.
 
     Real migration runners still own the edge under test. This supplies their
     exact empty predecessor contract without replaying every earlier conversion.
     Callers choose their genre vocabulary and any completed regular owners.
     """
-    from yt_playlist.core import genre_identity, schema_admission, schema_definition
-    from yt_playlist.core.migrations import registry
-    from yt_playlist.core.migrations.runner import Context
+    from yt_playlist.core import schema_definition
+    from yt_playlist.core.migrations import registry, regular
 
+    assert version == 107, 'Pre-release schemas are reset rather than converted'
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
     with conn:
         conn.execute('BEGIN')
-        # The assembled v86 contract deliberately admits optional v80-v85
-        # owners. A publication predecessor needs their actual absence before
-        # takeover, so start at v79 and apply only those small historical edges.
-        base_version = 79 if 79 <= version < 86 else version
-        statements = (schema_admission.reference()['statements'] if base_version == 79
-                      else schema_definition.statements(version=version))
-        for sql in statements:
-            conn.execute(sql)
-        conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-                         [(item.version, item.name) for item in registry.MIGRATIONS[:base_version]])
-        conn.executemany('INSERT INTO settings VALUES (?,?)', schema_definition.SEED_SETTINGS.items())
-        for sql in schema_definition.INITIAL_STATE:
-            conn.execute(sql)
-        genre_identity.seed_catalog(conn)
-        for migration in registry.MIGRATIONS[base_version:version]:
-            with schema_definition.migration_definitions(migration.version):
-                migration.apply(conn, Context(1.))
-            conn.execute('INSERT INTO schema_migrations VALUES (?,?,1)',
-                         (migration.version, migration.name))
-        if regular_owners:
-            install_regular_input(conn, regular_owners)
+        schema_definition.bootstrap(conn, registry.MIGRATIONS, 1.)
+        install_regular_input(conn, regular.CHANGES if regular_owners is None else regular_owners)
 
 
 def install_regular_input(conn, changes):
@@ -460,11 +436,11 @@ def mock_snapshot_coordinator(store, monkeypatch):
                 if (store.conn.execute('PRAGMA main.schema_version').fetchone()[0] != schema
                         or store.conn.execute('PRAGMA data_version').fetchone()[0] != version):
                     return False
-                if not allow_stale_tables:
-                    return store.conn.total_changes == changes
+                # File admission reserves output paths without changing any
+                # consumed catalog facts, as in the real guarded snapshots.
                 return not any(revision > changes for (table, _), revision
                                in store._snapshot_revisions.capture().items()
-                               if table not in allow_stale_tables)
+                               if table not in allow_stale_tables | {'recommendation_file_writes'})
 
             return nullcontext(SimpleNamespace(
                 store=reader, release_reader=lambda: None, publish=publish,

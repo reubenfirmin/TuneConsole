@@ -9,7 +9,6 @@ import json
 
 import numpy as np
 
-from yt_playlist.core import entity_names, mode_retention
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
 
@@ -39,13 +38,11 @@ class ModesRepo(Repo):
 
     @snapshot_read
     def list_modes(self, active_only=True) -> list[dict]:
-        retired = mode_retention.available(self.conn)
         sql = ("SELECT m.*,r.mode_id IS NOT NULL AS payload_retired FROM taste_modes m "
-               "LEFT JOIN taste_mode_retired_payloads r ON r.mode_id=m.mode_id" if retired else
-               "SELECT *,0 AS payload_retired FROM taste_modes")
+               "LEFT JOIN taste_mode_retired_payloads r ON r.mode_id=m.mode_id")
         if active_only:
             sql += " WHERE active=1"
-        sql += " ORDER BY size DESC, " + ("m.mode_id" if retired else "mode_id") + " ASC"
+        sql += " ORDER BY size DESC, m.mode_id ASC"
         out = []
         for r in self.conn.execute(sql).fetchall():
             out.append({
@@ -73,8 +70,7 @@ class ModesRepo(Repo):
     @synchronized
     def next_mode_id(self) -> int:
         row = self.conn.execute("SELECT MAX(mode_id) m FROM taste_modes").fetchone()
-        high_water = (self.conn.execute('SELECT high_water FROM taste_mode_retention WHERE id=1').fetchone()[0]
-                      if mode_retention.available(self.conn) else 0)
+        high_water = self.conn.execute('SELECT high_water FROM taste_mode_retention WHERE id=1').fetchone()[0]
         return max(row["m"] or 0, high_water) + 1
 
     @synchronized
@@ -172,9 +168,8 @@ class ModesRepo(Repo):
             # A historical caller may only retain the local handle. Keep its context
             # unknown; allocating future memberships must never reuse that handle.
             self.conn.execute('INSERT OR IGNORE INTO main.playlist_membership_refs(id) VALUES (?)',(int(membership_ref_id),))
-            picks = entity_names.owner(self.conn, 'rec_mode_picks')
             self.conn.execute(
-                f'INSERT OR IGNORE INTO {picks.table}({picks.column("membership_ref_id")}, mode_id, ranker, created_at) '
+                'INSERT OR IGNORE INTO rec_mode_picks(membership_ref_id, mode_id, ranker, created_at) '
                 "VALUES (?, ?, ?, ?)", (int(membership_ref_id), int(mode_id), ranker, float(now)))
 
     @lookup_read

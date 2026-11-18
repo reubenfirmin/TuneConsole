@@ -54,19 +54,20 @@ def other_album(store, title):
 def access_boundary(monkeypatch):
     monkeypatch.setattr(deepseek, '_iao', DeepSeekIAO())
     monkeypatch.setattr(deepseek._iao, 'pacer', SimpleNamespace(wait=lambda: None))
-    monkeypatch.setattr(deepseek._iao, '_request', lambda *args, **kwargs: {})
+    monkeypatch.setattr(deepseek._iao, '_request', lambda *args, **kwargs: {
+        'model': deepseek.MODEL, 'choices': [{'finish_reason': 'stop', 'message': {
+            'content': json.dumps({'description': None, 'confidence': 'low'})}}]})
 
 
 @pytest.fixture
 def description_provider(monkeypatch):
-    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'secret-key')
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'secret-key')
     calls = []
-    def describe(album, send):
+    def describe(album, document, usage):
         calls.append(album)
-        send({'controlled_album': album['browse_id']})
         return {'description': 'Persistent album copy.', 'confidence': 'moderate', 'uncertainty': '',
                 'model': deepseek.MODEL, 'prompt_version': 1, 'usage': {'total_tokens': 319}}
-    monkeypatch.setattr(deepseek, 'describe', describe)
+    monkeypatch.setattr(deepseek, 'project_description', describe)
     return calls
 
 
@@ -87,7 +88,7 @@ def test_refresh_alternate_id_disable_and_key_change_reuse_paid_copy(store, gene
     assert store.album_descriptions.album_id(other) == store.album_descriptions.album_id(ALBUM)
     assert copy.get(store, other, 200)[0] == description
     store.settings.set_setting('deepseek_album_descriptions_enabled', '0')
-    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'replacement-secret')
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'replacement-secret')
     assert copy.get(store, other, 999999)[0] == description
     assert copy.read(store, other) == description
     assert len(generated) == 1
@@ -123,17 +124,16 @@ def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_
     path = store._db_path
     own_album(store)
     store.settings.set_setting('deepseek_daily_limit', '1')
-    def fail(album, send):
-        send({'controlled_album': album['browse_id']})
+    def fail(album, document, usage):
         raise deepseek.DescriptionUnavailable('unavailable')
-    monkeypatch.setattr(deepseek, 'describe', fail)
+    monkeypatch.setattr(deepseek, 'project_description', fail)
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'unavailable'
     store.conn.close()
     store = Store(path)
     try:
         store.conn.execute('PRAGMA synchronous=OFF')
         store.init_schema()
-        monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'another-key')
+        monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'another-key')
         store.album_notes.wake(200)
         deferred = copy.get(store, other_album(store, 'Another release'), 200)[1]
         assert deferred == {'status': 'daily_limit', 'retry_at': 86400}
@@ -189,26 +189,24 @@ def test_reservation_uses_current_clock_after_earlier_worker_work(store, generat
 
 
 def test_auth_failure_stops_all_albums_until_key_changes(store, generated, monkeypatch):
-    def rejected(album, send):
+    def rejected(album, document, usage):
         generated.append('rejected')
-        send({'controlled_album': album['browse_id']})
         raise deepseek.DescriptionUnavailable('auth')
-    monkeypatch.setattr(deepseek, 'describe', rejected)
+    monkeypatch.setattr(deepseek, 'project_description', rejected)
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'auth'
     assert copy.get(store, other_album(store, 'Another album'), 200000)[1]['status'] == 'auth'
     assert len(generated) == 1
-    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'a-fixed-key')
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: 'a-fixed-key')
     assert copy.get(store, ALBUM, 102)[1]['status'] == 'auth'
     assert len(generated) == 2  # A new credential can retry the same failed record immediately.
 
 
 @pytest.mark.parametrize('reason,delay', [('rate_limit', 3600), ('balance', 86400), ('unavailable', 900)])
 def test_provider_failure_backs_off_across_different_albums(store, generated, monkeypatch, reason, delay):
-    def fail(album, send):
+    def fail(album, document, usage):
         generated.append(reason)
-        send({'controlled_album': album['browse_id']})
         raise deepseek.DescriptionUnavailable(reason)
-    monkeypatch.setattr(deepseek, 'describe', fail)
+    monkeypatch.setattr(deepseek, 'project_description', fail)
     copy.get(store, ALBUM, 100)
     assert copy.get(store, other_album(store, 'Other record'), 100 + delay - 1)[1]['status'] == reason
     assert len(generated) == 1
@@ -222,11 +220,10 @@ def test_provider_failure_backs_off_across_different_albums(store, generated, mo
 
 
 def test_unknown_record_has_negative_cache_without_blocking_other_records(store, generated, monkeypatch):
-    def unknown(album, send):
+    def unknown(album, document, usage):
         generated.append('unknown')
-        send({'controlled_album': album['browse_id']})
         return {'description': None, 'model': deepseek.MODEL, 'confidence': 'low', 'usage': {}}
-    monkeypatch.setattr(deepseek, 'describe', unknown)
+    monkeypatch.setattr(deepseek, 'project_description', unknown)
     assert copy.get(store, ALBUM, 100)[0] is None
     assert copy.get(store, ALBUM, 101)[1]['retry_at'] == 100 + 7 * 86400
     assert len(generated) == 1
@@ -240,7 +237,7 @@ def test_disabled_missing_key_or_zero_limit_never_requests_provider(store, gener
     store.settings.set_setting('deepseek_album_descriptions_enabled', '1')
     store.settings.set_setting('deepseek_daily_limit', '0')
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'paused'
-    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: None)
+    monkeypatch.setattr(deepseek, 'api_key', lambda *args: None)
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'not_configured'
     assert generated == []
     assert store.album_descriptions.requests_today(100) == 0
@@ -252,7 +249,7 @@ def test_usage_and_generated_records_do_not_contain_credentials(store, generated
     from yt_playlist.core import album_description_files, fao
     rows = [tuple(row) for row in store.conn.execute('SELECT * FROM album_description_requests')]
     files = [fao.read(path).bytes.decode('utf-8')
-             for path in album_description_files.directory(store.conn).glob('*/*.json')]
+             for path in album_description_files.directory(store.conn).rglob('*.json')]
     assert rows and files
     assert 'secret-key' not in json.dumps(rows + files)
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface LIKE 'album_description%'").fetchone()

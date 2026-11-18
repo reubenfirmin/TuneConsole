@@ -45,8 +45,15 @@ def choice_evidence(store, now=None):
     until = math.nextafter(now, math.inf) if now is not None else None
     offered = store.modes.impression_counts(since, before=until)
     picked = store.modes.pick_counts(since, before=until)
+    modes = store.modes.list_modes(active_only=True)
+    window = rec_params.get_param(store, 'bandit_window_d') if now is not None else None
+    return evidence_from_counts(modes, offered, picked, window_days=window)
+
+
+def evidence_from_counts(modes, offered, picked, *, window_days):
+    """Stable posterior/report projection over detached mode and event counts."""
     rows = []
-    for color, mode in enumerate(store.modes.list_modes(active_only=True)):
+    for color, mode in enumerate(modes):
         mid = mode["mode_id"]
         offers, picks = offered.get(mid, 0), picked.get(mid, 0)
         # The sampler ignores orphan picks until an impression exists for that mode.
@@ -60,7 +67,7 @@ def choice_evidence(store, now=None):
     strongest = sorted((r for r in rows if r["picked"] and r["offered"]),
                        key=lambda r: (-r["low"], r["mode_id"]))[:3]
     return {"rows": rows, "strongest": strongest, "contrast": _choice_contrast(rows, strongest),
-            "window_days": rec_params.get_param(store, "bandit_window_d") if now is not None else None,
+            "window_days": window_days,
             "offered": sum(r["offered"] for r in rows),
             "picked": sum(r["picked"] for r in rows)}
 

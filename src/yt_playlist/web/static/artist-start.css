@@ -5,6 +5,14 @@
 .artist-start-intro { color: var(--dim); margin: 0 0 24px; font-size: 1rem; max-width: 680px; }
 .artist-start-search { display: flex; align-items: center; gap: 16px; max-width: 740px; border: 2px solid var(--border-strong); background: var(--surface-card); border-radius: 12px; padding: 0 20px; }
 .artist-start-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.artist-start-search-open { width: 100%; padding-top: 16px; padding-bottom: 16px; color: var(--dim); font: inherit; font-size: 1.05rem; cursor: pointer; text-align: left; }
+.artist-start-songs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin-top: 24px; }
+.artist-start-song { display: flex; gap: 14px; align-items: center; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.artist-start-song .pl-cover, .artist-start-song .pl-thumb { width: 60px; height: 60px; border-radius: 8px; margin: 0; object-fit: cover; }
+.artist-start-song > span:not(.artist-start-song-saved):not(.pl-cover) { display: grid; gap: 5px; min-width: 0; }
+.artist-start-song strong { overflow-wrap: anywhere; }
+.artist-start-song small { color: var(--dim); }
+.artist-start-song-saved { margin-left: auto; color: var(--accent); font-size: .8rem; white-space: nowrap; }
 .artist-start-search > .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .artist-start-search > svg { flex: none; width: 28px; height: 28px; color: var(--accent-2); }
 .artist-start-search input { border: 0; background: transparent; box-shadow: none; color: var(--text); width: 100%; min-width: 0; padding: 15px 0; font-size: 1.05rem; outline: none; }

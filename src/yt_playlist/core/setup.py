@@ -2,11 +2,9 @@
 bridge pairing now, so this module only validates identities and writes config.toml."""
 import logging
 import json
-import os
-import tempfile
 from contextlib import contextmanager
-from pathlib import Path
 from yt_playlist.core import config
+from yt_playlist.core.config_files import ConfigFiles
 
 logger = logging.getLogger(__name__)
 
@@ -43,41 +41,16 @@ def serialize_config(identities) -> str:
 def prepared_config(identities, config_path):
     """Fully write, flush, parse and validate a candidate beside its atomic publication target."""
     content = serialize_config(identities)
-    path = Path(config_path)
-    staged = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                         prefix=f".{path.name}.", delete=False) as file:
-            staged = Path(file.name)
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
-        configs = config.load_accounts(staged)
+    configs = config.parse_accounts(content)
+    with ConfigFiles().stage(config_path, content.encode('utf-8')) as staged:
         yield staged, configs
-    finally:
-        if staged is not None:
-            staged.unlink(missing_ok=True)
 
 
 def write_config(identities, config_path) -> None:
     with prepared_config(identities, config_path) as (staged, _):
-        os.replace(staged, config_path)
+        ConfigFiles().publish(staged, config_path)
 
 
 def restore_config(content, config_path):
     """Restore an already validated last-good file after a failed multi-resource publication."""
-    path = Path(config_path)
-    if content is None:
-        path.unlink(missing_ok=True)
-        return
-    staged = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as file:
-            staged = Path(file.name)
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(staged, path)
-    finally:
-        if staged is not None:
-            staged.unlink(missing_ok=True)
+    ConfigFiles().restore(content, config_path)

@@ -18,7 +18,11 @@ def build_transition(store):
     """(keys, W, idx): a column-stochastic co-occurrence transition matrix built from the SAME baskets
     the embedding uses. W[:, j] is the distribution of where a walker at track j steps next. Returns
     ([], None, {}) when there are no baskets."""
-    baskets = store.rec_evidence.rec_baskets()
+    return transition_from_baskets(store.rec_evidence.rec_baskets())
+
+
+def transition_from_baskets(baskets):
+    """Build the stochastic graph from detached, eligible training baskets."""
     keys = sorted({k for b in baskets for k in b})
     if not keys:
         return [], None, {}
@@ -83,6 +87,15 @@ def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None, *, snapsh
         tol = float(rec_params.get_param(store, "ppr_tol"))
     if depth is None:
         depth = int(rec_params.get_param(store, "ppr_rank_depth"))
+    return rankings_from_inputs(modes, (keys, W, idx), (lkeys, LV, lidx),
+        alpha=alpha, iters=iters, tol=tol, depth=depth)
+
+
+def rankings_from_inputs(modes, graph, content, *, alpha, iters, tol, depth):
+    keys, W, idx = graph
+    lkeys, LV, _ = content
+    if not modes or W is None or LV is None or not lkeys:
+        return {}
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
     if C.shape[1] != LV.shape[1]:
         # Stale modes: content space rebuilt at a new dim before the mode rebuild re-stacked the

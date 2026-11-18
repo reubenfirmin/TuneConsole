@@ -137,7 +137,7 @@ def test_retry_after_survives_recreation(boundary, store, header, delay):
     recreated = access.WikipediaIAO(now_fn=lambda: b.clock[0],
         open_fn=lambda *a, **kw: pytest.fail('Persisted cooldown was bypassed'),
         pacer=SimpleNamespace(wait=lambda: pytest.fail('Deferred access must not pace')))
-    with recreated.context(store), pytest.raises(IntegrationUnavailable) as pending:
+    with recreated.context(store.enrichment_state), pytest.raises(IntegrationUnavailable) as pending:
         recreated.get_url(summary_url('Other Artist'))
     assert pending.value.retry_at == NOW + delay
 
@@ -332,7 +332,7 @@ def test_album_artwork_retains_last_good_projection_and_honors_vendor_deadline(b
     store.album_notes.publish(album['browse_id'],
         {'editorial_version': 6, 'artwork': old}, NOW - 1)
     monkeypatch.setattr(album_editorial, 'lookup', lambda *a: None)
-    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *a: None)
+    monkeypatch.setattr(deepseek, 'api_key', lambda *a: None)
     monkeypatch.setattr(release_notes, 'fetch',
         lambda *a: {'description': None, 'evidence': [], 'retry': False})
 
@@ -357,7 +357,7 @@ def test_album_stale_raw_photo_remains_pending_after_projection(boundary, store,
     art = wikipedia.fetch_artwork(ARTIST)
     b.clock[0] += access.POSITIVE_TTL
     monkeypatch.setattr(album_editorial, 'lookup', lambda *a: None)
-    monkeypatch.setattr(deepseek._iao, 'api_key', lambda *a: None)
+    monkeypatch.setattr(deepseek, 'api_key', lambda *a: None)
     monkeypatch.setattr(release_notes, 'fetch',
         lambda *a: {'description': None, 'evidence': [], 'retry': False})
     album = {'browse_id': 'raw-photo-album', 'artist': ARTIST, 'title': 'Album'}
@@ -444,7 +444,7 @@ def test_success_cannot_clear_a_newer_persisted_cooldown(boundary, store):
             retry_after=NOW + 500, error='newer process deadline')
         return payload(request)
     b = boundary(fetch)
-    with b.iao.context(store):
+    with b.iao.context(store.enrichment_state):
         assert b.iao.get_url(search_url(ARTIST))['query']['search']
         assert not b.iao.availability().ready(NOW)
     assert store.enrichment_state.integration_cooldown('wikipedia')['retry_at'] == NOW + 500

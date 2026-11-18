@@ -97,18 +97,18 @@ def test_cancelled_output_batch_keeps_only_committed_prefix_and_reuses_durable_f
     previous = publish(store, plan(store, 'previous'))
     prepared = output_plan(store, 'interrupted-files', 35)
     build = store.recommendations.claim(prepared)
-    real_publish = outputs.publish
+    real_publish = store.recommendations.files.publish_reserved
     produced = []
 
-    def interrupted(root, encoded, **kwargs):
+    def interrupted(identity, encoded, **kwargs):
         assert not store._lock.held_by_current_thread and not store.conn.in_transaction
         if len(produced) == 18:
             raise WorkClosing('file publication interrupted')
-        result = real_publish(root, encoded, **kwargs)
+        result = real_publish(identity, encoded, **kwargs)
         produced.append(result)
         return result
 
-    monkeypatch.setattr(outputs, 'publish', interrupted)
+    monkeypatch.setattr(store.recommendations.files, 'publish_reserved', interrupted)
     with pytest.raises(WorkClosing, match='file publication interrupted'):
         store.recommendations.stage(prepared, build)
     committed = manifest(store, build.generation_id)
@@ -117,11 +117,11 @@ def test_cancelled_output_batch_keeps_only_committed_prefix_and_reuses_durable_f
     assert store.recommendations.head('home')['id'] == previous.generation_id
     retried = []
 
-    def resume(root, encoded, **kwargs):
+    def resume(identity, encoded, **kwargs):
         retried.append(encoded)
-        return real_publish(root, encoded, **kwargs)
+        return real_publish(identity, encoded, **kwargs)
 
-    monkeypatch.setattr(outputs, 'publish', resume)
+    monkeypatch.setattr(store.recommendations.files, 'publish_reserved', resume)
     store.recommendations.stage(prepared, build)
     assert retried == [output.encoded for output in prepared.outputs[16:]]
     assert manifest(store, build.generation_id)[:16] == committed
@@ -200,14 +200,14 @@ with schema_inspection.reuse_tables(store.conn):
     store.init_schema()
 prepared = output_plan(store, 'process-exit', 35)
 build = store.recommendations.claim(prepared, owner=sys.argv[2])
-original, produced = outputs.publish, []
+original, produced = store.recommendations.files.publish_reserved, []
 def exit_after_file(*args, **kwargs):
     result = original(*args, **kwargs)
     produced.append(result)
     if len(produced) == 18:
         os._exit(73)
     return result
-outputs.publish = exit_after_file
+store.recommendations.files.publish_reserved = exit_after_file
 store.recommendations.stage(prepared, build)
 raise AssertionError('Expected abrupt process exit')
 ''', str(store._db_path), build.owner], capture_output=True, text=True, timeout=40)
@@ -228,7 +228,7 @@ def test_file_collector_cannot_retire_a_batch_before_its_manifest_commit(file_ba
     store = file_backed_store
     prepared = output_plan(store, 'file-custody', 20)
     build = store.recommendations.claim(prepared)
-    real_publish, published, attempts = outputs.publish, [], []
+    real_publish, published, attempts = store.recommendations.files.publish_reserved, [], []
 
     def collect(root):
         collector = outputs.OrphanCollector(root)
@@ -239,19 +239,19 @@ def test_file_collector_cannot_retire_a_batch_before_its_manifest_commit(file_ba
             collector.close()
 
     with ThreadPoolExecutor(1) as maintenance:
-        def observed(root, encoded, **kwargs):
+        def observed(identity, encoded, **kwargs):
             assert not store._lock.held_by_current_thread and not store.conn.in_transaction
-            result = real_publish(root, encoded, **kwargs)
+            result = real_publish(identity, encoded, **kwargs)
             published.append(result)
             if len(published) == 16:
                 assert manifest(store, build.generation_id) == []
-                progress = maintenance.submit(collect, root).result(3)
+                progress = maintenance.submit(collect, store.recommendations.files.root).result(3)
                 attempts.append(progress)
                 assert progress.blocked and progress.files == 0
                 assert all(Path(filename).is_file() for filename, _, _ in published)
             return result
 
-        monkeypatch.setattr(outputs, 'publish', observed)
+        monkeypatch.setattr(store.recommendations.files, 'publish_reserved', observed)
         store.recommendations.stage(prepared, build)
     assert len(attempts) == 1
     assert len(manifest(store, build.generation_id)) == 20

@@ -2,7 +2,7 @@
 import hashlib
 from uuid import uuid4
 
-from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.controllers.model_health import ModelHealth
 from yt_playlist.rec import embedding_vectors, eval_recs, summary_inputs
 
 SURFACE = 'model_health'
@@ -21,20 +21,20 @@ def input_key(store, now):
 
 
 def prepare(store, now):
-    with store.read_snapshot() as snapshot:
-        reader = snapshot.store
-        stamp = input_key(store, now)
-        holdout = eval_recs.best_holdout(reader)
-        inputs = (embedding_vectors.load_vectors(reader), reader.rec_query.track_content(),
-                  reader.rec_query.track_audio_features())
-        result = {'version': VERSION, 'inputs': stamp, 'built_at': now,
-                  'holdout_days': holdout, 'recall': eval_recs.recall_at_k(reader, k=20),
-                  'proj': eval_recs.projection_recall(reader, k=20, inputs=inputs, max_targets=MAX_TARGETS),
-                  'temporal': eval_recs.rolling_temporal_recall(
-                      reader, holdout_days=holdout, k=20, memory_bytes=MEMORY_BYTES)}
-        check_cancellable_work()
-        return result if snapshot.publish(
-            lambda: store.rec_proposals.put_proposals(SURFACE, result, now)) else None
+    return ModelHealth(snapshot=store.read_snapshot, input_key=lambda at: input_key(store, at),
+        calculate=calculate, reports=store.rec_proposals, surface=SURFACE).prepare(now)
+
+
+def calculate(reader, now, stamp):
+    """Coordinate diagnostic input capture from the controller's coherent reader."""
+    holdout = eval_recs.best_holdout(reader)
+    inputs = (embedding_vectors.load_vectors(reader), reader.rec_query.track_content(),
+              reader.rec_query.track_audio_features())
+    return {'version': VERSION, 'inputs': stamp, 'built_at': now,
+            'holdout_days': holdout, 'recall': eval_recs.recall_at_k(reader, k=20),
+            'proj': eval_recs.projection_recall(reader, k=20, inputs=inputs, max_targets=MAX_TARGETS),
+            'temporal': eval_recs.rolling_temporal_recall(
+                reader, holdout_days=holdout, k=20, memory_bytes=MEMORY_BYTES)}
 
 
 def view(store, now, *, failed=False):

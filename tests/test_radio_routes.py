@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from fastapi.testclient import TestClient
 
-from yt_playlist.library import playlist_generated
+from yt_playlist.library import generated_acquisition
 from yt_playlist.web.routes import radio_session as radio_routes
 from tests.radio_session_support import (
     uncontended_poc as route_poc, completed_radio_schema, completed_radio_store,
@@ -177,9 +177,9 @@ def test_playlist_launch_waits_for_accepted_tracks_when_writer_omits_a_song(poc,
     videos = ["v8", "v5", "v11", "v16"]
     by_video = store.tracks.track_ids_for_videos(videos)
     store.playlists.set_playlist_tracks(pid, [by_video[v] for v in videos])
-    create = playlist_generated.create_generated_playlist
-    monkeypatch.setattr(playlist_generated, "create_generated_playlist", lambda store, title, tracks, *args:
-                        create(store, title, tracks[1:], *args))
+    create = generated_acquisition.create_generated_playlist
+    monkeypatch.setattr(generated_acquisition, "create_generated_playlist", lambda store, title, tracks, *args, **kwargs:
+                        create(store, title, tracks[1:], *args, **kwargs))
     assert c.start(playlist_id=pid)["ok"]
     assert remote.ids == ["v5", "v11", "v16"]
     assert c.session.initial_tracks == []

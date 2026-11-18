@@ -3,14 +3,15 @@ import json
 import uuid
 
 from yt_playlist.rec import paid_description_policy as policy
+from yt_playlist.core.album_description_files import describe
 
 
 class AlbumDescriptions:
-    def __init__(self, repository, read_result, publish_result, publish_policy, *, proposals=None, installed=True):
+    def __init__(self, repository, read_result, publish_result, policies, *, proposals=None, installed=True):
         self.repository = repository
         self.read_result = read_result
         self.publish_result = publish_result
-        self.publish_policy = publish_policy
+        self.policies = policies
         self.proposals = proposals
         self.installed = installed
 
@@ -134,14 +135,15 @@ class AlbumDescriptions:
     def claim_version(self, album_id, version, credential, daily_limit, now, *, configuration=None):
         """Admit an exact policy, including already installed policy versions."""
         policy.validate_admission(album_id, version, credential, daily_limit, now)
-        reference = self.publish_policy(configuration) if configuration is not None else None
+        if configuration is not None:
+            self.policies.publish([(version, json.dumps(configuration), now)])
         with self.repository.transaction():
-            outcome = self._claim(album_id, version, credential, daily_limit, now, reference)
+            outcome = self._claim(album_id, version, credential, daily_limit, now)
         if outcome['status'] == 'cached':
             return {'status': 'cached', 'record': self.result(outcome['request_id'])}
         return outcome
 
-    def _claim(self, album_id, version, credential, daily_limit, now, reference):
+    def _claim(self, album_id, version, credential, daily_limit, now):
         album_id = self.repository.canonical_album(album_id)
         request_id = self.repository.request_for(album_id, version, policy.REQUEST_ORDER)
         row = self.repository.request(request_id) if request_id is not None else None
@@ -164,7 +166,7 @@ class AlbumDescriptions:
         attempt, token = (row['attempt_count'] + 1 if row else 1), uuid.uuid4().hex
         request_id = self.repository.reserve(album_id, version, policy.request_key(album_id, version),
             row['id'] if row else None, attempt, token, credential, now + policy.LEASE_SECONDS,
-            policy.period(now), now, initial_status='pending', claimed_status='claimed', policy_reference=reference)
+            policy.period(now), now, initial_status='pending', claimed_status='claimed')
         return {'status': 'reserved', 'request_id': request_id, 'token': token, 'attempt': attempt}
 
     def authorize(self, request_id, token, credential, daily_limit, now):
@@ -185,7 +187,8 @@ class AlbumDescriptions:
         row = self.repository.request(request_id)
         if not policy.can_finish(row, token, record, tokens):
             return False
-        reference = self.publish_result(raw)
+        file_id = self.repository.reserve_result(request_id, row['attempt_count'], *describe(raw))
+        reference = self.publish_result(file_id, raw)
         with self.repository.transaction():
             row = self.repository.request(request_id)
             if not policy.can_finish(row, token, record, tokens):
@@ -196,5 +199,6 @@ class AlbumDescriptions:
                 decision['access'] = policy.merge_access(access,
                     self.repository.access_state(access['scope'], access['credential']), now)
             self.repository.complete(request_id, row['attempt_count'], token, decision,
-                reference, tokens, policy.period(now), now, model=record['model'] if record['status'] == 'ready' else None)
+                reference, tokens, policy.period(now), now, file_id=file_id,
+                model=record['model'] if record['status'] == 'ready' else None)
         return True

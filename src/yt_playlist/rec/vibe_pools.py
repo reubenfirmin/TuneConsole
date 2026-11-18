@@ -3,7 +3,6 @@
 The existing ranked full-depth pools supply taste scores and eligible catalog
 coverage. Controls only assemble these bounded prepared opportunities.
 """
-from collections import Counter
 from dataclasses import dataclass
 import math
 from types import MappingProxyType
@@ -27,7 +26,8 @@ class _Catalog:
 
     def __post_init__(self):
         object.__setattr__(self, 'groups', tuple(
-            MappingProxyType({key: MappingProxyType(dict(row)) for key, row in group.items()})
+            MappingProxyType({key: MappingProxyType({field: tuple(value) if field == 'artist_ids' else value
+                for field, value in row.items()}) for key, row in group.items()})
             for group in self.groups))
 
     def __deepcopy__(self, memo):
@@ -38,17 +38,13 @@ class _Catalog:
 
 def _reserve(items, limit=POOL_LIMIT):
     """Cap ranked items, reserving room beyond one prolific artist's discography."""
-    artists, result = Counter(), []
+    from yt_playlist.rec.artist_variety import Selection
+    selected = Selection(8, limit, limit=limit)
     for item in items:
         check_cancellable_work()
-        artist = normalize(item.get('artist') or '')
-        if artist and artists[artist] >= 8:
-            continue
-        artists[artist] += 1
-        result.append(item)
-        if len(result) == limit:
+        if selected.add(item):
             break
-    return result
+    return selected.finish()
 
 
 def prepare(store, bundles, now, policies):
@@ -56,7 +52,42 @@ def prepare(store, bundles, now, policies):
     pools = bundles.get('all', {})
     unique = {item['key']: item for mid, bucket in bundles.items() if not mid.startswith('_')
               for items in bucket.values() for item in items if item.get('key')}
+    identities = store.artists.track_keys(keys=unique)
+    for mid, bucket in bundles.items():
+        if not mid.startswith('_'):
+            for lane, items in bucket.items():
+                bucket[lane] = [{**item, 'artist_ids': sorted(identities.get(item['key'], ()))} for item in items]
     profiles = musical_character.load(store, list(unique))
+    labels = {item.get('genre') for mid, bucket in bundles.items() if not mid.startswith('_')
+              for items in bucket.values() for item in items}
+    axes = store.genres.feature_axes(labels)
+    prepare_values(bundles, profiles, axes)
+    for preset, lanes in bundles['_vibes']['pools'].items():
+        for lane, items in lanes.items():
+            lanes[lane] = policies.stamp(items, f'{home_vibe.VERSION}:{preset}:{lane}')
+            families = bundles['_vibes']['genres'][preset][lane]
+            for family, members in families.items():
+                families[family] = policies.stamp(members, f'{home_vibe.VERSION}:{preset}:{lane}:{family}')
+    if bundles.get('_radio'):
+        radio_intensity.prepare(store, bundles['_radio'], profiles, unique)
+    bundles.setdefault('_meta', {})['musical_generation'] = musical_profiles.digest(
+        sorted((key, (profile or {}).get('digest')) for key, profile in profiles.items()))
+    from yt_playlist.rec import mix_tuning, vibe_readiness_index
+    request = store.rec_proposals.get_proposals('home_genre_request') or {}
+    filters = ((request.get('include_genres', ()), request.get('avoid_genres', ()))
+               if mix_tuning.genre_active(store, request) else ((), ()))
+    readiness = vibe_readiness_index.prepare(bundles, include_genres=any(filters), genre_request=filters)
+    readiness['profile_state'] = store.musical_profiles.readiness_fingerprint(
+        item['key'] for item in readiness['tracks'])
+    encoded = json_cache.encode(readiness)
+    bundles['_meta'].pop('vibe_readiness', None)
+    if len(encoded.encode()) <= vibe_readiness_index.MAX_INDEX_BYTES:
+        bundles['_meta']['vibe_readiness'] = encoded
+    return bundles
+
+
+def prepare_values(bundles, profiles, axes):
+    """Build the complete ranked reserves from detached pools and profile values."""
     labels = set()
     for mid, bucket in bundles.items():
         if mid.startswith('_'):
@@ -69,7 +100,6 @@ def prepare(store, bundles, now, policies):
     menus, genre_menus = {}, {}
     # Every preset/lane sees the same taxonomy on this preparation snapshot.
     # A recording can have different provider labels across lanes; resolve them all.
-    axes = store.genres.feature_axes(labels)
     cuts = bundles.get('_meta', {}).get('year_cuts')
     band_pools = {}
     if cuts:
@@ -90,8 +120,7 @@ def prepare(store, bundles, now, policies):
                 # neighborhoods did not admit it to this particular lane.
                 candidates = {**{key: {**item, 'score': None} for key, item in library.items()}, **candidates}
             ranked = sorted(candidates.values(), key=priority)
-            menus[preset][lane] = policies.stamp(_reserve(ranked),
-                                                 f'{home_vibe.VERSION}:{preset}:{lane}')
+            menus[preset][lane] = _reserve(ranked)
             # Keep the input's family encounter order for stable selection ties.
             families = {family: [] for item in candidates.values()
                         if (family := axes.get(item.get('genre'), ('', None))[0])}
@@ -103,27 +132,9 @@ def prepare(store, bundles, now, policies):
                 family = axes.get(genre, ('', None))[0]
                 if family:
                     families[family].append(item)
-            genre_menus[preset][lane] = {family: policies.stamp(_reserve(items, GENRE_RESERVE),
-                f'{home_vibe.VERSION}:{preset}:{lane}:{family}') for family, items in families.items()}
+            genre_menus[preset][lane] = {family: _reserve(items, GENRE_RESERVE) for family, items in families.items()}
     bundles['_vibes'] = {'version': home_vibe.VERSION, 'profile_version': musical_character.VERSION,
                          'pools': menus, 'genres': genre_menus}
-    if bundles.get('_radio'):
-        radio_intensity.prepare(store, bundles['_radio'], profiles, unique)
-    bundles.setdefault('_meta', {})['musical_generation'] = musical_profiles.digest(
-        sorted((key, (profile or {}).get('digest')) for key, profile in profiles.items()))
-    from yt_playlist.rec import mix_tuning, vibe_readiness_index
-    request = store.rec_proposals.get_proposals('home_genre_request') or {}
-    filters = ((request.get('include_genres', ()), request.get('avoid_genres', ()))
-               if mix_tuning.genre_active(store, request) else ((), ()))
-    # Publish ordinary pools plus bounded reserves for the current controls.
-    # Requests never reconstruct missing readiness from full musical profiles.
-    readiness = vibe_readiness_index.prepare(bundles, include_genres=any(filters), genre_request=filters)
-    readiness['profile_state'] = store.musical_profiles.readiness_fingerprint(
-        item['key'] for item in readiness['tracks'])
-    encoded = json_cache.encode(readiness)
-    bundles['_meta'].pop('vibe_readiness', None)
-    if len(encoded.encode()) <= vibe_readiness_index.MAX_INDEX_BYTES:
-        bundles['_meta']['vibe_readiness'] = encoded
     return bundles
 
 
@@ -292,8 +303,16 @@ def eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_g
 
 def iter_eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_genres=(), inputs=None):
     """Yield live eligible candidates; ordered consumers can stop after filling their menu."""
-    blocked, owned, discoveries, metadata, weights, maximum, muted, axes = (
-        inputs if inputs is not None else eligibility_inputs(store, items, now, include_discoveries=lane == 'fresh'))
+    if lane == 'comfort':
+        from yt_playlist.rec.eligibility import comfort_tracks
+        items = comfort_tracks(store, items, now)
+    inputs = inputs if inputs is not None else eligibility_inputs(store, items, now, include_discoveries=lane == 'fresh')
+    return iter_eligible_values(items, lane, excluded, include_genres=include_genres,
+                                avoid_genres=avoid_genres, inputs=inputs)
+
+
+def iter_eligible_values(items, lane, excluded=(), *, include_genres=(), avoid_genres=(), inputs):
+    blocked, owned, discoveries, metadata, weights, maximum, muted, axes = inputs
     blocked = blocked | set(excluded)
     for item in items:
         current = (discoveries if lane == 'fresh' else owned).get(item['key'])
@@ -310,22 +329,13 @@ def iter_eligible(store, items, now, lane, excluded=(), *, include_genres=(), av
                 or (details.get('duration') and details['duration'] > maximum)
                 or (item.get('genre') and family != axes[item['genre']][0])):
             continue
-        yield {**item, **{key: current[key] for key in ('title', 'artist', 'video_id', 'thumbnail')
+        yield {**item, **{key: current[key] for key in ('title', 'artist', 'video_id', 'thumbnail', 'artist_ids')
                          if key in current}}
 
 
 def diversify(items, artist_cap, album_cap, *, size=12):
-    artists, albums, result = Counter(), Counter(), []
-    for item in items:
-        artist, album = normalize(item.get('artist') or ''), normalize(item.get('album') or '')
-        if (artist and artists[artist] >= artist_cap) or (album and albums[(artist, album)] >= album_cap):
-            continue
-        artists[artist] += 1
-        albums[(artist, album)] += 1
-        result.append(item)
-        if len(result) == size:
-            break
-    return result
+    from yt_playlist.rec.artist_variety import select
+    return select(items, artist_cap, album_cap, limit=size, minimum=size)
 
 
 def pick(store, now, preset, lane, excluded=(), *, bundles=None, size=12,

@@ -165,12 +165,12 @@ def test_changed_head_rejects_old_snapshot_but_private_staging_does_not(database
         assert snapshot.store.conn.execute("SELECT generation_id FROM recommendation_heads WHERE surface='home'").fetchone()[0] == old.generation_id
         snapshot.release_reader()
         build = stage(database, prepared)
-        assert snapshot.publish(lambda: database.settings.publish_values({'same': 'accepted'}))
+        assert snapshot.publish_ordered(lambda: database.settings.publish_values({'same': 'accepted'}))
     with database.read_snapshot() as snapshot:
         snapshot.store.conn.execute("SELECT generation_id FROM recommendation_heads WHERE surface='home'").fetchone()
         snapshot.release_reader()
         database.recommendations.publish(build, 12)
-        assert not snapshot.publish(lambda: database.settings.publish_values({'stale': 'forbidden'}))
+        assert not snapshot.publish_ordered(lambda: database.settings.publish_values({'stale': 'forbidden'}))
     assert database.settings.get_setting('same') == 'accepted'
     assert database.settings.get_setting('stale') is None
 

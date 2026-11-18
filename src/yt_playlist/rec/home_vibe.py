@@ -7,7 +7,7 @@ from yt_playlist.rec import mix_tuning, musical_character
 from yt_playlist.rec.ordering import _field
 
 SETTING = "home_mix_vibe"
-VERSION = 'musical-vibes-5'
+VERSION = 'musical-vibes-6'
 FIT_STEP = .04
 _NATURAL = ContextVar('onboarding_natural_mix', default=False)
 _AUTHORIZED = ContextVar('authorized_vibe_request', default=None)
@@ -170,33 +170,46 @@ def order_key(item, preset, profiles=None):
 
 
 class Ranker:
-    def __init__(self, store, now):
-        self.store = store
-        self.preset = current(store, now)
+    def __init__(self, preset, profiles=None):
+        self.preset = preset
+        self.profiles = profiles or {}
+
+    def affinity(self, item):
+        return affinity(item, self.preset, self.profiles) if self.preset else .5
+
+    def __call__(self, items):
+        return sorted(items, key=lambda item: order_key(item, self.preset, self.profiles)) if self.preset else items
+
+
+class ProfileRanker:
+    """Acquire only keys visited by bounded menu consumers before detached ranking."""
+    def __init__(self, preset, load):
+        self.preset, self.load = preset, load
         self.profiles, self.loaded = {}, set()
 
     def _ensure(self, items):
         keys = {_field(item, 'key') for item in items
                 if _field(item, 'key') and not (isinstance(item, dict) and 'musical' in item)} - self.loaded
-        self.profiles.update(musical_character.load(self.store, sorted(keys)))
+        if keys:
+            self.profiles.update(self.load(sorted(keys)))
         self.loaded.update(keys)
 
     def affinity(self, item):
         if not self.preset:
             return .5
         self._ensure([item])
-        return affinity(item, self.preset, self.profiles)
+        return Ranker(self.preset, self.profiles).affinity(item)
 
     def __call__(self, items):
         if not self.preset:
             return items
         self._ensure(items)
-        return sorted(items, key=lambda item: order_key(item, self.preset, self.profiles))
+        return Ranker(self.preset, self.profiles)(items)
 
 
 def ranker(store, now):
     """Capture metadata once for a whole menu; preserve taste order when sound evidence ties."""
-    return Ranker(store, now)
+    return ProfileRanker(current(store, now), lambda keys: musical_character.load(store, keys))
 
 
 def rank(store, now, items):

@@ -185,6 +185,19 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
     sampler.tick({collect: durable && available && !capture.previewOpen && state.outbox.length < LIMIT});
     if (deliver) flush();
   }
+  function restorePoints(run) {
+    for (const [point, value] of Object.entries(run.points)) {
+      if (['saved', 'too_short', 'missed'].includes(value)) continue;
+      const queued = state.outbox.some(sample => sample.run_id === run.id && sample.point === point);
+      if (queued) {
+        run.points[point] = 'saving';
+      } else {
+        run.points[point] = 'interrupted';
+        // A worker can stop after persisting the interval and before queuing its sample.
+        delete run.excerpts?.[point];
+      }
+    }
+  }
   const loaded = (async () => {
     try {
       const saved = (await storage?.get(KEY))?.[KEY];
@@ -194,11 +207,7 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
           throw Error('Invalid extension collection state.');
         state = saved;
       }
-      if (state.run) for (const [point, value] of Object.entries(state.run.points)) {
-        if (['waiting', 'capturing', 'analysing'].includes(value)
-            || (value === 'saving' && !state.outbox.some(sample => sample.run_id === state.run.id && sample.point === point)))
-          state.run.points[point] = 'interrupted';
-      }
+      if (state.run) restorePoints(state.run);
       await persist();
       sampler = new TuneConsoleAudioSampler.AudioVibeSampler({session, playback: () => playback,
         cached: state.run, clock, save() {}, changed, result: collected});
@@ -254,10 +263,7 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
         state.run = structuredClone(message.run);
         state.restored_from_app = true;
         sampler.run = state.run;
-        for (const [point, value] of Object.entries(state.run.points))
-          if (!['saved', 'too_short'].includes(value)
-              && !state.outbox.some(sample => sample.run_id === state.run.id && sample.point === point))
-            state.run.points[point] = 'interrupted';
+        restorePoints(state.run);
         remember(state.run);
       }
       try {

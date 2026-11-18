@@ -3,6 +3,7 @@ import io
 import json
 import urllib.error
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -95,11 +96,14 @@ def test_genre_fallback_remains_usable_without_caching_failure_for_a_day(provide
 def discovery_context(store, clock, monkeypatch):
     # Exercise the real similarity repository without fitting unrelated models
     # or making image/YouTube requests. No ranked candidates are needed here.
-    monkeypatch.setattr(discover, 'playlist_taste', lambda store: SimpleNamespace())
-    monkeypatch.setattr(discover.vectors, 'load_vectors', lambda store: (['core'], np.ones((1, 1)), {'core': 0}))
-    monkeypatch.setattr(discover, '_anchors', lambda *args, **kwargs: [('CoreBand', 1, np.ones(1))])
-    monkeypatch.setattr(discover.artist_model, 'artist_neighbors', lambda *args, **kwargs: [])
-    return SimpleNamespace(store=store, now_fn=lambda: clock[0])
+    from yt_playlist.library import discovery_composition
+    monkeypatch.setattr(discovery_composition, 'playlist_taste', Mock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(discovery_composition.embedding_vectors, 'load_vectors',
+                        Mock(return_value=(['core'], np.ones((1, 1)), {'core': 0})))
+    anchors = Mock(return_value=[('CoreBand', 1, np.ones(1))])
+    monkeypatch.setattr(discovery_composition.artist_bridges, 'anchor_values', anchors)
+    monkeypatch.setattr(discovery_composition.artist_model, 'artist_neighbors', Mock(return_value=[]))
+    return SimpleNamespace(store=store, now_fn=lambda: clock[0]), anchors
 
 
 def test_failed_similarity_refresh_keeps_the_graph_and_original_fetch_time(provider, store, monkeypatch):
@@ -109,8 +113,9 @@ def test_failed_similarity_refresh_keeps_the_graph_and_original_fetch_time(provi
         return {'similarartists': {'artist': [{'name': 'Fresh' if len(p.calls) == 1 else 'Updated',
                                                'match': '0.9'}]}}
     p = provider(fetch)
-    ctx = discovery_context(store, p.clock, monkeypatch)
+    ctx, anchors = discovery_context(store, p.clock, monkeypatch)
     discover.new_artists(ctx)
+    anchors.assert_called_once()
     assert store.artist_similarity.cached_similar('CoreBand', p.clock[0]) == [['Fresh', 0.9]]
     p.clock[0] += 14 * 86400 + 1
     with net.probe_errors() as failed:
@@ -132,8 +137,9 @@ def test_unavailable_similarity_is_not_stored_as_a_confirmed_empty_result(provid
             outage()
         return {'similarartists': {'artist': []}}
     p = provider(fetch)
-    ctx = discovery_context(store, p.clock, monkeypatch)
+    ctx, anchors = discovery_context(store, p.clock, monkeypatch)
     discover.new_artists(ctx)
+    anchors.assert_called_once()
     assert store.artist_similarity.cached_similar('CoreBand', p.clock[0]) is None
     p.clock[0] += 30
     discover.new_artists(ctx)

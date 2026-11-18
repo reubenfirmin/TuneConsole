@@ -8,8 +8,8 @@ from yt_playlist.util.genre_catalog import normalize
 
 
 class RoadTrips:
-    def __init__(self, repository, recovery, read_prepared):
-        self.repository, self.recovery, self.read_prepared = repository, recovery, read_prepared
+    def __init__(self, repository, recovery):
+        self.repository, self.recovery = repository, recovery
 
     def list_road_trip_recipes(self):
         return self.repository.list_road_trip_recipes()
@@ -69,9 +69,6 @@ class RoadTrips:
             state = self.recovery.read((row['recovery_filename'], row['recovery_digest'], row['recovery_bytes']),
                                        kind='road-trip-draft', owner=row['id'])
             return policy.restore_draft(state, row['revision'], facts['selections'])
-        if 'prepared' in facts:
-            return (json.loads(self.read_prepared(facts['prepared'], facts['parts']))
-                    if facts['prepared'] is not None else None)
         return json.loads(facts['raw'])
 
     def get_road_trip_draft(self, recipe_id):
@@ -118,9 +115,12 @@ class RoadTrips:
                                 title=candidate.get('title') or '', artist=candidate.get('artist') or '', now=now)
                         entry, recording = entries[video]
                         selections.append((kind, position, recording, entry, video))
-                reference = self.recovery.publish('road-trip-draft', owner, recovery)
+                integrity = self.recovery.describe('road-trip-draft', owner, recovery)
+                file_id = self.repository.reserve_draft_file(owner, integrity)
+                reference = self.recovery.publish_reserved(file_id, 'road-trip-draft', owner, recovery,
+                                                            expected=integrity)
                 if self.repository.save_draft(recipe_id, owner, account, revision, status, reference, selections, now,
-                        expected_revision=expected_revision, conditional=conditional):
+                        file_id=file_id, expected_revision=expected_revision, conditional=conditional):
                     return True
                 if conditional:
                     return False
@@ -147,8 +147,12 @@ class RoadTrips:
                     revision = revised['revision'] = uuid4().hex
                     revised.pop('picks')
                     revised.pop('banned')
-                    reference = self.recovery.publish('road-trip-draft', row['id'], revised)
-                    saved = self.repository.rekey_draft_reference(row['id'], row['revision'], revision, reference)
+                    integrity = self.recovery.describe('road-trip-draft', row['id'], revised)
+                    file_id = self.repository.reserve_draft_file(row['id'], integrity)
+                    reference = self.recovery.publish_reserved(file_id, 'road-trip-draft', row['id'], revised,
+                                                               expected=integrity)
+                    saved = self.repository.rekey_draft_reference(row['id'], row['revision'], revision, reference,
+                                                                  file_id=file_id)
                 else:
                     saved = self.repository.save_legacy_draft(recipe, json.dumps(revised), updated,
                         expected_raw=facts['raw'], conditional=True)

@@ -1,12 +1,6 @@
-"""Versioned current bootstrap and schema contract, independent of the baseline.
-
-Recognized unversioned databases and every numbered predecessor remain supported
-through the frozen historical upgrade path. Empty databases use the complete
-destination resource, covering both numbered and regular histories. The numbered
-SQL resource remains the baseline for explicit historical replay and export.
-"""
+"""Compiled release-baseline schema and current structural validation."""
 from collections import Counter, defaultdict
-from contextlib import closing, contextmanager
+from contextlib import closing
 from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
@@ -16,43 +10,11 @@ import sqlite3
 from .schema_contract import MigrationError, tokens as _tokens
 
 
-CONTRACT_FLOOR = 32
+CONTRACT_FLOOR = 107
 VERSION = 107
 CURRENT_DEFINITION = Path(__file__).with_name('schema') / f'layout-{VERSION}.sql'
 CURRENT_SEEDS = CURRENT_DEFINITION.with_name(f'seeds-{VERSION}.sql')
-DEFINITION = Path(__file__).with_name('migrations') / 'schema.sql'
-SOURCE_DEFINITIONS = (DEFINITION.with_name('schema_discovery_subjects.sql'),
-               DEFINITION.with_name('schema_listening_subjects.sql'),
-               DEFINITION, DEFINITION.with_name('schema_metadata_deliveries.sql'),
-               DEFINITION.with_name('schema_archives.sql'), DEFINITION.with_name('schema_scope_account_state.sql'),
-               DEFINITION.with_name('schema_metadata_evidence.sql'), DEFINITION.with_name('schema_playback_feedback.sql'),
-               DEFINITION.with_name('schema_recommendation_work.sql'), DEFINITION.with_name('schema_home_offers.sql'),
-               DEFINITION.with_name('schema_album_note_requests.sql'),
-               DEFINITION.with_name('schema_genre_preferences.sql'),
-               DEFINITION.with_name('schema_genre_classifications.sql'),
-               DEFINITION.with_name('schema_recommendation_requests.sql'),
-               DEFINITION.with_name('schema_taste_axes.sql'),
-               DEFINITION.with_name('schema_recipe_memberships.sql'),
-               DEFINITION.with_name('schema_listening_outputs.sql'),
-               DEFINITION.with_name('schema_home_outputs.sql'),
-               DEFINITION.with_name('schema_choice_learning.sql'),
-               DEFINITION.with_name('schema_recommendation_reports.sql'),
-               DEFINITION.with_name('schema_collection_state.sql'),
-               DEFINITION.with_name('schema_session_state.sql'),
-               DEFINITION.with_name('schema_sync_state.sql'),
-               DEFINITION.with_name('schema_model_state.sql'),
-               DEFINITION.with_name('schema_tv_recommendations.sql'),
-               DEFINITION.with_name('schema_clicked_library_pools.sql'),
-               DEFINITION.with_name('schema_model_projections.sql'),
-               DEFINITION.with_name('schema_radio_policy_roots.sql'),
-               DEFINITION.with_name('schema_taste_controls.sql'),
-               DEFINITION.with_name('schema_collection_documents.sql'),
-               DEFINITION.with_name('schema_action_work.sql'),
-               DEFINITION.with_name('schema_transfer_work.sql'),
-               DEFINITION.with_name('schema_album_occurrences.sql'),
-               DEFINITION.with_name('schema_foreign_calendar_scopes.sql'))
-DEFINITIONS = (CURRENT_DEFINITION, CURRENT_SEEDS,
-               CURRENT_DEFINITION.with_name('current.json'), *SOURCE_DEFINITIONS)
+DEFINITIONS = (CURRENT_DEFINITION, CURRENT_SEEDS, CURRENT_DEFINITION.with_name('current.json'))
 SEED_SETTINGS = {
     'catalog_identity_version': '2',
     'discovery_enrichment_audit_requeued': '1',
@@ -69,39 +31,14 @@ INITIAL_STATE = (
     'INSERT INTO group_retention_state VALUES (1,0)',
     "INSERT INTO rec_vibe_pending(position,group_key,revision,cursor) VALUES (1,'*',2,'')",
 )
-_migration_version = ContextVar('schema_definition_version',default=None)
-
-
-@contextmanager
-def migration_definitions(version):
-    """Historical callers without a version see their own frozen schema."""
-    token = _migration_version.set(version)
-    try:
-        yield
-    finally:
-        _migration_version.reset(token)
-
-
 def statements(*, version=None):
-    historical = _migration_version.get()
-    if version is None:
-        version = historical if historical is not None else VERSION
-    if historical is None and version == VERSION:
-        yield from _read_statements(CURRENT_DEFINITION)
-        return
-    yield from assembled_statements(version=version)
+    if version not in (None, VERSION):
+        raise MigrationError('Historical schema definitions have been retired')
+    yield from _read_statements(CURRENT_DEFINITION)
 
 
 def seed_statements():
-    if _migration_version.get() is None:
-        yield from _read_statements(CURRENT_SEEDS)
-        return
-    # The maintenance compiler consumes canonical seed declarations rather
-    # than depending on an already generated resource.
-    quote = lambda value: "'"+value.replace("'", "''")+"'"
-    for key, value in SEED_SETTINGS.items():
-        yield 'INSERT INTO settings(key,value) VALUES ('+quote(key)+','+quote(value)+')'
-    yield from INITIAL_STATE
+    yield from _read_statements(CURRENT_SEEDS)
 
 
 def _read_statements(path):
@@ -115,141 +52,6 @@ def _read_statements(path):
             pending = ''
     if pending.strip():
         raise MigrationError('Incomplete current schema definition: ' + path.name)
-
-
-def assembled_statements(*, version):
-    """Frozen predecessors and offline export only; current startup reads SQL.
-
-    The complete installed format also includes the independently versioned,
-    bounded regular changes. This numbered layout is not the final rebuild
-    destination version; the builder fences its entire contract by signature.
-    """
-    # Repeated historical validations share the same shipped text. Read it for
-    # the key so a changed definition cannot reuse an older compiled layout.
-    definitions = tuple((path, path.read_text()) for path in _source_definitions(version))
-    yield from _assembled_statements(version, definitions, DEFINITION)
-
-
-@lru_cache(maxsize=32)
-def _assembled_statements(version, definitions, baseline):
-    from . import schema_transforms as transforms
-
-    result = []
-    for sql in _statements(version, definitions=definitions, baseline=baseline):
-        if version >= 103:
-            sql = transforms.entity_names(sql)
-        result.append(transforms.domain_contracts(sql) if version >= 104 else sql)
-    if version >= 105:
-        from .frozen_share_contract import fences
-        result.extend(fences())
-    return tuple(result)
-
-
-def _source_definitions(version):
-    from . import schema_transforms as transforms
-
-    for definition in SOURCE_DEFINITIONS:
-        if version < 106 and definition.name == 'schema_foreign_calendar_scopes.sql':
-            continue
-        if version < 101 and definition.name == 'schema_discovery_subjects.sql':
-            continue
-        if version < 100 and definition.name == 'schema_listening_subjects.sql':
-            continue
-        if version < 99 and definition.name == 'schema_album_occurrences.sql':
-            continue
-        if version < 98 and definition.name in ('schema_action_work.sql','schema_transfer_work.sql'):
-            continue
-        if version < 97 and definition.name == 'schema_collection_documents.sql':
-            continue
-        if version < 96 and definition.name == 'schema_taste_controls.sql':
-            continue
-        if version < 95 and definition.name in ('schema_tv_recommendations.sql','schema_clicked_library_pools.sql',
-                                               'schema_model_projections.sql','schema_radio_policy_roots.sql'):
-            continue
-        if version < 94 and definition.name in transforms.COLLECTION_DEFINITIONS:
-            continue
-        if version < 93 and definition.name in ('schema_choice_learning.sql','schema_recommendation_reports.sql'):
-            continue
-        if version < 91 and definition.name == 'schema_home_outputs.sql':
-            continue
-        if version < 90 and definition.name == 'schema_listening_outputs.sql':
-            continue
-        if version < 89 and definition.name == 'schema_recipe_memberships.sql':
-            continue
-        if version < 88 and definition.name == 'schema_taste_axes.sql':
-            continue
-        if version < 87 and definition.name == 'schema_recommendation_requests.sql':
-            continue
-        if version < 86 and definition.name == 'schema_genre_classifications.sql':
-            continue
-        yield definition
-
-
-@lru_cache(maxsize=64)
-def _source_statements(definition, text):
-    # Adjacent installed versions share source files. Cache only the immutable
-    # split text, with file contents in the key so edits cannot reuse old SQL.
-    result = []
-    pending = ''
-    for line in text.splitlines(keepends=True):
-        pending += line
-        if sqlite3.complete_statement(pending):
-            result.append(pending)
-            pending = ''
-    if pending.strip():
-        raise MigrationError('Incomplete current schema definition: ' + definition.name)
-    return tuple(result)
-
-
-def _statements(version, *, definitions=None, baseline=None):
-    from . import schema_transforms as transforms
-    from .genre_contract import classified_definition
-
-    if definitions is None:
-        definitions = ((path, path.read_text()) for path in _source_definitions(version))
-    if baseline is None:
-        baseline = DEFINITION
-    for definition, text in definitions:
-        for statement in _source_statements(definition, text):
-            if definition.name=='schema_radio_policy_roots.sql' and re.match(
-                    r'CREATE (?:TABLE |INDEX ix_)radio_seed_policies\b',statement.lstrip(),re.I):
-                continue
-            sql = classified_definition(statement) if version >= 86 else statement
-            sql = transforms.taste_axes(sql) if version >= 88 else sql
-            sql = transforms.recipe_memberships(sql) if version >= 89 else sql
-            if definition == baseline:
-                sql = transforms.collection_state(sql) if version >= 94 else sql
-                sql = transforms.collection_documents(sql) if version >= 97 else sql
-                sql = transforms.action_work(sql) if version >= 98 else sql
-                sql = transforms.album_occurrences(sql) if version >= 99 else sql
-                sql = transforms.listening_subjects(sql) if version >= 100 else sql
-            if version >= 101 and definition.name!='schema_discovery_subjects.sql':
-                sql = transforms.discovery_subjects(sql)
-            if version >= 102:
-                sql = transforms.catalog_writes(sql)
-            yield sql
-    if version >= 93:
-        yield from transforms.choice_fences()
-    if version >= 94:
-        yield from transforms.collection_fences()
-    if version >= 95:
-        from yt_playlist.core import model_projections
-        yield from transforms.model_control_statements()
-        yield from model_projections.guards()
-        yield from transforms.retired_recommendation_fences()
-        yield from transforms.saved_output_definitions()
-    if version >= 96:
-        yield from transforms.taste_control_fences()
-    if version >= 97:
-        yield from transforms.document_fences()
-    if version >= 98:
-        yield from transforms.action_fences()
-    if version >= 99:
-        yield from transforms.album_fences()
-    if version >= 100:
-        yield from transforms.listening_fences()
-    if 101 <= version < 102:
-        yield from transforms.discovery_fences()
 
 
 def _checks(sql):
@@ -435,6 +237,13 @@ def _normalized_vibe_contract():
     return _schema_contract(tables)
 
 
+@lru_cache(maxsize=2)
+def _annotation_file_contract(native):
+    from . import destination_schema
+    return _schema_contract(sql for sql in destination_schema.statements(normalized=native)
+                            if re.match(r'\s*CREATE TABLE audio_annotations\b', sql, re.I))
+
+
 @lru_cache(maxsize=1)
 def _retired_metadata_contract():
     from . import metadata_locator_contract as locators
@@ -482,6 +291,11 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
         replaced = replaced | metadata_locators.REMOVED
     if vibe_versions.normalized(conn):
         expected_contract = {**expected_contract, **_normalized_vibe_contract()}
+    if 'audio_annotations' in expected_contract:
+        from yt_playlist.repos import annotation_file_writes
+        # Installed hash constraints remain valid until the explicitly approved
+        # offline cutover. Fresh destinations use the ID-file contract.
+        expected_contract = {**expected_contract, **_annotation_file_contract(annotation_file_writes.native(conn))}
     replaced = replaced | legacy_journals.retired_relations(conn)
     runtime_views = metadata_runtime.views() if metadata_runtime.active(conn) else {}
     # Preserve the full-contract check's last matching object, including a

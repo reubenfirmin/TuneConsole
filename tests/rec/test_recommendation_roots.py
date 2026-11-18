@@ -7,11 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.legacy_recommendation_fixture_support import recommendations
 from tests.repos.test_typed_recommendation_publication import (
     publish, plan, collect,
 )
-from yt_playlist.core import group_documents
+from yt_playlist.core import group_documents, home_outputs, model_projections, mix_choices
+from yt_playlist.library import group_lifetimes
 from yt_playlist.rec import choice_evidence, group_roots, recommendation_roots
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -36,6 +37,12 @@ def roots(store, kind):
         'FROM recommendation_generation_refs WHERE kind=? ORDER BY external_key,generation_id', (kind,))]
 
 
+def display_root(store, surface, field='recommendations'):
+    identity = store.conn.execute('SELECT publication_id FROM home_display_heads WHERE surface=?',
+                                  (surface,)).fetchone()[0]
+    return f'home-output:{identity}:{field}'
+
+
 def exists(store, generation):
     return store.conn.execute('SELECT 1 FROM recommendation_generations WHERE id=?', (generation,)).fetchone() is not None
 
@@ -44,7 +51,7 @@ def test_reader_selects_and_retains_the_head_atomically_until_idempotent_close(r
     store = recommendations
     first = publish(store, plan(store)).generation_id
     selecting, switched = threading.Event(), threading.Event()
-    writer = group_roots.writer
+    writer = group_lifetimes.writer
 
     @contextmanager
     def before_selection(source):
@@ -70,7 +77,7 @@ def test_reader_selects_and_retains_the_head_atomically_until_idempotent_close(r
         with ThreadPoolExecutor(1) as executor:
             worker = executor.submit(replacement)
             with monkeypatch.context() as patch:
-                patch.setattr(group_roots, 'writer', before_selection)
+                patch.setattr(group_lifetimes, 'writer', before_selection)
                 generation, close = group_roots.pending_head(store, ('radio', 'home'), 10)
             second = worker.result(2)
         assert generation == second and close is not None
@@ -241,7 +248,8 @@ def test_queued_mix_capture_and_late_response_survive_retiring_track_generation(
     assert jobs[0].run() == 'menu'
     jobs[0].close()
     offer = store.rec_ledger.evidence().get('opportunity', 'menu')
-    assert [(o['id'], o['label'], o['intent'], o['genres']) for o in offer['options']] == [
+    expanded = [mix_choices.expand(store.conn, option) for option in offer['options']]
+    assert [(o['id'], o['label'], o['intent'], o['genres']) for o in expanded] == [
         ('one', 'Your wheelhouse', 'familiar', ['House', 'Techno']),
         ('two', 'Explore', 'discovery', ['Ambient'])]
     assert all('tracks' not in o and 'serving_context' not in o for o in offer['options'])
@@ -307,36 +315,39 @@ def test_prepared_menus_retain_track_generations_with_atomic_replacement_and_sql
     store.rec_proposals.put_proposals('home_prepared', data, 10)
     second = publish(store, plan(store, 'second')).generation_id
     replacement = {'protos': options(second)}
-    with pytest.raises(RuntimeError, match='controlled rollback'), store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.rec_proposals.publish_prepared_home(json.dumps(replacement), 11)
-        raise RuntimeError('controlled rollback')
-    assert roots(store, 'prepared') == [('proposal:home_prepared:recommendations', first)]
+    with store.rec_proposals.prepare_home(json.dumps(replacement), 11) as prepared:
+        with pytest.raises(RuntimeError, match='controlled rollback'), store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            store.rec_proposals.publish_home(prepared)
+            raise RuntimeError('controlled rollback')
+    assert roots(store, 'prepared') == [(display_root(store, 'home_prepared'), first)]
     assert store.rec_proposals.get_proposals('home_prepared') == data
     collect(store)
     assert exists(store, first)
     store.rec_proposals.put_proposals('home_prepared', replacement, 12)
-    assert roots(store, 'prepared') == [('proposal:home_prepared:recommendations', second)]
+    assert roots(store, 'prepared') == [(display_root(store, 'home_prepared'), second)]
     collect(store)
     assert not exists(store, first)
     with store.conn:
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface='home_prepared'")
+        store.conn.execute('BEGIN IMMEDIATE')
+        home_outputs.clear(store.conn, ('home_prepared',))
     assert not roots(store, 'prepared')
 
 
-def test_comparison_context_retains_publication_without_decoding_compressed_payload(recommendations):
+def test_comparison_context_retains_publication_until_its_owner_is_cleared(recommendations):
     store = recommendations
     first = publish(store, plan(store)).generation_id
-    data = {'codec': 'unreadable-compressed-payload', 'data': 'opaque',
-            'context': {'recommendation_generations': [first]}}
-    surface = 'model_pair:trial:incumbent:mixes'
+    data = {'run_id': 1, 'data': {'context': {'recommendation_generations': [first]}}}
+    surface = 'model_pair:1:incumbent:mixes'
     store.rec_proposals.put_proposals(surface, data, 10)
-    assert roots(store, 'comparison') == [('proposal:' + surface + ':context', first)]
+    identity = store.conn.execute('SELECT publication_id FROM model_pair_heads').fetchone()[0]
+    assert roots(store, 'comparison') == [(f'comparison-output:{identity}:context', first)]
     publish(store, plan(store, 'second'))
     collect(store)
     assert exists(store, first)
     with store.conn:
-        store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
+        store.conn.execute('BEGIN IMMEDIATE')
+        model_projections.clear(store.conn)
     collect(store)
     assert not exists(store, first)
 
@@ -367,7 +378,7 @@ def test_malformed_prepared_options_preserve_the_existing_root(recommendations, 
     with pytest.raises(ValueError):
         store.rec_proposals.put_proposals('home_prepared', {'protos': value}, 11)
     assert store.rec_proposals.get_proposals('home_prepared') == data
-    assert roots(store, 'prepared') == [('proposal:home_prepared:recommendations', first)]
+    assert roots(store, 'prepared') == [(display_root(store, 'home_prepared'), first)]
 
 
 def test_references_use_only_declared_track_context_and_never_recursive_json():
@@ -388,5 +399,5 @@ def test_display_track_boundaries_retain_the_served_generation(recommendations, 
     store.rec_proposals.put_proposals('home_choice', data, 10)
     publish(store, plan(store, 'second'))
     collect(store)
-    assert roots(store, 'prepared') == [('proposal:home_choice:recommendations', first)]
+    assert roots(store, 'prepared') == [(display_root(store, 'home_choice'), first)]
     assert exists(store, first)

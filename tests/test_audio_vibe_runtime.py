@@ -13,7 +13,8 @@ from yt_playlist.rec import audio_vibe_runtime as runtime
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
+from yt_playlist.rec import audio_vibe_prediction as predictor
 
 SPECIALISTS = (cruise, release, relax, uplift, energize, focus)
 VIBES = ('cruise', 'release', 'relax', 'uplift', 'energize', 'concentrate')
@@ -95,12 +96,13 @@ def test_one_specialist_failure_preserves_other_five(module, vibe, error_type, m
     monkeypatch.setattr(module, 'load', fail)
     after = predictor.predict(rows)
     assert set(after['individual_models']) == set(VIBES) - {vibe}
-    assert {k: v for k, v in after.items() if k not in ('suitability', 'individual_models')} == {
-        k: v for k, v in before.items() if k not in ('suitability', 'individual_models')}
+    assert after['arc'] == before['arc']
     for other in set(VIBES) - {vibe}:
         assert after['individual_models'][other] == before['individual_models'][other]
         assert after['suitability'][other] == before['suitability'][other]
-    assert after['suitability'][vibe] == next(row['score'] for row in before['ranking'] if row['vibe'] == vibe)
+    assert vibe not in after['suitability']
+    assert vibe in after['unavailable']
+    assert all(row['vibe'] != vibe for row in after['ranking'])
     assert rows == original
 
 
@@ -117,7 +119,7 @@ def test_explicit_empty_environment_overrides_local_model_and_mode(module, monke
     monkeypatch.setenv(module.MODE_KEY, '')
     assert module.configured_path() is None
     assert module.mode() == 'off'
-    assert module.identity() == module.VERSION + '/off/shared'
+    assert module.identity() == module.VERSION + '/off/unavailable'
 
 
 def test_read_bounds_apply_to_logical_bytes_and_changed_lengths(tmp_path):

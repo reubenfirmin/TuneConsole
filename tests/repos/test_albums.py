@@ -1,33 +1,8 @@
 import json
-from pathlib import Path
 
 import pytest
 
 from yt_playlist.core import albums
-from yt_playlist.core.migrations import Migration, MigrationError, migrate
-from yt_playlist.core.migrations import registry, v023_albums
-from yt_playlist.core.migrations.runner import validate_version
-from yt_playlist.core.store import Store
-
-
-DRAFT = (*registry.MIGRATIONS[:22],Migration(23,'canonical_releases_and_album_memberships',v023_albums.apply))
-
-
-def upgrade(store):
-    current = store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]
-    if current<23:
-        migrate(store.conn,registry=DRAFT)
-        current = 23
-    validate_version(store.conn,current)
-
-
-@pytest.fixture
-def installed_v22(tmp_path):
-    store = Store(tmp_path / 'installed.db')
-    migrate(store.conn,registry=registry.MIGRATIONS[:22])
-    store.conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/albums_v22.sql').read_text())
-    yield store
-    store.conn.close()
 
 
 def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
@@ -35,7 +10,6 @@ def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
     store.tracks.upsert_track('v','Song','Artist','Same',10,album_browse_id='second')
     store.collection.add_saved_album({'browse':'first','title':'Same','artist':'Artist'})
     store.discovery.upsert_discovered_album('second','Artist','Same',None,None,1)
-    upgrade(store)
     first,second = albums.lookup(store.conn,'first'),albums.lookup(store.conn,'second')
     assert first != second
     assert {r[0] for r in store.conn.execute('SELECT album_id FROM album_tracks WHERE entry_id=?', (entry,))} == {first,second}
@@ -49,7 +23,6 @@ def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
 def test_full_fetch_retains_order_repeats_and_disc_numbers(store):
     a = store.tracks.upsert_track('a','First','Artist',None,10)
     b = store.tracks.upsert_track('b','Second','Artist',None,10)
-    upgrade(store)
     with store.conn:
         aid = albums.cache_full(store.conn,'release','Album','Artist',None,[],entries=[
             {'entry_id':b,'disc_number':1,'track_number':1},
@@ -59,48 +32,6 @@ def test_full_fetch_retains_order_repeats_and_disc_numbers(store):
     assert store.conn.execute('SELECT fetched_at,complete,expected_track_count FROM album_fetch_state').fetchone()[:] == (50,1,3)
     assert json.loads(store.conn.execute('SELECT track_keys FROM album_tracklist_keys').fetchone()[0]) == ['second|artist','first|artist','second|artist']
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-
-
-def test_legacy_cache_preserves_unknown_order_unresolved_keys_and_raw_evidence(installed_v22):
-    store = installed_v22
-    key = 'song|artist'
-    store.conn.execute('UPDATE album_tracklists SET track_keys=?', (json.dumps([key,'unresolved|artist']),))
-    store.conn.execute("INSERT INTO album_tracklists VALUES ('incidental','Other','Artist',NULL,'bad json')")
-    store.conn.commit()
-    upgrade(store)
-    assert all(r[0] is None for r in store.conn.execute('SELECT position FROM album_tracks'))
-    assert json.loads(store.conn.execute("SELECT track_keys FROM album_tracklists WHERE browse_id='release'").fetchone()[0]) == [key,'unresolved|artist']
-    assert store.conn.execute("SELECT COUNT(*) FROM album_tracklists WHERE browse_id='incidental'").fetchone()[0] == 0
-    raw = store.conn.execute("SELECT payload FROM identity_state_archive WHERE kind='album_legacy:album_tracklists' AND source_id='incidental'").fetchone()[0]
-    assert json.loads(raw)['track_keys'] == 'bad json'
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-
-
-def test_populated_album_upgrade_rolls_back_and_reopens_without_backups(installed_v22,tmp_path,monkeypatch):
-    store = installed_v22
-    entry = 1
-    before = list(store.conn.iterdump())
-
-    def fail(conn,context):
-        v023_albums.apply(conn,context)
-        raise RuntimeError('interrupted album migration')
-
-    monkeypatch.setattr(registry,'MIGRATIONS',(*DRAFT[:22],Migration(23,DRAFT[22].name,fail)))
-    with pytest.raises(MigrationError,match='interrupted album'):
-        migrate(store.conn, registry=registry.MIGRATIONS)
-    assert list(store.conn.iterdump()) == before
-    monkeypatch.setattr(registry,'MIGRATIONS',DRAFT)
-    migrate(store.conn, registry=DRAFT)
-    store._bind_repositories()
-    assert store.collection.saved_album_ids() == {'release'}
-    assert store.conn.execute('SELECT found_at,first_shown,offered_count FROM discovered_albums').fetchone()[:] == (5,10,1)
-    assert store.conn.execute('SELECT entry_id FROM album_track_links').fetchone()[0] == entry
-    state = list(store.conn.iterdump())
-    migrate(store.conn, registry=DRAFT)
-    assert list(store.conn.iterdump()) == state
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    assert not (tmp_path / 'backups').exists()
-    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 def test_release_consumers_keep_same_title_releases_and_previous_associations(store):

@@ -17,9 +17,53 @@ pytestmark = pytest.mark.usefixtures('no_database')
 
 @pytest.fixture
 def models():
-    return VibeModels(create_autospec(VibeModelsRepo, instance=True, spec_set=True),
+    service = VibeModels(create_autospec(VibeModelsRepo, instance=True, spec_set=True),
         create_autospec(vibe_model_files.VibeModelFiles, instance=True, spec_set=True),
         create_autospec(ProvenanceFiles, instance=True, spec_set=True))
+    service.repository.file_reference.return_value = None
+    return service
+
+
+def test_model_reservation_precedes_file_preparation_and_completion_follows_publish(models):
+    events = []
+    models.files.describe.return_value = 'a'*64, b'model'
+    models.repository.reserve_file.side_effect = lambda *args: events.append('pending') or 257
+    staged = Mock(file_id=257, generation='a'*64, byte_size=5)
+    models.files.stage_reserved.side_effect = lambda *args: events.append('prepare') or staged
+    staged.publish.side_effect = lambda: events.append('file')
+    models.repository.complete_file.side_effect = lambda *args: events.append('ready')
+    generation, publication = models.stage({'inputs': []})
+    assert generation == 'a'*64 and publication is staged
+    assert events == ['pending', 'prepare']
+    models.files.stage_reserved.assert_called_once_with(257, 'a'*64, b'model')
+    models.publish(publication)
+    assert events == ['pending', 'prepare', 'file', 'ready']
+    models.repository.complete_file.assert_called_once_with(257, 'a'*64, 5)
+
+
+def test_snapshot_preparation_reserves_on_the_original_writer(models):
+    writer = create_autospec(VibeModelsRepo, instance=True, spec_set=True)
+    writer.reserve_file.return_value = 1
+    models.files.describe.return_value = 'a'*64, b'model'
+    reader = VibeModels(models.repository, models.files, models.provenance, file_repository=writer)
+    reader.stage({'inputs': []})
+    writer.reserve_file.assert_called_once_with('a'*64, 5)
+    models.repository.reserve_file.assert_not_called()
+
+
+def test_invalid_model_description_cannot_reserve_work(models):
+    models.files.describe.side_effect = ValueError('invalid')
+    with pytest.raises(ValueError, match='invalid'):
+        models.stage({})
+    models.repository.reserve_file.assert_not_called()
+
+
+def test_failed_model_file_cannot_complete_its_receipt(models):
+    staged = Mock()
+    staged.publish.side_effect = OSError('full')
+    with pytest.raises(OSError, match='full'):
+        models.publish(staged)
+    models.repository.complete_file.assert_not_called()
 
 
 def original(measurement=7, recording=3):

@@ -14,9 +14,10 @@ from yt_playlist.library.sync import sync_identity
 
 
 def _generation_provider():
-    return FakeClient(playlists=[{'playlistId': 'SOURCE', 'title': 'Ready', 'count': 2}],
+    return FakeClient(playlists=[{'playlistId': 'SOURCE', 'title': 'Ready', 'count': 3}],
                       tracks={'SOURCE': [_track('one', 'First song', 'Artist'),
-                                         _track('two', 'Second song', 'Artist')]})
+                                         _track('two', 'Second song', 'Artist'),
+                                         _track('three', 'Third song', 'Artist')]})
 
 
 @pytest.fixture(scope='session')
@@ -178,6 +179,8 @@ def save_deadline(generation_app, page, stalled_routes, request):
 
 
 def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(generation_app, page):
+    from tests.browser.welcome_support import dismiss_welcome
+    dismiss_welcome(page)
     base, provider, bridge, frames = generation_app
     pending, errors = {}, []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -212,7 +215,7 @@ def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(ge
       }, {once: true});
     }''')
     with page.expect_popup() as opened:
-        page.get_by_role('button', name='Save and play this mix').click()
+        page.get_by_role('button', name='Start First sounds', exact=True).click()
     popup = opened.value
     try:
         deadline = time.monotonic() + 10

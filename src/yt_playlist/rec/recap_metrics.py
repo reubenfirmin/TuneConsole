@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from statistics import median
 
-from yt_playlist.util import genre_map
-
 SESSION_GAP = 30 * 60
 MIN_PLAYS = 20
 MIN_DAYS = 4
@@ -83,7 +81,9 @@ def profile(month, events, meta, spans, playlists):
         day = day_number(p)
         result.tracks[key] += 1
         artist = card.get("artist")
-        family = card.get('family',genre_map.family(card.get('genre'))) or None
+        if card.get('genre') and 'family' not in card:
+            raise ValueError('Recap metadata must supply the genre family')
+        family = card.get('family') or None
         year = str(card.get("mb_year", ""))[:4]
         decade = f"{int(year) // 10 * 10}s" if year.isdigit() and 1900 <= int(year) <= 2100 else None
         for name, value, counts in (("artist", card.get('artist_ids',(artist,) if artist else ()), result.artists),

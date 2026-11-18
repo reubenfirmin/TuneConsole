@@ -66,6 +66,8 @@ def test_json_expansion_guards_its_input_without_rejecting_unrelated_writes(data
         payload = snapshot.store.settings.get_setting('json-input')
         assert [row[0] for row in snapshot.store.conn.execute(
             f"SELECT value FROM {function}(?) WHERE type='text'", (payload,))] == ['first']
+        with pytest.raises(sqlite3.DatabaseError, match='not authorized'):
+            snapshot.store.conn.execute("UPDATE settings SET value='blocked' WHERE key='json-input'")
         database.settings.set_setting('unrelated', 'changed')
         assert snapshot.publish(lambda: None)
     with database.read_snapshot() as snapshot:

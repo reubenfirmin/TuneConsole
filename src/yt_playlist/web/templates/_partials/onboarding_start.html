@@ -6,16 +6,16 @@
     <div class="gen-card-body" data-name="{{ p.name }}">
       <header class="starter-head">
         <div>
-          <h2 id="starter-title-{{ p.lane }}">Something to listen to</h2>
-          <p class="starter-context">{% if radio_fallback %}Start with this mix while we find songs for your station.{% else %}while we find more music for you.{% endif %}</p>
+          <h2 id="starter-title-{{ p.lane }}">First sounds</h2>
+          <p class="starter-context">Start listening. We’ll keep adding songs as your music arrives.</p>
         </div>
         <div class="starter-actions">
-          <button class="btn btn-primary starter-play" type="button" aria-label="Save and play this mix"
+          <button class="btn btn-primary starter-play" type="button" aria-label="Start First sounds"
                   {% if not subsequent_mix %}data-onboarding-play{% endif %}
                   hx-post="/home/generate" hx-target="#gen-{{ p.lane }}" hx-swap="outerHTML" hx-disabled-elt="this"
                   onclick="genOpenYT('gen-{{ p.lane }}')"
-                  hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: ""}'>
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5a1 1 0 0 1 1.5-.86l12 7a1 1 0 0 1 0 1.72l-12 7A1 1 0 0 1 7 18.5z"/></svg>Play mix
+                  hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: "", first_sounds: "1"}'>
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5a1 1 0 0 1 1.5-.86l12 7a1 1 0 0 1 0 1.72l-12 7A1 1 0 0 1 7 18.5z"/></svg>Start listening
           </button>
         </div>
       </header>

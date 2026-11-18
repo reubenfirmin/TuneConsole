@@ -30,7 +30,7 @@ def identity():
 
 def previous_labels(paths):
     result = []
-    teacher_path = evaluation.ROOT / 'src/yt_playlist/rec/data/emotify-vibes.json'
+    teacher_path = evaluation.ROOT / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'
     teacher = json.loads(teacher_path.read_text())
     for path in paths:
         value = json.loads(path.read_text())

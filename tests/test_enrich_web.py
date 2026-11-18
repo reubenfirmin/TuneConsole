@@ -176,12 +176,12 @@ def test_live_worker_activity_is_visible(store):
     c = _client(store)
     worker = c.app.state.ctx.enrich_worker
     worker._busy = True
-    worker._record_activity(state="running", text="Looking up B with Discogs.")
+    worker._update_activity(state="running", text="Looking up B with Discogs.")
     html = c.get("/enrich/stats").text
     assert 'state-running' in html
     assert "Looking up B with Discogs." in html
     assert "Updated 0s ago" in html
-    worker._record_activity(state="waiting", text="Waiting for a newer lookup.")
+    worker._update_activity(state="waiting", text="Waiting for a newer lookup.")
     assert 'state-waiting' in c.get("/enrich/stats").text
 
 

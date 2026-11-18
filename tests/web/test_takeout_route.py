@@ -3,7 +3,7 @@ import json
 
 import pytest
 from fastapi import FastAPI
-from fastapi.templating import Jinja2Templates
+from tests.template_support import web_templates
 from starlette.testclient import TestClient
 
 from yt_playlist.web.routes.setup import build as build_setup_route
@@ -30,9 +30,10 @@ def takeout_app(store):
     store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
     rec_worker = _FakeRecWorker()
-    templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+    templates = web_templates(directory=_TEMPLATES_DIR)
     ctx = type("C", (), {
         "store": store, "templates": templates, "setup": None,
+        "auth_expired": {}, "clear_auth_expired": staticmethod(lambda account_id: None),
         "rec_worker": rec_worker, "now_fn": staticmethod(lambda: 1_700_000_000.0),
     })()
     app = FastAPI()

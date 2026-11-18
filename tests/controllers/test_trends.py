@@ -1,13 +1,12 @@
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import Mock, create_autospec
 
 import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.trends import Trends
-from yt_playlist.rec import trend_rollups
+from yt_playlist.controllers import trend_preparation
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.repos.trends import TrendsRepo
 
@@ -58,22 +57,31 @@ def test_failed_first_play_write_does_not_publish_new_output(trends):
 
 @pytest.mark.parametrize('current', [False, True])
 def test_pipeline_checks_generation_and_closes_reader_before_ordered_writes(monkeypatch, current):
-    snapshot = Mock(spec_set=['store', 'is_current', 'release_reader'])
-    snapshot.store = SimpleNamespace(trends=Mock(spec_set=['prepare_first_play']),
-                                     settings=Mock(spec_set=['get_setting']))
+    snapshot = Mock(spec_set=['trends', 'settings', 'is_current', 'release_reader', 'publish_ordered'])
+    snapshot.trends = Mock(spec_set=['prepare_first_play'])
+    snapshot.settings = Mock(spec_set=['get_setting'])
     snapshot.is_current.return_value = current
-    snapshot.store.trends.prepare_first_play.return_value = {'track': [1]}
-    snapshot.store.settings.get_setting.return_value = None
+    snapshot.trends.prepare_first_play.return_value = {'track': [1]}
+    snapshot.settings.get_setting.return_value = None
     writer = Mock(spec_set=['publish_rollup'])
-    store = SimpleNamespace(read_snapshot=lambda: nullcontext(snapshot), trends=writer)
-    monkeypatch.setattr(trend_rollups, '_calculate', Mock(return_value={'story': None}))
+    calculate = Mock(return_value={'story': None})
+    monkeypatch.setattr(trend_preparation, 'calculate', calculate)
+    def publish(action):
+        snapshot.release_reader()
+        action()
+        return True
+    snapshot.publish_ordered.side_effect = publish
+    preparation = trend_preparation.TrendPreparation(snapshot=lambda: nullcontext(snapshot),
+                                                     publish=writer.publish_rollup)
     order = Mock()
     order.attach_mock(snapshot, 'snapshot')
     order.attach_mock(writer, 'writer')
-    assert trend_rollups.build(store, 100) == ({'story': None} if current else None)
+    assert preparation.build(100) == ({'story': None} if current else None)
+    calculate.assert_called_once_with(snapshot, 100)
     if current:
-        assert [call[0] for call in order.mock_calls][-3:] == [
-            'snapshot.is_current', 'snapshot.release_reader', 'writer.publish_rollup']
+        assert [call[0] for call in order.mock_calls][-4:] == [
+            'snapshot.is_current', 'snapshot.publish_ordered', 'snapshot.release_reader', 'writer.publish_rollup']
     else:
         snapshot.release_reader.assert_not_called()
+        snapshot.publish_ordered.assert_not_called()
         writer.publish_rollup.assert_not_called()

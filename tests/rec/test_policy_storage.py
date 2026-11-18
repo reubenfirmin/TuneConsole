@@ -12,7 +12,7 @@ from tests.store_fixture_support import (
 )
 from yt_playlist.core import db_space, policy_config, radio_storage
 from yt_playlist.core.store import Store
-from yt_playlist.rec import candidate_refresh, measurement, mode_surfaces, scorecard
+from yt_playlist.rec import candidate_refresh, measurement, mode_inputs, mode_surfaces, scorecard
 from yt_playlist.repos import policy_storage
 
 
@@ -33,23 +33,6 @@ def _publish(store, now=1, rankers=('first', 'second'), body=None):
     rows = [policy_config.variant_record(base[0], {'ranker': ranker}, now) for ranker in rankers]
     store.rec_ledger.record_prepared_policies(rows, [base])
     return rows, base
-
-
-@pytest.fixture
-def legacy_policy_store(tmp_path, monkeypatch):
-    """The genuine SQL-policy predecessor for its retained cleanup contracts."""
-    from tests.legacy_policy_support import open_legacy as _open_legacy
-    from tests.genre_catalog_support import bound_catalog
-
-    # Policy byte accounting consumes the frozen layout, independently of the
-    # unrelated complete genre vocabulary. Keep the genuine historical replay.
-    bound_catalog(monkeypatch)
-    store = _open_legacy(tmp_path / 'legacy-policies.db')
-    try:
-        store.conn.execute('PRAGMA synchronous=OFF')
-        yield store
-    finally:
-        store.conn.close()
 
 
 def test_pool_variants_share_large_body_and_preserve_exact_configuration(store, monkeypatch):
@@ -99,7 +82,7 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
         for n in range(variants):
             latest = policies.stamp([{'key': 'song'}], f'vibe:lane:family-{n}')
         return {'0': {'wheelhouse': latest}}, []
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate)
     for tick in range(generations):
         now = 10000 + 120 * tick
         assert mode_surfaces.prepare_bundles(store, now) is not None
@@ -312,31 +295,3 @@ def test_quota_queries_use_partial_indexes_and_do_not_traverse_served_history(st
     plans = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN '
         'SELECT sum(byte_size) FROM recommendation_policy_bodies WHERE served=0')]
     assert any('ix_recommendation_policy_bodies_unused' in line for line in plans), plans
-
-
-def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(legacy_policy_store, monkeypatch):
-    store = legacy_policy_store
-    monkeypatch.setattr(policy_config, 'SCAN_BYTES', 8 * 1024)
-    raw = json.dumps({'evidence': 'x' * 1024})
-    with store.conn:
-        store.conn.executemany('INSERT INTO rec_serving_policies VALUES (?,?,1)',
-                              [(f'legacy-{n:03}', raw) for n in range(12)])
-    assert measurement.maintain_storage(store, 10000)
-    remaining = store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0]
-    assert 0 < remaining < 12
-    assert store.settings.get_setting(policy_config.CURSOR) is not None
-    assert measurement.maintain_storage(store, 10000)
-    assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] == 0
-
-
-@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
-def test_orphan_body_collection_also_limits_payload_work(legacy_policy_store, monkeypatch):
-    store = legacy_policy_store
-    monkeypatch.setattr(policy_config, 'SCAN_BYTES', 8 * 1024)
-    for n in range(12):
-        _publish(store, rankers=(), body={'evidence': 'x' * 1024, 'generation': n})
-    assert measurement.maintain_storage(store, 10000)
-    remaining = store.conn.execute('SELECT count(*) FROM rec_policy_bases').fetchone()[0]
-    assert 0 < remaining < 12
-    assert measurement.maintain_storage(store, 10000)
-    assert store.conn.execute('SELECT count(*) FROM rec_policy_bases').fetchone()[0] == 0

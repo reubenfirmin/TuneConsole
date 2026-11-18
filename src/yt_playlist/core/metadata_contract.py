@@ -7,7 +7,7 @@ from .metadata_values import RECORDING_FIELDS, ITEM_FIELDS
 
 
 ALTERNATIVE_SECONDS = 7 * 86400
-PROVIDER_FIELDS = (*RECORDING_FIELDS, *ITEM_FIELDS, 'year', 'art', 'isrc', 'mb_release_ids', 'cover_url')
+PROVIDER_FIELDS = (*RECORDING_FIELDS, *ITEM_FIELDS, 'year', 'art', 'isrc', 'mb_release_ids', 'cover_url', 'artist_credits')
 
 
 @dataclass(frozen=True)

@@ -102,8 +102,8 @@ def freeze(directory):
     dependencies = [pinned(ROOT / name) for name in CODE]
     dependencies += [pinned(path) for path in sources]
     dependencies += [pinned(NATIVE_WORK / name) for name in native]
-    dependencies += [pinned(ROOT / 'src/yt_playlist/rec/data' / name)
-                     for name in ('emotify-vibes.json', 'cruise-vibes.json')]
+    dependencies += [pinned(ROOT / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'),
+                     pinned(ROOT / 'src/yt_playlist/rec/data/cruise-vibes.json')]
     capture = load(CAPTURE)
     dependencies += [pinned(CAPTURE)]
     for row in capture['cases']:

@@ -88,6 +88,9 @@ class ReadinessRepo(Repo):
 
     @snapshot_read
     def journey_history(self, *, provider, completed_statuses):
+        first_live_at = self.conn.execute(
+            'SELECT MIN(e.played_at) FROM play_events e JOIN play_event_sources s ON s.event_id=e.id '
+            "WHERE s.source='live'").fetchone()[0]
         takeout = self.conn.execute(
             'SELECT COUNT(DISTINCT e.id) FROM play_events e JOIN play_event_sources s ON s.event_id=e.id '
             "WHERE s.source='takeout' AND e.played_at IS NOT NULL AND e.video_id IS NOT NULL").fetchone()[0]
@@ -99,7 +102,7 @@ class ReadinessRepo(Repo):
             'AND NOT EXISTS (SELECT 1 FROM enrichment_provider_jobs j '
             'WHERE j.recording_id=s.recording_id AND j.provider=?)',
             (provider, *completed_statuses, provider)).fetchone()[0]
-        return {'live_starts': self.conn.execute("SELECT 1 FROM play_event_sources WHERE source='live' LIMIT 1").fetchone() is not None,
+        return {'live_starts': first_live_at is not None, 'first_live_at': first_live_at,
             'takeout': takeout,
             'takeout_started': self.conn.execute('SELECT 1 FROM takeout_imports LIMIT 1').fetchone() is not None,
             'lastfm_config': tuple(config) if config else None, 'lastfm_checked': checked,

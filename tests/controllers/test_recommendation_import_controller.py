@@ -39,7 +39,7 @@ def test_all_canonical_owners_are_resolved_before_import_starts(importer):
     with pytest.raises(ValueError, match='unresolved canonical'):
         importer.install(plan(), 100)
     importer.repository.create.assert_not_called()
-    importer.files.publish.assert_not_called()
+    importer.files.publish_original.assert_not_called()
 
 
 def test_import_file_precedes_owner_then_metadata_precedes_head(importer):
@@ -47,7 +47,7 @@ def test_import_file_precedes_owner_then_metadata_precedes_head(importer):
     build = recommendation_plan.Build(7, 'worker', recommendation_plan.validate(prepared))
     importer.repository.create.return_value = build
     events = []
-    importer.files.publish.side_effect = lambda encoded: events.append('file') or ('path', 'digest', 10)
+    importer.files.publish_original.side_effect = lambda encoded: events.append('file') or ('path', 'digest', 10)
     importer.repository.record_output.side_effect = lambda *args: events.append('owner')
     importer.repository.ready.side_effect = lambda *args: events.append('ready')
     importer.repository.finish.side_effect = lambda *args: events.append('head')
@@ -65,7 +65,7 @@ def test_failed_metadata_keeps_head_unpublished(importer):
 
 
 def test_failed_file_does_not_create_owner_or_publish_head(importer):
-    importer.files.publish.side_effect = OSError('disk full')
+    importer.files.publish_original.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         importer.install(plan(), 100)
     importer.repository.record_output.assert_not_called()
@@ -77,7 +77,7 @@ def test_retiring_pool_is_rejected_before_file_work(importer):
     with pytest.raises(ValueError, match='unfinished or retiring'):
         importer.install(plan(), 100)
     importer.repository.create.assert_not_called()
-    importer.files.publish.assert_not_called()
+    importer.files.publish_original.assert_not_called()
 
 
 def test_policy_mismatch_is_rejected_before_owner_work(importer):
@@ -85,4 +85,4 @@ def test_policy_mismatch_is_rejected_before_owner_work(importer):
     with pytest.raises(ValueError, match='recorded policy'):
         importer.install(plan(), 100)
     importer.repository.create.assert_not_called()
-    importer.files.publish.assert_not_called()
+    importer.files.publish_original.assert_not_called()

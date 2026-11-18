@@ -21,7 +21,7 @@ def _two_identity_move(store):
 def test_move_run_copy_returns_row_with_message():
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from starlette.templating import Jinja2Templates
+    from tests.template_support import web_templates
     from yt_playlist.controllers.actions import Actions
     from yt_playlist.controllers.playlists import Playlists
     from yt_playlist.controllers.tracks import Tracks
@@ -48,14 +48,14 @@ def test_move_run_copy_returns_row_with_message():
     actions.transaction.side_effect = nullcontext
     files = SimpleNamespace(retained=nullcontext)
     store = SimpleNamespace(
-        playlists=Playlists(playlists, None, None, nullcontext),
+        playlists=Playlists(playlists, None, None, nullcontext), accounts=Mock(),
         tracks=Tracks(tracks, None, None, None, None, None),
         actions=Actions(actions, files, None, 'copy-route', nullcontext))
     source = FakeClient(tracks={"PL1": [_track("v1", "S", "X")]})
     target = FakeClient(catalog={"v1": _track("v1", "S", "X")})
     ops = PlaylistOps(store, lambda: {i1: source, i2: target}, lambda: 1.)
     ctx = SimpleNamespace(store=store, ops=lambda: ops, logger=Mock(),
-                          templates=Jinja2Templates(directory=Path(webapp.__file__).with_name('templates')))
+                          templates=web_templates(directory=Path(webapp.__file__).with_name('templates')))
     app = FastAPI()
     app.include_router(move.build(ctx))
     with TestClient(app) as c:

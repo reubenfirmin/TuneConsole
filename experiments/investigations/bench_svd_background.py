@@ -257,7 +257,6 @@ def _backup_library(source, destination):
     from types import SimpleNamespace
     from tests.prepared_fixture_support import PreparedTemplate, coordinates, roots
     from yt_playlist.core.db_rebuild import job
-    from yt_playlist.core import preparation_files
     with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as reader:
         reader.row_factory = sqlite3.Row
         reader.execute('PRAGMA query_only=ON')
@@ -266,16 +265,12 @@ def _backup_library(source, destination):
         with job._files(reader):
             reader.execute("BEGIN")
             source_schema = reader.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-            preparation = tuple(preparation_files.references(reader))
-            manifest = (preparation_files.export(reader, destination.with_name(
-                destination.name + '.fixture-custody')) if preparation else None)
-            prepared_columns = {(owner['table'], owner['columns'][0]) for owner in preparation}
             # Old action exports may retain an absolute human export name.
             # Only retained_filename is the physical file coordinate.
             logical = {('action_backups', 'filename')}
             ordinary = tuple((table, column, filename)
                 for table, column, filename in coordinates(reader)
-                if (table.strip('"'), column.strip('"')) not in prepared_columns | logical)
+                if (table.strip('"'), column.strip('"')) not in logical)
             files = roots(reader)
             external = []
             for _table, _column, filename in ordinary:
@@ -292,7 +287,7 @@ def _backup_library(source, destination):
                 assert matches, 'Unmanaged benchmark file coordinate: ' + filename
                 _depth, name, relative = max(matches)
                 external.append((filename, name, relative))
-            template = PreparedTemplate(SimpleNamespace(conn=reader), files, ordinary, {}, None, manifest)
+            template = PreparedTemplate(SimpleNamespace(conn=reader), files, ordinary, {}, None, None)
             target = Store(destination)
             try:
                 # These are disposable fixture bytes, not a recovery-acceptance

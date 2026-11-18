@@ -30,7 +30,8 @@ def test_recap_podium_personality_and_details_share_account_calendar(store, zone
     payload = trend_rollups.build(store, until + 4 * 86400)
     day_counts = trend_rollups.day_counts_source(store)
     meta = store.trends.track_meta()
-    months = stats.compute_months(day_counts, meta, store.trends.first_play_map("artist"))
+    months = stats.compute_months(day_counts, meta, store.trends.first_play_map("artist"),
+                                  genre_axes={}, family_adjacency={})
     review = trend_payload.month_review(months, store, payload["built_at"], day_counts, meta)
     assert review["plays"] == 3 * len(zones)
     assert sum(a["plays"] for a in review["top_artists"]) == review["plays"]

@@ -13,7 +13,7 @@ def test_home_renders_toast_from_query_param(store):
     assert "toast-ok" not in c.get("/").text          # absent without the param
 
 def test_auth_expired_shows_reauth_banner(store, monkeypatch):
-    from yt_playlist.library import sync
+    from yt_playlist.controllers import library_synchronization as sync
     from yt_playlist.util.retry import with_retry
 
     # Keep the real failed requests, retry policy, sync job and rendered banner;
@@ -188,7 +188,8 @@ def test_omni_search_returns_results_partial(store):
     c = TestClient(app)
     r = c.get("/search/omni", params={"q": "ritmo"})
     assert r.status_code == 200
-    assert "Tracks by Ritmo" in r.text
+    assert '<div class="omni-head">Songs</div>' in r.text
+    assert 'Spektrum' in r.text
     assert f"/artist?artist_id={store.artists.resolve('Ritmo')}" in r.text
 
 
@@ -207,4 +208,5 @@ def test_navbar_has_omni_search(store):
     r = c.get("/")
     assert r.status_code == 200
     assert 'class="omni"' in r.text
-    assert 'hx-get="/search/omni"' in r.text
+    assert 'aria-controls="music-search"' in r.text
+    assert 'id="music-search"' in r.text

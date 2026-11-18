@@ -1,5 +1,6 @@
 """Serving presence must stay bounded, and prepared writes retain outer ownership."""
 import json
+from contextlib import nullcontext
 
 import pytest
 
@@ -43,9 +44,14 @@ def test_native_presence_does_not_read_display_content(store, monkeypatch, surfa
 ])
 def test_encoded_publication_keeps_caller_transaction_and_rollback(store, surface, original, replacement):
     store.rec_proposals.put_proposals(surface, original, 10)
-    with pytest.raises(RuntimeError, match='interrupt publication'):
+    prepared = (store.rec_proposals.prepare_home(json.dumps(replacement), 11, surface=surface)
+                if surface == 'home_prepared' else nullcontext(None))
+    with prepared as publication, pytest.raises(RuntimeError, match='interrupt publication'):
         with store._lock, store.conn.atomic():
-            store.rec_proposals.publish_prepared_home(json.dumps(replacement), 11, surface=surface)
+            if publication is not None:
+                store.rec_proposals.publish_home(publication)
+            else:
+                store.rec_proposals.publish_prepared_home(json.dumps(replacement), 11, surface=surface)
             assert store.conn.in_transaction
             assert store.rec_proposals.get_proposals(surface) == replacement
             raise RuntimeError('interrupt publication')

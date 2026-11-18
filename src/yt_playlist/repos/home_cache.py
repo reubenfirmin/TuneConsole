@@ -2,9 +2,15 @@
 from yt_playlist.core import group_evidence, home_outputs
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
+from . import recommendation_file_writes
 
 
 class HomeCacheRepo(Repo):
+    @synchronized
+    def reserve_file(self, surface, chunk_key, integrity):
+        with self.conn.atomic():
+            return recommendation_file_writes.reserve(self.conn, 'home_display_files', surface, chunk_key, integrity)
+
     @lookup_read
     def unchanged(self, prepared):
         """Identical bytes retain their existing head, files and evidence roots."""
@@ -26,25 +32,19 @@ class HomeCacheRepo(Repo):
         with keyed_reads(self._store, 'rec_proposals', (surface,)):
             if self._store._home_display_files:
                 return None, home_outputs.manifest(self.conn, surface)
-            from yt_playlist.core.preparation import home_publication, home_outputs as preparation
-            handled, header = home_publication.header(self.conn, surface)
-            if handled:
-                if header is None:
-                    return None, None
-                parts = self.conn.execute(f'SELECT CAST(position AS TEXT),filename,digest,byte_size FROM {preparation.PARTS} '
-                    'WHERE surface=? AND generation=? ORDER BY position', (surface, header['generation'])).fetchall()
-                if len(parts) != header['part_count']:
-                    raise ValueError('Incomplete Home display parts')
-                return None, (header['raw_digest'], header['raw_size'], parts)
             row = self.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
             return row[0] if row else None, None
 
     @synchronized
-    def publish(self, prepared, filenames, policies, roots, *, input_revision=None):
+    def publish(self, prepared, filenames, policies, roots, *, input_revision=None, file_ids=()):
         with self.conn.atomic(join=True):
-            if self.unchanged(prepared):
+            if self.unchanged(prepared) and not file_ids:
                 return
             if self._store._home_display_files:
+                if not file_ids or len(file_ids) != len(filenames):
+                    raise ValueError('Home files require their pending SQL identities')
+                for identity, (surface, key, *reference) in zip(file_ids, filenames):
+                    recommendation_file_writes.complete(self.conn, identity, 'home_display_files', surface, key, reference)
                 return home_outputs.publish_files(self.conn, prepared, filenames, policies=policies, roots=roots,
                                                   input_revision=input_revision)
             self._publish_legacy(prepared.surface, prepared.raw, prepared.built_at, roots)
@@ -66,9 +66,5 @@ class HomeCacheRepo(Repo):
         with keyed_reads(self._store, 'rec_proposals', (surface,)):
             if self._store._home_display_files:
                 return home_outputs.present(self.conn, surface)
-            from yt_playlist.core.preparation import home_publication
-            handled, header = home_publication.header(self.conn, surface)
-            if handled:
-                return header is not None and bool(header['has_content'])
             return self.conn.execute("SELECT 1 FROM rec_proposals WHERE surface=? AND payload NOT IN ('null','{}')",
                                      (surface,)).fetchone() is not None

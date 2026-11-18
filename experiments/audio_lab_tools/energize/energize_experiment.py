@@ -88,7 +88,7 @@ def freeze(directory, local):
         ref(PREVIOUS / name)
     # The other specialists do not alter Energize. Verify the retained shared
     # checkpoint is exactly the current production model before reusing scores.
-    production = EXPERIMENTS.parent / 'src/yt_playlist/rec/data/emotify-vibes.json'
+    production = EXPERIMENTS.parent / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'
     if load(production) != load(PREVIOUS / 'inputs/checkpoint.json'):
         raise ValueError('Production shared model changed; refresh the baseline')
     references[str(production)] = digest(production)

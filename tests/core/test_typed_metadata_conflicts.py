@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from tests.core.test_metadata_evidence_migration import additive_catalog, catalog, capture, mutate
-from yt_playlist.core import metadata_conflicts as conflicts, metadata_evidence as evidence, metadata_legacy as legacy
+from tests.metadata_catalog_support import catalog, capture, mutate
+from yt_playlist.core import metadata_conflicts as conflicts, metadata_evidence as evidence
 
 
 def _status(store, conflict):
@@ -79,24 +79,3 @@ def test_supplied_evidence_cannot_be_borrowed_from_another_input_or_provider(cat
             mutate(store, lambda: conflicts.upsert(store.conn, target, 'bpm',
                 [{'provider': provider, 'value': 120, 'observation_id': observations['bpm']}]))
     assert list(store.conn.iterdump()) == before
-
-
-def test_legacy_entry_conflict_continues_with_new_scoped_evidence_without_reassigning_history(additive_catalog):
-    store = additive_catalog
-    entry, recording, _, _ = capture(store, fields={})
-    original = json.dumps([{'provider': 'a', 'value': 120}, {'provider': 'b', 'value': 130}])
-    with store.conn:
-        old = store.conn.execute("INSERT INTO enrichment_conflict(track_id,field,candidates) VALUES (?,'bpm',?)",
-                                 (entry, original)).lastrowid
-    mutate(store, lambda: legacy.backfill_conflicts(store.conn))
-    historical = list(map(tuple, store.conn.execute("SELECT * FROM metadata_observations WHERE origin='legacy_conflict'")))
-    conflict = mutate(store, lambda: conflicts.upsert(store.conn, entry, 'bpm',
-        [{'provider': 'a', 'value': 120}, {'provider': 'b', 'value': 140}], now=40))
-    row = store.conn.execute('SELECT * FROM metadata_conflicts WHERE id=?', (conflict,)).fetchone()
-    assert row['legacy_record_id'] == old and row['field_scope'] == 'legacy_item'
-    assert row['recording_id'] is None and row['entry_id'] == entry
-    assert list(map(tuple, store.conn.execute("SELECT * FROM metadata_observations WHERE origin='legacy_conflict'"))) == historical
-    assert [(r['field_scope'], r['value']) for r in conflicts.candidates(store.conn, conflict)] == [
-        ('recording', 120), ('recording', 140)]
-    assert {r[0] for r in store.conn.execute("SELECT recording_id FROM metadata_observations WHERE origin='provider'")} == {recording}
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()

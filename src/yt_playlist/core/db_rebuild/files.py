@@ -5,12 +5,43 @@ under the job's reader fences. Private database names borrow those roots.
 The directory inventory comes from domain owners, not filesystem discovery.
 """
 from yt_playlist.core import file_paths
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
+import hashlib
 import os
 
-from .. import (choice_evidence_files, evidence_ledger, fao, file_owners,
-               metadata_runtime, metadata_runtime_files, served_facts)
+from .. import evidence_ledger, fao, file_owners, metadata_runtime_files, served_facts, policy_documents
 from ..evidence_ledger import _sync_directory
+
+
+def source_identity(path):
+    """Fingerprint write-fenced SQL/WAL bytes for conservative restart admission."""
+    result = {}
+    for candidate in (path, path.with_name(path.name + '-wal')):
+        try:
+            with candidate.open('rb') as stream:
+                if candidate != path and candidate.stat().st_size <= 32:
+                    continue
+                result[candidate.name] = hashlib.file_digest(stream, 'sha256').hexdigest()
+        except FileNotFoundError:
+            if candidate == path:
+                raise
+    return {'path': str(path), 'files': result}
+
+
+def tree_bytes(path):
+    count = size = allocated = 0
+    for file in path.rglob('*'):
+        if file.is_file():
+            info = file.stat()
+            count += 1
+            size += info.st_size
+            allocated += getattr(info, 'st_blocks', 0) * 512
+    return dict(files=count, bytes=size, allocated_bytes=allocated)
+
+
+def same_filesystem(left, right):
+    return left.stat().st_dev == right.stat().st_dev
 
 
 def roots(database):
@@ -22,20 +53,49 @@ def roots(database):
 
 
 def owners(conn):
-    for name, owner in file_owners.owners().items():
-        if owner.available(conn):
-            yield name, owner, owner.references(conn)
-    yield 'choice_evidence', choice_evidence_files, choice_evidence_files.references(conn)
-    if served_facts.available(conn):
-        root = served_facts.directory(conn)
-        yield 'served', served_facts, (root / served_facts.relative(row['id'])
-                                      for row in served_facts.references(conn))
-    if metadata_runtime.active(conn):
-        root = metadata_runtime_files.directory(conn)
-        yield 'runtime_metadata', metadata_runtime_files, (
-            root / metadata_runtime_files.relative(kind, owner, revision)
-            for kind, owner, revision, required in metadata_runtime_files.references(conn)
-            if required or (root / metadata_runtime_files.relative(kind, owner, revision)).exists())
+    """Compatibility composition for installed recovery callers."""
+    from . import references
+    for name, owner, selected in references.owners(conn):
+        yield name, owner, paths(selected)
+
+
+def paths(references):
+    from .references import MapReference, EvidenceReferences
+    from .. import file_map
+    from ..evidence_paths import record_id
+    for reference in references:
+        if isinstance(reference, MapReference):
+            yield from file_map.pages(reference.root, reference.publication)
+        elif isinstance(reference, EvidenceReferences):
+            for kind in sorted(evidence_ledger.EvidenceLedger.KINDS):
+                yield from (path for path in sorted((reference.root / kind).glob('*/*.json'))
+                            if record_id(path) is None or record_id(path) in reference.owned)
+        elif reference.required or reference.path.exists():
+            yield reference.path
+
+
+def inspect(references):
+    # Deduplicate without retaining every stat result alongside the paths.
+    count = size = allocated = 0
+    for path in set(paths(references)):
+        stat = path.stat()
+        count += 1
+        size += stat.st_size
+        allocated += getattr(stat, 'st_blocks', 0) * 512
+    return dict(files=count, bytes=size, allocated_bytes=allocated)
+
+
+@contextmanager
+def readers(roots):
+    with ExitStack() as stack:
+        for root in roots:
+            stack.enter_context(policy_documents.retained_reader(root))
+        yield
+
+
+def verify_references(references):
+    for path in paths(references):
+        fao.read(path).digest
 
 
 def borrow(source, candidate):
@@ -84,9 +144,3 @@ def rollback(state):
             _move(original, installed)
         elif not item['had_original'] and installed.exists() and not candidate.exists():
             _move(installed, candidate)
-
-
-def verify(conn):
-    for _, _, references in owners(conn):
-        for path in references:
-            fao.read(path).digest

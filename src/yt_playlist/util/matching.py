@@ -28,6 +28,17 @@ def identity_key(title: str, artist: str) -> str:
     return f"{normalize(title)}|{normalize(artist)}"
 
 
+_ARTIST_DISAMBIGUATION_RE = re.compile(r"\s+\(\d+\)")
+
+
+def artist_key(artist: str) -> str:
+    """Matching key for an artist credit/name, e.g. for cross-provider or ledger lookup.
+
+    Strips a trailing Discogs-style disambiguation suffix ("Automatic (4)") before the
+    normal fold; a plain artist name has nothing to strip."""
+    return normalize(_ARTIST_DISAMBIGUATION_RE.sub("", artist or ""))
+
+
 def recording_title(title: str) -> str:
     """Matching evidence that retains live, remix, edit, and version qualifiers.
 

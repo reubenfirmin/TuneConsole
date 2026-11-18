@@ -1,5 +1,6 @@
 """Album page: renders the track table, and creates a playlist from the album."""
 from contextlib import ExitStack
+import json
 import sys
 
 import pytest
@@ -331,7 +332,7 @@ def test_album_page_renders_table_and_create_form(store):
     assert "One" in r.text and "Two" in r.text                 # the track table
     assert "/album/create-playlist" in r.text                  # the create-playlist form
     assert 'aria-label="Save album to library" aria-pressed="false"' in r.text
-    assert 'class="alink" href="/artist?name=Artist%20X"' in r.text
+    assert f'class="alink" href="/artist?artist_id={store.artists.resolve("Artist X")}"' in r.text
     assert '<a class="ptitle" href="/track/v1?' in r.text
     assert 'class="pl-play" href="https://music.youtube.com/watch?v=v1"' in r.text
     assert 'library-hero release-hero album-release-hero has-art' in r.text
@@ -462,9 +463,14 @@ def test_album_play_requires_connection_and_confirms_exact_queue_separately(stor
     c.app.state.ctx.bridge = bridge
     response = c.post('/album/play', data={'browse_id': 'MPREb_x', 'opportunity_id': oid})
     assert response.status_code == 503 and response.content == b''
+    assert 'HX-Trigger' not in response.headers
     assert not sent and store.rec_ledger.evidence().records('response') == []
     bridge.connected = True
-    assert c.post('/album/play', data={'browse_id': 'MPREb_x', 'opportunity_id': oid}).status_code == 204
+    response = c.post('/album/play', data={'browse_id': 'MPREb_x', 'opportunity_id': oid})
+    assert response.status_code == 204
+    assert json.loads(response.headers['HX-Trigger']) == {'album-play-started': {
+        'browse': 'MPREb_x', 'playlist': 'OLAK5uy_album', 'title': 'The Album',
+        'artist': 'Artist X', 'thumbnail': 'http://t/1.jpg'}}
     assert sent[0]['url'] == 'https://music.youtube.com/watch?v=v1&list=OLAK5uy_album'
     row = choice_evidence.compile_report(store, 2)['formats']['albums']
     assert row['choices'] == 1 and row['starts'] == 0
@@ -539,7 +545,7 @@ def test_saved_album_folds_in_durations_and_renders_liked_and_plays(store):
     assert 'aria-label="Unsave album"' in r.text and 'Sync accounts to confirm ownership' in r.text
     assert 'hx-post="/collection/unsave-album"' not in r.text
     assert '<a class="ptitle" href="/track/v1?' in r.text
-    assert 'class="alink" href="/artist?name=Artist%20X"' in r.text
+    assert f'class="alink" href="/artist?artist_id={store.artists.resolve("Artist X")}"' in r.text
     # the folded-in tracks actually carry the parsed duration (seconds), not None
     assert {t["title"]: t["duration"] for t in store.charts.album_tracks_detail("MPREb_x")} \
         == {"One": 181, "Two": 160}

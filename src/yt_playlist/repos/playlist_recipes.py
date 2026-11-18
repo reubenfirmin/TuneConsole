@@ -1,11 +1,15 @@
 """SQL owners and detached file references for saved playlist documents."""
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.core import append_reads, append_work, playlist_recipe_state, playlist_scopes, taste_axes
-from yt_playlist.core.preparation.collection_document_publication import OWNERS
-from yt_playlist.core.preparation.collection_documents import table as prepared_table
+from yt_playlist.repos import collection_file_writes
 
 
 class PlaylistRecipesRepo(Repo):
+    @synchronized
+    def reserve_file(self, kind, owner, integrity):
+        with self.conn.atomic():
+            return collection_file_writes.reserve(self.conn, kind, owner, integrity)
+
     @synchronized
     def document_owner(self, name, scope):
         with self.conn.atomic():
@@ -28,9 +32,13 @@ class PlaylistRecipesRepo(Repo):
                 (scope, raw, now))
 
     @synchronized
-    def publish_recipe(self, owner, revision, value, facets, reference, append, now):
+    def publish_recipe(self, owner, revision, value, facets, reference, append, now, *, file_id):
         identity = owner['id']
         with self.conn.atomic():
+            collection_file_writes.complete(self.conn, file_id, 'playlist-recipe', identity, reference)
+            if append is not None:
+                collection_file_writes.complete(self.conn, append['file_id'], 'tv-append',
+                                                append['id'], append['reference'])
             rows = [(identity, kind, position, taste_axes.identity(self.conn, axis, create=True), label)
                     for kind, position, axis, label in facets]
             self.conn.execute('INSERT INTO rec_recipes(id,playlist_scope_id,revision,created_at,media,model,journey,'
@@ -46,8 +54,9 @@ class PlaylistRecipesRepo(Repo):
                 append_work.install_tv(self.conn, identity, owner['scope'], append)
 
     @synchronized
-    def publish_canvas(self, owner, revision, reference, now):
+    def publish_canvas(self, owner, revision, reference, now, *, file_id):
         with self.conn.atomic():
+            collection_file_writes.complete(self.conn, file_id, 'playlist-canvas', owner['id'], reference)
             self.conn.execute('INSERT INTO cluster_canvas VALUES (?,?,?,?,?,?,?) '
                 'ON CONFLICT(playlist_scope_id) DO UPDATE SET revision=excluded.revision,created_at=excluded.created_at,'
                 'recovery_filename=excluded.recovery_filename,recovery_digest=excluded.recovery_digest,recovery_bytes=excluded.recovery_bytes',
@@ -70,15 +79,6 @@ class PlaylistRecipesRepo(Repo):
                     'FROM playlist_recipe_facets f JOIN taste_axes a ON a.id=f.axis_id '
                     'WHERE f.recipe_id=? ORDER BY f.kind,f.position', (row['id'],))]
             return facts
-        owner = OWNERS[name]
-        stage = owner.selected(self.conn)
-        if stage is not None:
-            header = owner.capture(self.conn, stage, scope)
-            if header is None:
-                return None
-            parts = [dict(row) for row in self.conn.execute('SELECT * FROM '+prepared_table(name, 'parts')+
-                ' WHERE source=? AND preparation_revision=? ORDER BY position LIMIT 513', (scope, header['preparation_revision']))]
-            return {'scope': scope, 'native': False, 'prepared': True, 'header': dict(header), 'parts': parts}
         row = self.conn.execute(f'SELECT {field} FROM {table} WHERE playlist_ytm=?', (scope,)).fetchone()
         return {'scope': scope, 'native': False, 'prepared': False, 'raw': row[0]} if row else None
 
@@ -115,12 +115,6 @@ class PlaylistRecipesRepo(Repo):
         if playlist_recipe_state.available(self.conn):
             return [row[0] for row in self.conn.execute("SELECT playlist_scope_id FROM rec_recipes WHERE media='video' "
                 'ORDER BY created_at DESC,playlist_scope_id LIMIT ?', (limit,))]
-        owner = OWNERS['recipes']
-        stage = owner.selected(self.conn)
-        if stage is not None:
-            return [row[0] for row in self.conn.execute('SELECT m.source FROM '+owner.table('map')+' m JOIN '+owner.header+
-                " g ON g.source=m.source AND g.preparation_revision=m.generation WHERE m.stage=? AND g.media='video' "
-                'ORDER BY g.created_at DESC,m.source LIMIT ?', (stage, limit))]
         return [row[0] for row in self.conn.execute('SELECT playlist_ytm FROM rec_recipes WHERE CASE WHEN json_valid(recipe) '
             "THEN json_extract(recipe,'$.media') END='video' ORDER BY created_at DESC,playlist_ytm LIMIT ?", (limit,))]
 
@@ -138,12 +132,6 @@ class PlaylistRecipesRepo(Repo):
     @snapshot_read
     def document_created_ats(self, name):
         native = playlist_recipe_state.available(self.conn)
-        if not native:
-            owner = OWNERS[name]
-            stage = owner.selected(self.conn)
-            if stage is not None:
-                return {row[0]: row[1] for row in self.conn.execute('SELECT m.source,g.created_at FROM '+owner.table('map')+
-                    ' m JOIN '+owner.header+' g ON g.source=m.source AND g.preparation_revision=m.generation WHERE m.stage=?', (stage,))}
         column = 'playlist_scope_id' if native else 'playlist_ytm'
         table = 'rec_recipes' if name == 'recipes' else 'cluster_canvas'
         return dict(self.conn.execute(f'SELECT {column},created_at FROM {table}'))

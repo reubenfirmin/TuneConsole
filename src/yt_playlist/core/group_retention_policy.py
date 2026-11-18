@@ -5,7 +5,9 @@ retains its earliest publication, rather than every repeated selection of it.
 Builds retain their parent context; their own unfinished generation need not
 expand. The durable SQL walk implements this same closure in bounded prefixes.
 """
-from .activity import WorkBudgetExceeded, check_cancellable_work
+from dataclasses import dataclass, field
+
+from .activity import WorkBudgetExceeded
 
 MAX_REFERENCES = 8192
 
@@ -25,47 +27,46 @@ def _bounded(values, label):
     return values
 
 
-def closure(repository, selected_roots):
-    generations, aliases = repository.root_references(selected_roots, MAX_REFERENCES + 1)
-    generations, aliases = set(generations), set(aliases)
-    _bounded(generations, 'generation')
-    _bounded(aliases, 'evidence')
-    pending, visited, edges = list(aliases), set(), set()
-    while pending:
-        check_cancellable_work()
-        source = pending.pop()
-        if source in visited:
-            continue
-        visited.add(source)
-        for target in repository.published_successors(source, MAX_REFERENCES + 1):
-            edges.add((source, target))
-            _bounded(edges, 'lineage')
-            aliases.add(target)
-            if target not in visited:
-                pending.append(target)
-        _bounded(aliases, 'alias')
-    generations.update(repository.alias_origins(aliases))
-    generations.update(repository.lineage_origins(edges))
-    _bounded(generations, 'generation')
-    return generations, edges
+@dataclass
+class Closure:
+    """A bounded reachability calculation fed detached publication facts."""
+    generations: set
+    aliases: set
+    edges: set = field(default_factory=set)
+    visited: set = field(default_factory=set)
+    pending: list = field(init=False)
 
+    def __post_init__(self):
+        self.generations = _bounded(set(self.generations), 'generation')
+        self.aliases = _bounded(set(self.aliases), 'evidence')
+        self.pending = list(self.aliases)
 
-def plan(repository, *, batch):
-    state = repository.retention_state()
-    if not state['complete']:
+    def next_alias(self):
+        while self.pending:
+            source = self.pending.pop()
+            if source not in self.visited:
+                self.visited.add(source)
+                return source
         return None
-    selected_roots = roots(recommendations=state['recommendations'], checkpoint=state['checkpoint'])
-    if state['walk']:
-        commands = repository.advance_walk(selected_roots)
-        if commands is not None:
-            return {'walk': commands, 'revision': state['revision']}
-        selected = repository.walk_expired(batch)
-        return dict(selected, revision=state['revision']) if selected else None
-    generations, required = closure(repository, selected_roots)
-    expired = [pair for pair in repository.published_edges(len(required) + batch) if pair not in required][:batch]
-    if expired:
-        return {'edges': repository.edge_selections(expired, batch)}
-    for generation in repository.published_generations(len(generations) + batch):
-        if generation not in generations and not repository.alias_selected_elsewhere(generation):
-            return {'generation': generation}
-    return None
+
+    def include(self, source, successors):
+        for target in successors:
+            self.edges.add((source, target))
+            _bounded(self.edges, 'lineage')
+            self.aliases.add(target)
+            if target not in self.visited:
+                self.pending.append(target)
+        _bounded(self.aliases, 'alias')
+
+    def finish(self, alias_origins, lineage_origins):
+        self.generations.update(alias_origins)
+        self.generations.update(lineage_origins)
+        return _bounded(self.generations, 'generation'), self.edges
+
+
+def expired_edges(published, required, batch):
+    return [pair for pair in published if pair not in required][:batch]
+
+
+def unreferenced_generations(published, retained):
+    return [generation for generation in published if generation not in retained]

@@ -49,9 +49,8 @@ def save(conn,value,*,legacy=False):
 
 
 def capture(conn, account):
-    from . import entity_names
     head = conn.execute('SELECT j.* FROM spotify_import_job_head h JOIN spotify_import_jobs j ON j.id=h.job_id').fetchone()
-    known = conn.execute(f'SELECT id FROM {entity_names.accounts(conn)} WHERE id=?', (account,)).fetchone() if account is not None else None
+    known = conn.execute('SELECT id FROM accounts WHERE id=?', (account,)).fetchone() if account is not None else None
     return {'head': dict(head) if head else None, 'known': known[0] if known else None,
             'next_id': conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM spotify_import_jobs').fetchone()[0]}
 

@@ -144,7 +144,7 @@ def test_setup_page_alpine_attr_well_formed(store):
 
 # --- streaming sync (background job + SSE) ---
 
-def test_saving_identity_definitions_does_not_clear_expired_session():
+def test_saving_identity_definitions_does_not_clear_expired_session(monkeypatch):
     from fastapi import FastAPI
     from yt_playlist.controllers.accounts import Accounts
     from yt_playlist.repos.accounts import AccountRepo
@@ -152,13 +152,17 @@ def test_saving_identity_definitions_does_not_clear_expired_session():
     from yt_playlist.web.jobs import SyncJobs
     from yt_playlist.web.routes import setup
 
+    # This resource check owns definition saving and authentication state.
+    # Import execution has its own held-work/SQL owners.
+    monkeypatch.setattr(setup, 'HistoryImports',
+                        lambda ctx: Mock(spec_set=['run', 'remove_spotify']))
     iid = 1
     repository = Mock(spec_set=AccountRepo)
     repository.has_auth_state.return_value = True
     repository.auth_expirations.return_value = {}
     repository.flag_auth_expiration.return_value = {iid: 'Main'}
     repository.get_accounts.return_value = [SimpleNamespace(id=iid)]
-    store = SimpleNamespace(accounts=Accounts(
+    store = SimpleNamespace(settings=None, genres=None, album_notes=None, accounts=Accounts(
         repository, None, paused=lambda: False, maintenance_accounts=lambda: None))
     rt = _FakeRuntime(store, configured=True)
     ctx = Ctx(store, rt.clients, lambda: 1.0, Mock(), SyncJobs(), setup=rt)

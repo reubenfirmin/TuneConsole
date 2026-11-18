@@ -1,6 +1,8 @@
-"""Radio's SQL preflight must leave the ASGI response pump available."""
+"""Radio's SQL preflight and projection must leave the ASGI event loop available."""
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, ExitStack, nullcontext
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -10,7 +12,9 @@ from fastapi.testclient import TestClient
 # storage. SQLite admission, fresh readers and the HTTP concurrency stay real.
 from tests.test_radio_start_overlap import poc, radio_schema, controlled_radio_checkpoints
 from tests.store_fixture_support import without_query_timing
-from yt_playlist.rec import account_growth
+from yt_playlist.core.activity import Activity
+from yt_playlist.core.db_reads import MAX_READERS
+from yt_playlist.rec import account_growth, growth_access
 from yt_playlist.web.routes import radio_session
 from yt_playlist.web.routes.bridge import build as bridge_routes
 
@@ -21,6 +25,63 @@ pytestmark = pytest.mark.usefixtures('without_query_timing', 'controlled_radio_c
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """The actual ASGI preflight routes have no application background jobs."""
+
+
+@pytest.mark.parametrize('route, body', [
+    ('start', {'video_id': 'fixture'}),
+    ('select', {'proposal_id': 'direction', 'menu_id': 'menu'}),
+    ('tune', {'comfort': .5, 'theme': .5, 'energy': .5}),
+    ('seen', {'menu_id': 'menu'}),
+])
+def test_radio_direction_projection_does_not_block_unrelated_requests(file_backed_store, monkeypatch, route, body):
+    store = file_backed_store
+    artist_id = store.artists.ensure_artist('Artist')
+    track = {'video_id': 'fixture', 'artist': 'Artist', 'artist_id': artist_id}
+    state = {'ok': True, 'directions': [{'id': 'direction', 'tracks': [track]}]}
+    entered = threading.Event()
+    read_view = store.read_view
+
+    @contextmanager
+    def observed_read_view():
+        entered.set()
+        with read_view() as reader:
+            yield reader
+
+    monkeypatch.setattr(store, 'read_view', observed_read_view)
+
+    def result(*args, **kwargs):
+        return state
+
+    radio = SimpleNamespace(
+        work=Activity(), start=result, select=result, tune=result, seen=result,
+        launch_request=lambda _: nullcontext(threading.Event()),
+        bootstrap=lambda: {'state': {'active': True}, 'seeds': []},
+        reserve_tuning=lambda: 1,
+    )
+    bridge = SimpleNamespace(begin_playback_intent=lambda: None)
+    app = FastAPI()
+    app.include_router(radio_session.build(SimpleNamespace(store=store, radio=radio, bridge=bridge)))
+
+    @app.get('/unrelated')
+    async def unrelated():
+        return {'ok': True}
+
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        with ExitStack() as held_readers:
+            for _ in range(MAX_READERS):
+                assert store._analytics_readers.acquire(blocking=False)
+                held_readers.callback(store._analytics_readers.release)
+            pending = pool.submit(client.post, f'/radio/{route}', json=body)
+            assert entered.wait(5), 'Radio did not attempt reader admission'
+            response = pool.submit(client.get, '/unrelated').result(timeout=5)
+            assert response.status_code == 200 and response.json() == {'ok': True}
+            assert not pending.done()
+        response = pending.result(timeout=5)
+
+    assert response.status_code == 200
+    assert response.json() == {'ok': True, 'directions': [{'id': 'direction', 'tracks': [{
+        **track, 'artist_links': [{'name': 'Artist', 'artist_id': artist_id, 'href': f'/artist?artist_id={artist_id}'}],
+    }]}]}
 
 
 @pytest.mark.parametrize('phase', ['bootstrap', 'start_access', 'tune_access'])
@@ -47,7 +108,8 @@ def test_radio_preflight_leaves_status_and_unrelated_requests_available(poc, mon
             monkeypatch.setattr(account_growth, 'radio_access', held(lambda *args, **kwargs: True))
             controller.ctx.store.settings.set_setting('onboard_listening_format', 'library')
         else:
-            monkeypatch.setattr(account_growth, 'retained_access', lambda *args: False)
+            monkeypatch.setattr(account_growth, 'retained_usage', lambda *args: 'USAGE')
+            monkeypatch.setattr(growth_access, 'retained_access', lambda *args: False)
             monkeypatch.setattr(account_growth, 'vibe_access', held(lambda *args, **kwargs: True))
             monkeypatch.setattr(account_growth, 'view', lambda *args, **kwargs: pytest.fail('Full journey read during tuning'))
             assert controller.start()['ok']

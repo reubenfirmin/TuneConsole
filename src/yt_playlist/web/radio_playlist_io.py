@@ -1,11 +1,15 @@
 """Complete remote reads and atomic publication of confirmed playlist contents."""
 from dataclasses import dataclass
+import logging
 import math
 from typing import Literal
 
+from yt_playlist.core.album_snapshot import LibrarySnapshotError
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import recording_title, track_artist
+
+log = logging.getLogger(__name__)
 
 
 class PlaylistChanged(ValueError):
@@ -95,7 +99,13 @@ class RadioPlaylistIO:
         self._unpublished = set()
 
     def read(self, client, playlist: str, *, expected: list[str] | None = None) -> list[dict]:
-        detail = client.get_playlist(playlist, limit=None)
+        try:
+            detail = client.get_playlist(playlist, limit=None)
+        except LibrarySnapshotError as exc:
+            # The write may already have landed. Retain its checkpoint and let
+            # the next maintenance pass reconcile a fresh complete snapshot.
+            log.debug('Radio playlist confirmation pending: %s', exc)
+            raise PlaylistPending() from exc
         # Initial header counts can lag; exact accepted contents prove readiness.
         if (expected is not None and isinstance(detail, dict) and isinstance(detail.get("tracks"), list)
                 and all(isinstance(t, dict) for t in detail["tracks"])

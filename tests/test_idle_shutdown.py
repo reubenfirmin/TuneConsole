@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from yt_playlist.providers import enrichment
 from yt_playlist.web import app as web_app
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.core.activity import Activity, WorkClosing
@@ -174,7 +175,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
     app, monitor = idle_app
     from yt_playlist.web import jobs
     ctx = SimpleNamespace(updater=None, work=Activity(), sync_lock=threading.Lock(),
-        spotify_import_lock=threading.Lock(), jobs=SyncJobs(),
+        spotify_import_lock=threading.Lock(), jobs=SyncJobs(), client_provider=lambda: {},
         store=SimpleNamespace(tracks=SimpleNamespace()), templates=SimpleNamespace(),
         logger=SimpleNamespace(warning=lambda *a, **kw: None))
     app.state.ctx = ctx
@@ -200,22 +201,29 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
             assert scope == (1 if kind == "playlist_enrichment" else "BID")
             return pending
 
-        monkeypatch.setattr(jobs.enrichment, "load_config", lambda store: {})
+        monkeypatch.setattr(enrichment, "load_config", lambda store: {})
         monkeypatch.setattr(jobs.waterfall, "run_waterfall", blocking)
         if kind == "playlist_enrichment":
             ctx.store.tracks.tracks_for_waterfall = pending_for
             job = jobs.start_playlist_enrichment(ctx, 1)
             assert job.playlist_id == 1
         else:
+            from yt_playlist.controllers.enrichment import EnrichmentCommands
             from yt_playlist.web.routes import album
             ctx.store.tracks.album_tracks_for_waterfall = pending_for
+            commands = EnrichmentCommands(None, None, None, None, ctx.store.tracks, None,
+                now=lambda: clock[0], start_enrichment=lambda **scope: jobs.waterfall.start_or_rejoin_enrichment(
+                    ctx.jobs, ctx.store, ctx.logger, ctx.work.start_thread, **scope))
+            # This resource only starts enrichment; album landing queries are unrelated.
+            monkeypatch.setattr(album.Ctx, 'album_commands', lambda context: SimpleNamespace())
+            monkeypatch.setattr(album.Ctx, 'enrichment_commands', lambda context: commands)
             app.include_router(album.build(ctx))
             response = client.post("/album/BID/enrich")
             assert response.status_code == 200
             job = ctx.jobs.get(response.json()["job_id"])
             assert job.album_browse == "BID" and job.playlist_id is None
     elif kind == "fresh_pool":
-        from yt_playlist.rec import fresh_pool
+        from yt_playlist.library import mode_composition, pool_composition
 
         def head(kind):
             assert kind == 'fresh' and stages == ["populating", "populated"]
@@ -235,8 +243,9 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
             assert ctx.work.active and not ctx.work.accepting
             stages.append("refreshed")
 
-        monkeypatch.setattr(fresh_pool, "populate", blocking)
-        monkeypatch.setattr(fresh_pool, "prepare", prepare)
+        monkeypatch.setattr(pool_composition, "fresh", lambda owner:
+            SimpleNamespace(populate=blocking))
+        monkeypatch.setattr(mode_composition, "scheduled", prepare)
         ctx.store.recommendations = SimpleNamespace(head=head)
         ctx.rec_worker = SimpleNamespace(trigger_home_refresh=refresh)
         ctx.now_fn = lambda: 1000

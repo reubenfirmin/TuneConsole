@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="/static/genre-controls.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/visualization-tooltips.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/playback.css?v={{ asset_v }}" data-persistent>
+  <link rel="stylesheet" href="/static/album-listening.css?v={{ asset_v }}" data-persistent>
   <link rel="stylesheet" href="/static/onboarding-playback.css?v={{ asset_v }}" data-persistent>
   <link rel="stylesheet" href="/static/storage-maintenance.css?v={{ asset_v }}">
   <script defer src="/static/storage-maintenance.js?v={{ asset_v }}"></script>
@@ -89,13 +90,15 @@
   {% endif %}
   <link rel="stylesheet" href="/static/artwork.css?v={{ asset_v }}">
   {% block page_styles %}{% endblock %}
+  <script type="application/json" id="detail-link-config">{{ detail_link_config|tojson }}</script>
+  <script src="/static/detail-links.js?v={{ asset_v }}"></script>
   <script src="/static/vendor/htmx.min.js"></script>
   {% if path.startswith(('/playlist', '/album', '/merge', '/compare', '/dupe', '/setup', '/move')) %}
   <script src="/static/vendor/sortable.min.js"></script>
   {% endif %}
   {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
      global `d3`, so dispatch/quadtree/timer must load first. #}
-  {% if path.startswith('/clusters') %}
+  {% if path.startswith(('/clusters', '/model-admin')) %}
   <script src="/static/vendor/d3-dispatch.min.js"></script>
   <script src="/static/vendor/d3-quadtree.min.js"></script>
   <script src="/static/vendor/d3-timer.min.js"></script>
@@ -112,25 +115,24 @@
   <link rel="stylesheet" href="/static/audio-vibe-banner.css?v={{ asset_v }}">
   {% endif %}
   {% set setup_pending = false if read_recovery else initial_setup_pending() %}
-  {% if setup_pending %}
-  <link rel="stylesheet" href="/static/setup-status.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/setup-status.css?v={{ asset_v }}" data-persistent>
   <script src="/static/setup-status.js?v={{ asset_v }}"></script>
-  {% endif %}
   <script src="/static/playback-controls.js?v={{ asset_v }}"></script>
-  {% if path == '/' or path.startswith('/album') %}<script src="/static/album-player.js?v={{ asset_v }}"></script>{% endif %}
+  <script src="/static/album-player.js?v={{ asset_v }}"></script>
   {% if path.startswith('/playlist/') %}<script src="/static/playlist-player.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/app.js?v={{ asset_v }}"></script>
+  <script src="/static/music-search.js?v={{ asset_v }}"></script>
+  <link rel="stylesheet" href="/static/music-search.css?v={{ asset_v }}">
   <script src="/static/app-navigation.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith('/album') %}<script src="/static/listening-choices.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/player-card.js?v={{ asset_v }}"></script>
+  <script src="/static/album-listening.js?v={{ asset_v }}"></script>
   <script defer src="/static/onboarding-playback.js?v={{ asset_v }}"></script>
   <script src="/static/song-actions.js?v={{ asset_v }}"></script>
   {% if path.startswith('/track/') %}
   <link rel="stylesheet" href="/static/track-detail.css?v={{ asset_v }}">
   <script src="/static/track-detail.js?v={{ asset_v }}"></script>
   {% endif %}
-  {# Shared song dialogs can be opened from any page, including HTMX results. #}
-  <script src="/static/genre-dialog.js?v={{ asset_v }}"></script>
   {% if path == '/enrich' %}<script src="/static/genre-editor.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/visualization-tooltips.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/cleanup', '/taste')) %}
@@ -170,7 +172,7 @@
   {% endif %}
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
-<body>
+<body data-player-tour-dismissed="{{ 'true' if player_tour_dismissed() else 'false' }}">
   <template id="mix-launch-loader">
     <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
     <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
@@ -181,7 +183,7 @@
     <script defer src="/static/generating.js?v={{ asset_v }}"></script>
     {% include "_partials/mix_launch_loader.html" %}
   </template>
-  {% if setup_pending %}{% include "_partials/setup_status.html" %}{% endif %}
+  {% include "_partials/setup_status.html" %}
   <div id="storage-maintenance" class="storage-maintenance"
        data-warning="false"
        role="status"
@@ -194,22 +196,14 @@
     </a>
     {# Clusters has its own seed search; the library omni-search would only compete with it there #}
     {% if not path.startswith('/clusters') %}
-    <form class="omni" role="search" autocomplete="off" x-data="omniSearch()"
-          x-init="$el.addEventListener('htmx:afterSwap', () => onResults())"
-          @click.outside="close()" @keydown.escape.window="close()">
+    <form class="omni" role="search" onsubmit="event.preventDefault(); openMusicSearch()">
       <div class="omni-box">
-        <input type="search" name="q" class="omni-input" placeholder="Search your library…"
-               aria-label="Search your library"
-               hx-get="/search/omni" hx-trigger="input changed delay:200ms, focus"
-               hx-target="#omni-results" hx-swap="innerHTML"
-               @focus="onResults()"
-               @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"
-               @keydown.enter.prevent="choose()">
-        <div id="omni-results" class="omni-results" x-show="open" x-cloak></div>
+        <button type="button" class="omni-input" onclick="openMusicSearch({source: this})" aria-keyshortcuts="Control+K Meta+K"
+                aria-haspopup="dialog" aria-controls="music-search">Search music…</button>
       </div>
     </form>
     {% endif %}
-    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') or path.startswith('/audio-preview') %}
+    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') or path.startswith('/audio-preview') or path.startswith('/model-admin') %}
     <nav>
       <div class="nav-sections">
         <div class="nav-group">
@@ -229,7 +223,8 @@
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
                 @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">{{ arrow_icon('disclosure') }}</span></button>
-        <div class="tools-pop" x-show="open" x-cloak x-transition.opacity.scale.origin.top.right>
+        <div class="tools-pop" x-show="open" x-cloak x-transition.opacity.scale.origin.top.right
+             @click="if ($event.target.closest('a[href]')) open = false">
           <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
           <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>
           {% if not read_recovery and has_multiple_identities() %}
@@ -237,6 +232,7 @@
           {% endif %}
           <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
           <a href="/taste" class="{{ 'active' if path.startswith('/taste') else '' }}">Taste Model</a>
+          <a href="/model-admin" class="{{ 'active' if path.startswith('/model-admin') else '' }}">Model map</a>
           {% if audio_preview_available() %}
           <a href="/audio-preview" class="{{ 'active' if path.startswith('/audio-preview') else '' }}">Audio analysis preview</a>
           {% endif %}
@@ -271,14 +267,16 @@
   {# "Songs like this" loads here for the same reason, and on every page: it used to sit inside each
      page's own body block, where main's transform captured it and opened it off-screen (#104). #}
   <div id="similar-modal"></div>
-  {# Per-song genre provenance inspector (#103), also kept outside transformed <main>. #}
-  <div id="genre-candidates-modal"></div>
   {% include "_partials/song_actions.html" %}
+  {% include "_partials/music_search.html" %}
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
   <div hidden data-audio-vibe-collection
        data-extension-ids="{{ audio_vibe_extension_ids|join(',') }}"
        data-taxonomy-version="{{ audio_vibe_taxonomy_version }}"></div>
   {% if audio_vibes_enabled is defined and audio_vibes_enabled() %}{% include "_partials/audio_vibe_banner.html" %}{% endif %}
   {% include "_partials/heartbeat.html" %}
+  {% if not read_recovery and early_adopter_notice() %}
+  {% include "_partials/early_adopter_notice.html" %}
+  {% endif %}
 </body>
 </html>

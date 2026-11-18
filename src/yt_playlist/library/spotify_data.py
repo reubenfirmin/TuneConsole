@@ -11,7 +11,8 @@ import datetime
 import io
 import json
 import zipfile
-from collections import Counter
+from yt_playlist.controllers.history_loading import SpotifyHistory
+from yt_playlist.library.history_matching import import_identity
 
 
 class SpotifyDataFormatError(ValueError):
@@ -151,38 +152,11 @@ def prepare_streaming_history(raw):
 
 def resolve_import_identity(store):
     """A local Spotify export belongs to the configured main identity, not a live YTM session."""
-    identities = store.accounts.get_accounts()
-    main = [identity for identity in identities if identity.is_master]
-    candidates = main or identities
-    return candidates[0].id if len(candidates) == 1 else None
+    return import_identity(store.accounts.get_accounts())
 
 
 def import_spotify_data(store, raw, *, on_progress=None) -> dict:
     """Parse, library-match, and idempotently backfill Spotify listening history."""
-    ident = resolve_import_identity(store)
-    if ident is None:
-        return {"error": "no identity configured"}
-    progress = on_progress or (lambda text: None)
-    progress('Reading Spotify history…')
-    parsed, quality = prepare_streaming_history(raw)
-    progress(f'Matching {len(parsed):,} history entries to your library…')
-    owned = set(store.rec_query.library_keys())
-    matched, unmatched, listens, matches = [], Counter(), [], {}
-    for row in parsed:
-        credit = (row['title'], row['artist'])
-        if credit not in matches:
-            matches[credit] = store.tracks.match_recording(*credit)
-        key = matches[credit]
-        listens.append((row['spotify_uri'],row['ts'],row['artist'],key if key in owned else None))
-        if key not in owned:
-            unmatched[row["artist"]] += 1
-            continue
-        # Spotify ids are intentionally not put in the YouTube video_id column.
-        matched.append((key, None, row["ts"]))
-    progress(f'Saving {len(matched):,} matched plays…')
-    plays_added,events_added,listens_added = store.history.import_spotify_listens(ident,listens)
-    span_days = int((parsed[-1]["ts"] - parsed[0]["ts"]) // 86400) if parsed else 0
-    return {**quality, "source": SOURCE, "identity_id": ident, "matched": len(matched), "unmatched": sum(unmatched.values()),
-            "plays_added": plays_added, "events_added": events_added, "listens_added": listens_added,
-            "span_days": span_days,
-            "unmatched_artists": store.history.spotify_unmatched_artists(ident)}
+    return SpotifyHistory(accounts=store.accounts.get_accounts, parse=prepare_streaming_history,
+        library_keys=store.rec_query.library_keys, match_recording=store.tracks.match_recording,
+        history=store.history).run(raw, on_progress=on_progress)

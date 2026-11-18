@@ -4,15 +4,17 @@ import json
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
+from yt_playlist.providers import genres as genre_lib
 from yt_playlist.rec import home_cache, home_prepared, home_vibe, mix_tuning, rec_params
 from yt_playlist.rec.home_cards import _epoch
-from yt_playlist.web.context import form_float, request_form
+from yt_playlist.web.context import Ctx, form_float, request_form
 from yt_playlist.web.routes.home_access import guard, vibe_selection
 
 
 def build(ctx, views):
     router = APIRouter(dependencies=[Depends(guard(ctx, 'directions'))])
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
+    commands = Ctx.home_tuning(ctx, views.prepared)
 
     @router.post("/home/other-genres")
     def home_other_genres(request: Request, form=Depends(request_form)):
@@ -22,35 +24,22 @@ def build(ctx, views):
             genres = json.loads(form.get("genres") or "[]")
         except (TypeError, ValueError):
             return Response(status_code=400)
-        if not isinstance(genres, list) or not genres or len(genres) > 100 or any(
-                not isinstance(g, str) or not g.strip() or len(g) > 100 for g in genres):
-            return Response(status_code=400)
         now = now_fn()
-        with mix_tuning.adjusting(store, now):
-            store.rec_ledger.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-            store.rec_proposals.put_proposals("home_genre_request", {
-                "epoch": _epoch(store, "cards"),
-                "avoid_genres": sorted({axis[0] for axis in store.genres.feature_axes(genres).values()}),
-                **({'held_by_vibe': True} if store.settings.get_setting(home_vibe.SETTING) else {}),
-            }, now)
-        ctx.rec_worker.trigger_candidate_refresh()
+        try:
+            commands.genre_request(genres, now, avoid=True)
+        except ValueError:
+            return Response(status_code=400)
         return views.cards_safe(request, now)
 
     @router.post("/home/mix-genres")
     def home_mix_genres(request: Request, form=Depends(request_form)):
         """Choose genre families for one menu, without teaching a lasting preference."""
         genres = form.getlist("genres")
-        available = {option["family"] for option in (views.prepared(now_fn()) or {}).get("genre_options", [])}
-        if not genres or len(genres) > 100 or any(not isinstance(g, str) or g not in available for g in genres):
-            return Response(status_code=400)
         now = now_fn()
-        with mix_tuning.adjusting(store, now):
-            store.rec_ledger.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-            store.rec_proposals.put_proposals("home_genre_request", {
-                "epoch": _epoch(store, "cards"), "include_genres": sorted(set(genres)),
-                **({'held_by_vibe': True} if store.settings.get_setting(home_vibe.SETTING) else {}),
-            }, now)
-        ctx.rec_worker.trigger_candidate_refresh()
+        try:
+            commands.genre_request(genres, now)
+        except ValueError:
+            return Response(status_code=400)
         return views.cards_safe(request, now)
 
     @router.post("/home/vibe")
@@ -76,9 +65,7 @@ def build(ctx, views):
         # so it gets its own route; set_param clamps it to the spec range [-1, 1]. Center (0) is neutral.
         bias = form.get("breadth_bias")
         now = now_fn()
-        if bias is not None:
-            with mix_tuning.adjusting(store, now):
-                rec_params.set_param(store, "breadth_bias", bias)
+        commands.breadth(bias, now)
         return views.cards_safe(request, now)
 
     @router.post("/home/steer")
@@ -89,14 +76,7 @@ def build(ctx, views):
         # on the Taste Model page. These adjustments expire after four hours.
         axis, weight = form.get("axis"), form.get("weight")
         target = form_float(weight)
-        if axis and target is not None and axis.split(":", 1)[0] in ("genre", "era", "artist"):
-            now = now_fn()
-            with mix_tuning.adjusting(store, now):
-                perm = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
-                lean = target / perm if perm > 0 else target
-                lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
-                lean = max(lo, min(hi, lean))
-                store.rec_model.set_lean(axis, lean, now)
+        commands.steer(axis, target, now_fn())
         return views.cards_safe(request, now_fn())
 
     @router.post("/home/fingerprint/add")
@@ -108,15 +88,10 @@ def build(ctx, views):
         need to re-render the whole feed (and re-rendering it would churn the picker)."""
         axis = (form.get("axis") or "").strip()
         now = now_fn()
-        if axis and axis.split(":", 1)[0] in ("genre", "era", "artist"):
-            with mix_tuning.adjusting(store, now):
-                store.rec_model.unhide_facet(axis)              # re-adding an axis un-hides it
-                # Only write if not already present. Don't overwrite a user-set lean.
-                if store.rec_model.get_lean(axis) == 1.0 and axis not in store.rec_model.get_leans():
-                    store.rec_model.set_lean(axis, 1.0, now)
+        commands.pin(axis, now)
         return views.tuning_response(templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": home_prepared.fingerprint(store, views.prepared(now), now)}), now)
+            {"fingerprint": commands.fingerprint(now)}), now)
 
     @router.post("/home/fingerprint/remove")
     def fingerprint_remove(request: Request, form=Depends(request_form)):
@@ -126,25 +101,22 @@ def build(ctx, views):
         alive). Permanent taste (the Taste page) is untouched; the genre picker re-adds it any time."""
         axis = (form.get("axis") or "").strip()
         now = now_fn()
-        if axis:
-            with mix_tuning.adjusting(store, now):
-                store.rec_model.hide_facet(axis)
-                store.rec_model.clear_lean(axis)
+        commands.remove(axis, now)
         return views.tuning_response(templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": home_prepared.fingerprint(store, views.prepared(now), now)}), now)
+            {"fingerprint": commands.fingerprint(now)}), now)
 
     @router.get("/home/fingerprint")
     def fingerprint_status(request: Request):
         # Recheck the persisted deadline: another tab may have extended the tuning window.
         now = now_fn()
-        mix_tuning.expire(store, now)
+        commands.expire(now)
         return views.tuning_fragment(request, now)
 
     @router.post("/home/fingerprint/reset")
     def fingerprint_reset(request: Request):
         """Clear all manual Home choices and refresh both controls and mixes together."""
-        mix_tuning.reset(store)
+        commands.reset()
         response = views.tuning_fragment(request, now_fn())
         # Close before replacing the controls so their remembered open state cannot reopen them.
         response.headers["HX-Trigger"] = "home-mixes-applied"
@@ -156,26 +128,7 @@ def build(ctx, views):
         library-scoped clusters list, this is the whole map, so you can pin a bar for a genre you have
         zero plays of yet. Each option: {name, kind: 'family'|'genre'}; the Alpine picker filters it
         client-side (so reset/close are instant) and posts a pick to /home/fingerprint/add."""
-        taxonomy = store.genres.taxonomy()
-        fams = sorted(taxonomy['families'])
-        seen = set(fams)
-        options = [{"name": f, "kind": "family"} for f in fams]
-        options += [{"name": row['key'], "label": row['name'], "kind": "genre"}
-                    for row in taxonomy['genres'] if row['key'] not in seen]
-        # This picker only needs play totals for ordering. Resolving the active
-        # complete menu here repeats journey/Vibe admission while the browser
-        # is already sending its explicit selection.
-        prepared = home_cache.read(store, home_prepared.SURFACE, fields=('fingerprint',)) or {}
-        plays = {g.lower(): count for g, count in
-                 (prepared.get("fingerprint") or {}).get("genre_plays", {}).items()}
-        family_plays = {}
-        axes = store.genres.feature_axes(plays)
-        for genre, count in plays.items():
-            family = axes[genre][0]
-            family_plays[family] = family_plays.get(family, 0) + count
-        options.sort(key=lambda o: (-(family_plays.get(o["name"], 0) if o["kind"] == "family"
-                                     else plays.get(o["name"], 0)), o["name"]))
-        return JSONResponse({"options": options})
+        return JSONResponse({"options": commands.picker()})
 
     return router
 

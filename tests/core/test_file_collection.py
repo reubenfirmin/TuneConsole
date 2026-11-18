@@ -8,58 +8,47 @@ import time
 import pytest
 
 from yt_playlist.core import (fao, file_collection, file_map, legacy_journals,
-                              policy_documents, policy_history, vibe_provenance)
+                              policy_documents, policy_history)
 from yt_playlist.core.evidence_ledger import canonical
 
 
-@pytest.mark.parametrize('domain', ['policy', 'provenance', 'archive'])
+@pytest.mark.parametrize('domain', ['policy', 'archive'])
 def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path, monkeypatch, domain):
     database, root = tmp_path / 'state.db', tmp_path / 'files'
     conn = sqlite3.connect(database, timeout=0)
-    owner = {'policy': policy_history, 'provenance': vibe_provenance, 'archive': legacy_journals}[domain]
+    owner = {'policy': policy_history, 'archive': legacy_journals}[domain]
     data_root = root / 'album' if domain == 'archive' else root
     monkeypatch.setattr(owner, 'directory', lambda _conn: root)
     paths, payloads = [], []
-    if domain != 'provenance':
-        if domain == 'archive':
-            conn.execute(owner.SQL)
-        else:
-            conn.execute('CREATE TABLE policy_history_archive(id INTEGER PRIMARY KEY,publication BLOB)')
-        number = 0
-        while len(paths) < 130:
-            raw = canonical({'format': file_map.FORMAT, 'entries': {str(number): {'original': number}}})
-            number += 1
-            digest = hashlib.sha256(raw).hexdigest()
-            if not digest.startswith('00'):
-                continue
-            paths.append(data_root / file_map.relative(digest))
-            payloads.append(raw)
-        if domain == 'archive':
-            conn.execute("INSERT INTO legacy_archive_heads VALUES ('album',?)", (bytes.fromhex(paths[0].stem),))
-        else:
-            conn.execute('INSERT INTO policy_history_archive VALUES (1,?)', (bytes.fromhex(paths[0].stem),))
-        shard, other_shard, checkpoint = '00', 'ff', '.collect.json'
+    if domain == 'archive':
+        conn.execute(owner.SQL)
     else:
-        conn.execute('CREATE TABLE prediction_provenance(prediction_id INTEGER PRIMARY KEY,state TEXT)')
-        conn.execute("INSERT INTO prediction_provenance VALUES (1,'ready')")
-        for group in range(130):
-            pid = group * owner.CHUNK_ROWS + 1
-            paths.append(root / owner.relative(pid))
-            payloads.append(canonical({'format': 1, 'calculations': {
-                str(pid): {'inputs': [17, 23], 'artists': [3]}}}))
-        shard, other_shard, checkpoint = '0', '1', '.collection.json'
+        conn.execute('CREATE TABLE policy_history_archive(id INTEGER PRIMARY KEY,publication BLOB)')
+    number = 0
+    while len(paths) < 130:
+        raw = canonical({'format': file_map.FORMAT, 'entries': {str(number): {'original': number}}})
+        number += 1
+        digest = hashlib.sha256(raw).hexdigest()
+        if not digest.startswith('00'):
+            continue
+        paths.append(data_root / file_map.relative(digest))
+        payloads.append(raw)
+    if domain == 'archive':
+        conn.execute("INSERT INTO legacy_archive_heads VALUES ('album',?)", (bytes.fromhex(paths[0].stem),))
+    else:
+        conn.execute('INSERT INTO policy_history_archive VALUES (1,?)', (bytes.fromhex(paths[0].stem),))
+    shard, other_shard, checkpoint = '00', 'ff', '.collect.json'
     conn.commit()
     for path, raw in zip(paths, payloads):
         fao.write(path, raw)
-    if domain != 'provenance':
-        # Keep a reachable child as well as the SQL root itself.
-        key = next(iter(json.loads(payloads[0])['entries']))
-        publication = file_map._write(data_root, {'children': {file_map._key(key)[0]: paths[0].stem}})
-        table = 'legacy_archive_heads' if domain == 'archive' else 'policy_history_archive'
-        conn.execute('UPDATE ' + table + ' SET publication=?', (bytes.fromhex(publication),))
-        conn.commit()
-        current_root = data_root / file_map.relative(publication)
-        original_root = fao.read(current_root).bytes
+    # Keep a reachable child as well as the SQL root itself.
+    key = next(iter(json.loads(payloads[0])['entries']))
+    publication = file_map._write(data_root, {'children': {file_map._key(key)[0]: paths[0].stem}})
+    table = 'legacy_archive_heads' if domain == 'archive' else 'policy_history_archive'
+    conn.execute('UPDATE ' + table + ' SET publication=?', (bytes.fromhex(publication),))
+    conn.commit()
+    current_root = data_root / file_map.relative(publication)
+    original_root = fao.read(current_root).bytes
     extra_orphans = []
     if domain == 'archive':
         for namespace in ('catalog', 'workflow'):
@@ -128,18 +117,14 @@ def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path,
         assert all(not path.exists() for path in paths[1:])
         assert all(not path.exists() for path in extra_orphans)
         assert fao.read(paths[0]).bytes == payloads[0]
-        if domain != 'provenance':
-            assert fao.read(current_root).bytes == original_root
+        assert fao.read(current_root).bytes == original_root
         assert fao.read(nested / 'untouched.json').bytes == b'nested'
         saved = json.loads(fao.read(root / checkpoint).bytes)
         assert set(saved) == ({'shard', 'after_shard', 'prefix'} if domain == 'archive'
                               else {'shard', 'after_shard'})
         # A superseded current body becomes collectible on a later wrap.
-        if domain != 'provenance':
-            table = 'legacy_archive_heads' if domain == 'archive' else 'policy_history_archive'
-            conn.execute('DELETE FROM ' + table)
-        else:
-            conn.execute("UPDATE prediction_provenance SET state='expired'")
+        table = 'legacy_archive_heads' if domain == 'archive' else 'policy_history_archive'
+        conn.execute('DELETE FROM ' + table)
         conn.commit()
         for _ in range(100):
             step(10**10)
@@ -149,26 +134,5 @@ def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path,
     finally:
         for key in list(file_collection._CURSORS):
             if key[1] == root:
-                file_collection._CURSORS.pop(key).close()
-        conn.close()
-
-
-def test_provenance_collection_validates_every_calculation_before_repacking(tmp_path, monkeypatch):
-    conn = sqlite3.connect(tmp_path / 'state.db')
-    root = tmp_path / 'files'
-    monkeypatch.setattr(vibe_provenance, 'directory', lambda _conn: root)
-    conn.execute('CREATE TABLE prediction_provenance(prediction_id INTEGER PRIMARY KEY,state TEXT)')
-    conn.execute("INSERT INTO prediction_provenance VALUES (1,'ready')")
-    conn.commit()
-    path = root / vibe_provenance.relative(1)
-    fao.write(path, canonical({'format': 1, 'calculations': {'1': {}, '129': {}}}))
-    original = path.read_bytes()
-    try:
-        with pytest.raises(fao.CorruptFile, match='chunk owner'):
-            vibe_provenance.collect(conn, 10**10)
-        assert path.read_bytes() == original
-    finally:
-        for key in list(file_collection._CURSORS):
-            if key[0] is conn:
                 file_collection._CURSORS.pop(key).close()
         conn.close()

@@ -9,7 +9,7 @@ import pytest
 from experiments.audio_lab_tools.training import gold_silver_vibes as gs, robust_vibes as robust, train_vibes as trainer
 from tests.test_audio_vibe_model import examples, excerpts
 from tests.test_audio_vibe_semisupervised import unlabeled_examples
-from yt_playlist.rec import audio_vibe_model as model, audio_vibe_prediction as heuristic
+from experiments.audio_lab_tools.legacy import audio_vibe_model as model, audio_vibe_prediction as heuristic
 
 
 def snapshot():

@@ -63,7 +63,8 @@ def test_ticker_artwork_uses_saved_album_cover_and_ignores_empty_thumbnails(stor
     store.collection.add_saved_album({"browse": "MPRE_a", "title": "Album A", "artist": "Artist A",
                            "thumbnail": "/album-art.png"})
 
-    assert store.charts.ticker_thumbnails("artist") == {"Artist A": "/track-art.png"}
+    key = store.artists.key('Artist A')
+    assert store.charts.ticker_thumbnails("artist") == {key: "/track-art.png"}
     key = next(k for k,v in store.charts.album_browse_ids().items() if v=='MPRE_a')
     assert store.charts.ticker_thumbnails("album") == {key: "/album-art.png"}
 

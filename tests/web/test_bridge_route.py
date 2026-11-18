@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 import threading
 import time
 import pytest
@@ -27,6 +28,9 @@ class _FakeStore:
     def __init__(self):
         self._lock = threading.RLock()
         self.settings = _FakeSettings()
+
+    def read_view(self):
+        return nullcontext(self)
 
 
 def _app(bridge):
@@ -307,6 +311,18 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     snapshot = _now_playing_snapshot({"videoId": "new", "title": "New"}, previous)
     assert "playlist_ytm_id" not in snapshot
     assert "album_browse_id" not in snapshot
+
+
+def test_native_counterpart_preserves_planned_item_without_replacing_playing_identity():
+    from yt_playlist.web.routes.bridge import _now_playing_snapshot
+    frame = {'videoId': 'actual', 'title': 'Different version', 'playlist': 'PL',
+             'queueItem': {'videoId': 'planned', 'playlist': 'PL', 'index': 6}}
+    snapshot = _now_playing_snapshot(frame)
+    assert snapshot['video_id'] == 'actual'
+    assert snapshot['queue_item'] == {'video_id': 'planned', 'playlist': 'PL', 'index': 6}
+    assert 'queue_item' not in _now_playing_snapshot({'videoId': 'actual'}, snapshot)
+    assert 'queue_item' not in _now_playing_snapshot({**frame, 'playlist': 'OTHER'}, snapshot)
+    assert 'queue_item' not in _now_playing_snapshot({**frame, 'queueItem': []})
 
 
 @pytest.mark.parametrize('field,key', [('muted', 'muted'), ('tabMuted', 'tab_muted')])

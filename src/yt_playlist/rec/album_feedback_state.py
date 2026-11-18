@@ -20,6 +20,11 @@ def _state(store, browse_ids):
         return {}
     requested = None if browse_ids is None else set(browse_ids)
     preferred = store.collection.preferred_album_ids(set(original) | (requested or set()))
+    return resolve(original, preferred, requested)
+
+
+def resolve(original, preferred, requested=None):
+    """Resolve captured judgments without changing source identities or evidence."""
     resolved = {}
     for browse, item in sorted(original.items(), key=lambda row: (row[1]['at'], row[0])):
         resolved[preferred[browse]] = item

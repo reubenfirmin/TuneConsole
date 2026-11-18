@@ -7,7 +7,6 @@ import json
 
 from yt_playlist.core import catalog, metadata, metadata_conflicts, metadata_evidence
 from yt_playlist.core import metadata_runtime, metadata_runtime_files
-from yt_playlist.core.preparation import metadata_destinations, metadata_publication
 
 
 def metadata_provenance(store, entry):
@@ -42,7 +41,7 @@ def metadata_provenance(store, entry):
             return {'fields': fields, 'decisions': sorted(decisions, key=lambda d: (
                 d['chosen_at'] is not None, d['chosen_at'] if d['chosen_at'] is not None else 0, d['id']))}
         choices = {row['field']: dict(row) for row in conn.execute(
-            'SELECT * FROM '+metadata_publication.read_table(conn, 'entry_field_choices')+' WHERE entry_id=?', (entry,))}
+            'SELECT * FROM entry_field_choices WHERE entry_id=?', (entry,))}
         fields = {}
         for field in (*catalog.ITEM_FIELDS, *catalog.RECORDING_FIELDS):
             choice = choices.get(field)
@@ -51,10 +50,9 @@ def metadata_provenance(store, entry):
                             metadata.selected_source(conn, entry, field) or
                             ('missing' if track[field] is None else 'unknown')}
         decisions = [dict(row) for row in conn.execute(
-            'SELECT * FROM '+metadata_publication.read_table(conn, 'metadata_decisions')+
+            'SELECT * FROM metadata_decisions'+
             ' WHERE entry_id=? ORDER BY chosen_at,id', (entry,))]
-        lineage = metadata_destinations.lineage(conn, entry, track['recording_id'])
-        return {'fields': fields, 'decisions': decisions, **({'lineage': lineage} if lineage is not None else {})}
+        return {'fields': fields, 'decisions': decisions}
 
 
 def _evidence_provenance(conn, entry, track):

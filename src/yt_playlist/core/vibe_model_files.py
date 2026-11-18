@@ -4,6 +4,7 @@ import json
 import math
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import fao, file_collection
@@ -20,11 +21,21 @@ class VibeModelFiles:
     def __init__(self, root):
         self.root = Path(root)
 
-    def read(self, generation):
-        return read(self.root, generation)
+    def read(self, generation, file_id=None):
+        return read(self.root, generation, file_id)
 
     def stage(self, value):
         return stage(self.root, value)
+
+    @staticmethod
+    def describe(value):
+        return encode(value)
+
+    def stage_reserved(self, identity, generation, raw):
+        if hashlib.sha256(raw).hexdigest() != generation or len(raw) > MAX_BYTES:
+            raise ValueError('Shared-model bytes changed after reservation')
+        return ModelWrite(identity, generation, len(raw),
+                          fao.prepare(self.root / relative(identity), fao.Content(raw, max_bytes=MAX_BYTES)))
 
     @contextmanager
     def collection(self):
@@ -33,8 +44,23 @@ class VibeModelFiles:
                 yield None
                 return
             with file_collection.collection(self.root, self.root, name='.collection.json',
-                    valid_shard=lambda name: bool(re.fullmatch('[0-9a-f]{2}', name))) as work:
+                    valid_shard=lambda name: bool(re.fullmatch('[0-9a-f]{2}', name)),
+                    prefixes=('', 'by-id')) as work:
                 yield ModelCollection(self.root, work)
+
+
+@dataclass
+class ModelWrite:
+    file_id: int
+    generation: str
+    byte_size: int
+    prepared: object
+
+    def publish(self):
+        self.prepared.publish()
+
+    def close(self):
+        self.prepared.close()
 
 
 class ModelCollection:
@@ -44,6 +70,11 @@ class ModelCollection:
     def generations(self, limit):
         for _ in range(limit):
             path = self.cursor.next()
+            if path is not None and path.stem.isdecimal():
+                identity = int(path.stem)
+                if identity > 0 and path.relative_to(self.root) == relative(identity):
+                    yield identity
+                continue
             if (path is not None and path.suffix == '.json' and _DIGEST.fullmatch(path.stem)
                     and path.relative_to(self.root) == relative(path.stem)):
                 yield path.stem
@@ -59,6 +90,8 @@ class ModelCollection:
 
 
 def relative(generation):
+    if type(generation) is int and generation > 0:
+        return Path('by-id', f'{generation % 256:02x}', f'{generation}.json')
     if not isinstance(generation, str) or not _DIGEST.fullmatch(generation):
         raise ValueError('Invalid shared vibe generation identity')
     return Path(generation[:2], generation + '.json')
@@ -71,9 +104,9 @@ def encode(value):
     return hashlib.sha256(raw).hexdigest(), raw
 
 
-def read(root, generation):
+def read(root, generation, file_id=None):
     try:
-        raw = fao.read(root / relative(generation), max_bytes=MAX_BYTES).bytes
+        raw = fao.read(root / relative(file_id if file_id is not None else generation), max_bytes=MAX_BYTES).bytes
     except FileNotFoundError as exc:
         raise fao.CorruptFile('Required shared vibe generation is missing') from exc
     if hashlib.sha256(raw).hexdigest() != generation:

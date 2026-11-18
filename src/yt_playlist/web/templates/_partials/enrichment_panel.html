@@ -38,7 +38,8 @@
 
   <div class="provider-list" x-ref="list">
     {% for p in enrichment %}
-    <div class="provider-card{% if not p.enabled %} off{% endif %}" data-name="{{ p.name }}">
+    <div class="provider-card setup-destination{% if not p.enabled %} off{% endif %}" data-name="{{ p.name }}"
+         id="setup-{{ p.name }}" tabindex="-1" role="region" aria-labelledby="setup-{{ p.name }}-title">
       <span class="drag-handle" title="Drag to reorder" aria-hidden="true">
         <svg viewBox="0 0 16 24" fill="currentColor" focusable="false">
           <circle cx="5" cy="6" r="1.5"/><circle cx="11" cy="6" r="1.5"/>
@@ -49,7 +50,7 @@
       <span class="provider-icon provider-icon--{{ p.name }}">{{ provider_icon(p.name) }}</span>
       <div class="provider-meta">
         <div class="provider-heading">
-          <strong>{{ p.label }}</strong>
+          <strong id="setup-{{ p.name }}-title">{{ p.label }}</strong>
           {% if p.requires %}<span class="provider-dependency">After MusicBrainz</span>{% endif %}
         </div>
         <p class="provider-description">{{ p.blurb }}</p>

@@ -144,9 +144,9 @@ def wait_samples(page, count, timeout=15000):
 
 
 
-def seed_samples(store, count=3, **changes):
+def seed_samples(store, count=3, *, run_id=None, **changes):
     values = []
-    run_id = str(uuid4())
+    run_id = run_id or str(uuid4())
     for index, point in enumerate(('thirty', 'middle', 'two_thirds')[:count]):
         value = {**sample(run_id=run_id, point=point), **changes}
         store.audio_vibes.save_sample(value, index + 1)
@@ -168,24 +168,46 @@ def saved_banner(page, live_app, store, count=3, **changes):
     return values, state
 
 
-def publish_run(page, run_id):
-    page.evaluate('''async id => {
+def publish_run_view(page, run_id):
+    page.evaluate('''async ([id, key]) => {
       const value = await (await fetch('/audio-vibes/runs/' + id)).json();
-      const records = JSON.parse(localStorage.getItem('tuneconsole.audio-vibes.cards.1') || '[]');
-      if (!records.some(row => row.id === id)) {
-        // A real new occurrence is announced by playback before its sample
-        // response. A late VIEW response alone must never admit an old card.
-        const playback = value.playback || value.samples[0];
-        localStorage.setItem('tuneconsole.audio-vibes.run.1', JSON.stringify({id, ...playback}));
-        window.dispatchEvent(new StorageEvent('storage', {key:'tuneconsole.audio-vibes.run.1'}));
-      }
-      localStorage.setItem('tuneconsole.audio-vibes.view.1', JSON.stringify(value));
-      window.dispatchEvent(new StorageEvent('storage', {key:'tuneconsole.audio-vibes.view.1'}));
-    }''', run_id)
+      localStorage.setItem(key, JSON.stringify(value));
+      window.dispatchEvent(new StorageEvent('storage', {key}));
+    }''', [run_id, VIEW])
+
+
+def play_sampled_run(page, store, state, *, video_id, title, artist='Observed artist', count=3):
+    # Let the bridge observer admit the occurrence before attaching samples.
+    state.update(video_id=video_id, title=title, artist=artist)
+    page.evaluate('playbackStatus.refresh()')
+    run_id = page.wait_for_function('''([runKey, cardsKey, video]) => {
+      const run = JSON.parse(localStorage.getItem(runKey));
+      const cards = JSON.parse(localStorage.getItem(cardsKey)) || [];
+      return run?.video_id === video && cards.some(row => row.id === run.id) && run.id;
+    }''', arg=[RUN, CARDS, video_id]).json_value()
+    seed_samples(store, count, run_id=run_id, video_id=video_id, title=title, artist=artist)
+    publish_run_view(page, run_id)
+    return run_id
+
+
+def reload_current_play(page, state):
+    page.reload()
+    page.wait_for_function('video => playbackStatus.audioSnapshot?.now_playing?.video_id === video',
+                           arg=state['video_id'])
 
 
 def visible_card(page):
     return page.locator('[data-vibe-card]:visible')
+
+
+def dismiss_welcome(page):
+    welcome = page.get_by_role('dialog', name='A better way to listen to music.', exact=True)
+    expect(welcome).to_be_visible()
+    with page.expect_response(lambda response: response.url.endswith('/onboard/welcome/dismiss')
+                              and response.request.method == 'POST') as acknowledgment:
+        welcome.get_by_role('button', name='Explore my festival', exact=True).click()
+    assert acknowledgment.value.ok
+    expect(welcome).to_be_hidden()
 
 
 def assert_quiet_audio_card(page):
@@ -216,6 +238,7 @@ def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_ena
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_app + '/#directions')
+    dismiss_welcome(page)
     banner = page.locator('[data-audio-vibe-banner]')
     expect(banner).to_be_visible()
     expect(visible_card(page).locator('[data-vibe-checks] [data-complete="true"]')).to_have_count(0)
@@ -228,7 +251,9 @@ def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_ena
             expect(banner).to_be_visible()
             expect(visible_card(page).locator('[data-vibe-checks] [data-complete="true"]')).to_have_count(index)
     card = visible_card(page)
-    expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction: Forceful, hard-hitting, cathartic')
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Independent listening-purpose scores')
+    expect(card.locator('[data-vibe-specialist]')).to_have_count(6)
+    expect(card.locator('[data-vibe-specialist] output')).to_have_text(['—'] * 6)
     expect(card.locator('[data-vibe-choice]')).to_have_count(6)
     assert banner.get_by_role('button', name='Save labels', exact=True).count() == 0
     assert banner.locator('[data-vibe-held-status], progress').count() == 0
@@ -278,3 +303,136 @@ def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_ena
     page.evaluate('playbackStatus.refresh()')
     expect(banner).to_be_visible()
     assert errors == []
+
+
+def test_popup_shows_independent_scores_and_isolates_a_disabled_specialist(
+        vibes_enabled, live_app, page, store, monkeypatch):
+    from tests.audio_model_support import enable_models
+    from tests.test_audio_vibe_cruise import samples
+    from yt_playlist.rec import audio_vibe_prediction, audio_vibe_release
+
+    enable_models(monkeypatch)
+    compatible = samples()[0]
+    values, _state = saved_banner(page, live_app, store,
+        embedding=compatible['embedding'], artifact_hashes=compatible['artifact_hashes'],
+        model_version=compatible['model_version'])
+    expected = audio_vibe_prediction.predict(values)
+    assert len(expected['suitability']) == 6
+    page.set_viewport_size({'width': 1400, 'height': 900})
+    page.goto(live_app)
+    dismiss_welcome(page)
+    card = visible_card(page)
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Independent listening-purpose scores')
+    for vibe, score in expected['suitability'].items():
+        expect(card.locator(f'[data-vibe-specialist="{vibe}"] output')).to_have_text(f'{score:.2f}')
+    expect(page.locator('[data-audio-vibe-banner]')).to_have_css('opacity', '1')
+    page.screenshot(path='/tmp/tuneconsole-specialist-scores.png')
+    monkeypatch.setenv(audio_vibe_release.MODE_KEY, 'off')
+    page.reload()
+    expect(visible_card(page).locator('[data-vibe-specialist="release"] output')).to_have_text('—')
+    for vibe, score in expected['suitability'].items():
+        if vibe != 'release':
+            expect(visible_card(page).locator(f'[data-vibe-specialist="{vibe}"] output')).to_have_text(f'{score:.2f}')
+
+
+def test_cards_keep_the_close_button_in_place_across_the_stack(vibes_enabled, live_app, page, store):
+    _, state = saved_banner(page, live_app, store)
+    page.set_viewport_size({'width': 1400, 'height': 900})
+    page.goto(live_app)
+    dismiss_welcome(page)
+    play_sampled_run(page, store, state, count=1, video_id='partial', title='A much longer song title ' * 8)
+    play_sampled_run(page, store, state, count=2, video_id='middle', title='Observed title',
+                     artist='A long artist credit ' * 8)
+    banner = page.locator('[data-audio-vibe-banner]')
+    expect(page.locator('[data-vibe-card]')).to_have_count(3)
+    banner.evaluate('node => Promise.all(node.getAnimations().map(animation => animation.finished))')
+    original = banner.bounding_box()
+    close = visible_card(page).locator('[data-vibe-dismiss]').bounding_box()
+    for remaining in (3, 2, 1):
+        expect(page.locator('[data-vibe-card]')).to_have_count(remaining)
+        assert banner.bounding_box() == original
+        assert visible_card(page).locator('[data-vibe-dismiss]').bounding_box() == close
+        if remaining > 1:
+            expect(visible_card(page).get_by_role('button', name='Close all', exact=True)).to_be_visible()
+        else:
+            expect(visible_card(page).get_by_role('button', name='Close all', exact=True)).to_be_hidden()
+        page.screenshot(path=f'build/test-reports/1244-stack-{remaining}.png')
+        # Repeated clicks at the same coordinates clear all three cards.
+        page.mouse.click(close['x'] + close['width'] / 2, close['y'] + close['height'] / 2)
+    expect(banner).to_be_hidden()
+
+
+def test_close_all_preserves_pending_labels_and_allows_later_plays(vibes_enabled, live_app, page, store):
+    first, state = saved_banner(page, live_app, store)
+    page.route('**/audio-vibes/feedback', lambda route: route.fulfill(status=503, json={}))
+    page.goto(live_app)
+    dismiss_welcome(page)
+    second_id = play_sampled_run(page, store, state, video_id='second', title='Second song')
+    card = visible_card(page)
+    card.get_by_role('button', name=DESCRIPTIONS['release'], exact=True).click()
+    expect(card.locator('[data-vibe-feedback-status]')).to_have_text('Saved here · retrying sync…')
+    card.get_by_role('button', name='Close all', exact=True).click()
+    banner = page.locator('[data-audio-vibe-banner]')
+    expect(banner).to_be_hidden()
+    records = page.evaluate('JSON.parse(localStorage.getItem(' + json.dumps(CARDS) + '))')
+    pending = next(row for row in records if row['id'] == first[0]['run_id'])
+    assert pending['dismissed'] and pending['dirty'] and pending['draft'] == ['release']
+    assert all(row['dismissed'] for row in records)
+    reload_current_play(page, state)
+    expect(banner).to_be_hidden()
+    publish_run_view(page, second_id)  # Late results cannot reopen the old stack.
+    expect(banner).to_be_hidden()
+    page.unroute('**/audio-vibes/feedback')
+    later_id = play_sampled_run(page, store, state, video_id='later', title='A later play')
+    assert later_id not in {first[0]['run_id'], second_id}
+    expect(visible_card(page).locator('[data-vibe-track]')).to_have_text('A later play')
+    expect(visible_card(page).get_by_role('button', name='Close all', exact=True)).to_be_hidden()
+    page.wait_for_function('''id => !JSON.parse(localStorage.getItem(
+      'tuneconsole.audio-vibes.cards.1')).find(row => row.id === id).dirty''', arg=first[0]['run_id'])
+    assert store.audio_vibes.feedback(first[0]['run_id'])['vibes'] == ['release']
+    assert store.audio_vibes.feedback(second_id) is None
+
+
+@pytest.mark.parametrize('close', ['all', 'each'])
+def test_dismissal_suppresses_rejected_answers_without_an_empty_popup(
+        vibes_enabled, live_app, page, store, close):
+    first, state = saved_banner(page, live_app, store)
+    page.set_viewport_size({'width': 1400, 'height': 900})
+    page.route('**/audio-vibes/feedback', lambda route: route.fulfill(status=422, json={}))
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app)
+    dismiss_welcome(page)
+    second_id = play_sampled_run(page, store, state, video_id='second', title='Second song')
+    run_ids = {first[0]['run_id'], second_id}
+    banner = page.locator('[data-audio-vibe-banner]')
+    expect(page.locator('[data-vibe-card]')).to_have_count(2)
+    for _ in run_ids:
+        card = visible_card(page)
+        card.get_by_role('button', name=DESCRIPTIONS['release'], exact=True).click()
+        expect(card.locator('[data-vibe-feedback-status]')).to_have_text('Saved here · needs attention')
+        banner.get_by_role('button', name='Next song', exact=False).click()
+    if close == 'all':
+        visible_card(page).get_by_role('button', name='Close all', exact=True).click()
+    else:
+        for _ in run_ids:
+            visible_card(page).get_by_role('button', name='Dismiss vibe check for this song').click()
+    expect(banner).to_be_hidden()
+    expect(page.locator('[data-vibe-card]')).to_have_count(0)
+    records = page.evaluate('JSON.parse(localStorage.getItem(' + json.dumps(CARDS) + '))')
+    assert len(records) == 2 and {row['id'] for row in records} == run_ids
+    assert all(row['dismissed'] and row['dirty'] and row['sync_error']['rejected']
+               and row['draft'] == ['release'] for row in records)
+    page.screenshot(path=f'/tmp/tuneconsole-audio-dismiss-rejected-{close}.png')
+    reload_current_play(page, state)
+    expect(banner).to_be_hidden()
+    publish_run_view(page, second_id)
+    expect(banner).to_be_hidden()
+    assert page.evaluate('JSON.parse(localStorage.getItem(' + json.dumps(CARDS) + '))') == records
+    later_id = play_sampled_run(page, store, state, video_id='later', title='A later play')
+    assert later_id not in run_ids
+    expect(visible_card(page).locator('[data-vibe-track]')).to_have_text('A later play')
+    expect(banner).not_to_contain_text('saved answers need attention')
+    expect(page.get_by_role('alert')).to_have_count(0)
+    assert all(store.audio_vibes.feedback(run_id) is None for run_id in run_ids)
+    assert not errors

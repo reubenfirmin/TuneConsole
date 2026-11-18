@@ -309,7 +309,7 @@ def replace(store, rollback, progress=lambda phase, detail: None):
         job.run(store, progress=observed)
 
 
-@pytest.mark.parametrize('browsing_input', [79, 93, 107], indirect=True)
+@pytest.mark.parametrize('browsing_input', [107], indirect=True)
 @pytest.mark.parametrize('rollback', [False, True])
 def test_preconstructed_app_browses_legacy_readers_and_radio_after_reopen(browsing_input, browsing_routes, rollback):
     store, account = browsing_input

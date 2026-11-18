@@ -1,7 +1,6 @@
 """Metered DeepSeek access: one durable admission authorizes one billed POST."""
 import hashlib
 import json
-import os
 import threading
 import time
 import urllib.error
@@ -10,16 +9,13 @@ from collections import OrderedDict
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_cancellable_work
 from yt_playlist.integrations.base import IntegrationUnavailable, RateLimiter
-from yt_playlist.providers import credentials
 from yt_playlist.util import net
 
 ENDPOINT = 'https://api.deepseek.com/chat/completions'
 MAX_RESPONSE_BYTES = 65536
 TIMEOUT_S = 20
-DEFAULT_DAILY_LIMIT = 20
-MAX_DAILY_LIMIT = 100
-_DELAYS = {'auth': 86400, 'balance': 86400, 'rate_limit': 3600,
-           'invalid_response': 86400, 'unavailable': 900}
+RETRY_DELAYS = {'auth': 86400, 'balance': 86400, 'rate_limit': 3600,
+                'invalid_response': 86400, 'unavailable': 900}
 
 
 def credential_id(key):
@@ -30,7 +26,7 @@ class DescriptionUnavailable(IntegrationUnavailable):
     """A safe category and retry deadline, without vendor bodies or credentials."""
 
     def __init__(self, reason, retry_at=0):
-        self.reason = reason if reason in _DELAYS else 'unavailable'
+        self.reason = reason if reason in RETRY_DELAYS else 'unavailable'
         super().__init__('deepseek', self.reason, retry_at, outage=self.reason == 'unavailable')
 
 
@@ -39,16 +35,30 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-class _AdmissionChanged(Exception):
-    pass
+def description_response(data, expected_model):
+    """Decode the provider envelope; no album or prose-selection policy lives here."""
+    try:
+        if not isinstance(data, dict) or data.get('model') != expected_model:
+            raise ValueError
+        choice = data['choices'][0]
+        if not isinstance(choice, dict) or choice.get('finish_reason') != 'stop':
+            raise ValueError
+        message = choice['message']
+        if not isinstance(message, dict) or not isinstance(message.get('content'), str):
+            raise ValueError
+        document = json.loads(message['content'])
+        if not isinstance(document, dict):
+            raise ValueError
+        raw = data.get('usage') or {}
+        usage = {key: value for key in ('prompt_tokens', 'completion_tokens', 'total_tokens')
+            if type(value := raw.get(key)) is int and value >= 0} if isinstance(raw, dict) else {}
+        return document, usage
+    except (KeyError, IndexError, TypeError, ValueError, RecursionError):
+        raise DescriptionUnavailable('invalid_response') from None
 
 
 class DeepSeekIAO:
-    """Resolve credentials and coordinate budget, availability, pacing and transport.
-
-    The projection callback builds and validates content. It receives a one-use
-    send function, never a credential or an unmetered public HTTP helper.
-    """
+    """Bounded paid transport, pacing and process-local provider availability."""
 
     def __init__(self, *, now_fn=time.time, open_fn=None, pacer=None):
         self.now = now_fn
@@ -58,47 +68,15 @@ class DeepSeekIAO:
         self._host = {}
         self._credentials = OrderedDict()
 
-    @staticmethod
-    def api_key(store=None, config_path=None):
-        return credentials.resolve(env_name='DEEPSEEK_API_KEY', setting_name='deepseek_api_key',
-                                   store=store, config_path=config_path)
-
-    def settings(self, store, now, *, paid=None):
-        paid = getattr(store, '_paid_descriptions', False) if paid is None else paid
-        key = self.api_key(store)
-        try:
-            limit = int(store.settings.get_setting('deepseek_daily_limit', str(DEFAULT_DAILY_LIMIT)))
-        except (ValueError, TypeError):
-            limit = DEFAULT_DAILY_LIMIT
-        usage = {} if paid else store.rec_proposals.get_proposals('album_description_usage') or {}
-        wait = self.availability(store, key, now, paid=paid)
-        saved = bool((store.settings.get_setting('deepseek_api_key') or '').strip())
-        source = ('environment' if (os.environ.get('DEEPSEEK_API_KEY') or '').strip()
-                  else 'settings' if saved else 'config' if key else None)
-        status = wait.get('status') or (usage.get('status')
-                                       if usage.get('credential') == credential_id(key) else None)
-        return {'configured': bool(key), 'saved_key': saved, 'key_source': source,
-                'enabled': store.settings.get_setting('deepseek_album_descriptions_enabled', '1') == '1',
-                'daily_limit': max(0, min(MAX_DAILY_LIMIT, limit)),
-                'requests_today': (store.album_descriptions.requests_today(now) if paid else
-                                   usage.get('requests', 0) if usage.get('day') == int(now // 86400) else 0),
-                'status': status, 'retry_at': wait.get('retry_at', 0)}
-
-    def availability(self, store, key, now, *, paid=None):
-        paid = getattr(store, '_paid_descriptions', False) if paid is None else paid
-        digest = credential_id(key)
+    def availability(self, digest, now):
         with self._lock:
             candidates = [self._host, self._credentials.get(digest, {})]
-        if paid:
-            candidates.append(store.album_descriptions.availability(digest, now))
-        else:
-            candidates.append(store.album_descriptions.legacy_availability(digest, now))
         blocked = [wait for wait in candidates if wait.get('status') == 'auth'
                    or wait.get('retry_at', 0) > now]
         return max(blocked, key=lambda wait: (wait.get('status') == 'auth', wait.get('retry_at', 0)),
                    default={})
 
-    def _remember(self, digest, record):
+    def remember(self, digest, record):
         if record['status'] not in ('auth', 'balance', 'rate_limit', 'unavailable'):
             return
         wait = {key: record[key] for key in ('status', 'retry_at')}
@@ -140,82 +118,19 @@ class DeepSeekIAO:
         except OSError:
             raise DescriptionUnavailable('unavailable') from None
 
-    def complete(self, store, identity, project, now, *, now_fn=None, policy=None):
-        """Reserve and publish a single attempt, including failures and abstentions.
+    def attempt(self, key, payload, *, now_fn, reauthorize):
+        """One admitted bounded attempt: the IAO's entire role in a paid request.
 
-        Durable reservations serialize callers of the same database, including
-        separate processes. Cancellation retains the counted short lease because
-        a POST may already have reached the vendor. It is never replayed here.
+        Paces, then calls the supplied zero-arg `reauthorize` immediately before
+        the single permitted dispatch -- the Description controller
+        (rec/album_descriptions.py) supplies it to re-verify consent/credential/
+        budget and re-authorize its durable reservation at exactly this point,
+        the same timing the admission orchestration has always used, now an
+        explicit seam instead of this IAO reaching into Store itself.
+        `reauthorize` raises to abort; this method never retries on its own.
         """
         check_cancellable_work()
-        clock = now_fn or (lambda: now)
-        admitted_at = clock()
-        key = self.api_key(store)
-        # A typed request must identify its exact generation policy. Reject an
-        # old caller after cutover instead of recreating a legacy paid surface.
-        paid = policy is not None
-        if getattr(store, '_paid_descriptions', False) and not paid:
-            raise ValueError('Paid description admission requires its generation policy')
-        config = self.settings(store, admitted_at, paid=paid)
-        if not key or not config['enabled'] or not config['daily_limit']:
-            return {'status': 'not_configured' if not key else 'paused'}
-        wait = self.availability(store, key, admitted_at, paid=paid)
-        if wait:
-            if config['requests_today'] >= config['daily_limit']:
-                return {'status': 'daily_limit', 'retry_at': (int(admitted_at // 86400) + 1) * 86400}
-            return dict(wait)
-        digest = credential_id(key)
-        claim = (store.album_descriptions.claim(identity, policy, digest, config['daily_limit'], admitted_at)
-                 if paid else store.album_descriptions.legacy_claim(
-                     identity, digest, config['daily_limit'], admitted_at))
-        if claim['status'] != 'reserved':
-            return claim.get('record') or claim
-        active, sent = True, False
-
-        def send(payload):
-            nonlocal sent
-            with self._lock:
-                if not active or sent:
-                    raise RuntimeError('A DeepSeek admission permits exactly one request')
-                sent = True
-            check_cancellable_work()
-            self.pacer.wait()
-            check_cancellable_work()
-            # Settings may have changed while awaiting the shared request slot.
-            current = self.settings(store, clock(), paid=paid)
-            if (not current['enabled'] or not current['daily_limit']
-                    or current['requests_today'] > current['daily_limit'] or self.api_key(store) != key):
-                raise _AdmissionChanged()
-            wait = self.availability(store, key, clock(), paid=paid)
-            if wait:
-                raise DescriptionUnavailable(wait['status'], wait['retry_at'])
-            authorized = (store.album_descriptions.authorize(
-                claim['request_id'], claim['token'], digest, current['daily_limit'], clock())
-                if paid else store.album_descriptions.legacy_authorize(
-                    claim['token'], digest, current['daily_limit'], clock()))
-            if not authorized:
-                raise _AdmissionChanged()
-            return self._request(payload, key, now_fn=clock)
-
-        try:
-            record = project(send)
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except _AdmissionChanged:
-            finished_at = clock()
-            record = {'status': 'paused', 'at': finished_at, 'retry_at': finished_at + 60}
-        except DescriptionUnavailable as error:
-            finished_at = clock()
-            # HTTP Retry-After is captured against this attempt's clock as well.
-            record = {'status': error.reason, 'at': finished_at,
-                      'retry_at': max(finished_at + _DELAYS[error.reason], error.retry_at)}
-            self._remember(digest, record)
-            net.record_probe_failure(DescriptionUnavailable(error.reason, record['retry_at']))
-        finally:
-            active = False
-        if paid:
-            if not store.album_descriptions.finish(claim['request_id'], claim['token'], record, clock()):
-                return {'status': 'stale'}
-        else:
-            store.album_descriptions.legacy_finish(identity, claim['token'], record, clock())
-        return record
+        self.pacer.wait()
+        check_cancellable_work()
+        reauthorize()
+        return self._request(payload, key, now_fn=now_fn)

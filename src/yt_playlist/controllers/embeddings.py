@@ -8,8 +8,9 @@ from yt_playlist.core import embeddings
 
 
 class Embeddings:
-    def __init__(self, repository, files):
+    def __init__(self, repository, files, *, file_repository=None):
         self.repository, self.files = repository, files
+        self.file_repository = repository if file_repository is None else file_repository
 
     def retained(self):
         return self.files.retained()
@@ -66,7 +67,12 @@ class Embeddings:
                 if previous_order is None:
                     order += 1
                 values.append((subject, vector, now, previous_order if previous_order is not None else order))
-            files = self.files.write(kind, size, values)
+            records = self.files.describe(kind, size, values)
+            identities = self.file_repository.reserve_files(records)
+            if len(identities) != len(records):
+                raise ValueError('Embedding reservation count differs from its packs')
+            records = [dict(record, file_id=identity) for record, identity in zip(records, identities, strict=True)]
+            files = self.files.write_reserved(records)
         return embeddings.Publication(name, model_version, tuple(admitted), tuple(retracted), replace, now, size, files)
 
     def publish(self, publications):
@@ -80,3 +86,11 @@ class Embeddings:
         with self.files.retained():
             publication = self.prepare(name, rows, replace=True, model_version=embeddings.version(name, settings))
             self.publish([publication])
+
+    def collect(self, now, *, limit=16):
+        removed = 0
+        with self.files.garbage(now - 30*86400, limit=limit) as candidates:
+            for kind, reference, path, info in candidates:
+                if not self.repository.file_required(kind, reference):
+                    removed += self.files.remove(path, info)
+        return removed

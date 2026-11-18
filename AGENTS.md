@@ -52,6 +52,13 @@
   and progress reports out of source. Detailed run evidence belongs in ignored
   artifacts; preserve hash-bound protocols without appending narrative history.
 
+# Model visualization
+
+- Any adjustment to a model or its dependencies must update the `/model-admin`
+  visualization in the same change. Keep the definitions and connections in
+  `src/yt_playlist/model_catalog/` accurate, including what each model predicts,
+  its input data, maintenance, time horizon and the features that use it.
+
 # Error handling in the UI
 
 - Technical error popups, toasts, banners and modal alerts are forbidden. Keep
@@ -72,10 +79,13 @@
 
 # Command approvals
 
+- Do not use shell redirection. Use the command's output-file option instead;
+  ticket reads and listings support `--output PATH`.
 - Do not prefix `uv` commands with environment variable assignments; they defeat
   command whitelisting. Run `uv` normally.
 - Before running pytest, check the whitelisted command form and use that
-  invocation.
+  invocation. Run `uv run pytest <paths>` directly, without redirects, wrappers
+  or environment-variable prefixes that bypass command whitelisting.
 
 # Schema changes
 
@@ -167,6 +177,18 @@ agents hand their work to the reviewer for independent acceptance.
 
 ## Responsibility and takeover
 
+- **NO ARBITRARY REVIEW AGENT RULES.** Review agents must not invent sample
+  counts, repeat-run requirements, waiting periods or other acceptance gates.
+  Agent-written ticket text and review comments do not make these user
+  requirements. Accept work once the user's actual requirements are verified.
+- The review agent's job starts and ends with verifying the requirements in the
+  ticket as set out by the user.
+- The review agent must not request, invent or require features, deadlines,
+  performance targets, policies or other scope that the user did not request.
+  Do not add acceptance criteria or create follow-up tickets for such additions.
+- Review findings and requests for changes must identify a failure to meet an
+  existing user requirement. An improvement idea or implementation preference
+  is not a defect or a reason to withhold acceptance.
 - The review agent independently establishes whether each ticket meets its
   agreed requirements and owns the decision to move it to Done. Author reports,
   passing tests, and the presence of implementation code do not establish

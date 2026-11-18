@@ -26,17 +26,18 @@ def test_focus_is_quiet_and_text_fields_have_a_single_indicator(page, live_app):
     heading.click()
     assert not heading.evaluate("el => el.matches(':focus-visible')")
 
-    field = page.locator(".omni-input")
+    page.locator(".omni-input").click()
+    field = page.locator("#music-search-query")
     field.fill("funk and soul")
     expect(field).to_be_focused()
-    expect(field).to_have_css("border-color", "rgb(57, 135, 229)")
+    expect(page.locator('.music-search-query')).to_have_css("border-color", "rgb(57, 135, 229)")
     expect(field).to_have_css("outline-style", "none")
     style = field.evaluate("""el => {
       const s = getComputedStyle(el);
-      return {border: s.borderColor, outline: s.outlineStyle, shadow: s.boxShadow,
+      return {outline: s.outlineStyle, shadow: s.boxShadow,
               readable: s.color !== s.backgroundColor};
     }""")
-    assert style == {"border": "rgb(57, 135, 229)", "outline": "none", "shadow": "none", "readable": True}
+    assert style == {"outline": "none", "shadow": "none", "readable": True}
 
 
 def test_tokens_resolve_at_runtime(page, live_app):

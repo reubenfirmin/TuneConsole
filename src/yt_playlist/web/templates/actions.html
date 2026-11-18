@@ -31,7 +31,7 @@
           {% if a.status == 'executed' %}<span class="tag teal">{{ a.status }}</span>
           {% elif a.status in ('cancelled', 'undone') %}<span class="tag">{{ a.status }}</span>
           {% elif a.status == 'planned' %}<span class="tag amber">{{ a.status }}</span>
-          {% elif a.status == 'pending' %}<span class="tag amber">{{ 'creating playlist' if a.kind == 'copy_playlist' else 'placement pending' }}</span>
+          {% elif a.status == 'pending' %}<span class="tag amber">{{ 'checking library change' if a.kind in ('save_song', 'save_catalog_entity') else 'creating playlist' if a.kind == 'copy_playlist' else 'placement pending' }}</span>
           {% elif a.status == 'delete_pending' %}<span class="tag amber">deletion pending</span>
           {% elif a.status == 'delete_failed' %}<span class="tag amber">deletion failed</span>
           {% elif a.status == 'undo_failed' %}<span class="tag amber">recovery incomplete · {{ row.recovery_progress }}</span>

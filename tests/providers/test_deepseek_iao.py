@@ -370,8 +370,8 @@ def test_an_admission_send_function_cannot_be_reused_after_publication(boundary,
             send({})
         return {**result, 'status': 'ready', 'at': 1000}
 
-    b.iao.complete(store, store.album_descriptions.album_id(ALBUM), project, 1000,
-                   policy=deepseek.description_policy())
+    copy._admit(store, store.album_descriptions.album_id(ALBUM), project, 1000,
+               policy=deepseek.description_policy())
     with pytest.raises(RuntimeError, match='exactly one request'):
         send_functions[0]({})
     assert len(b.calls) == 1 and copy.settings(store, 1000)['requests_today'] == 1

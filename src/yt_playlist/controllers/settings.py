@@ -6,14 +6,8 @@ import json
 from yt_playlist.core import recommendation_setting_outputs as outputs
 from yt_playlist.core import model_state, spotify_job_state, entity_names, taste_control_state, experiment_decision_state
 from yt_playlist.core import workflow_settings
-from yt_playlist.core.radio_reads import ORIGIN_KEYS
 from yt_playlist.controllers.workflow_settings import WorkflowSettings
 from yt_playlist.core.schema_contract import MigrationError
-
-PREPARED_KEYS = frozenset({spotify_job_state.KEY, *taste_control_state.KEYS, *experiment_decision_state.KEYS,
-    'library_sync_state', 'listening_playback_bindings', 'listening_album_pending',
-    'album_feedback', 'auth_expired_identities', 'radio_current_session', *ORIGIN_KEYS})
-
 
 class Settings:
     def __init__(self, repository, files, recovery):
@@ -74,32 +68,7 @@ class Settings:
                                 (not isinstance(raw, str) or len(raw.encode()) != reference['raw_size'])):
                             raise MigrationError('Prepared saved output differs from its captured kind or byte size')
                     return raw
-        if key in PREPARED_KEYS or workflow_settings.owns(key):
-            with self.files.retained():
-                handled, raw, document = self.repository.prepared_document(key, default)
-                if handled:
-                    return raw if document is None else self._read_prepared(document)
         return self.repository.get_setting(key, default)
-
-    def _read_prepared(self, document):
-        if document['storage'] == 'plain':
-            return self.files.read_original(document)
-        parts = document['parts']
-        if [part['position'] for part in parts] != list(range(document['part_count'])):
-            raise MigrationError('Prepared setting original parts are incomplete')
-        values = [self.files.read(part, surface=document['surface'],
-                  chunk_key=document['prefix']+str(part['position'])) for part in parts]
-        null = document.get('source_kind') == 'null'
-        if null and document['nullable_part']:
-            if values != [None]:
-                raise MigrationError('Prepared setting has an invalid null source')
-            raw = ''
-        else:
-            raw = ''.join(values)
-        encoded = raw.encode()
-        if len(encoded) != document['raw_size'] or hashlib.sha256(encoded).hexdigest() != document['raw_digest']:
-            raise MigrationError('Prepared setting differs from its captured bytes')
-        return None if null else raw
 
     def _write(self, values, writer):
         selected = {key: raw for key, raw in values.items() if key in outputs.KEYS}
@@ -120,6 +89,7 @@ class Settings:
         taste = {key: taste_control_state.prepare(key, raw) for key, raw in controls.items()} if native_controls else {}
         with ExitStack() as stack:
             arguments = {}
+            file_writes = []
             if native_workflows:
                 stack.enter_context(self.recovery.retained())
                 arguments['workflow_records'] = self.workflows.prepare_values(workflows)
@@ -129,25 +99,41 @@ class Settings:
                 first_id = rows[-1]['id']+1 if rows else 1
                 appended = experiment_decision_state.prepare(values[experiment_decision_state.KEY], records)
                 arguments['decisions'] = [row['id'] for row in rows], [
-                    (first_id+offset, item, self.recovery.publish('experiment-decision', first_id+offset, item['live_evidence']))
+                    (first_id+offset, item, self._publish_recovery('experiment-decision', first_id+offset,
+                                                                item['live_evidence'], file_writes))
                     for offset, item in enumerate(appended)]
             if saved:
                 stack.enter_context(self.files.retained())
-                durable = {key: self.files.publish(output['encoded'])
-                           for key, output in prepared.items() if output is not None}
-                arguments['outputs'] = prepared, durable
+                durable, output_ids = {}, {}
+                for key, output in prepared.items():
+                    if output is None:
+                        continue
+                    integrity = self.files.describe(output['encoded'])
+                    identity = self.repository.reserve_output_file(key, integrity)
+                    durable[key] = self.files.publish_reserved(identity, output['encoded'], expected=integrity)
+                    output_ids[key] = identity
+                arguments['outputs'] = prepared, durable, output_ids
             if native_models:
                 stack.enter_context(self.recovery.retained())
-                arguments['model_references'] = {owner: self.recovery.publish('taste-settings', owner, value)
+                arguments['model_references'] = {owner: self._publish_recovery('taste-settings', owner, value, file_writes)
                                                 for owner, value in model_values.items()}
             if native_job:
                 stack.enter_context(self.recovery.retained())
                 arguments['import_job'] = job, self._publish_job(job) if job is not None else None
             if native_controls:
                 stack.enter_context(self.recovery.retained())
-                arguments['controls'] = {key: (value, self.recovery.publish(kind, 1, opaque) if value is not None else None)
+                arguments['controls'] = {key: (value, self._publish_recovery(kind, 1, opaque, file_writes) if value is not None else None)
                                          for key, (value, kind, opaque) in taste.items()}
+            if file_writes:
+                arguments['file_writes'] = file_writes
             return writer(values, **arguments)
+
+    def _publish_recovery(self, kind, owner, value, file_writes):
+        integrity = self.recovery.describe(kind, owner, value)
+        file_id = self.repository.reserve_file(kind, owner, integrity)
+        reference = self.recovery.publish_reserved(file_id, kind, owner, value, expected=integrity)
+        file_writes.append((file_id, kind, owner, reference))
+        return reference
 
     def set_values(self, values):
         return self._write(values, self.repository.set_values)
@@ -188,7 +174,6 @@ class Settings:
     def get_settings_with_prefix(self, prefix):
         with self.files.retained(), self.recovery.retained():
             values, documents, native = self.repository.prefix_documents(prefix)
-            values.update((key, self._read_prepared(document)) for key, document in documents.items())
             values.update((key, self.workflows.get(key)) for key in native)
             return values
 
@@ -226,8 +211,11 @@ class Settings:
 
     def _publish_job(self, prepared):
         job = prepared['value']
-        return self.recovery.publish('spotify-import', prepared['identity'],
-            {key: job[key] for key in spotify_job_state.OPAQUE if key in job})
+        value = {key: job[key] for key in spotify_job_state.OPAQUE if key in job}
+        integrity = self.recovery.describe('spotify-import', prepared['identity'], value)
+        prepared['file_id'] = self.repository.reserve_file('spotify-import', prepared['identity'], integrity)
+        return self.recovery.publish_reserved(prepared['file_id'], 'spotify-import', prepared['identity'], value,
+                                               expected=integrity)
 
     def _load_job(self, *, token=False):
         with self.recovery.retained():

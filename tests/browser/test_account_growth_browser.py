@@ -32,6 +32,156 @@ def store(store, request):
     return store
 
 
+def test_integration_notices_and_highlighted_setup_destinations(live_app, store, page, monkeypatch):
+    from tests.conftest import seed_catalog_track
+
+    account = store.accounts.get_accounts()[0].id
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='song')
+    returning_listener(store, 'mixes')
+    first = 120
+    store.history.record_play_event(account, 'song|artist', 'song', first)
+    clock = {'now': first}
+    actual_view = account_growth.view
+    monkeypatch.setattr(account_growth, 'view', lambda source, _now, **kwargs:
+                        actual_view(source, clock['now'], **kwargs))
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
+    page.add_init_script('''if (!localStorage.getItem('tc-growth-notices-v1')) localStorage.setItem('tc-growth-notices-v1', JSON.stringify({
+        seen: ['foundation', 'albums', 'discover', 'listening', 'radio', 'tv', 'vibes', 'recent', 'rediscover'],
+        later: true,
+    }))''')
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(live_app + '/#unlocks', wait_until='domcontentloaded')
+    model = "Alpine.$data(document.querySelector('.home-growth'))"
+    notice = page.locator('.growth-unlock-notice')
+    expect(notice).to_be_hidden()
+
+    clock['now'] = first + 86400
+    page.evaluate(f'{model}.refresh()')
+    expect(notice).to_contain_text('Last.fm')
+    expect(page.get_by_role('tab', name='Your unlocks')).to_have_class(re.compile('has-new'))
+    page.screenshot(path='/tmp/tuneconsole-1118-lastfm-notice.png', full_page=True)
+    notice.get_by_role('button', name='See what’s new', exact=True).click()
+    popup = page.get_by_role('dialog', name='Find more music that fits')
+    expect(popup).to_contain_text('Optional bonus')
+    popup.get_by_role('link', name='Set up Last.fm', exact=True).click()
+    expect(page.get_by_role('tab', name='Enrichment', exact=True)).to_have_attribute('aria-selected', 'true')
+    lastfm = page.locator('#setup-lastfm')
+    expect(lastfm).to_be_focused()
+    expect(lastfm.get_by_text('Last.fm', exact=True)).to_be_in_viewport()
+    expect(lastfm).to_have_css('outline-style', 'solid')
+    expect(lastfm).to_have_css('outline-width', '3px')
+    page.screenshot(path='/tmp/tuneconsole-1118-lastfm-setup.png', full_page=True)
+
+    # Both overdue recommendations queue in the requested order for a returning listener.
+    clock['now'] = first + 2 * 86400
+    page.goto(live_app + '/#unlocks', wait_until='domcontentloaded')
+    expect(notice).to_contain_text('Last.fm')
+    notice.get_by_role('button', name='Mark as seen', exact=True).click()
+    expect(notice).to_contain_text('Google Takeout')
+    notice.get_by_role('button', name='See what’s new', exact=True).click()
+    popup = page.get_by_role('dialog', name='Rediscover old favorites sooner')
+    popup.get_by_role('link', name='Add past listening', exact=True).click()
+    expect(page.get_by_role('tab', name='Import', exact=True)).to_have_attribute('aria-selected', 'true')
+    takeout = page.locator('#setup-takeout')
+    expect(takeout).to_be_focused()
+    expect(takeout.get_by_role('heading', name='Import YouTube history (Google Takeout)')).to_be_in_viewport()
+    expect(takeout).to_have_css('outline-width', '3px')
+    page.screenshot(path='/tmp/tuneconsole-1118-takeout-setup.png', full_page=True)
+
+    page.goto(live_app + '/#unlocks', wait_until='domcontentloaded')
+    expect(notice).to_contain_text('Google Takeout')
+    notice.get_by_role('button', name='Mark as seen', exact=True).click()
+    expect(notice).to_be_hidden()
+    page.reload(wait_until='domcontentloaded')
+    expect(notice).to_be_hidden()
+    assert not errors
+
+
+def test_integration_reminders_in_needs_attention(store, page, monkeypatch, request):
+    from tests.conftest import seed_catalog_track
+    from yt_playlist.web import app as webapp
+
+    first = 120
+    clock = {'now': first + 86400}
+    create_app = webapp.create_app
+
+    def timed_app(*args, **kwargs):
+        return create_app(*args, **{**kwargs, 'now_fn': lambda: clock['now']})
+
+    monkeypatch.setattr(webapp, 'create_app', timed_app)
+    monkeypatch.setattr(account_growth.lastfm, 'api_key',
+                        lambda source: source.settings.get_setting('lastfm_api_key') or None)
+    base = request.getfixturevalue('live_app')
+    account = store.accounts.get_accounts()[0].id
+    seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='song')
+    store.history.record_play_event(account, 'song|artist', 'song', first)
+    returning_listener(store, 'mixes')
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
+    # Acknowledging the unlock notices must not dismiss the later reminders.
+    page.add_init_script('''localStorage.setItem('tc-growth-notices-v1', JSON.stringify({
+        seen: ['foundation', 'albums', 'discover', 'listening', 'radio', 'tv', 'vibes', 'recent', 'rediscover', 'lastfm', 'takeout'],
+        later: true,
+    }))''')
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    lastfm, takeout = page.locator('#lastfm-nudge'), page.locator('#takeout-nag')
+    page.goto(base + '/#unlocks', wait_until='domcontentloaded')
+    expect(lastfm).to_have_count(0)
+    expect(takeout).to_have_count(0)
+
+    clock['now'] = first + 8 * 86400 - 1
+    page.reload(wait_until='domcontentloaded')
+    expect(lastfm).to_have_count(0)
+    clock['now'] += 1
+    page.reload(wait_until='domcontentloaded')
+    page.get_by_role('tab', name='Needs attention').click()
+    expect(lastfm).to_be_visible()
+    expect(takeout).to_have_count(0)
+    lastfm.get_by_role('link', name='Add key', exact=False).click()
+    expect(page.locator('#setup-lastfm')).to_be_focused()
+    expect(page.locator('#setup-lastfm')).to_have_css('outline-width', '3px')
+
+    clock['now'] = first + 9 * 86400
+    page.goto(base + '/#notices', wait_until='domcontentloaded')
+    expect(page.get_by_role('tab', name='Needs attention')).to_have_attribute('aria-selected', 'true')
+    expect(lastfm).to_be_visible()
+    expect(takeout).to_be_visible()
+    page.screenshot(path='/tmp/tuneconsole-1118-needs-attention.png', full_page=True)
+    takeout.get_by_role('link', name='Add listening history', exact=False).click()
+    expect(page.locator('#setup-takeout')).to_be_focused()
+    expect(page.locator('#setup-takeout')).to_have_css('outline-width', '3px')
+
+    page.goto(base + '/#notices', wait_until='domcontentloaded')
+    lastfm.get_by_role('button', name='Dismiss', exact=True).click()
+    expect(lastfm).to_have_count(0)
+    expect(takeout).to_be_visible()
+    page.reload(wait_until='domcontentloaded')
+    expect(lastfm).to_have_count(0)
+    expect(takeout).to_be_visible()
+    takeout.get_by_role('button', name='Dismiss', exact=True).click()
+    expect(takeout).to_have_count(0)
+    page.reload(wait_until='domcontentloaded')
+    expect(lastfm).to_have_count(0)
+    expect(takeout).to_have_count(0)
+
+    clock['now'] += 30 * 86400
+    page.reload(wait_until='domcontentloaded')
+    page.get_by_role('tab', name='Needs attention').click()
+    expect(lastfm).to_be_visible()
+    expect(takeout).to_have_count(0)
+    clock['now'] += 60 * 86400
+    page.reload(wait_until='domcontentloaded')
+    expect(lastfm).to_be_visible()
+    expect(takeout).to_be_visible()
+    store.settings.set_setting('lastfm_api_key', 'controlled-key')
+    store.history.import_play_events(account, [('song|artist', 'song', 60)], source='takeout')
+    page.reload(wait_until='domcontentloaded')
+    expect(lastfm).to_have_count(0)
+    expect(takeout).to_have_count(0)
+    assert not errors
 
 
 @pytest.mark.parametrize('width', [1536])

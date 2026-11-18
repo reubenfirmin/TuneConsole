@@ -54,20 +54,18 @@ class AcousticBrainzIAO:
         self._cache, self._waits = OrderedDict(), OrderedDict()
 
     @contextmanager
-    def context(self, store=None):
-        token = self._scope.set(store) if store is not None else None
+    def context(self, state=None):
+        # `state` is a narrow AccessState (see integrations/base.py), never a Store.
+        token = self._scope.set(state) if state is not None else None
         try:
             yield self
         finally:
             if token is not None:
                 self._scope.reset(token)
 
-    def _state(self):
-        return getattr(self._scope.get(), 'enrichment_state', None)
-
     def availability(self):
         with self._lock:
-            state = self._state()
+            state = self._scope.get()
             saved = state.integration_cooldown('acousticbrainz') if state else None
             if saved and saved['retry_at'] > self._availability.retry_at:
                 return Availability(saved['retry_at'], saved['error'])
@@ -180,7 +178,7 @@ class AcousticBrainzIAO:
                     raise error from exc
             self._failures = 0
             self._availability = Availability()
-            state = self._state()
+            state = self._scope.get()
             if state:
                 state.clear_integration_cooldown('acousticbrainz', admitted.retry_at)
             self._waits.pop(key, None)
@@ -203,7 +201,7 @@ class AcousticBrainzIAO:
         if outage:
             self._failures += 1
             retry_at = max(retry_at, now + min(3600, 30 * 2 ** min(self._failures - 1, 7)))
-            state = self._state()
+            state = self._scope.get()
             if state:
                 retry_at = state.defer_integration('acousticbrainz', now=now,
                     retry_after=retry_at, error=message)['retry_at']

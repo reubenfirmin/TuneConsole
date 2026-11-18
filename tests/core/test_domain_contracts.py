@@ -3,12 +3,10 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import genre_identity, schema_inspection
-from yt_playlist.core.migrations import current, registry, migrate, Migration, MigrationError
-from yt_playlist.core.migrations import regular, v104_domain_contracts as domains
+from yt_playlist.core import domain_contracts as domains
 from yt_playlist.core.store import Store
 from tests.genre_catalog_support import bound_catalog
-from tests.regular_schema_support import admit_regular_schema, captured
+from tests.regular_schema_support import captured
 from tests.store_fixture_support import install_regular_input, use_native_sql_calls, without_query_timing
 
 
@@ -107,7 +105,6 @@ def test_valid_zero_flags_unknowns_and_pre_epoch_times_remain_legal(constrained)
                 conn.execute(f'UPDATE {table} SET {column}=?',(value,))
                 if 'IS NULL OR' in expression:
                     conn.execute(f'UPDATE {table} SET {column}=NULL')
-        domains.preflight(conn)
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         conn.execute('ROLLBACK TO boundary')
@@ -140,49 +137,6 @@ def test_final_account_and_recipe_boundaries_keep_valid_exchange_and_reload(cons
         conn.execute('RELEASE final_contracts')
 
 
-def installed(path):
-    store = Store(path)
-    try:
-        store.conn.execute('PRAGMA synchronous=OFF')
-        # This constructs one predecessor, not hundreds of separate durable
-        # DDL commits. Every test still runs its own admission and upgrade.
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            for sql in current.statements(version=103):
-                store.conn.execute(sql)
-            genre_identity.seed_catalog(store.conn)
-            store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-            store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-                                  [(m.version,m.name) for m in registry.MIGRATIONS[:103]])
-            seed(store.conn)
-    except BaseException:
-        store.conn.close()
-        raise
-    return store
-
-
-@pytest.fixture(scope='module')
-def admitted_predecessor(tmp_path_factory):
-    """Completed regular SQL below each domain conversion and its real admission."""
-    source = installed(tmp_path_factory.mktemp('domain-predecessor')/'installed.db')
-    snapshot = sqlite3.connect(':memory:')
-    try:
-        # First regular admission has its own complete test below. Invalid-domain
-        # conversions consume that finished input, then run their actual upgrade.
-        with source.conn:
-            source.conn.execute('BEGIN IMMEDIATE')
-            install_regular_input(source.conn, regular.CHANGES)
-        assert regular.validate(source.conn) == len(regular.CHANGES)
-        from tests.prepared_fixture_support import coordinates
-        assert not coordinates(source.conn), 'SQL-only predecessor retains external files'
-        source.conn.backup(snapshot)
-        snapshot.execute('PRAGMA query_only=ON')
-        yield snapshot
-    finally:
-        snapshot.close()
-        source.conn.close()
-
-
 @pytest.mark.parametrize('value',[2,-1,1.5,'1'])
 def test_catalog_availability_rejects_coercion_before_admitting_an_owner(store,value):
     from yt_playlist.core import catalog
@@ -199,110 +153,3 @@ def test_mode_size_rejects_coercion_before_partial_publication(store,size):
     with pytest.raises(ValueError,match='Mode size'):
         store.modes.replace_modes([valid,{**valid,'mode_id':2,'size':size}],[],1)
     assert captured(store.conn)==before
-
-
-def converted_history(before):
-    return sorted(before['schema_migrations'] + [
-        (entry.version, entry.name, 2000) for entry in registry.MIGRATIONS[103:]], key=repr)
-
-
-def test_installed_upgrade_preserves_values_sequences_dependencies_and_matches_fresh(tmp_path):
-    store = installed(tmp_path/'upgrade.db')
-    try:
-        store.conn.execute('CREATE VIEW installed_credit AS SELECT entry_id,position FROM entry_artists')
-        store.conn.execute('CREATE TABLE installed_receipts(position INTEGER)')
-        store.conn.execute('CREATE TRIGGER installed_position AFTER UPDATE OF position ON entry_artists '
-                           'BEGIN INSERT INTO installed_receipts VALUES (NEW.position); END')
-        # Preserve deleted high IDs, including an empty autoincrement owner.
-        store.conn.execute("UPDATE sqlite_sequence SET seq=1000 WHERE name IN ('recordings','rec_content_pending')")
-        store.conn.execute('DELETE FROM rec_musical_pending')
-        store.conn.execute("UPDATE sqlite_sequence SET seq=1000 WHERE name='rec_musical_pending'")
-        store.conn.commit()
-        before = admit_regular_schema(store)
-        sql = dict(store.conn.execute("SELECT name,sql FROM sqlite_schema WHERE type IN ('view','trigger')"))
-        migrate(store.conn, registry=registry.MIGRATIONS, clock=lambda: 2000)
-        store.init_schema()
-        assert captured(store.conn)=={**before, 'schema_migrations': converted_history(before)}
-        actual = dict(store.conn.execute("SELECT name,sql FROM sqlite_schema WHERE type IN ('view','trigger')"))
-        assert {name:actual[name] for name in sql}==sql
-        # Subsequent migrations can add guards without rewriting installed programs.
-        earlier = current._schema_contract(current.statements(version=103))
-        added = {name for name,(kind,_) in current.contract().items()
-                 if kind in ('view','trigger') and name not in earlier}
-        assert actual.keys()-sql.keys()==added
-        current.validate(store.conn)
-        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        with store.conn:
-            store.conn.execute('UPDATE entry_artists SET position=1')
-        assert tuple(store.conn.execute('SELECT * FROM installed_credit').fetchone())==(1,1)
-        assert store.conn.execute('SELECT position FROM installed_receipts').fetchone()[0]==1
-        with store.conn:
-            rid = store.conn.execute("INSERT INTO recordings(identity_key) VALUES ('new')").lastrowid
-        assert rid>1000
-        with store.conn:
-            position = store.conn.execute("INSERT INTO rec_musical_pending(source_key,revision) VALUES ('after',1)").lastrowid
-        assert position>1000
-    finally:
-        store.conn.close()
-
-
-@pytest.mark.parametrize('table,column,bad',[
-    ('recordings','provisional',7),('taste_modes','size',-1),
-    ('discovery_memberships','offered_count',1.5),('entry_artists','position',.5),
-    ('discovery_impressions','shown_at',float('inf')),
-])
-def test_invalid_predecessor_stops_with_exact_owner_and_retains_original_database(
-        tmp_path,admitted_predecessor,table,column,bad):
-    store = Store(tmp_path/'invalid.db')
-    try:
-        store.conn.execute('PRAGMA synchronous=OFF')
-        admitted_predecessor.backup(store.conn)
-        with store.conn:
-            store.conn.execute(f'UPDATE {table} SET {column}=?',(bad,))
-        assert_invalid_upgrade_retains_database(store,table,column)
-    finally:
-        store.conn.close()
-
-
-def assert_invalid_upgrade_retains_database(store,table,column):
-    before = list(store.conn.iterdump())
-    with pytest.raises(MigrationError,match=table+r'\.'+column+r'.*original rows retained'):
-        migrate(store.conn, registry=registry.MIGRATIONS)
-    retained = sqlite3.connect(store._db_path.as_uri()+'?mode=ro',uri=True)
-    try:
-        assert list(retained.iterdump())==before
-    finally:
-        retained.close()
-
-
-def test_first_regular_admission_preserves_invalid_domain_before_failed_conversion(tmp_path):
-    store = installed(tmp_path/'first-admission.db')
-    try:
-        with schema_inspection.reuse_tables(store.conn):
-            with store.conn:
-                store.conn.execute('UPDATE recordings SET provisional=7')
-            # Keep the independent first-admission boundary covered with invalid
-            # data. The five owner-specific failures above reuse only its setup.
-            admit_regular_schema(store)
-            assert_invalid_upgrade_retains_database(store,'recordings','provisional')
-    finally:
-        store.conn.close()
-
-
-def test_interrupted_replacement_rolls_back_every_owner_then_restarts(tmp_path):
-    store = installed(tmp_path/'interrupted.db')
-    try:
-        admitted = admit_regular_schema(store)
-        before = list(store.conn.iterdump())
-        def interrupted(conn,context):
-            domains.apply(conn,context)
-            raise RuntimeError('interrupted domain cutover')
-        with pytest.raises(MigrationError,match='interrupted domain cutover'):
-            migrate(store.conn,registry=(*registry.MIGRATIONS[:103],Migration(104,'domain_contracts',interrupted,rebuild_tables=True)))
-        assert list(store.conn.iterdump())==before
-        migrate(store.conn, registry=registry.MIGRATIONS, clock=lambda: 2000)
-        store.init_schema()
-        assert captured(store.conn)=={**admitted, 'schema_migrations': converted_history(admitted)}
-        current.validate(store.conn)
-    finally:
-        store.conn.close()

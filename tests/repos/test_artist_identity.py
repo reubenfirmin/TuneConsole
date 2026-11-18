@@ -1,13 +1,12 @@
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 
-from yt_playlist.core import artists, discovery_provenance, file_map, legacy_evidence, legacy_journals
-from yt_playlist.core.migrations import Migration,MigrationError,migrate
+from yt_playlist.core import artists, legacy_evidence
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.core.migrations import v027_artist_identity_redirects as upgrade
 from yt_playlist.core.store import Store
 from yt_playlist.rec import model_refresh
 
@@ -28,23 +27,20 @@ def mute(s,aid):
     s.discovery.mark_scanned(aid,10)
 
 
-def retained_reconciliations(store):
-    root = legacy_journals.directory(store.conn) / 'artist'
-    records = []
-    for key, value in file_map.items(root, legacy_journals.head(store.conn, 'artist')):
-        kind, source = json.loads(key)
-        if kind.startswith('artist_reconcile:'):
-            assert legacy_evidence.original(store.conn, 'artist', kind, source) == value['payload']
-            records.append((kind, json.loads(value['payload'])))
-    return records
-
-
-def original_reconciliations(store, tables, old, target):
-    return [(f'artist_reconcile:{table}', dict(row) | (
-        {'explanation': discovery_provenance.explanation(store.conn, row)}
-        if table == 'discovered_artists' else {}))
-        for table in tables
-        for row in store.conn.execute(f'SELECT * FROM {table} WHERE artist_id IN (?,?)', (old, target))]
+@pytest.mark.parametrize('legacy', [False, True])
+def test_ambiguity_guard_remains_effective_without_a_recovery_payload(tmp_path, legacy):
+    with closing(sqlite3.connect(tmp_path / 'guard.sqlite')) as conn:
+        if legacy:
+            conn.execute('CREATE TABLE identity_state_archive(kind TEXT,source_id TEXT,payload TEXT,reason TEXT,'
+                         'PRIMARY KEY(kind,source_id))')
+        else:
+            conn.execute('CREATE TABLE legacy_catalog_evidence(id INTEGER PRIMARY KEY)')
+            conn.execute('CREATE TABLE artist_ambiguities(artist_id INTEGER PRIMARY KEY,reason TEXT)')
+        assert not artists.ambiguous_context(conn, 7)
+        legacy_evidence.mark_artist_ambiguity(conn, 7)
+        legacy_evidence.mark_artist_ambiguity(conn, 7)
+        assert artists.ambiguous_context(conn, 7)
+        assert not artists.ambiguous_context(conn, 8)
 
 
 def test_first_provider_identity_keeps_provisional_id_and_feedback(store):
@@ -80,8 +76,6 @@ def test_existing_provider_reconciles_state_and_old_handles_atomically(store,oth
     store.conn.execute('UPDATE album_artists SET artist_id=?',(old,))
     store.conn.commit()
     observations = store.conn.execute('SELECT COUNT(*) FROM artist_credit_observations').fetchone()[0]
-    originals = original_reconciliations(store,
-        ('artist_scans', 'discovered_artists', 'rec_artist_similar'), old, target)
     refresh(store)
     assert store.artists.resolve(old)==target
     assert store.artists.resolve(f'@artist:{old}')==target
@@ -95,9 +89,6 @@ def test_existing_provider_reconciles_state_and_old_handles_atomically(store,oth
     captures = store.conn.execute('SELECT capture_kind FROM artist_credit_observations ORDER BY id LIMIT -1 OFFSET ?',
                                   (observations,)).fetchall()
     assert sorted(row[0] for row in captures)==['identity_reconciliation','provider_delivery']
-    retained = retained_reconciliations(store)
-    assert len(retained) == len(originals) == 6
-    assert all(record in retained for record in originals)
     store.discovery.mark_scanned(old,50)
     assert store.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:]==(target,50)
 
@@ -133,9 +124,7 @@ def test_feature_reconciliation_failure_keeps_completed_writes_and_retries_track
     store.discovery.record_discovery_impressions('artist',[old],'view',30)
     store.artist_similarity.cache_similar(old,[['Neighbor',.8]],20)
     store.rec_model.replace_rec_artist_vectors([(artists.token(old),b'\x00\x00\x80\x3f')])
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.rec_proposals.publish_prepared_home(json.dumps({'artist':artists.token(old)}),20)
+    store.rec_proposals.publish_prepared_home(json.dumps({'artist':artists.token(old)}),20)
     owner, name = ((store.discovery,'reconcile_artist') if feature=='discovery'
                    else (store.artist_state,'reconcile_artist'))
     original = getattr(owner,name)
@@ -171,9 +160,8 @@ def test_artist_reconciliation_excludes_retired_candidates_and_rebuilds_artist_s
     store.discovery.upsert_discovered_artist('Artist', 1, [], [], None, 99, artist_id=old)
     saved_home = {'discovery_artists': [{'artist_id': old, 'artist': 'Artist', 'genre': 'Techno'}],
                   'discovery_albums': [], 'discovery_tracks': []}
+    store.rec_proposals.publish_prepared_home(json.dumps(saved_home),100)
     with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.rec_proposals.publish_prepared_home(json.dumps(saved_home),100)
         store.conn.execute("INSERT INTO rec_model_selection_runs(started_at,result_json,identity_version) VALUES (1,'{}',2)")
     if via=='track':
         refresh(store)
@@ -200,21 +188,16 @@ def test_artist_reconciliation_excludes_retired_candidates_and_rebuilds_artist_s
     assert not store.rec_refresh.has_pending_changes()
 
 
-def test_equal_timestamp_reconciliation_prefers_surviving_payload_and_retains_originals(store):
+def test_equal_timestamp_reconciliation_prefers_surviving_payload(store):
     tid = store.tracks.upsert_track('v','Song','Artist',None,200)
     old = store.artists.track_credits(tid)[0]['artist_id']
     target = store.artists.track_credits(refresh(store,'known'))[0]['artist_id']
     for aid,score,neighbor in [(target,2,'Target neighbor'),(old,1,'Old neighbor')]:
         store.discovery.upsert_discovered_artist('Artist',score,[],[],None,20,artist_id=aid)
         store.artist_similarity.cache_similar(aid,[[neighbor,.8]],20)
-    originals = original_reconciliations(store, ('discovered_artists', 'rec_artist_similar'), old, target)
     refresh(store)
     assert store.discovery.get_discovered_artists()[0]['score']==2
     assert store.artist_similarity.cached_similar(target,30)==[['Target neighbor',.8]]
-    archived = retained_reconciliations(store)
-    assert len(archived)==4
-    assert {r[0] for r in archived}=={'artist_reconcile:discovered_artists','artist_reconcile:rec_artist_similar'}
-    assert all(record in archived for record in originals)
 
 
 @pytest.mark.parametrize('surviving',['old','target'])
@@ -390,23 +373,3 @@ def test_two_verified_homonyms_are_not_merged_on_a_changed_credit(store):
     assert store.artists.resolve(old)==old
     assert not store.conn.execute('SELECT * FROM artist_redirects').fetchall()
     assert store.tracks.identity_key_for_video('v') not in store.rec_model.suppressed_keys('for_you',40)
-
-
-def test_failed_additive_upgrade_restores_installed_version_without_backups(
-        tmp_path, _pristine_installed_schema):
-    path = tmp_path/'state.db'
-    s = Store(path)
-    _pristine_installed_schema(26).backup(s.conn)
-    s.conn.execute("INSERT INTO artists(name,provisional) VALUES ('Artist',1)")
-    s.conn.commit()
-    before = list(s.conn.iterdump())
-    def fail(conn,context):
-        upgrade.apply(conn,context)
-        raise RuntimeError('interrupted redirect migration')
-    with pytest.raises(MigrationError,match='interrupted redirect'):
-        migrate(s.conn,registry=(*MIGRATIONS[:26],Migration(27,'artist_identity_redirects',fail)))
-    assert list(s.conn.iterdump())==before
-    assert not (tmp_path/'backups').exists()
-    assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==26
-    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    s.conn.close()

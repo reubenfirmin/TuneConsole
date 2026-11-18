@@ -111,11 +111,14 @@ def test_changed_order_is_distinct_from_membership_and_missing_profiles_are_reje
         reports.verify_served_profiles([{'key': 'a', 'musical': {'digest': 'old'}}], {'a': {'digest': 'new'}})
 
 
-def test_legacy_capture_fallback_does_not_hide_missing_specialists_on_compatible_audio():
+@pytest.mark.parametrize('shared', (None, 'shared'))
+def test_unavailable_capture_does_not_hide_missing_specialists_on_compatible_audio(shared):
     with pytest.raises(ValueError, match='Compatible capture'):
-        reports.verify_route({}, 'shared', {'relax': 'specialist'}, compatible=True)
-    assert reports.verify_route({}, 'shared', {'relax': 'specialist'}, compatible=False) == {}
-    prediction = {'model': {'sha256': 'shared'}, 'individual_models': {'relax': {'sha256': 'specialist'}}}
-    assert reports.verify_route(prediction, 'shared', {'relax': 'specialist'}, compatible=True) == {'relax': 'specialist'}
+        reports.verify_route({}, shared, {'relax': 'specialist'}, compatible=True)
+    assert reports.verify_route({}, shared, {'relax': 'specialist'}, compatible=False) == {}
+    prediction = {'individual_models': {'relax': {'sha256': 'specialist'}}}
+    if shared is not None:
+        prediction['model'] = {'sha256': shared}
+    assert reports.verify_route(prediction, shared, {'relax': 'specialist'}, compatible=True) == {'relax': 'specialist'}
     with pytest.raises(ValueError, match='Incompatible capture'):
-        reports.verify_route(prediction, 'shared', {'relax': 'specialist'}, compatible=False)
+        reports.verify_route(prediction, shared, {'relax': 'specialist'}, compatible=False)

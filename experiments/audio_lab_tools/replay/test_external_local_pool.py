@@ -11,7 +11,7 @@ def test_current_teacher_retains_native_and_local_fit_dependencies(tmp_path, mon
     snapshot = tmp_path / 'historical.json'
     save(snapshot, {'gold': [{'video_id': 'known-local', 'embedding_values': [0.] * 200}],
         'teacher': {'model_sha256': 'old-model', 'training_video_ids': ['old-local']}})
-    product = tmp_path / 'src/yt_playlist/rec/data/emotify-vibes.json'
+    product = tmp_path / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'
     save(product, {'provenance': {'snapshot_sha256': digest(snapshot)}})
     monkeypatch.setattr(pool, 'ROOT', tmp_path)
     monkeypatch.setattr(pool, 'SNAPSHOT', snapshot)

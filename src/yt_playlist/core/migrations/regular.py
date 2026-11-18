@@ -58,10 +58,7 @@ def _validate_group_progress(conn):
 
 
 def _retire_genre_choice_capture(conn, context):
-    if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='genre_preferences'").fetchone()
-            and conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name GLOB 'prepare_genre_choices_dependency_*'").fetchone()):
-        from .v085_genre_preferences import retire_preparation_capture
-        retire_preparation_capture(conn)
+    _validate_retired_genre_capture(conn)
 
 
 def _validate_retired_genre_capture(conn):
@@ -73,10 +70,7 @@ def _validate_retired_genre_capture(conn):
 
 
 def _retire_taste_capture(conn, context):
-    if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='taste_axes'").fetchone()
-            and conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name GLOB 'prepare_taste_axes_dependency_*'").fetchone()):
-        from .v088_taste_axes import retire_preparation_capture
-        retire_preparation_capture(conn)
+    _validate_retired_taste_capture(conn)
 
 
 def _validate_retired_taste_capture(conn):
@@ -88,11 +82,7 @@ def _validate_retired_taste_capture(conn):
 
 
 def _retire_metadata_capture(conn, context):
-    if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_observations'").fetchone()
-            and conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name GLOB 'prepare_metadata_dependency_*' "
-                             "OR name GLOB 'prepare_metadata_conflicts_dependency_*'").fetchone()):
-        from .v080_metadata_evidence import retire_preparation_capture
-        retire_preparation_capture(conn)
+    _validate_retired_metadata_capture(conn)
 
 
 def _validate_retired_metadata_capture(conn):
@@ -116,20 +106,20 @@ def _validate_group_retirement(conn):
 
 
 def _repair_installed_genre(conn, context):
-    from ..preparation import installed_genre_contract
-    installed_genre_contract.install(conn,context)
+    from .. import genre_schema
+    genre_schema.install(conn,context)
 
 
 def _validate_installed_genre(conn):
-    from ..preparation import installed_genre_contract
+    from .. import genre_schema
     # Change 7 could precede the taste owner. Change 8 repairs its known missing
     # guards and establishes strict validation without rewriting applied rows.
-    installed_genre_contract.validate(conn, allow_missing_guards=True)
+    genre_schema.validate(conn, allow_missing_guards=True)
 
 
 def _validate_installed_genre_guards(conn):
-    from ..preparation import installed_genre_contract
-    installed_genre_contract.validate(conn)
+    from .. import genre_schema
+    genre_schema.validate(conn)
 
 
 def _install_runtime_metadata(conn, context):
@@ -287,8 +277,8 @@ def after_owner_upgrade(conn):
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
         return
     if conn.execute("SELECT 1 FROM schema_changes WHERE version=7 AND name='bounded_installed_genre_repair'").fetchone():
-        from ..preparation import installed_genre_contract
-        installed_genre_contract.install_guards(conn)
+        from .. import genre_schema
+        genre_schema.install_guards(conn)
     if conn.execute("SELECT 1 FROM schema_changes WHERE version=16 AND name='file_owned_vibe_guards'").fetchone():
         from .. import vibe_provenance
         vibe_provenance.install_guards(conn)
@@ -461,6 +451,206 @@ def _validate_group_preview_work(conn):
     group_preview_work.validate(conn)
 
 
+def _install_song_library(conn, context):
+    from .. import song_library
+    song_library.install(conn)
+
+
+def _validate_song_library(conn):
+    from .. import song_library
+    song_library.validate(conn)
+
+
+def _install_sample_files(conn, context):
+    from yt_playlist.repos.audio_vibes import install_sample_files
+    install_sample_files(conn, context)
+
+
+def _validate_sample_files(conn):
+    from yt_playlist.repos.audio_vibes import validate_sample_files
+    validate_sample_files(conn)
+
+
+def _install_collection_file_writes(conn, context):
+    from yt_playlist.repos import collection_file_writes
+    collection_file_writes.install(conn, context)
+
+
+def _validate_collection_file_writes(conn):
+    from yt_playlist.repos import collection_file_writes
+    collection_file_writes.validate(conn)
+
+
+def _install_recommendation_file_writes(conn, context):
+    from yt_playlist.repos import recommendation_file_writes
+    recommendation_file_writes.install(conn, context)
+
+
+def _validate_recommendation_file_writes(conn):
+    from yt_playlist.repos import recommendation_file_writes
+    recommendation_file_writes.validate(conn)
+
+
+def _install_action_backup_writes(conn, context):
+    from yt_playlist.repos import action_backup_writes
+    action_backup_writes.install(conn, context)
+
+
+def _validate_action_backup_writes(conn):
+    from yt_playlist.repos import action_backup_writes
+    action_backup_writes.validate(conn)
+
+
+def _install_annotation_file_writes(conn, context):
+    from yt_playlist.repos import annotation_file_writes
+    annotation_file_writes.install(conn, context)
+
+
+def _validate_annotation_file_writes(conn):
+    from yt_playlist.repos import annotation_file_writes
+    annotation_file_writes.validate(conn)
+
+
+def _install_playlist_backup_writes(conn, context):
+    from yt_playlist.repos import playlist_backups
+    playlist_backups.install(conn, context)
+
+
+def _validate_playlist_backup_writes(conn):
+    from yt_playlist.repos import playlist_backups
+    playlist_backups.validate(conn)
+
+
+def _install_policy_file_writes(conn, context):
+    from yt_playlist.repos import policy_file_writes
+    policy_file_writes.install(conn, context)
+
+
+def _validate_policy_file_writes(conn):
+    from yt_playlist.repos import policy_file_writes
+    policy_file_writes.validate(conn)
+
+
+def _install_policy_history_files(conn, context):
+    from yt_playlist.repos import policy_history_files
+    policy_history_files.install(conn, context)
+
+
+def _validate_policy_history_files(conn):
+    from yt_playlist.repos import policy_history_files
+    policy_history_files.validate(conn)
+
+
+def _install_embedding_file_writes(conn, context):
+    from yt_playlist.repos import embedding_file_writes
+    embedding_file_writes.install(conn, context)
+
+
+def _validate_embedding_file_writes(conn):
+    from yt_playlist.repos import embedding_file_writes
+    embedding_file_writes.validate(conn)
+
+
+def _install_group_file_writes(conn, context):
+    from yt_playlist.repos import group_file_writes
+    group_file_writes.install(conn, context)
+
+
+def _validate_group_file_writes(conn):
+    from yt_playlist.repos import group_file_writes
+    group_file_writes.validate(conn)
+
+
+def _install_profile_file_writes(conn, context):
+    from yt_playlist.repos import profile_file_writes
+    profile_file_writes.install(conn, context)
+
+
+def _validate_profile_file_writes(conn):
+    from yt_playlist.repos import profile_file_writes
+    profile_file_writes.validate(conn)
+
+
+def _install_vibe_model_file_writes(conn, context):
+    from yt_playlist.repos import vibe_model_file_writes
+    vibe_model_file_writes.install(conn, context)
+
+
+def _validate_vibe_model_file_writes(conn):
+    from yt_playlist.repos import vibe_model_file_writes
+    vibe_model_file_writes.validate(conn)
+
+
+def _install_provenance_file_writes(conn, context):
+    from yt_playlist.repos import provenance_file_writes
+    provenance_file_writes.install(conn, context)
+
+
+def _validate_provenance_file_writes(conn):
+    from yt_playlist.repos import provenance_file_writes
+    provenance_file_writes.validate(conn)
+
+
+def _install_description_file_writes(conn, context):
+    from yt_playlist.repos import description_file_writes
+    description_file_writes.install(conn, context)
+
+
+def _validate_description_file_writes(conn):
+    from yt_playlist.repos import description_file_writes
+    description_file_writes.validate(conn)
+
+
+def _install_metadata_file_writes(conn, context):
+    from yt_playlist.repos import metadata_file_writes
+    metadata_file_writes.install(conn, context)
+
+
+def _validate_metadata_file_writes(conn):
+    from yt_playlist.repos import metadata_file_writes
+    metadata_file_writes.validate(conn)
+
+
+def _install_delivery_file_writes(conn, context):
+    from yt_playlist.repos import delivery_file_writes
+    delivery_file_writes.install(conn, context)
+
+
+def _validate_delivery_file_writes(conn):
+    from yt_playlist.repos import delivery_file_writes
+    delivery_file_writes.validate(conn)
+
+
+def _install_evidence_file_writes(conn, context):
+    from yt_playlist.repos import evidence_file_writes
+    evidence_file_writes.install(conn, context)
+
+
+def _validate_evidence_file_writes(conn):
+    from yt_playlist.repos import evidence_file_writes
+    evidence_file_writes.validate(conn)
+
+
+def _install_impression_file_writes(conn, context):
+    from yt_playlist.repos import impression_file_writes
+    impression_file_writes.install(conn, context)
+
+
+def _validate_impression_file_writes(conn):
+    from yt_playlist.repos import impression_file_writes
+    impression_file_writes.validate(conn)
+
+
+def _install_provider_credits(conn, context):
+    from .. import provider_credit_fields
+    provider_credit_fields.install(conn)
+
+
+def _validate_provider_credits(conn):
+    from .. import provider_credit_fields
+    provider_credit_fields.validate(conn)
+
+
 CHANGES = (
     Change(1, 'independent_playback_feedback_receipts', _install_receipts, validate_receipts),
     Change(2, 'group_preparation_failure_progress', _install_group_progress, _validate_group_progress),
@@ -499,6 +689,26 @@ CHANGES = (
     Change(35, 'resumable_recording_associations', _install_association_work, _validate_association_work),
     Change(36, 'durable_home_revisit_progress', _install_home_revisit_progress, _validate_home_revisit_progress),
     Change(37, 'durable_adaptive_preview_pages', _install_group_preview_work, _validate_group_preview_work),
+    Change(38, 'native_song_library_and_starter_picks', _install_song_library, _validate_song_library),
+    Change(39, 'record_owned_audio_sample_files', _install_sample_files, _validate_sample_files),
+    Change(40, 'record_owned_collection_documents', _install_collection_file_writes, _validate_collection_file_writes),
+    Change(41, 'record_owned_recommendation_files', _install_recommendation_file_writes, _validate_recommendation_file_writes),
+    Change(42, 'record_owned_action_backups', _install_action_backup_writes, _validate_action_backup_writes),
+    Change(43, 'record_owned_annotation_files', _install_annotation_file_writes, _validate_annotation_file_writes),
+    Change(44, 'record_owned_playlist_captures', _install_playlist_backup_writes, _validate_playlist_backup_writes),
+    Change(45, 'record_owned_policy_files', _install_policy_file_writes, _validate_policy_file_writes),
+    Change(46, 'record_owned_policy_history', _install_policy_history_files, _validate_policy_history_files),
+    Change(47, 'record_owned_embedding_files', _install_embedding_file_writes, _validate_embedding_file_writes),
+    Change(48, 'record_owned_group_files', _install_group_file_writes, _validate_group_file_writes),
+    Change(49, 'record_owned_profile_files', _install_profile_file_writes, _validate_profile_file_writes),
+    Change(50, 'record_owned_vibe_model_files', _install_vibe_model_file_writes, _validate_vibe_model_file_writes),
+    Change(51, 'record_owned_prediction_provenance', _install_provenance_file_writes, _validate_provenance_file_writes),
+    Change(52, 'record_owned_paid_description_files', _install_description_file_writes, _validate_description_file_writes),
+    Change(53, 'record_owned_runtime_metadata', _install_metadata_file_writes, _validate_metadata_file_writes),
+    Change(54, 'record_owned_metadata_deliveries', _install_delivery_file_writes, _validate_delivery_file_writes),
+    Change(55, 'record_owned_listening_evidence', _install_evidence_file_writes, _validate_evidence_file_writes),
+    Change(56, 'pending_served_diagnostic_files', _install_impression_file_writes, _validate_impression_file_writes),
+    Change(57, 'structured_provider_attempt_credits', _install_provider_credits, _validate_provider_credits),
 )
 
 
@@ -527,55 +737,6 @@ def validate(conn):
     from .. import group_progress
     if group_progress.available(conn):
         group_progress.validate(conn)
-    from ..preparation import (
-        action_publication, album_note_publication, album_publication, album_share_publication, append_publication, calendar_indexes, checkpoint_publication, choice_publication, clicked_publication, collection_document_publication, collection_feedback_publication, conflict_publication,
-        control_publication, demand_publication, discovery_artist_publication, discovery_checkpoint_publication, discovery_publication, draft_publication, genre_preference_publication, genre_publication, home_publication, import_publication, library_sync_publication, listening_publication, model_publication,
-        metadata_destinations, metadata_publication, offer_publication, pair_publication, playback_publication, radio_origin_publication,
-        radio_publication, recipe_publication, report_publication, saved_output_publication,
-        subject_publication, taste_control_publication, taste_publication, trial_publication, tv_publication, work_publication, workflow_publication,
-    )
-    calendar_indexes.validate_installed(conn)
-    radio_publication.validate_installed(conn)
-    radio_origin_publication.validate_installed(conn)
-    saved_output_publication.validate_installed(conn)
-    collection_feedback_publication.validate_installed(conn)
-    playback_publication.validate_installed(conn)
-    library_sync_publication.validate_installed(conn)
-    listening_publication.validate_installed(conn)
-    subject_publication.validate_installed(conn)
-    discovery_checkpoint_publication.validate_installed(conn)
-    discovery_artist_publication.validate_installed(conn)
-    discovery_publication.validate_installed(conn)
-    genre_publication.validate_installed(conn)
-    genre_preference_publication.validate_installed(conn)
-    taste_control_publication.validate_installed(conn)
-    taste_publication.validate_installed(conn)
-    import_publication.validate_installed(conn)
-    tv_publication.validate_installed(conn)
-    collection_document_publication.validate_installed(conn)
-    draft_publication.validate_installed(conn)
-    recipe_publication.validate_installed(conn)
-    clicked_publication.validate_installed(conn)
-    trial_publication.validate_installed(conn)
-    pair_publication.validate_installed(conn)
-    home_publication.validate_installed(conn)
-    workflow_publication.validate_installed(conn)
-    append_publication.validate_installed(conn)
-    action_publication.validate_installed(conn)
-    album_note_publication.validate_installed(conn)
-    album_publication.validate_installed(conn)
-    album_share_publication.validate_installed(conn)
-    work_publication.validate_installed(conn)
-    offer_publication.validate_installed(conn)
-    report_publication.validate_installed(conn)
-    control_publication.validate_installed(conn)
-    demand_publication.validate_installed(conn)
-    checkpoint_publication.validate_installed(conn)
-    choice_publication.validate_installed(conn)
-    conflict_publication.validate_installed(conn)
-    metadata_publication.validate_installed(conn)
-    metadata_destinations.validate_installed(conn)
-    model_publication.validate_installed(conn)
     return _applied(conn, CHANGES)
 
 
@@ -601,10 +762,14 @@ def _validated_history(conn, changes):
     # before applying DDL or leaving this transaction.
     with reuse_objects(conn):
         version = history(conn, MIGRATIONS)
-        if version < 79:
-            raise MigrationError('Regular schema changes require a supported installed layout (79+)')
+        if version != 107:
+            raise MigrationError('Regular schema changes require the current release baseline')
         validate_version(conn, version, foreign_keys=False, data=False)
-        return _applied(conn, changes)
+        applied = _applied(conn, changes)
+        from .runner import RELEASE_CHANGES
+        if applied < RELEASE_CHANGES:
+            raise MigrationError('Regular schema changes require the current release baseline')
+        return applied
 
 
 def _migrate(conn, changes, clock, inspections):
@@ -628,9 +793,6 @@ def _migrate(conn, changes, clock, inspections):
             if applied == len(changes):
                 conn.rollback()
                 return
-            if applied == 0 and not conn.execute(
-                    "SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
-                conn.execute(HISTORY_SQL)
             change = changes[applied]
             change.apply(conn, Context(clock()))
             if not conn.in_transaction:

@@ -14,7 +14,7 @@ from tests.test_undo_recovery import RecoveryClient
 from yt_playlist.core import fao
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
-from yt_playlist.library import playlist_backups, playlist_deletion, playlist_gc_retry, playlist_generated
+from yt_playlist.library import generated_acquisition, playlist_backups, playlist_deletion, playlist_gc_retry
 from yt_playlist.library.playlist_generated import gc_generated_playlists
 from yt_playlist.util.action_kinds import DELETE_PLAYLIST, GC_GENERATED
 
@@ -393,7 +393,7 @@ def test_retry_rechecks_current_eligibility_before_any_remote_read(case, reason)
 
 @pytest.mark.parametrize("source", ["sync", "generated_playback"])
 def test_listening_completed_during_admission_prevents_automatic_delete(case, monkeypatch, source):
-    original_claim = playlist_generated.claim_deletion_target
+    original_claim = generated_acquisition.claim_deletion_target
     admitted = []
 
     @contextmanager
@@ -410,7 +410,7 @@ def test_listening_completed_during_admission_prevents_automatic_delete(case, mo
             admitted.append((account_id, remote_id))
             yield
 
-    monkeypatch.setattr(playlist_generated, "claim_deletion_target", claim_after_listening)
+    monkeypatch.setattr(generated_acquisition, "claim_deletion_target", claim_after_listening)
 
     assert collect(case, NOW + 2) == []
 
@@ -422,7 +422,7 @@ def test_listening_completed_during_admission_prevents_automatic_delete(case, mo
 
 @pytest.mark.parametrize("reason", ["played", "adopted", "young", "removed"])
 def test_eligibility_changed_during_backup_prevents_automatic_delete(case, monkeypatch, reason):
-    backup = playlist_generated.backup_playlist
+    backup = generated_acquisition.backup_playlist
     retained = []
 
     def backup_then_change(*args, **kwargs):
@@ -440,7 +440,7 @@ def test_eligibility_changed_during_backup_prevents_automatic_delete(case, monke
             case.store.playlists.remove_playlist(case.pid)
         return path
 
-    monkeypatch.setattr(playlist_generated, "backup_playlist", backup_then_change)
+    monkeypatch.setattr(generated_acquisition, "backup_playlist", backup_then_change)
 
     assert collect(case) == []
 

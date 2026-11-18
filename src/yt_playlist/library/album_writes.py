@@ -10,6 +10,15 @@ def set_saved(store, client, account_id, browse_id, album, *, saved, fallback=No
     or a response dictionary. Explicit rejection never changes local ownership.
     The caller owns account selection and runs this blocking operation off-loop.
     """
+    confirm_saved(client, album, saved=saved)
+    if not saved:
+        store.collection.remove_saved_album(browse_id, account_id=account_id)
+        return
+    store.collection.add_saved_album(saved_album(browse_id, album, fallback), account_id=account_id)
+
+
+def confirm_saved(client, album, *, saved):
+    """The provider acknowledgement capability, shared by every album writer."""
     audio_id = album.get('audioPlaylistId')
     if not audio_id:
         raise ActionInputError('album_unavailable')
@@ -18,15 +27,16 @@ def set_saved(store, client, account_id, browse_id, album, *, saved, fallback=No
                  isinstance(result, dict) and result.get('status') in (None, 'STATUS_SUCCEEDED'))
     if not confirmed:
         raise ActionInputError('album_save_rejected' if saved else 'album_remove_rejected')
-    if not saved:
-        store.collection.remove_saved_album(browse_id, account_id=account_id)
-        return
+
+
+def saved_album(browse_id, album, fallback=None):
+    """Detached metadata projection shared by collection writers."""
     fallback = fallback or {}
     artist = ', '.join(a['name'] for a in (album.get('artists') or []) if a.get('name'))
-    store.collection.add_saved_album({
+    return {
         'browse': browse_id, 'title': album.get('title') or fallback.get('title'),
         'artist': artist or fallback.get('artist') or '',
         'year': album.get('year') or fallback.get('year'), 'type': album.get('type'),
         'thumbnail': best_thumb(album.get('thumbnails')) or fallback.get('thumbnail'),
         'credits': album.get('artists'),
-    }, account_id=account_id)
+    }

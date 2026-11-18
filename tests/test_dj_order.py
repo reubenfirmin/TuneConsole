@@ -105,11 +105,9 @@ def test_dj_order_supports_opaque_keys_and_duplicate_occurrences():
     assert all(a != b for a, b in zip(out, out[1:]))
 
 
-def test_attach_genres_fills_from_store(store):
-    a = store.tracks.upsert_track("v1", "S1", "Hermanos", "", None, 1); store.tracks.set_track_genre(a, "Latin")
-    store.tracks.upsert_track("v2", "S2", "Ritmo", "", None, 1)             # left untagged on purpose
+def test_attach_genres_fills_from_explicit_metadata():
     fy = ForYouItem("S1", "Hermanos", "", "v1", None, 5, "r", identity_key("S1", "Hermanos"), "comfort")
     d = {"video_id": "v2", "title": "S2", "artist": "Ritmo"}         # DOM-style dict, no key
-    ordering.attach_genres(store, [fy, d])
+    ordering.attach_genres([fy, d], genres={identity_key('S1', 'Hermanos'): 'Latin'})
     assert fy.genre == "Latin"          # ForYouItem gets its genre from the library (by identity_key)
     assert d["genre"] == ""             # dict path works too; untagged -> empty (no crash, no journey)

@@ -10,7 +10,7 @@ from yt_playlist.rec import audio_vibe_runtime as runtime
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared, audio_vibe_prediction as predictor
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT = Path('/tmp/tuneconsole-review-specialists-702-20261102')

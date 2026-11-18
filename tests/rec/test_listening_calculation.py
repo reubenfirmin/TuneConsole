@@ -73,7 +73,6 @@ def test_local_midnight_and_dst_do_not_borrow_time_from_another_day():
 def test_build_uses_the_captured_repository_plan_and_publishes_only_current_inputs(current):
     reader = reader_for([('tick', 0, 0, {}), ('tick', 30, 30, {})], now=NOW-100)
     plan = object()
-    reader.listening_analytics.prepare_generation.return_value = plan
 
     def guarded_publish(callback):
         if current:
@@ -81,10 +80,11 @@ def test_build_uses_the_captured_repository_plan_and_publishes_only_current_inpu
         return current
 
     snapshot = SimpleNamespace(store=reader, _changes=17, publish=guarded_publish)
-    publisher = Mock(spec=('publish_generation',))
+    publisher = Mock(spec=('prepare_generation', 'publish_generation'))
+    publisher.prepare_generation.return_value = plan
     store = SimpleNamespace(read_snapshot=lambda: nullcontext(snapshot), listening_analytics=publisher)
     result = analytics.build(store, NOW)
-    arguments = reader.listening_analytics.prepare_generation.call_args
+    arguments = publisher.prepare_generation.call_args
     chunks, manifest, edition, built_at = arguments.args
     assert built_at == NOW and arguments.kwargs == {'input_revision': 17}
     assert json.loads(manifest)['timezone'] == 'UTC'

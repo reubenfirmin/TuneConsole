@@ -32,7 +32,6 @@ class Retention:
         self._step('prediction provenance retirement', repository.maintain_prediction_provenance, now)
         self._step('musical profile file collection', repository.collect_musical_profiles, now)
         self._step('embedding file collection', repository.collect_embeddings, now)
-        self._step('legacy diagnostic expiry', repository.expire_legacy_diagnostics, now)
         self._step('runtime history retirement', repository.maintain_runtime_history, now,
                    pending=lambda result: bool(result and any(result.values())))
         retired = self._step('derived history retirement', group_roots.maintain_retention, self.store,

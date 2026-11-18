@@ -7,90 +7,32 @@ per-playlist taste, so it only surfaces if it fits contexts the user actually pl
 playlist can't drag in off-taste artists. Each result explains itself: which of your artists bridged
 it, and which of your playlists it fits. Runs in the background worker; Last.fm results cached 14d.
 """
-import json
-import random
-import time
-from yt_playlist.core.accounts import catalog_client,main_client
+from yt_playlist.core.accounts import catalog_client
 from yt_playlist.core.activity import check_stopping, WorkClosing
 
 import numpy as np
 
-from yt_playlist.util import net
-from yt_playlist.util.matching import identity_key, normalize, track_artist
+from yt_playlist.util.matching import normalize
 from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.rec import artist_model, content_model, embed, embedding_vectors as vectors, rec_params, discovery_pool
-from yt_playlist.rec.scoring import playlist_taste, discovery_facet_weight
-from yt_playlist.providers import lastfm
+from yt_playlist.rec import artist_model, content_model, embed, embedding_vectors as vectors, rec_params
+from yt_playlist.rec.scoring import discovery_facet_weight
+from yt_playlist.rec.artist_bridges import anchor_values, rank_candidates as _rank_candidates
 
 
 def fetch_artist_info(ctx, name, browse_id=None):
-    """Best-effort bio + thumbnail + album list from YouTube. Uses the stored artist browseId when we
-    have it (accurate); else searches the name. Returns None on any failure (no client, network, etc.).
+    """Best-effort bio + thumbnail + album list for an explicit YouTube artist browseId.
+    Returns None without that identity or on failure (no client, network, etc.).
 
     Lives here (not in the web layer) so outward discovery can reach it without a rec -> web import; the
     artist page in web/routes/charts imports it from here. Module-level so tests can patch it."""
-    check_stopping()
-    try:
-        client = catalog_client(ctx.client_provider())
-        if client is None:
-            return None
-        if not browse_id:
-            results = client.search(name, filter="artists") or []
-            browse_id = results[0].get("browseId") if results else None
-        if not browse_id:
-            return None
-        a = client.get_artist(browse_id)
-        albums = []
-        for x in (a.get("albums") or {}).get("results") or []:
-            albums.append({"title": x.get("title"), "year": x.get("year"),
-                           "browse_id": x.get("browseId"),
-                           "thumbnail": best_thumb(x.get("thumbnails"))})
-        _check_album_alias(ctx, client, name, albums)
-        return {"bio": a.get("description"),
-                "thumbnail": best_thumb(a.get("thumbnails")),
-                "subscribers": a.get("subscribers"),
-                "name": a.get("name") or name,
-                "browse_id": browse_id,            # the artist's channel, for the "Open in YouTube" link
-                "albums": albums}
-    except WorkClosing:
-        raise
-    except Exception:  # noqa: BLE001 - network/parse/missing-method all degrade to "no info"
-        ctx.logger.info("artist info fetch failed for %r (non-fatal)", name)
-        return None
+    from yt_playlist.library.discovery_composition import catalog
+    return catalog(ctx).artist(name, browse_id)
 
 
 def _check_album_alias(ctx, client, artist, discography):
     """Compare at most one candidate pair, with no network work under a DB lock."""
-    from yt_playlist.core.album_aliases import _text, fingerprint
-    if not hasattr(client, 'get_album'):
-        return
-    candidates = ctx.store.collection.album_alias_candidates(a.get('title') for a in discography)
-    for remote in discography:
-        bid = remote.get('browse_id')
-        if not bid or not bid.startswith('MPRE'):
-            continue
-        for local in candidates:
-            other = local['browse_id']
-            if (other == bid or not other.startswith('MPRE') or
-                    _text(local['artist']) != _text(artist) or _text(local['title']) != _text(remote.get('title'))):
-                continue
-            if not ctx.store.collection.claim_album_alias_check(bid, other, time.time()):
-                continue
-            try:
-                check_stopping()
-                left = client.get_album(other)
-                check_stopping()
-                right = client.get_album(bid)
-                # Unknown or unequal responses do not even create a new local release.
-                comparison = fingerprint(left)
-                if comparison is not None and comparison == fingerprint(right):
-                    ctx.store.collection.observe_album_representation(other, left)
-                    ctx.store.collection.observe_album_representation(bid, right)
-            except WorkClosing:
-                raise
-            except Exception:
-                ctx.logger.debug('Album alias comparison unavailable for %s and %s', other, bid, exc_info=True)
-            return
+    from yt_playlist.library.discovery_composition import catalog
+    return catalog(ctx).aliases(client, artist, discography)
 
 
 class ContentProjection:
@@ -198,29 +140,10 @@ def _anchors(store, V, idx, top_n=30):
     """[(display_name, weight, unit_vector)]: your artists weighted by play × taste-centrality, so
     the *core* of your taste anchors discovery (not one-off saves)."""
     seeds = store.rec_query.top_played_keys(limit=12)
-    centre = embed._centroid(V, idx, [(seeds, 1.0)]) if seeds else None
-    if centre is None:
-        centre = V.mean(0)
-        centre = centre / (np.linalg.norm(centre) + 1e-9)
-    by_artist = {}
     refs = store.artists.track_keys(library=True)
-    for k in idx:
-        for artist in refs.get(k,()):
-            by_artist.setdefault(artist, []).append(idx[k])
-    out = []
-    for a in store.charts.top_artists(top_n):
-        rows = by_artist.get(store.artists.key(a.get('artist_id') or a['artist']))
-        if not rows:
-            continue
-        c = V[rows].mean(0)
-        n = np.linalg.norm(c)
-        if n == 0:
-            continue
-        unit = c / n
-        weight = a["plays"] * max(float(unit @ centre), 0.0)
-        if weight > 0:
-            out.append((store.artists.key(a.get('artist_id') or a['artist']), weight, unit))
-    return out
+    artists = [(store.artists.key(a.get('artist_id') or a['artist']), a['plays'])
+               for a in store.charts.top_artists(top_n)]
+    return anchor_values(V, idx, seeds, refs, artists)
 
 
 def _artist_thumb(ctx, name):
@@ -263,102 +186,10 @@ def repair_artist_images(ctx, artist_ids, now):
             ctx.store.discovery.record_artist_image(artist['artist_id'], thumbnail, now)
 
 
-def _rank_candidates(bridges, pt, dim) -> list[dict]:
-    """#86 Rank bridge candidates by STRENGTH alone (sum of anchor_weight x match; multi-anchor fit
-    compounds). The proxy vector is the anchors' own weighted average, so scoring taste FROM it and
-    multiplying by strength double-counted the anchors (a candidate near many high-play anchors won
-    twice). Taste now only GATES (off-taste proxies are dropped, keeping the 'fits you' label
-    honest) and supplies the fits/because explanations."""
-    out = []
-    for cand, bl in bridges.items():
-        strength = sum(w for _, w, _ in bl)
-        proxy = np.zeros(dim, dtype=np.float64)
-        for v, w, _ in bl:
-            proxy += w * v
-        if strength <= 0 or not np.any(proxy):
-            continue
-        contributions = pt.context_contributions(proxy)
-        if contributions.sum() <= 0:
-            continue
-        order = np.argsort(-contributions)[:3]
-        fits = [pt.titles[i] for i in order if contributions[i] > 0]
-        because = [n for _, _, n in sorted(bl, key=lambda x: -x[1])[:3]]
-        out.append({"cand": cand, "score": round(float(strength), 4),
-                    "because": because, "fits": fits})
-    out.sort(key=lambda c: -c["score"])
-    return out
-
-
 def new_artists(ctx, limit=15, max_anchors=30):
     """Taste-pinned new artists: [{artist, score, because[anchors], fits[playlists]}], or []."""
-    store = ctx.store
-    key = lastfm.api_key(store)
-    if not key:
-        return []
-    pt = playlist_taste(store)
-    if not pt:
-        return []
-    keys, V, idx = vectors.load_vectors(store)
-    anchors = _anchors(store, V, idx, top_n=max_anchors)
-    if not anchors:
-        return []
-    dao = store.rec_query
-    owned = dao.library_artists()
-    now = ctx.now_fn()
-
-    # Refresh the Last.fm similar cache for each anchor: this is the #28 artist model's §C edge source.
-    # Cache by canonical anchor reference; the API call uses its display name.
-    # Keep a display map for candidates that still lack a provider identity.
-    display = {}
-    for name, _, _ in anchors:
-        check_stopping()
-        ref = store.artists.get_artist(name)
-        api_name = ref['name'] if ref else name
-        nkey = name
-        cached = store.artist_similarity.cached_similar(nkey, now)
-        if cached is None:
-            with lastfm.access(store), net.probe_errors() as errors:
-                cached = [[n, m] for n, m in lastfm.similar_artists(api_name, key)]
-            for error in errors:
-                net.record_probe_failure(error)
-            if errors:
-                # Preserve the old similarity graph and its fetch time. An outage
-                # must not become a successful empty response cached for 14 days.
-                cached = cached or store.artist_similarity.cached_similar(
-                    nkey, now, ttl_days=float('inf')) or []
-            else:
-                store.artist_similarity.cache_similar(nkey, cached, now)
-        for n, _ in cached:
-            display.setdefault(normalize(n), n)
-
-    # Bridge via the #28 artist model (artist_neighbors blends your co-curation §A + content §B + the
-    # Last.fm edges §C cached above), not Last.fm alone. Candidates are normalized vocab names; the
-    # taste-fit / because / fits ranking below is kept exactly as before.
-    bridges = {}   # candidate -> [(anchor_unit_vec, edge_weight, anchor_name), ...]
-    for name, weight, vec in anchors:
-        check_stopping()
-        ref = store.artists.get_artist(name)
-        label = ref['name'] if ref else name
-        for cand, match in artist_model.artist_neighbors(store, name, topn=50):
-            if not cand or cand in owned:
-                continue
-            # A candidate near several of your anchors accumulates one edge per anchor (append, not
-            # clobber); the strength/proxy below then sum over all of them, so multi-anchor fit compounds.
-            bridges.setdefault(cand, []).append((vec, weight * float(match), label))
-
-    ranked = _rank_candidates(bridges, pt, V.shape[1])
-    out = []
-    for c in ranked[:limit]:
-        ref = store.artists.get_artist(c['cand'])
-        out.append({'artist':ref['name'] if ref else display.get(c['cand'],c['cand'].title()),
-                    'artist_id':ref['id'] if ref else None,'score':c['score'],
-                    'because':c['because'],'fits':c['fits']})
-    for c in out:                                       # enrich the shown few with an artist image
-        check_stopping()
-        c["thumbnail"] = _artist_thumb(ctx, c["artist"])
-        with lastfm.access(store):
-            c["genre"] = lastfm.artist_genre(c["artist"], key)   # #18: tag for the facet overlay
-    return out
+    from yt_playlist.library.discovery_composition import artists
+    return artists(ctx).query(limit, max_anchors)
 
 
 def run_discovery(ctx, now, budget=25) -> dict:
@@ -366,41 +197,8 @@ def run_discovery(ctx, now, budget=25) -> dict:
     (>5 days since last scan), accumulating their unowned albums into the pool; refresh the taste-
     bridged new-artist pool; prune anything since acquired. Bounded by `budget` so each pass is cheap
     and the pools fill in over many runs rather than re-scanning everything every sync."""
-    store = ctx.store
-    dao = store.rec_query
-    owned_albums, saved = dao.owned_albums(), store.collection.saved_album_ids()
-    artist_genre = dao.artist_genres(canonical=True)
-    # #52: scan only the top-N most-engaged artists, holding a small ROTATING per-artist album sample
-    # (old albums surface over time) instead of every album of every artist you have ever touched.
-    artist_limit = rec_params.get_param(store, "discovery_artist_limit")
-    per_artist = rec_params.get_param(store, "discovery_albums_per_artist")
-    rng = random.Random(int(now))                         # varies per pass so the rotation moves over time
-    due = store.discovery.artists_due_for_scan(now, budget=budget, artist_limit=artist_limit,with_ids=True)
-    for ref in due:
-        check_stopping()
-        artist = ref['artist']
-        try:
-            info = fetch_artist_info(ctx, artist,ref.get('browse_id'))
-        except Exception:  # noqa: BLE001 - one bad artist must not abort the pass
-            info = None
-        _scan_artist_albums(store, artist, info, owned_albums, saved,
-                            artist_genre.get(store.artists.key(ref['artist_id'])), now, per_artist, rng,
-                            artist_id=ref['artist_id'])
-        store.discovery.mark_scanned(ref['artist_id'], now)
-    spotify = store.history.spotify_history_stats()
-    source = 'spotify_model' if spotify['events'] or spotify['days'] or spotify['artists'] else 'discovery'
-    for a in new_artists(ctx):                            # taste-bridged new artists, accumulated
-        store.discovery.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
-                                       a.get("thumbnail"), now, genre=a.get("genre"),artist_id=a.get('artist_id'),source=source)
-    store.discovery.prune_discovered(owned_albums, saved, dao.library_artists())
-    store.discovery.prune_discovered_tracks(dao.library_keys(), held_keys=store.rec_eligibility.generated_track_keys())
-    cleanup_discovery_pool(store, rng)                     # #52: bound the pool + prune orphaned tracks
-    populate_discovered_tracks(ctx, now)                   # #13 P2: out-of-corpus candidate tracks
-    try:
-        populate_radio_tracks(ctx, now)                   # #50: radio pulls feed the same cold pool
-    except Exception:  # noqa: BLE001 - radio pull is best-effort; never abort the discovery pass
-        ctx.logger.info("radio pool population failed (non-fatal)")
-    return {"scanned": len(due)}
+    from yt_playlist.library.discovery_composition import preparation
+    return preparation(ctx.store, ctx=ctx).run(now, budget)
 
 
 def _scan_artist_albums(store, artist, info, owned_albums, saved, genre, now, per, rng, *, artist_id=None) -> None:
@@ -408,50 +206,24 @@ def _scan_artist_albums(store, artist, info, owned_albums, saved, genre, now, pe
     catalog, asks discovery_pool which to retain vs add (unshown retained, shown rotated out, slots
     filled by a uniform-random draw across the WHOLE catalog so old albums surface), then applies the
     delete/insert. Caps the artist at `per` albums in the pool."""
-    catalog = []
-    for alb in (info or {}).get("albums") or []:
-        bid, title = alb.get("browse_id"), (alb.get("title") or "").strip()
-        if not bid or not title or bid in saved or store.collection.album_id(bid) in owned_albums:
-            continue
-        catalog.append({"browse_id": bid, "title": title, "year": alb.get("year"),
-                        "thumbnail": alb.get("thumbnail")})
-    pooled = store.discovery.discovered_albums_for_artist(artist_id if artist_id is not None else artist)
-    keep, add = discovery_pool.rotate_album_sample(catalog, pooled, per, rng)
-    store.discovery.delete_discovered_albums([b for b in pooled if b not in keep])
-    for alb in add:
-        store.discovery.upsert_discovered_album(alb["browse_id"], artist, alb["title"], alb["year"],
-                                      alb["thumbnail"], now, genre=genre,artist_id=artist_id)
+    from yt_playlist.library.discovery_composition import preparation
+    return preparation(store).scan(artist, info, owned_albums, saved, genre, now, per, rng, artist_id=artist_id)
 
 
 def enforce_album_bounds(store, keep_artists, per_artist, rng) -> int:
     """#52 (no network): bound the existing album pool. Drop albums from artists not in `keep_artists`
     (the top-N interest set), and trim each kept artist to `per_artist` (retaining unshown first, a
     random-varied subset among ties so the kept sample spans the catalogue). Returns albums removed."""
-    keep = {store.artists.resolve(a) for a in keep_artists}
-    by_artist: dict = {}
-    for a in store.discovery.get_discovered_albums():
-        by_artist.setdefault(a["artist_id"], {})[a["browse_id"]] = a.get("offered_count") or 0
-    to_delete = []
-    for artist, pooled in by_artist.items():
-        if artist not in keep:
-            to_delete.extend(pooled)                              # whole artist out of the top-N
-        elif len(pooled) > per_artist:
-            keepset = discovery_pool.choose_album_keep(pooled, per_artist, rng)
-            to_delete.extend(b for b in pooled if b not in keepset)
-    return store.discovery.delete_discovered_albums(to_delete)
+    from yt_playlist.library.discovery_composition import preparation
+    return preparation(store).enforce(keep_artists, per_artist, rng)
 
 
 def cleanup_discovery_pool(store, rng=None) -> dict:
     """#52 one-time (and per-pass) cleanup with no network: bound the album pool to the top
     discovery_artist_limit artists x discovery_albums_per_artist albums, then prune tracks orphaned by
     the removed albums. Returns {albums_removed, tracks_removed}."""
-    rng = rng or random.Random(0)
-    limit = rec_params.get_param(store, "discovery_artist_limit")
-    per = rec_params.get_param(store, "discovery_albums_per_artist")
-    keep_artists = {a["artist_id"] for a in store.discovery.interested_artists(limit=limit)}
-    albums_removed = enforce_album_bounds(store, keep_artists, per, rng)
-    tracks_removed = store.discovery.prune_orphan_discovered_tracks(held_keys=store.rec_eligibility.generated_track_keys())
-    return {"albums_removed": albums_removed, "tracks_removed": tracks_removed}
+    from yt_playlist.library.discovery_composition import preparation
+    return preparation(store).cleanup(rng)
 
 
 def gc_discovery(ctx, now) -> dict:
@@ -470,44 +242,8 @@ def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
     genre/year/audio are left null for the cold-enrichment worker to fill. Returns how many were added.
     Disabled unless radio_discovery_enabled is explicitly set to "1".
     Best-effort: no client/network -> 0."""
-    store = ctx.store
-    # Radio is parked. Previewing its UI must not enable periodic catalog harvesting.
-    if store.settings.get_setting("radio_discovery_enabled", "0") != "1":
-        return 0
-    client = main_client(store,ctx.client_provider())
-    if client is None:
-        return 0
-    owned = store.rec_query.library_keys()
-    have = store.discovery.discovered_track_keys()
-    added = 0
-    seed_tracks = store.charts.top_tracks(seeds)
-    for t in seed_tracks:
-        vid = t.get("video_id")
-        if not vid:
-            continue
-        try:
-            radio = client.get_watch_playlist(vid) or {}
-        except Exception:  # noqa: BLE001 - network/parse/missing-method -> skip this seed
-            continue
-        taken = 0
-        for r in radio.get("tracks") or []:
-            v, title = r.get("videoId"), (r.get("title") or "").strip()
-            artist = track_artist(r)
-            if not v or not title:
-                continue
-            key = store.tracks.identity_key_for_video(v)
-            if key in owned:
-                continue
-            existing = key in have
-            key = store.discovery.upsert_discovered_track(identity_key(title, artist), v, title, artist, None,
-                                          best_thumb(r.get("thumbnail") or r.get("thumbnails")),
-                                          None, None, f"radio:{vid}", now,credits=r.get('artists'))
-            have.add(key)
-            added += int(not existing)
-            taken += 1
-            if taken >= per_seed_limit:
-                break
-    return added
+    from yt_playlist.library.discovery_composition import catalog
+    return catalog(ctx).radio(now, seeds, per_seed_limit)
 
 
 def populate_discovered_tracks(ctx, now, budget=4) -> int:
@@ -515,40 +251,8 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
     out-of-corpus candidates, tagged with the album's genre, then re-encode the pool's content
     vectors. Bounded by `budget` so each pass is cheap and the pool fills over many runs. Owned
     tracks are skipped. Returns how many candidate tracks were added/updated."""
-    store = ctx.store
-    client = catalog_client(ctx.client_provider())
-    if client is None:
-        return 0
-    owned = store.rec_query.library_keys()
-    have = store.discovery.discovered_source_tokens('album')
-    albums = store.discovery.get_discovered_albums()
-    fetched = store.discovery.fetched_albums(a['browse_id'] for a in albums)
-    todo = [a for a in albums if a["browse_id"] not in have and a['browse_id'] not in fetched][:budget]
-    n = 0
-    for alb in todo:
-        try:
-            data = client.get_album(alb["browse_id"])
-        except Exception:  # noqa: BLE001 - one bad album must not abort the pass
-            continue
-        artist = alb.get("artist") or ", ".join(
-            x.get("name", "") for x in ((data or {}).get("artists") or []) if x.get("name"))
-        for t in (data or {}).get("tracks") or []:
-            vid, title = t.get("videoId"), (t.get("title") or "").strip()
-            if not vid or not title:
-                continue
-            key = store.tracks.identity_key_for_video(vid)
-            if key in owned:
-                continue
-            credit = track_artist(t) or artist
-            store.discovery.upsert_discovered_track(identity_key(title, credit), vid, title, credit, alb.get("title"),
-                                          alb.get("thumbnail"), alb.get("genre"), alb.get("year"),
-                                          alb["browse_id"], now,credits=t.get('artists') or data.get('artists'))
-            n += 1
-        if (data or {}).get("tracks"):
-            store.discovery.remember_album_fetch(alb['browse_id'])
-    if n:
-        vectors.build_discovered_content_vectors(store)
-    return n
+    from yt_playlist.library.discovery_composition import catalog
+    return catalog(ctx).populate(now, budget)
 
 
 def pick_discovered_albums(store, n, now, recent_frac=0.7, *, facet_leans=None):
@@ -561,14 +265,17 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7, *, facet_leans=None):
     albums = store.discovery.get_discovered_albums()
     if not albums:
         return []
-    wmap, family_weights = {}, {}
-    kept = []
     axes = store.genres.feature_axes(a.get('genre') for a in albums)
+    family_weights = {family: discovery_facet_weight(store, family, now,
+        **({'leans': facet_leans} if facet_leans is not None else {}))
+        for family in {axes[a['genre']][0] if a.get('genre') else None for a in albums}}
+    return album_values(albums, axes, family_weights, n, recent_frac)
+
+
+def album_values(albums, axes, family_weights, n, recent_frac=.7):
+    wmap, kept = {}, []
     for a in albums:
         family = axes[a['genre']][0] if a.get('genre') else None
-        if family not in family_weights:
-            family_weights[family] = discovery_facet_weight(store, family, now,
-                **({'leans': facet_leans} if facet_leans is not None else {}))
         w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue
@@ -629,14 +336,17 @@ def pick_discovered_artists(store, n, now, *, facet_leans=None):
     arts = store.discovery.get_discovered_artists()
     if not arts:
         return []
-    scored = []
-    family_weights = {}
     axes = store.genres.feature_axes(a.get('genre') for a in arts)
+    family_weights = {family: discovery_facet_weight(store, family, now,
+        **({'leans': facet_leans} if facet_leans is not None else {}))
+        for family in {axes[a['genre']][0] if a.get('genre') else None for a in arts}}
+    return artist_values(arts, axes, family_weights, n)
+
+
+def artist_values(arts, axes, family_weights, n):
+    scored = []
     for a in arts:
         family = axes[a['genre']][0] if a.get('genre') else None
-        if family not in family_weights:
-            family_weights[family] = discovery_facet_weight(store, family, now,
-                **({'leans': facet_leans} if facet_leans is not None else {}))
         w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue

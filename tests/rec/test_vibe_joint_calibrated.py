@@ -131,7 +131,7 @@ def test_masked_prior_ignores_own_numeric_inputs_and_preserves_artist_descriptio
                            'audio': {'mood_relaxed': .99, 'mood_happy': .9}}, 'discovered': None}
     def prepare(value, sources, overrides, *, masked=True):
         operation = musical_preparation.masked_recordings if masked else musical_preparation.recordings
-        return operation(None, [('target', 0, json.dumps(value), None, True)],
+        return operation([('target', 0, json.dumps(value), None, True)],
                          inputs={'target': (sources, overrides, False)})[0][1]
     overrides = {'energy': .99, 'mood_relaxed': .01, 'genre': 'Psybient'}
     actual = prepare(content, [source], overrides)

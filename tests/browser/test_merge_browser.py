@@ -201,7 +201,7 @@ def test_lost_merge_deletion_receipt_keeps_draft_backup_and_single_attempt(
     backup = fao.read(deletion['backup']).bytes
     assert store.playlists.get_playlist(int(case['ids'].split(',')[1])) is not None
     assert_quiet_action(page)
-    page.screenshot(path=action_evidence + '-merge-uncertain-delete.png', full_page=True)
+    page.screenshot(path=action_evidence + '-merge-uncertain-delete.png', full_page=True, animations='disabled')
     page.reload()
     expect(page.locator('#merge-body')).to_be_visible()
     assert len(attempts) == len(posts) == 1

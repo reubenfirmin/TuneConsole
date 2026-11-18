@@ -2,11 +2,18 @@
 from yt_playlist.core.db_space import require_database_space
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 from yt_playlist.core.policy_config import PolicyCapacityFull
-from yt_playlist.repos import policy_storage
+from yt_playlist.repos import policy_storage, policy_file_writes, policy_history_files
 from yt_playlist.repos.policy_storage import refresh_references, typed
 
 
 class PolicyRepo(Repo):
+    @synchronized
+    def reserve_files(self, records):
+        if not records:
+            return []
+        with self.conn.atomic():
+            return [policy_file_writes.reserve(self.conn, record) for record in records]
+
     @lookup_read
     def file_owned(self):
         return typed(self.conn)
@@ -31,7 +38,8 @@ class PolicyRepo(Repo):
         if row is None:
             return None
         head = self.conn.execute('SELECT publication FROM policy_history_archive WHERE id=1').fetchone()
-        return {'state': row[0], 'publication': head[0].hex() if head else None}
+        return {'state': row[0], 'publication': head[0].hex() if head else None,
+                'file': policy_history_files.reference(self.conn, version)}
 
     @lookup_read
     def legacy_capture(self, versions):
@@ -68,6 +76,8 @@ class PolicyRepo(Repo):
                 pending.append(record)
             require_database_space(self.conn, 2 * sum(record['size'] for record in pending))
             for record in pending:
+                if 'file_id' not in record:
+                    raise ValueError('New policies require their pending SQL file identities')
                 columns = 'version,configuration_filename,content_digest,byte_size,configuration_offset,created_at'
                 values = (record['version'], record['filename'], record['digest'], record['size'],
                           record['offset'], record['created'])
@@ -76,6 +86,7 @@ class PolicyRepo(Repo):
                     columns += ',base_version'
                     values += (record['base'],)
                 self.conn.execute(f'INSERT INTO {table}({columns}) VALUES (' + ','.join('?' for _ in values) + ')', values)
+                policy_file_writes.complete(self.conn, record)
             versions = [record['version'] for record in records if not record['body']]
             for offset in range(0, len(versions), 256):
                 batch = versions[offset:offset + 256]
@@ -154,15 +165,20 @@ class PolicyRepo(Repo):
         return rows, self.records((), bodies)['bodies']
 
     @synchronized
-    def publish_history(self, publication, versions):
+    def reserve_history(self, records):
         with self.conn.atomic():
-            self.conn.execute('INSERT INTO policy_history_archive VALUES (1,?) '
-                'ON CONFLICT(id) DO UPDATE SET publication=excluded.publication', (bytes.fromhex(publication),))
+            return [policy_history_files.reserve(self.conn, record) for record in records]
+
+    @synchronized
+    def publish_history(self, records):
+        with self.conn.atomic():
             trigger = self.conn.execute("SELECT sql FROM sqlite_schema WHERE name='recommendation_impression_link_retained'").fetchone()
             if trigger:
                 self.conn.execute('DROP TRIGGER recommendation_impression_link_retained')
             try:
-                for version, created in versions:
+                for record in records:
+                    version, created = record['version'], record['created']
+                    policy_history_files.complete(self.conn, record)
                     self.conn.execute("INSERT INTO recommendation_policy_history VALUES (?,?,'archived') "
                         "ON CONFLICT(version) DO UPDATE SET state='archived'", (version, created))
                     self.conn.execute('INSERT INTO historical_impression_policies SELECT impression_id,kind,policy_version '
@@ -180,8 +196,20 @@ class PolicyRepo(Repo):
             'AND created_at<? ORDER BY created_at,version LIMIT ?', (before, limit))]
 
     @synchronized
-    def expire_history(self, publication, versions):
+    def expire_history(self, versions):
         with self.conn.atomic():
-            self.conn.execute('UPDATE policy_history_archive SET publication=? WHERE id=1', (bytes.fromhex(publication),))
             self.conn.executemany("UPDATE recommendation_policy_history SET state='expired' WHERE version=?",
                                   [(version,) for version in versions])
+            # An old packed archive can be released once none of its policies
+            # still requires it. New archives have individual SQL receipts.
+            if not self.conn.execute("SELECT 1 FROM recommendation_policy_history h WHERE h.state='archived' "
+                    'AND NOT EXISTS(SELECT 1 FROM policy_history_files f WHERE f.version=h.version '
+                    "AND f.file_status='ready') LIMIT 1").fetchone():
+                self.conn.execute('DELETE FROM policy_history_archive')
+
+    @lookup_read
+    def history_file_required(self, identity):
+        if not self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='policy_history_files'").fetchone():
+            return False
+        return self.conn.execute('SELECT 1 FROM policy_history_files f JOIN recommendation_policy_history h '
+            "ON h.version=f.version WHERE f.id=? AND f.file_status='ready' AND h.state='archived'", (identity,)).fetchone() is not None

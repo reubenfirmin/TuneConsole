@@ -6,7 +6,7 @@ services own statistical interpretation; this repository owns persistence and re
 from yt_playlist.core import album_playback_context, playback_bindings, served_facts
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.repos.scorecard_attribution import ScorecardFacts
-from yt_playlist.repos import policy_storage
+from yt_playlist.repos import policy_storage, impression_file_writes
 
 RETENTION_BATCH_SIZE = 256
 
@@ -163,6 +163,7 @@ class RecLedgerRepo(Repo):
     @synchronized
     def reserve_impression_ids(self, rows):
         with self.conn.atomic():
+            impression_file_writes.install(self.conn)
             identity = self.conn.execute('SELECT next_id FROM served_fact_state WHERE id=1').fetchone()[0]
             identity = max(identity, self.conn.execute('SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions').fetchone()[0])
             reserved, seen = [], set()
@@ -173,6 +174,7 @@ class RecLedgerRepo(Repo):
                     continue
                 seen.add(key)
                 reserved.append((identity, index))
+                impression_file_writes.reserve(self.conn, identity, *key)
                 identity += 1
             self.conn.execute('UPDATE served_fact_state SET next_id=? WHERE id=1', (identity,))
             return reserved
@@ -186,6 +188,7 @@ class RecLedgerRepo(Repo):
                     'score,model_version,provenance,served_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) '
                     'ON CONFLICT(request_id,surface,rank) DO NOTHING', (identity, *row))
                 if inserted.rowcount:
+                    impression_file_writes.complete(self.conn, identity, row[0], row[1], row[5])
                     self.conn.execute('INSERT INTO served_facts(impression_id,' + ','.join(served_facts.FIELDS) +
                         ') VALUES (' + ','.join('?' for _ in range(1 + len(served_facts.FIELDS))) + ')', (identity, *facts))
                     self.conn.execute('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', (identity,))

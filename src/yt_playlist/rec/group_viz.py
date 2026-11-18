@@ -1,7 +1,8 @@
 """Taste Model readings over the same immutable graph definitions Home serves."""
 import numpy as np
 
-from yt_playlist.rec import choice_bandit, group_serving, layers, rec_params
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import choice_bandit, group_serving, rec_params
 
 
 def prepared(store):
@@ -10,8 +11,15 @@ def prepared(store):
 
 
 def mode_layers(store, now, preview):
+    window = rec_params.get_param(store, 'now_window_h')
+    half = rec_params.get_param(store, 'session_halflife_h')
+    minimum = int(rec_params.get_param(store, 'now_min_events'))
+    return layer_facts(now, preview, store.taste_groups.leaf_members(preview['generation']),
+        layers._plays(store, now - max(24, window) * 3600), window=window, half=half, minimum=minimum)
+
+
+def layer_facts(now, preview, members, plays, *, window, half, minimum):
     by_version = {g['version']: g for g in preview['groups']}
-    members = store.taste_groups.leaf_members(preview['generation'])
     targets = {}
     sizes = {}
     for version in set(members.values()):
@@ -24,12 +32,8 @@ def mode_layers(store, now, preview):
         sizes[gid] = sizes.get(gid, 0) + 1
     modes = [{'mode_id': g['group_id'], 'label': g['name'], 'size': sizes[g['group_id']]}
              for g in preview['groups'] if g['group_id'] in sizes]
-    gp = rec_params.get_param
-    window = gp(store, 'now_window_h')
-    half = gp(store, 'session_halflife_h')
-    minimum = int(gp(store, 'now_min_events'))
     latest = {}
-    for event in layers._plays(store, now - max(24, window) * 3600):
+    for event in plays:
         key, at = event['identity_key'], event['played_at']
         if at <= now:
             latest[key] = max(latest.get(key, at), at)
@@ -59,8 +63,13 @@ def mode_layers(store, now, preview):
 
 def choices(store, now, preview):
     state = store.rec_proposals.get_proposals('group_choice_bandit') or {}
+    return choice_facts(now, preview, state, parameters=choice_bandit.parameters(store),
+                        window=rec_params.get_param(store, 'bandit_window_d'))
+
+
+def choice_facts(now, preview, state, *, parameters, window):
     if (state.get('generation') != preview['generation']
-            or state.get('parameters') != choice_bandit.parameters(store)
+            or state.get('parameters') != parameters
             or state.get('at', now) > now
             or state.get('expires_at') is not None and now >= state['expires_at']):
         state = {}
@@ -82,4 +91,4 @@ def choices(store, now, preview):
     strongest = sorted((r for r in rows if r['picked']), key=lambda r: -r['low'])[:3]
     return {'adaptive': True, 'rows': rows, 'strongest': strongest, 'contrast': None,
             'offered': state.get('offered', 0), 'picked': state.get('picked', 0),
-            'window_days': rec_params.get_param(store, 'bandit_window_d')}
+            'window_days': window}

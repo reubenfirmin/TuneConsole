@@ -3,14 +3,36 @@ import json
 
 from yt_playlist.core import audio_vibe_metadata, sample_files, vibe_manifest, vibe_model_files, vibe_publication
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
-from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS, PREDICTION_VERSION
+from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS, PREDICTION_VERSION, serving_compatible
+
+
+def overlay_profiles(profiles, rows):
+    """Attach current relational fits to detached profiles; retain dimensions."""
+    for profile in profiles.values():
+        if not serving_compatible((profile.get('vibes') or {}).get('inputs_version')):
+            profile.pop('vibes', None)
+    for key, row in rows:
+        if not serving_compatible(row['inputs_version']):
+            continue
+        vibes = profiles[key].setdefault('vibes', {'version': PREDICTION_VERSION,
+            'inputs_version': row['inputs_version'], 'fits': {}})
+        fit = {name: row[name] for name in ('score', 'support', 'source')}
+        if row['recordings'] is not None:
+            fit.update({name: row[name] for name in ('recordings', 'variance')})
+        if row['vibe'] in INTENSITY_CHANNELS:
+            vibes.setdefault('intensity_fits', {})[INTENSITY_CHANNELS[row['vibe']]] = fit
+        else:
+            vibes['fits'][row['vibe']] = fit
+    return profiles
 
 
 class VibePredictions:
-    def __init__(self, repository, provenance, samples, metadata, models, settings, refresh, prepared_content, genres):
+    def __init__(self, repository, provenance, samples, metadata, models, settings, refresh, prepared_content, genres,
+                 *, file_repository=None):
         self.repository, self.provenance, self.samples, self.metadata = repository, provenance, samples, metadata
         self.models, self.settings, self.refresh = models, settings, refresh
         self.prepared_content, self.genres = prepared_content, genres
+        self.file_repository = file_repository if file_repository is not None else repository
 
     def prepare_publication(self, tracks, resolved, touched, now):
         versions = {track['version'] for track in tracks.values() if track}
@@ -24,8 +46,42 @@ class VibePredictions:
         facts = self.repository.publication_facts(list(tracks), versions, requests, originals, artists)
         axes = self.genres.feature_axes({track['genre'] for track in tracks.values() if track and track['genre']})
         plan = vibe_publication.prepare(tracks, resolved, touched, now, facts, axes)
-        plan.staged, plan.markers, plan.roots = self.provenance.stage_many(plan.provenance)
+        records, plan.roots = self.provenance.describe(plan.provenance)
+        if records:
+            identities = self.file_repository.reserve_provenance(records)
+            if len(identities) != len(records):
+                raise ValueError('Incomplete prediction provenance reservation')
+            plan.file_records = [{**record, 'file_id': identity} for record, identity in zip(records, identities)]
+            plan.staged, plan.markers = self.provenance.stage_reserved(plan.file_records)
         return plan
+
+    def maintain(self, now):
+        if not self.repository.provenance_available():
+            return 0
+        expired = self.repository.expire_provenance(now)
+        retired = self.maintain_history(now)
+        self.collect_provenance(now)
+        self.models.collect(now)
+        return expired + retired
+
+    def maintain_history(self, now, limit=128):
+        with self.provenance.history() as after:
+            if after is None:
+                return 0
+            retired, following = self.repository.retire_history(now, after, limit)
+            self.provenance.save_history(following)
+            return retired
+
+    def collect_provenance(self, now, limit=16):
+        self.repository.assert_idle()
+        examined = 0
+        with self.provenance.garbage(limit=limit) as candidates:
+            for path, content, identity, group in candidates:
+                ready, owned = self.repository.provenance_owners(identity, group)
+                self.provenance.prune(path, content, file_id=identity, ready=ready, owned=owned,
+                                      before=now - 30 * 86400)
+                examined += 1
+        return examined
 
     def publish_prepared(self, plan):
         self.repository.assert_idle()
@@ -60,7 +116,7 @@ class VibePredictions:
 
     def inputs(self, keys, max_bytes=8 * 1024 * 1024):
         result, used = {}, 0
-        with self.metadata.retained():
+        with self.metadata.retained(), self.samples.retained():
             for key, facts in self.repository.input_facts(keys).items():
                 samples, metadata = [], {}
                 for rows, source in facts['runs']:
@@ -124,7 +180,7 @@ class VibePredictions:
     def publish_joint_model(self, vibe, generation, outcome, measurements, staged, refresh):
         self.repository.assert_idle()
         if staged:
-            staged.publish()
+            self.models.publish(staged)
         self.repository.root_joint_model(measurements, refresh)
         self.settings.publish_values({vibe_model_files.HEAD_PREFIX + vibe: generation,
                                      vibe_model_files.STATE_PREFIX + vibe: json.dumps(outcome)})
@@ -136,23 +192,13 @@ class VibePredictions:
 
     def retained_joint_fits(self, keys):
         return {key: {row['vibe']: {**{name: row[name] for name in ('score', 'support', 'source', 'recordings', 'variance')},
-                                   'retain': True} for row in rows}
+                                   'retain': True} for row in rows if serving_compatible(row['inputs_version'])}
                 for key, rows in self.repository.retained_joint_fits(keys).items()}
 
     def overlay(self, profiles):
         if not profiles:
             return profiles
-        for key, row in self.repository.overlay_rows(list(profiles)):
-            vibes = profiles[key].setdefault('vibes', {'version': PREDICTION_VERSION,
-                'inputs_version': row['inputs_version'], 'fits': {}})
-            fit = {name: row[name] for name in ('score', 'support', 'source')}
-            if row['recordings'] is not None:
-                fit.update({name: row[name] for name in ('recordings', 'variance')})
-            if row['vibe'] in INTENSITY_CHANNELS:
-                vibes.setdefault('intensity_fits', {})[INTENSITY_CHANNELS[row['vibe']]] = fit
-            else:
-                vibes['fits'][row['vibe']] = fit
-        return profiles
+        return overlay_profiles(profiles, self.repository.overlay_rows(list(profiles)))
 
     def fit_scores(self, keys, preset):
         return self.repository.fit_scores(keys, preset)

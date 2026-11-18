@@ -12,14 +12,22 @@ def same_receipt(marker, value):
 
 
 class VibeModels:
-    def __init__(self, repository, files, provenance):
+    def __init__(self, repository, files, provenance, *, file_repository=None):
         self.repository, self.files, self.provenance = repository, files, provenance
+        self.file_repository = file_repository if file_repository is not None else repository
 
     def stage(self, value):
-        return self.files.stage(value)
+        generation, raw = self.files.describe(value)
+        identity = self.file_repository.reserve_file(generation, len(raw))
+        return generation, self.files.stage_reserved(identity, generation, raw)
+
+    def publish(self, staged):
+        staged.publish()
+        self.file_repository.complete_file(staged.file_id, staged.generation, staged.byte_size)
 
     def read(self, generation):
-        value = self.files.read(generation)
+        identity = self.repository.file_reference(generation)
+        value = self.files.read(generation, identity)
         inputs = {row['measurement']: row for row in value['inputs']}
         identities, found = list(inputs), set()
         for start in range(0, len(identities), 128):

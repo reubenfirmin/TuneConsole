@@ -203,8 +203,9 @@ def test_optional_capture_requires_current_guarded_collector(parent_capture, tmp
 
 
 @pytest.mark.parametrize('ending', ['complete', 'timeout', 'kill', 'disabled'])
+@pytest.mark.parametrize('browser_channel', [None, 'chrome'])
 def test_supervisor_cleans_owned_group_before_merging_or_removing_workspace(
-        tmp_path, monkeypatch, ending):
+        tmp_path, monkeypatch, ending, browser_channel):
     events = []
     captured = {}
     class Worker:
@@ -244,7 +245,8 @@ def test_supervisor_cleans_owned_group_before_merging_or_removing_workspace(
     monkeypatch.setenv('TUNECONSOLE_COVERAGE_OWNER', 'inherited-owner')
     monkeypatch.setenv('COVERAGE_FILE', 'parent.sqlite3')
     request = SimpleNamespace(node=SimpleNamespace(nodeid='tests/test_workflow.py::test_journey'),
-        config=SimpleNamespace(rootpath=tmp_path))
+        config=SimpleNamespace(rootpath=tmp_path,
+            getoption={'browser_channel': browser_channel}.__getitem__))
     report = tmp_path / 'report'
     if ending in {'timeout', 'kill'}:
         with pytest.raises(browser_deadline.JourneyTimeout, match='exceeded 12s'):
@@ -261,6 +263,8 @@ def test_supervisor_cleans_owned_group_before_merging_or_removing_workspace(
     else:
         assert ('finish', ending == 'complete') in events
     assert ('--no-cov' in captured['command']) is (ending == 'disabled')
+    assert [argument for argument in captured['command'] if argument.startswith('--browser-channel=')] == (
+        ['--browser-channel=' + browser_channel] if browser_channel else [])
     assert (report / 'worker-timing.json').is_file()
 
 

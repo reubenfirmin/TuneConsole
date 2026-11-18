@@ -84,7 +84,8 @@ def test_quit_interrupts_rollup_sql_rolls_back_and_releases_waiting_request(
 
 
 def test_cancelled_rebuild_does_not_continue_after_best_effort_stage(store, monkeypatch):
-    from yt_playlist.rec import mode_surfaces, model_refresh
+    from yt_playlist.rec import model_refresh
+    from yt_playlist.library import mode_composition
 
     work = Activity()
     worker = RecWorker(SimpleNamespace(store=store, work=work,
@@ -95,7 +96,8 @@ def test_cancelled_rebuild_does_not_continue_after_best_effort_stage(store, monk
         work.close_admission()
         raise WorkClosing("stopped")
 
-    monkeypatch.setattr(mode_surfaces, "prepare_bundles", cancel)
+    monkeypatch.setattr(mode_composition, "preparation", lambda owner:
+        SimpleNamespace(prepare=cancel))
 
     def unexpected(*args, **kwargs):
         pytest.fail("A cancelled rebuild started another stage")

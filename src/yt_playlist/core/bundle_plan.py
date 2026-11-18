@@ -8,7 +8,7 @@ import hashlib
 from dataclasses import replace
 
 from yt_playlist.core import policy_documents, recommendation_outputs as outputs, recommendation_pools as pools
-from yt_playlist.core import policy_config
+from yt_playlist.core import artist_policy, policy_config
 from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
@@ -16,7 +16,7 @@ from . import recommendation_plan as publication
 
 LANES = frozenset({'wheelhouse', 'explore', 'comfort', 'fresh', 'temporal'})
 ITEM_FIELDS = frozenset({'key', 'video_id', 'title', 'artist', 'album', 'thumbnail', 'plays', 'reason',
-                        'lane', 'genre', 'year', 'score', 'pool_policy', 'musical'})
+                        'lane', 'genre', 'year', 'score', 'pool_policy', 'musical', 'artist_ids'})
 EXPLANATION_BYTES = 64 * 1024
 REUSE_GENERATIONS = 4
 
@@ -31,6 +31,18 @@ def _keys(value, allowed, label):
     _object(value, label)
     if value.keys() - allowed:
         raise ValueError(f'Unsupported {label} fields: ' + ', '.join(sorted(value.keys() - allowed)))
+
+
+def _candidate(value):
+    _keys(value, ITEM_FIELDS, 'candidate')
+    # Current performing identities travel with detached ranking inputs. They
+    # remain owned by entry_artists and are resolved again when pools are read.
+    identities = value.get('artist_ids', [])
+    if (not isinstance(identities, list) or len(identities) > 128
+            or any(not isinstance(identity, str)
+                   or (number := artist_policy.reference_id(identity)) is None or number <= 0
+                   or artist_policy.token(number) != identity for identity in identities)):
+        raise ValueError('Invalid candidate performing identities')
 
 
 def _framing(bundle):
@@ -144,7 +156,7 @@ def prepare(bundle, fresh, *, recording_ids, policy_families, external_key, poli
             'prepared-pool-inputs-2' if reuse_existing else 'prepared-pool-inputs-1', dependencies]))
         for rank, value in enumerate(values):
             check_cancellable_work()
-            _keys(value, ITEM_FIELDS, 'candidate')
+            _candidate(value)
             key = value.get('key')
             owner = recording(key)
             version = value.get('pool_policy') or default_policy
@@ -161,7 +173,8 @@ def prepare(bundle, fresh, *, recording_ids, policy_families, external_key, poli
             inputs.update(canonical([pools.owner(candidate), musical.get('digest') if isinstance(musical, dict) else None]))
             opaque = {field: value[field] for field in ('reason', 'lane') if field in value}
             if owner is None:
-                opaque = {'unresolved_candidate': value, 'reason': 'missing_recording'}
+                opaque = {'unresolved_candidate': {field: item for field, item in value.items()
+                                                   if field != 'artist_ids'}, 'reason': 'missing_recording'}
             if opaque:
                 display.append([rank, pools.owner(candidate), opaque])
         if len(versions) > 1:
@@ -255,7 +268,7 @@ def requirements(bundle, fresh, policy_version):
         if not isinstance(values, list):
             raise ValueError('Prepared candidates must be a ranked array')
         for value in values:
-            _keys(value, ITEM_FIELDS, 'candidate')
+            _candidate(value)
             key = value.get('key')
             if not isinstance(key, str) or not key:
                 raise ValueError('Invalid exact recommendation recording key')

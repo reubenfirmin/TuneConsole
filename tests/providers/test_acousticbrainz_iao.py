@@ -100,13 +100,13 @@ def test_retry_after_survives_recreation(boundary, store, header, expected):
     def fetch(request):
         raise http(429, {'Retry-After': header})
     b = boundary(fetch)
-    with b.iao.context(store), pytest.raises(IntegrationUnavailable) as first:
+    with b.iao.context(store.enrichment_state), pytest.raises(IntegrationUnavailable) as first:
         b.iao.low_level(MBID)
     assert first.value.retry_at == expected
     recreated = access.AcousticBrainzIAO(now_fn=lambda: b.clock[0],
         open_fn=lambda *args, **kwargs: pytest.fail('Persisted cooldown bypassed'),
         pacer=SimpleNamespace(wait=lambda: pytest.fail('Deferred request should not pace')))
-    with recreated.context(store), pytest.raises(IntegrationUnavailable) as deferred:
+    with recreated.context(store.enrichment_state), pytest.raises(IntegrationUnavailable) as deferred:
         recreated.high_level(OTHER)
     assert deferred.value.retry_at == expected
 
@@ -302,7 +302,7 @@ def test_success_does_not_clear_a_newer_persisted_host_deadline(boundary, store)
             retry_after=2000, error='Another process saw throttling')
         return LOWLEVEL
     b = boundary(fetch)
-    with b.iao.context(store):
+    with b.iao.context(store.enrichment_state):
         assert b.iao.low_level(MBID) == LOWLEVEL
         with pytest.raises(IntegrationUnavailable) as deferred:
             b.iao.high_level(MBID)
@@ -400,7 +400,7 @@ def test_overlapping_callers_coalesce_without_holding_the_database_lock(boundary
     b = boundary(fetch)
 
     def read():
-        with b.iao.context(store):
+        with b.iao.context(store.enrichment_state):
             return b.iao.low_level(MBID)
     with ThreadPoolExecutor(max_workers=3) as pool:
         first = pool.submit(read)

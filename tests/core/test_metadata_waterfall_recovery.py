@@ -3,7 +3,7 @@
 # These fixtures deliberately stage v80 on the isolated v69 + v74/v75
 # predecessor, matching test_metadata_attempt_fields rather than changing the
 # normal production migration registry.
-from tests.core.test_metadata_evidence_migration import additive_catalog, catalog
+from tests.metadata_catalog_support import catalog
 from tests.test_waterfall import FakeProv, _cfg
 from yt_playlist.core import metadata_deliveries
 from yt_playlist.providers.base import EnrichmentResult, MetadataObservation

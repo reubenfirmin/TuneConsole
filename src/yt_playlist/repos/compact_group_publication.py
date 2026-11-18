@@ -10,7 +10,9 @@ import uuid
 from yt_playlist.core import group_content as content, group_storage
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core.db_reads import read_sql_snapshot
 from . import group_publication as publication
+from . import group_file_writes
 
 MAX_PLAN_BYTES = 64 * 1024 * 1024
 STAGED_TABLES = frozenset({'taste_groups', 'group_generations', 'group_input_manifests', 'group_recording_inputs',
@@ -28,54 +30,73 @@ def _touch(conn, generation_id, owner):
         raise RuntimeError('Musical group build is no longer owned by this worker')
 
 
-def _claim(repo, prepared, inputs, policy_version, policy_reference, metadata_reference):
+def _existing(conn, prepared, policy_version):
     owner = prepared.setdefault('_stage_owner', uuid.uuid4().hex)
-    manifest_digest = content.digest(canonical([key, digest]) for key, digest in inputs)
     parent = prepared.get('_stage_parent')
     expected = (policy_version, prepared['fingerprint'], prepared['at'], prepared['serial'],
                 prepared['_stage_digest'], parent)
-    with publication._write(repo) as conn:
-        row = conn.execute('SELECT g.* FROM group_generations g WHERE g.external_key=?',
-            (prepared['generation'],)).fetchone()
-        if row is not None:
-            build = conn.execute('SELECT b.*,p.external_key parent_key FROM group_builds b LEFT JOIN '
-                'group_generations p ON p.id=b.parent_generation_id WHERE b.generation_id=?', (row['id'],)).fetchone()
-            if build is None:
-                raise RuntimeError('Cannot resume a published musical group generation')
-            if build['owner'] == publication._CLEANUP_OWNER:
-                if build['expires_at'] > time.time():
-                    raise publication.BuildUnavailable('Old musical group build is awaiting its lease expiry')
+    row = conn.execute('SELECT g.* FROM group_generations g WHERE g.external_key=?',
+                       (prepared['generation'],)).fetchone()
+    if row is None:
+        return None
+    build = conn.execute('SELECT b.*,p.external_key parent_key FROM group_builds b LEFT JOIN '
+        'group_generations p ON p.id=b.parent_generation_id WHERE b.generation_id=?', (row['id'],)).fetchone()
+    if build is None:
+        raise RuntimeError('Cannot resume a published musical group generation')
+    if build['owner'] == publication._CLEANUP_OWNER:
+        if build['expires_at'] > time.time():
+            raise publication.BuildUnavailable('Old musical group build is awaiting its lease expiry')
+        raise publication._BuildBeingCleaned
+    actual = (*[row[key] for key in ('policy_version', 'input_fingerprint', 'created_at', 'input_serial')],
+              build['output_digest'], build['parent_key'])
+    if actual != expected:
+        raise RuntimeError('Musical group resume plan does not match its retained output digest')
+    if build['owner'] != owner and build['expires_at'] > time.time():
+        raise publication.BuildUnavailable('Musical group build is leased by another worker')
+    return row, build
+
+
+def _manifest(conn, inputs):
+    digest = content.digest(canonical([key, value]) for key, value in inputs)
+    manifest = conn.execute('SELECT id,complete FROM group_input_manifests WHERE content_digest=?', (digest,)).fetchone()
+    if manifest is None:
+        return digest, None
+    identity = manifest[0]
+    if not manifest[1] or not content.equal(group_storage.manifest_rows(conn, identity),
+                                           (canonical([key, value]) for key, value in inputs)):
+        if conn.execute('SELECT 1 FROM group_generations WHERE input_manifest_id=? LIMIT 1', (identity,)).fetchone() is None:
+            if group_storage.manifest_remainder_matches(conn, identity, inputs):
                 raise publication._BuildBeingCleaned
-            actual = (*[row[key] for key in ('policy_version', 'input_fingerprint', 'created_at', 'input_serial')],
-                      build['output_digest'], build['parent_key'])
-            if actual != expected:
-                raise RuntimeError('Musical group resume plan does not match its retained output digest')
-            if build['owner'] != owner and build['expires_at'] > time.time():
-                raise publication.BuildUnavailable('Musical group build is leased by another worker')
+            raise ValueError('Musical group input digest collision')
+        if not manifest[1]:
+            raise publication.BuildUnavailable('Musical group inputs are leased by another build')
+        raise ValueError('Musical group input digest collision')
+    return digest, identity
+
+
+def generation_reference(conn, prepared, policy_version, inputs):
+    existing = _existing(conn, prepared, policy_version)
+    if existing is None:
+        _manifest(conn, inputs)
+        return None
+    row, _build = existing
+    return tuple(row['metadata_' + field] for field in ('filename', 'digest', 'bytes', 'offset'))
+
+
+def _claim(repo, prepared, inputs, policy_version, metadata_reference):
+    owner = prepared.setdefault('_stage_owner', uuid.uuid4().hex)
+    parent = prepared.get('_stage_parent')
+    with publication._write(repo) as conn:
+        existing = _existing(conn, prepared, policy_version)
+        if existing is not None:
+            row, build = existing
             conn.execute('UPDATE group_builds SET owner=?,expires_at=? WHERE generation_id=?',
                          (owner, time.time() + publication.LEASE_SECONDS, row['id']))
             return row['id'], row['input_manifest_id'], owner, bool(build['ready'])
-        manifest = conn.execute('SELECT id,complete FROM group_input_manifests WHERE content_digest=?',
-                                (manifest_digest,)).fetchone()
-        if manifest is None:
+        manifest_digest, manifest_id = _manifest(conn, inputs)
+        if manifest_id is None:
             manifest_id = conn.execute('INSERT INTO group_input_manifests(content_digest) VALUES (?) RETURNING id',
                                        (manifest_digest,)).fetchone()[0]
-        else:
-            manifest_id = manifest[0]
-            if not manifest[1] or not content.equal(group_storage.manifest_rows(conn, manifest_id),
-                                                   (canonical([key, digest]) for key, digest in inputs)):
-                # Cleanup commits bounded deletions after the last generation
-                # releases a manifest. Its original complete flag can survive
-                # those deletions. Retire only a matching unowned remainder;
-                # exact complete manifests, including unowned ones, are reusable.
-                if conn.execute('SELECT 1 FROM group_generations WHERE input_manifest_id=? LIMIT 1',
-                                (manifest_id,)).fetchone() is None:
-                    if group_storage.manifest_remainder_matches(conn, manifest_id, inputs):
-                        raise publication._BuildBeingCleaned
-                    raise ValueError('Musical group input digest collision')
-                if not manifest[1]:
-                    raise publication.BuildUnavailable('Musical group inputs are leased by another build')
-                raise ValueError('Musical group input digest collision')
         parent_id = None
         if parent is not None:
             selected = conn.execute('SELECT g.id FROM group_generations g JOIN group_publications p '
@@ -83,14 +104,11 @@ def _claim(repo, prepared, inputs, policy_version, policy_reference, metadata_re
             if selected is None:
                 raise ValueError('Missing published musical group staging parent')
             parent_id = selected[0]
-        filename, digest, size, offset = policy_reference
-        existing = conn.execute('SELECT content_digest FROM recommendation_policies WHERE version=?',
+        existing = conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?',
                                 (policy_version,)).fetchone()
-        if existing is not None and existing[0] != digest:
-            raise ValueError('Conflicting immutable musical group policy')
-        conn.execute('INSERT INTO recommendation_policies(version,configuration_filename,content_digest,'
-            'byte_size,configuration_offset,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(version) DO NOTHING',
-            (policy_version, filename, digest, size, offset, prepared['at']))
+        if existing is None:
+            raise ValueError('Missing retained musical group policy')
+        group_file_writes.complete(conn, 'generation', metadata_reference)
         generation_id = group_storage.install_header_reference(
             conn, prepared, policy_version, metadata_reference, manifest_id)
         conn.execute('INSERT INTO group_builds VALUES (?,?,?,0,?,?)',
@@ -104,8 +122,7 @@ def _count(conn, generation_id, tables, key='generation_id'):
 
 
 def _inputs(repo, generation_id, manifest_id, owner, rows):
-    with repo._store.read_snapshot() as snapshot:
-        conn = snapshot.store.conn
+    with read_sql_snapshot(repo._store) as conn:
         if conn.execute('SELECT complete FROM group_input_manifests WHERE id=?', (manifest_id,)).fetchone()[0]:
             return
         count = _count(conn, manifest_id, ('group_manifest_inputs', 'unresolved_group_manifest_inputs'), 'manifest_id')
@@ -148,8 +165,7 @@ def _link(conn, generation_id, group_id, version_id, position, alias):
 def _clear_foreign_conflicts(repo, prepared, plans):
     """Retire only expired unpublished owners of this plan's aliases/content."""
     conflicts = {}
-    with repo._store.read_snapshot() as snapshot:
-        conn = snapshot.store.conn
+    with read_sql_snapshot(repo._store) as conn:
         for _position, group, _value, _fields, digest in plans:
             rows = conn.execute('SELECT g.external_key,b.expires_at FROM group_generations g JOIN ('
                 'SELECT first_generation_id generation_id FROM group_version_aliases WHERE external_version=? '
@@ -167,8 +183,8 @@ def _clear_foreign_conflicts(repo, prepared, plans):
     for generation in sorted(conflicts):
         while cleanup(repo, generation=generation):
             check_cancellable_work()
-        with repo._store.read_snapshot() as snapshot:
-            if snapshot.store.conn.execute('SELECT 1 FROM group_generations WHERE external_key=?',
+        with read_sql_snapshot(repo._store) as conn:
+            if conn.execute('SELECT 1 FROM group_generations WHERE external_key=?',
                                             (generation,)).fetchone() is not None:
                 raise publication.BuildUnavailable('Musical group version still belongs to another build')
 
@@ -178,8 +194,7 @@ def group_state(repo, generation_id, owner, plan):
     # Resuming a committed group must not spend the next turn renewing the
     # lease once per completed group. Every subsequent mutation renews and
     # rechecks ownership under its writer; this state inspection only reads.
-    with repo._store.read_snapshot() as snapshot:
-        conn = snapshot.store.conn
+    with read_sql_snapshot(repo._store) as conn:
         if conn.execute('SELECT 1 FROM group_builds WHERE generation_id=? AND owner=? AND ready=0',
                         (generation_id, owner)).fetchone() is None:
             raise RuntimeError('Musical group build is no longer owned by this worker')
@@ -242,6 +257,7 @@ def install_definitions(repo, prepared, generation_id, owner, rows):
                             (group_id, digest)).fetchone():
                 continue
             version_id = group_storage.create_version(conn, prepared, group, generation_id, group_id, digest, fields, file)
+            group_file_writes.complete(conn, 'definition', file)
             conn.execute('INSERT INTO group_build_versions VALUES (?,?,?,?)',
                          (generation_id, version_id, position, group['version']))
 
@@ -265,15 +281,18 @@ def insert_lineage(conn, generation_id, rows):
         conn.execute('INSERT INTO group_lineage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (source, target, source_row[0], target_row[0], relation, compatible,
              value.get('old_share'), value.get('new_share'), value.get('overlap'), *file))
+        group_file_writes.complete(conn, 'lineage', file)
         conn.execute('INSERT INTO group_generation_lineage VALUES (?,?,?)', (generation_id, source, target))
 
 
 def _caches(repo, prepared, generation_id, owner, resolve):
     operations = [(('group_unknown', 'unresolved_group_unknown'), prepared['unknown']),
                   (('group_graph', 'unresolved_group_graph'), prepared['edges'])]
-    for tables, rows in operations:
-        with repo._store.read_snapshot() as snapshot:
-            count = _count(snapshot.store.conn, generation_id, tables)
+    # Both prefixes belong to the same leased build. Capture their positions
+    # together; every subsequent write still rechecks and renews that lease.
+    with read_sql_snapshot(repo._store) as conn:
+        counts = [_count(conn, generation_id, tables) for tables, _rows in operations]
+    for (tables, rows), count in zip(operations, counts):
         if count > len(rows):
             raise RuntimeError('Musical group cache prefix exceeds its retained plan')
         for batch in publication._batches(islice(rows, count, None)):

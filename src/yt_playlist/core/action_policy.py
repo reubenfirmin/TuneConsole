@@ -135,8 +135,12 @@ def upgrade_journal(undo):
 
 
 def relocate_backup(backups, filename):
+    from .action_backup_paths import record_id
+    identity = record_id(filename)
     for row in backups:
-        if filename in (row['filename'], row['retained_filename']) and row['retained_filename'] is not None:
+        if (row['retained_filename'] is not None and (
+                filename in (row['filename'], row['retained_filename'])
+                or identity is not None and record_id(row['retained_filename']) == identity)):
             return row['retained_filename']
     path = PurePath(filename)
     if path.suffix == '.json' and len(path.stem) == 64 and all(char in '0123456789abcdef' for char in path.stem):

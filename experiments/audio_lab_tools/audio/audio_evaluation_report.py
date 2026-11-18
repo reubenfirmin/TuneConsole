@@ -19,7 +19,7 @@ def extent(values):
 
 
 def shared_values(model, embedding):
-    from yt_playlist.rec import audio_vibe_external as external
+    from experiments.audio_lab_tools.legacy import audio_vibe_external as external
     native = external._predict(model['native'], embedding)
     values = np.maximum(external._predict(model['calibration'], native), 1e-8)
     return values / values.sum()
@@ -30,7 +30,7 @@ def summarize(directory):
     verify(directory)
     archive = directory / 'evaluation-source'
     code = (*CODE, 'experiments/audio_lab_tools/audio/audio_evaluation_report.py',
-            'src/yt_playlist/rec/audio_vibe_external.py')
+            'experiments/audio_lab_tools/legacy/audio_vibe_external.py')
     for name in code:
         target = archive / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -62,7 +62,7 @@ def summarize(directory):
                 'embedding_max_delta': extent(r['independent_decoder_sensitivity'][policy]['embedding_maximum_delta'] for r in rows),
                 'cruise_absolute_score_delta': extent(r['independent_decoder_sensitivity'][policy]['cruise_absolute_score_delta'] for r in rows)}
                 for policy in ('default', 'arithmetic')}}
-        model = load(ROOT / 'src/yt_playlist/rec/data/emotify-vibes.json')
+        model = load(ROOT / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json')
         sensitivity = {}
         for policy in ('default', 'arithmetic'):
             deltas, choices = [], 0

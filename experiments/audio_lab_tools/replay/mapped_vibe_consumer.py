@@ -75,7 +75,8 @@ def worker(directory):
     from threadpoolctl import threadpool_limits
     from . import library_replay, replay_runtime, replay_storage
     from .external_propagation import current_inputs
-    from yt_playlist.rec import audio_vibe_model, musical_character
+    from experiments.audio_lab_tools.legacy import audio_vibe_model
+    from yt_playlist.rec import musical_character
     from yt_playlist.core import policy_documents, recommendation_outputs
     from .consumer_replay import evaluate
     before = replay_runtime.runtime_hashes()

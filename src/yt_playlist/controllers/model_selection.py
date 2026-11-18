@@ -148,3 +148,20 @@ class ModelSelection:
 
     def selection_play_keys(self, start, end):
         return self.repository.selection_play_keys(start, end)
+
+    def active_run_id(self):
+        return self.settings.get_setting("rec_selection_active_run")
+
+    def restore_pending(self):
+        return bool(self.settings.get_setting("rec_selection_restore"))
+
+    def request_restore(self, run_id):
+        """Ask the worker to pause automatic selection and restore `run_id` on its next pass."""
+        self.settings.set_setting("rec_selection_paused", "1")
+        self.settings.set_setting("rec_selection_restore", run_id)
+
+    def request_pause(self):
+        self.settings.set_setting("rec_selection_paused", "1")
+
+    def request_resume(self):
+        self.settings.set_setting("rec_selection_paused", "")

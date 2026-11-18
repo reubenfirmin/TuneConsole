@@ -114,8 +114,10 @@ def source_reference(conn, source_key, max_bytes=256 * 1024, *, store=None):
     """Capture exact immutable source references without opening delivery files."""
     from . import metadata_runtime as runtime
     if runtime.active(conn):
+        from yt_playlist.repos import metadata_file_writes
         row = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (source_key,)).fetchone()
-        return {'key': source_key, 'revision': row[0] if row else None}
+        reference = metadata_file_writes.reference(conn, 'native', (source_key,), row[0], store=store) if row else None
+        return {'key': source_key, 'revision': row[0] if row else None, **({'file': reference} if reference else {})}
     with ExitStack() as guards:
         if store is not None:
             guards.enter_context(keyed_reads(store, 'musical_source_observations', [source_key]))

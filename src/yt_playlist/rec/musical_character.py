@@ -6,7 +6,8 @@ The exact profile version and digest travel with each served recording.
 import math
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.rec import musical_profiles
+from yt_playlist.rec import musical_profiles, vibe_intensity
+from yt_playlist.core.audio_vibe_contract import serving_compatible
 
 VERSION = musical_profiles.VERSION
 
@@ -14,11 +15,14 @@ VERSION = musical_profiles.VERSION
 def compact(profile):
     if not profile or profile.get('schema') != 1:
         return None
+    vibes = profile.get('vibes') or {}
+    if not serving_compatible(vibes.get('inputs_version')):
+        vibes = {}
     return {'version': profile['version'], 'digest': musical_profiles.digest(profile),
             'dimensions': {name: {key: value for key, value in dimension.items()
                                   if key in ('value', 'support', 'override', 'conflict')}
                            for name, dimension in profile['dimensions'].items()},
-            'vibes': profile.get('vibes', {}), 'reliability': 'uncalibrated'}
+            'vibes': vibes, 'reliability': 'uncalibrated'}
 
 
 def load(store, keys):
@@ -48,16 +52,13 @@ def _intensity_fit(item):
             and dimension(item, 'intensity')[0] is not None):
         return None
     vibes = (item.get('musical') or {}).get('vibes') or {}
-    fits = vibes.get('fits') or {}
+    if vibes.get('inputs_version') and not serving_compatible(vibes['inputs_version']):
+        return None
+    fits = vibes.get('intensity_fits') or {}
     if not isinstance(fits, dict):
         return None
-    # Independent Energize/Release suitability has different scales. Their
-    # separately prepared shared scores retain intensity behavior and lineage.
-    fits = {**fits, **(vibes.get('intensity_fits') or {})}
-    available = [(name, fit) for name in ('energize', 'release') if isinstance(fit := fits.get(name), dict)
-                 and fit.get('source') != 'heuristic' and type(fit.get('score')) in (int, float)
-                 and math.isfinite(fit['score']) and 0 <= fit['score'] <= 1]
-    return max(available, key=lambda row: row[1]['score']) if available else None
+    combined = vibe_intensity.ensemble(fits)
+    return (combined['selected'], combined) if combined else None
 
 
 def intensity_evidence(item):
@@ -86,4 +87,5 @@ def provenance(item):
         value, support, source = fit['score'], fit.get('support', 0), fit.get('source')
     return {'musical_policy': VERSION, 'musical_version': profile.get('version'),
             'musical_digest': profile.get('digest'), 'intensity': value, 'intensity_support': support,
-            'intensity_source': source, 'intensity_vibe': name}
+            'intensity_source': source, 'intensity_vibe': name,
+            'intensity_ensemble': chosen[1] if chosen is not None else None}

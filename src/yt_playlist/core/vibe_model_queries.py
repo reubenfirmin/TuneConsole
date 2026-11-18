@@ -147,10 +147,12 @@ def album_facts(conn, recordings):
 
 def training_rows(conn, vibe, limit):
     """Return at most limit plus one original rows so callers detect overflow."""
+    from yt_playlist.core.audio_vibe_contract import serving_prefix
     return [dict(row) for row in conn.execute('SELECT v.recording_id,v.measurement_id,v.artist_key,v.subgenre_key,'
         'm.score,m.support,m.source,m.input_digest,' + vibe_versions.expression(conn, 'measurements', 'm') +
         ' AS exact_version FROM recording_vibes v JOIN measurements m ON m.id=v.measurement_id '
-        'WHERE v.vibe=? AND m.support>0 ORDER BY v.recording_id LIMIT ?', (vibe, limit + 1))]
+        'WHERE v.vibe=? AND m.support>0 AND ' + vibe_versions.expression(conn, 'recording_vibes', 'v') +
+        ' GLOB ? ORDER BY v.recording_id LIMIT ?', (vibe, serving_prefix() + '*', limit + 1))]
 
 
 def linked(conn, prediction):
@@ -217,6 +219,10 @@ class VibeModelQueries:
         if self.conn.in_transaction:
             raise RuntimeError('Shared model collection requires committed SQL')
 
+    def file_reference(self, generation):
+        from yt_playlist.repos import vibe_model_file_writes
+        return vibe_model_file_writes.selected(self.conn, generation)
+
     def measurements(self, identities):
         return measurement_rows(self.conn, identities)
 
@@ -233,8 +239,17 @@ class VibeModelQueries:
             raise RuntimeError('Receipt rebuild requires its SQL batch')
         root_measurements(self.conn, roots)
         self.conn.executemany('INSERT OR IGNORE INTO prediction_model_generations VALUES (?,?)', generations)
-        self.conn.executemany("INSERT INTO prediction_provenance VALUES (?,?,?,'ready') "
+        self.conn.executemany('INSERT INTO prediction_provenance(prediction_id,input_fingerprint,byte_size,state) '
+                             "VALUES (?,?,?,'ready') "
                              'ON CONFLICT(prediction_id) DO NOTHING', markers)
 
     def referenced(self, generation):
+        if type(generation) is int:
+            row = self.conn.execute('SELECT generation FROM vibe_model_file_writes WHERE id=?', (generation,)).fetchone()
+            if row is None:
+                return False
+            digest = row[0].hex()
+            return self.file_reference(digest) == generation and bool(referenced(self.conn, digest))
+        if self.file_reference(generation) is not None:
+            return False
         return bool(referenced(self.conn, generation))

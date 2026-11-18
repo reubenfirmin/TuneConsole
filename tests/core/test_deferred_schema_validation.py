@@ -53,7 +53,7 @@ def _pristine_installed_schema():
 def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'predecessor.db')
     with closing(store.conn):
-        _pristine_installed_schema(79).backup(store.conn)
+        _pristine_installed_schema(107).backup(store.conn)
     return store._db_path
 
 
@@ -63,7 +63,7 @@ def test_deferred_startup_validates_structure_without_scanning_all_foreign_keys(
     try:
         store.conn.set_trace_callback(statements.append)
         store.init_schema(defer_metadata=True)
-        assert store._schema_compatibility and not store.activity_paused
+        assert not store._schema_compatibility and not store.activity_paused
         assert not any(sql.strip().upper().startswith('PRAGMA FOREIGN_KEY_CHECK') for sql in statements)
         with closing(sqlite3.connect(predecessor.as_uri() + '?mode=ro', uri=True)) as reader, reader:
             reader.row_factory = sqlite3.Row
@@ -88,8 +88,8 @@ def test_explicit_audit_rejects_broken_predecessor_without_running_conversion(pr
             with pytest.raises(runner.MigrationError, match='foreign-key'):
                 audit(reader)
         assert list(store.conn.iterdump()) == before
-        assert store._schema_compatibility and not store.activity_paused
-        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 79
+        assert not store._schema_compatibility and not store.activity_paused
+        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
         assert store.conn.execute("SELECT recording_id FROM youtube_items WHERE video_id='dangling'").fetchone()[0] == 999999
     finally:
         store.conn.close()
@@ -130,7 +130,7 @@ def installed_library(tmp_path, _pristine_current_schema, _pristine_installed_sc
     return build
 
 
-@pytest.mark.parametrize('version', [79, 80, 81, 82, 85, 93, 103, 106, current.VERSION])
+@pytest.mark.parametrize('version', [current.VERSION])
 def test_every_readable_schema_admits_without_data_scans_or_writer_reservation(installed_library, monkeypatch, version):
     path = installed_library(version)
     store = Store(path)
@@ -170,7 +170,7 @@ def test_every_readable_schema_admits_without_data_scans_or_writer_reservation(i
                 pass  # Admission failure already closes its connection.
 
 
-@pytest.mark.parametrize('version', [80, 81, 82, current.VERSION])
+@pytest.mark.parametrize('version', [current.VERSION])
 def test_explicit_audit_reports_bad_data_separately_from_admission(installed_library, version):
     path = installed_library(version)
     with closing(sqlite3.connect(path)) as corrupt, corrupt:
@@ -190,7 +190,7 @@ def test_explicit_audit_reports_bad_data_separately_from_admission(installed_lib
         store.conn.close()
 
 
-@pytest.mark.parametrize('version', [81, 82, current.VERSION])
+@pytest.mark.parametrize('version', [current.VERSION])
 def test_explicit_audit_uses_private_snapshot_without_gating_admission(installed_library, monkeypatch, version):
     path = installed_library(version)
     store = Store(path)
@@ -297,7 +297,7 @@ def test_audit_interruption_preserves_writes_history_and_revisions(installed_lib
         store.conn.close()
 
 
-@pytest.mark.parametrize('version', [81, current.VERSION])
+@pytest.mark.parametrize('version', [current.VERSION])
 @pytest.mark.usefixtures('without_query_timing')
 def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(installed_library, version, monkeypatch):
     from fastapi import APIRouter
@@ -348,144 +348,4 @@ def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(in
             if maintenance is not None:
                 maintenance.stop()
                 maintenance.join(timeout=None)
-            genres.set_active(None)
-
-
-@pytest.mark.usefixtures('without_query_timing')
-def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(
-        tmp_path, caplog, installed_library, monkeypatch):
-    """An independent schema writer never starts the frozen bulk conversions."""
-    import hashlib
-    import json
-    import logging
-    from pathlib import Path
-    import sys
-    import traceback
-
-    from yt_playlist.core import db_revisions, db_snapshot, storage_maintenance
-    from yt_playlist.core.migrations import v085_genre_preferences, v086_genre_classifications
-    from yt_playlist.providers import genres
-
-    caplog.set_level(logging.INFO, logger='yt_playlist.core.migrations.runner')
-    modules = (current, registry, runner, db_revisions, db_snapshot,
-               storage_maintenance, sys.modules[Store.__module__],
-               v085_genre_preferences, v086_genre_classifications)
-    sources = {module.__name__: Path(module.__file__).resolve() for module in modules}
-    sources[__name__] = Path(__file__).resolve()
-
-    def fingerprints():
-        return {name: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
-                for name, path in sources.items()}
-
-    report = {'status': 'failed', 'python': sys.version, 'sqlite': sqlite3.sqlite_version,
-              'installed_version': 84, 'target_version': current.VERSION,
-              'completion_budget_seconds': 15,
-              'sources_before': fingerprints()}
-    path = installed_library(84)
-    setup = sqlite3.connect(path)
-    try:
-        change = register_independent_ddl(monkeypatch, setup)
-        regular_history = [(entry.version, entry.name) for entry in regular.CHANGES]
-        with setup:
-            setup.execute("INSERT INTO genre_whitelist(name) VALUES ('Jazz')")
-            setup.execute("INSERT INTO settings VALUES ('upgrade-preserved','original')")
-    finally:
-        setup.close()
-    store = Store(path)
-    resumed = []
-    maintenance = StorageMaintenance(store, on_resume=lambda: resumed.append(True))
-    try:
-        store.init_schema(defer_metadata=True)
-        report['initial'] = {
-            'pending': store._schema_recovery_pending, 'paused': store.activity_paused,
-            'version': store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0],
-        }
-        assert report['initial'] == {'pending': False, 'paused': False, 'version': 84}
-        assert store._schema_compatibility
-        history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
-        original_revisions = store._snapshot_revisions
-        assert 'genre_whitelist' in original_revisions.tables
-        with store.read_snapshot() as stale:
-            assert stale.store.settings.get_setting('upgrade-preserved') == 'original'
-            assert stale.store.genres.get_genre_whitelist() == ['Jazz']
-            stale.release_reader()  # Retain the guard without pinning the predecessor WAL view.
-
-        started = time.monotonic()
-        maintenance.start()
-        # Ready only waits for bounded regular DDL. It never waits for a
-        # conversion, owner replacement, repository rebind or full data audit.
-        ready = maintenance.ready.wait(report['completion_budget_seconds'])
-        report['completion_signal'] = ready
-        if not ready:
-            report['phase_at_timeout'] = maintenance.phase
-            frame = sys._current_frames().get(maintenance._thread.ident)
-            report['maintenance_stack_at_timeout'] = traceback.format_stack(frame) if frame else []
-        assert ready, f'Cutover did not finish: {maintenance.phase}'
-        maintenance.join(1)
-        report['cutover_seconds'] = time.monotonic() - started
-        report['final'] = {
-            'phase': maintenance.phase, 'pending': store._schema_recovery_pending,
-            'paused': store.activity_paused, 'active': maintenance.active,
-            'version': store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0],
-            'resume_calls': len(resumed),
-        }
-        assert report['final'] == {
-            'phase': 'done', 'pending': False, 'paused': False, 'active': False,
-            'version': 84, 'resume_calls': 0,
-        }
-        assert store.tracks.duration_for_video('committed') == 213
-        assert store.settings.get_setting('upgrade-preserved') == 'original'
-        assert 'Jazz' in store.genres.get_genre_whitelist()
-        assert store._snapshot_revisions is original_revisions
-        assert 'genre_whitelist' in store._snapshot_revisions.tables
-        assert 'genre_preferences' not in store._snapshot_revisions.tables
-        assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
-        assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == regular_history
-        assert store.conn.execute('SELECT * FROM independent_preparation_ddl').fetchall() == []
-        report['installed_owners_retained'] = True
-        # The schema guard conservatively rejects work captured before any DDL.
-        # It must not publish against a schema other than the one it observed.
-        assert not stale.publish(lambda: pytest.fail('Changed schema bypassed the guard'))
-        report['stale_snapshot_rejected'] = True
-
-        # Original counters must still reject changed consumed inputs.
-        with store.read_snapshot() as fresh:
-            assert fresh.store.settings.get_setting('after-upgrade') is None
-            fresh.release_reader()
-        store.settings.set_setting('after-upgrade', 'writable')
-        assert store.settings.get_setting('after-upgrade') == 'writable'
-        assert not fresh.publish(lambda: pytest.fail('Changed settings bypassed rebound counters'))
-        with store.read_snapshot() as unchanged:
-            assert unchanged.store.settings.get_setting('after-upgrade') == 'writable'
-            unchanged.release_reader()
-        assert unchanged.publish(lambda: store.settings.publish_values({'published-after-upgrade': 'yes'}))
-        assert store.settings.get_setting('published-after-upgrade') == 'yes'
-        report['post_cutover_writes_and_guards'] = True
-        assert fingerprints() == report['sources_before']
-        report['status'] = 'passed'
-    finally:
-        maintenance.stop()
-        try:
-            maintenance.join(5)
-        finally:
-            report['maintenance_phase_at_cleanup'] = maintenance.phase
-            report['maintenance_log'] = [
-                {'logger': record.name, 'level': record.levelname, 'message': record.getMessage(),
-                 'exception': ''.join(traceback.format_exception(*record.exc_info)) if record.exc_info else None}
-                for record in caplog.records
-                if record.name in ('yt_playlist.core.migrations.runner',
-                                   'yt_playlist.core.storage_maintenance')
-            ][-30:]
-            report['sources_after'] = fingerprints()
-            if maintenance._thread is None or not maintenance._thread.is_alive():
-                try:
-                    report['state_at_cleanup'] = {
-                        'version': store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0],
-                        'pending': store._schema_recovery_pending, 'paused': store.activity_paused,
-                        'resume_calls': len(resumed),
-                    }
-                except sqlite3.Error as error:
-                    report['cleanup_state_error'] = str(error)
-                store.conn.close()
-            (tmp_path / 'deferred-v84-cutover.json').write_text(json.dumps(report, indent=2) + '\n')
             genres.set_active(None)

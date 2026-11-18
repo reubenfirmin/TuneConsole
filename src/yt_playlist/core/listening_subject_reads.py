@@ -1,5 +1,5 @@
 """Names and selection of the retained listening projection family."""
-from .preparation.listening_views import DERIVED
+from .listening_views import DERIVED
 
 PREFIX = 'published_listening_subject_'
 READS = ('play_event_subjects', 'listening_observation_subjects', *DERIVED,

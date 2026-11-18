@@ -124,7 +124,8 @@ class RecWorker:
         return self.work.wrap('album feedback responses', drain)()
 
     def _poll_refresh(self):
-        from yt_playlist.rec import candidate_refresh
+        from yt_playlist.library.worker_composition import maintenance_commands
+        commands = maintenance_commands(self)
         busy = self.busy
         now = time.monotonic()
         with self._lock:
@@ -138,49 +139,27 @@ class RecWorker:
         if busy:
             return
         group_state = self.jobs.retry[Job.GROUPS]
-        if self.ctx.store.settings.get_setting('rec_group_shadow') == '0':
-            from yt_playlist.rec import group_serving
-            self.ctx.store.maintenance_diagnostics.resolve_wait(group_serving.PHASE, 'disabled')
-        elif now >= group_state.retry_at:
-            from yt_playlist.rec import group_preparation
-            due = (group_state.dirty or self.preparation.groups.due(self.ctx.now_fn())
-                   or group_preparation.status(self.ctx.store).get('phase') in {'failed', 'preparing', 'deferred'})
-            if not due and (generation := self.ctx.store.taste_groups.head_generation()):
-                from yt_playlist.rec import group_serving
-                preview = self.ctx.store.rec_proposals.get_proposals(group_serving.SURFACE)
-                due = (not preview or preview['generation'] != generation or preview.get('schema') != group_serving.SCHEMA
-                       or group_serving.due(self.ctx.store, self.ctx.now_fn()))
-            if due:
-                self._schedule(full=False, groups=True)
+        if commands.groups_due(group_state.dirty, admitted=now >= group_state.retry_at):
+            self._schedule(full=False, groups=True)
         state = self.jobs.retry[Job.FULL]
-        if state.dirty or self.ctx.store.rec_refresh.has_pending_changes():
-            if now >= state.retry_at and self.preparation.full_due(self.ctx.now_fn()):
-                self.trigger()
-        wall_now = self.ctx.now_fn()
-        if (now >= self.jobs.retry[Job.BUNDLES].retry_at
-                and candidate_refresh.check_due(self.ctx.store, wall_now)):
-            # Inspect impression/preference changes only on the hourly cadence.
-            # An unchanged account needs no new generation or policy variants.
-            if (not self.ctx.store.rec_proposals.has_proposals('mode_bundles')
-                    or candidate_refresh.due(self.ctx.store, wall_now)):
-                self._schedule(full=False, bundles=True)
-            else:
-                candidate_refresh.checked(self.ctx.store, wall_now)
+        if now >= state.retry_at and commands.full_due(state.dirty):
+            self.trigger()
+        if now >= self.jobs.retry[Job.BUNDLES].retry_at and commands.bundles_due():
+            self._schedule(full=False, bundles=True)
 
     def _poll_choices(self):
-        from yt_playlist.rec import choice_evidence, daily_model_selection
+        from yt_playlist.library.worker_composition import maintenance_commands
         if self.busy or time.monotonic() < self.jobs.retry[Job.CHOICES].retry_at:
             return
-        if (choice_evidence.daily_due(self.ctx.store, self.ctx.now_fn())
-                or daily_model_selection.due(self.ctx.store, self.ctx.now_fn())):
+        if maintenance_commands(self).choices_due():
             self._schedule(full=False, choices=True)
 
     def _poll_tv(self):
-        from yt_playlist.rec import tv
+        from yt_playlist.library.worker_composition import maintenance_commands
         state = self.jobs.retry[Job.TV]
         if self.jobs.has(Job.TV) or time.monotonic() < state.retry_at:
             return
-        if state.dirty or tv.due(self.ctx.store, self.ctx.now_fn()):
+        if maintenance_commands(self).tv_due(state.dirty):
             self._schedule(full=False, tv=True)
 
     def _poll_evidence_storage(self):
@@ -260,8 +239,8 @@ class RecWorker:
 
     def _gc_loop(self):
         """Daily collection plus due, persistent playlist retries between full sweeps."""
-        from yt_playlist.library import playlist_generated, playlist_gc_retry
-        from yt_playlist.rec import discover
+        from yt_playlist.library.worker_composition import collection_commands
+        commands = collection_commands(self)
         if self._stop.wait(self.gc_initial_s):
             return
         next_sweep = time.monotonic()
@@ -274,41 +253,27 @@ class RecWorker:
                 continue
             full_sweep = time.monotonic() >= next_sweep
             try:
-                retry_at = playlist_gc_retry.next_retry_at(self.ctx.store)
-                due = full_sweep or (retry_at is not None and retry_at <= self.ctx.now_fn())
-                clients = (self.ctx.client_provider() or {}) if due else {}
-                if clients:        # no clients configured (e.g. pre-setup) -> nothing to delete remotely
-                    kwargs = {} if full_sweep else {"retry_only": True}
-                    collected = self.work.wrap("generated-playlist collection",
-                        playlist_generated.gc_generated_playlists, self.ctx.store, clients,
-                        self.ctx.now_fn(), **kwargs)()
-                    if collected:
-                        self.ctx.logger.info("GC: collected %d unplayed generated playlist(s): %s",
-                                             len(collected), ", ".join(c["title"] for c in collected))
+                commands.generated(full_sweep)
             except WorkClosing:
                 return
             except Exception:  # noqa: BLE001 - a GC failure must never crash the daemon
                 self.ctx.logger.warning("generated-playlist GC tick failed", exc_info=True)
             if time.monotonic() >= next_collection:
                 try:
-                    self.work.wrap('collection recovery cleanup',
-                                   self.ctx.store.retention.maintain_collection_recovery)()
+                    commands.recovery()
                 except WorkClosing:
                     return
                 except Exception:
                     self.ctx.logger.warning('Collection recovery cleanup deferred',exc_info=True)
                 next_collection = time.monotonic() + (
-                    min(60, self.gc_tick_s) if self.ctx.store.retention.collection_recovery_pending()
+                    min(60, self.gc_tick_s) if commands.recovery_pending()
                     else self.gc_tick_s)
             if full_sweep:
                 next_sweep = time.monotonic() + self.gc_tick_s
             if time.monotonic() >= next_discovery:
                 discovery_delay = self.gc_tick_s
                 try:               # #52: discovery collection keeps its daily cadence
-                    gc = self.work.wrap("discovery collection", discover.gc_discovery,
-                                        self.ctx, self.ctx.now_fn())()
-                    if any(gc.values()):
-                        self.ctx.logger.info("GC: discovery pool removed %s", gc)
+                    commands.discoveries()
                 except WorkClosing:
                     return
                 except WorkBudgetExceeded as exc:
@@ -319,7 +284,7 @@ class RecWorker:
                 next_discovery = time.monotonic() + discovery_delay
             delay = max(0, min(next_sweep, next_discovery, next_collection) - time.monotonic())
             try:
-                retry_at = playlist_gc_retry.next_retry_at(self.ctx.store)
+                retry_at = commands.next_retry()
                 if retry_at is not None:
                     # A disconnected account or contended claim must not cause a busy loop.
                     delay = min(delay, max(60, retry_at - self.ctx.now_fn()))
@@ -602,209 +567,14 @@ class RecWorker:
             raise
 
     def _run_pending(self):
-        while not self._stop.wait(self.debounce_s):
-            if not getattr(self.ctx.store, '_recommendation_retirement_pending', False):
-                self._flush_measurements()
-            with self._lock:
-                if not self.jobs:
-                    self._running = False
-                    return
-                batch = self.jobs.drain()
-                if (not batch and self.jobs.measurements
-                        and time.monotonic() < self.jobs.retry[Job.MEASUREMENT].retry_at):
-                    # The maintenance ticker restarts due captures. A capacity
-                    # backlog must not keep this worker spinning between retries.
-                    self._running = False
-                    return
-                self._model_active = any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in batch)
-            full, modes = Job.FULL in batch, Job.MODES in batch
-            from yt_playlist.rec import candidate_refresh, recommendation_retirement, recommendation_roots
-            retirement = getattr(self.ctx.store, '_recommendation_retirement_pending', False)
-            try:
-                # Startup/idle recovery must not wait for the next hourly
-                # deadline to notice already-detached pools.
-                if Job.RETENTION in batch and recommendation_roots.enabled(self.ctx.store):
-                    retirement = retirement or self.ctx.store.recommendations.retirement_pending()
-                if retirement or (any(job in batch for job in (Job.FULL, Job.MODES, Job.BUNDLES))
-                                  and candidate_refresh.check_due(self.ctx.store, self.ctx.now_fn())):
-                    self._stage('recommendation cleanup', recommendation_retirement.drain,
-                                self.ctx.store, self.ctx.now_fn())
-            except WorkClosing:
-                raise
-            except Exception:
-                # Keep the entire detached batch. A cleanup failure must
-                # not admit ranking, discard queued work or spin this loop.
-                self.ctx.store._recommendation_retirement_pending = True
-                with self._lock:
-                    for job, payload in batch.items():
-                        if job != Job.RETENTION:
-                            self.jobs.merge(job, payload)
-                    # The ticker owns retry admission. A queued retention
-                    # flag would prevent it from starting another loop.
-                    self.jobs.pending.pop(Job.RETENTION, None)
-                    self.jobs.retry[Job.RETENTION].failed(time.monotonic(), base=5, cap=300)
-                    self._model_active = False
-                    self._running = False
-                self.ctx.logger.warning('Recommendation cleanup will retry before preparation', exc_info=True)
-                return
-            if Job.EVIDENCE_STORAGE in batch:
-                from yt_playlist.rec import choice_evidence
-                state = self.jobs.retry[Job.EVIDENCE_STORAGE]
-                state.retry_at = time.monotonic() + 300
-                try:
-                    result = self._stage('listening evidence storage', choice_evidence.maintain_storage,
-                                         self.ctx.store, self.ctx.now_fn())
-                    if result and result.get('deferred'):
-                        state.retry_at = time.monotonic() + 5
-                except WorkClosing:
-                    raise
-                except Exception:
-                    state.retry_at = time.monotonic() + 5
-                    self.ctx.logger.warning('Listening evidence maintenance failed', exc_info=True)
-            if Job.RETENTION in batch:
-                state = self.jobs.retry[Job.RETENTION]
-                # Coalesce ticker polls for the whole in-flight bundle, even
-                # when an early owner's retry becomes due before it finishes.
-                state.retry_at = float('inf')
-                state.retry_at = self.retention.run()
-            from yt_playlist.core import playback_feedback
-            if playback_feedback.try_drain(self.ctx.store):
-                self.trigger_rating_update()
-            if full and time.monotonic() < self.jobs.retry[Job.FULL].retry_at:
-                # Keep the intent for the ticker without delaying ratings/serving jobs.
-                self.jobs.retry[Job.FULL].dirty = True
-                full = False
-            keys = batch.get(Job.CONTENT, set())
-            if Job.RATINGS in batch:
-                try:
-                    keys.update(self.tasks.ratings())
-                except WorkClosing:
-                    raise
-                except Exception:
-                    self.ctx.logger.warning("rating subject update failed", exc_info=True)
-            preparation_refresh = False
-            try:
-                if Job.PREPARE in batch:
-                    preparation_refresh = self._prepare_content()
-                    # The later refresh in this batch already consumes this slice.
-                    if preparation_refresh and Job.BUNDLES not in batch:
-                        self._schedule(full=False, bundles=True)
-                        preparation_refresh = False
-                if full and not self.preparation.full_due(self.ctx.now_fn()):
-                    self.jobs.retry[Job.FULL].dirty = False
-                    full = False
-                if full:
-                    self._do_rebuild()           # includes genre groups and Home bundles
-                elif modes:
-                    self._do_mode_refresh()
-                if Job.BUNDLES in batch:
-                    with self.model_lock:
-                        self._refresh_bundles()
-                    preparation_refresh = False
-            except WorkClosing:
-                raise
-            except Exception:  # noqa: BLE001 - never let rec work crash the app
-                if preparation_refresh:
-                    self._schedule(full=False, bundles=True)
-                # A queued continuation or the maintenance poll must not turn a
-                # persistent failure into a 10ms retry loop. Keep every traceback.
-                backoff = self.jobs.retry[Job.FULL].failed(time.monotonic(), base=2, exponent_cap=4)
-                self.ctx.logger.warning("rec worker rebuild failed: retry_backoff=%.1fs", backoff, exc_info=True)
-                if full and modes:              # a failed full rebuild must not swallow local repair
-                    self.trigger_mode_refresh()
-            # Disposable projections keep their own retry clocks. A failed or
-            # coalesced learning pass must not swallow either summary job.
-            if Job.TRENDS in batch:
-                with self.model_lock:
-                    self._refresh_trends()
-            if Job.CLEANUP in batch:
-                with self.model_lock:
-                    self.projections.run('cleanup')
-            if Job.ANALYTICS in batch:
-                with self.model_lock:
-                    self.projections.run('analytics')
-            if Job.MODEL_HEALTH in batch:
-                with self.model_lock:
-                    self.projections.run('model_health')
-            if keys:
-                try:
-                    self.ctx.store.rec_refresh.enqueue()
-                    self._schedule(full=True, prepare=True)
-                except WorkClosing:
-                    raise
-                except Exception:
-                    self.ctx.logger.warning("rec content refresh failed: tracks=%d", len(keys), exc_info=True)
-            if Job.HOME in batch:
-                try:
-                    state = self.jobs.retry[Job.HOME]
-                    state.attempted_at = time.monotonic()
-                    with self.model_lock:
-                        dirty = self.tasks.home()
-                    with self._lock:
-                        state.dirty |= dirty
-                    self._poll_tv()
-                except WorkClosing:
-                    raise
-                except Exception:
-                    with self._lock:
-                        self.jobs.retry[Job.HOME].dirty = True
-                    self.ctx.logger.warning("Home preparation failed; retaining previous collections", exc_info=True)
-            if Job.CHOICES in batch:
-                state = self.jobs.retry[Job.CHOICES]
-                state.started(time.monotonic())
-                try:
-                    with self.model_lock:
-                        active = self.ctx.store.settings.get_setting('rec_selection_active_run')
-                        result = self.tasks.choices()
-                        if (active != self.ctx.store.settings.get_setting('rec_selection_active_run')
-                                or result and result.get('published_vectors')):
-                            self._schedule(full=False, bundles=True, home=True)
-                    state.succeeded()
-                except WorkClosing:
-                    raise
-                except Exception:
-                    state.failed(time.monotonic(), base=60, cap=3600)
-                    self.ctx.logger.warning("Daily listening evaluation failed; retaining previous report", exc_info=True)
-            if Job.ARTWORK in batch:
-                try:
-                    self.tasks.artwork(batch[Job.ARTWORK])
-                except WorkClosing:
-                    raise
-                except Exception:
-                    self.ctx.logger.warning('Artist image repair failed', exc_info=True)
-            if Job.STORIES in batch:
-                try:
-                    self.jobs.retry[Job.STORIES].attempted_at = time.monotonic()
-                    if self.tasks.stories():
-                        self._schedule(full=False, stories=True)
-                except WorkClosing:
-                    raise
-                except Exception:
-                    self.ctx.logger.warning("Story preparation failed; retaining previous stories", exc_info=True)
-            if Job.TV in batch:
-                state = self.jobs.retry[Job.TV]
-                if time.monotonic() >= state.retry_at:
-                    state.started(time.monotonic())
-                    try:
-                        more = self.tasks.tv()
-                        state.succeeded()
-                        state.dirty = more
-                        if more:
-                            from yt_playlist.rec import tv
-                            if len(tv.queue(self.ctx.store, self.ctx.now_fn())) < tv.QUEUE_SIZE:
-                                # Fill a usable session without a minute between
-                                # each small batch of searches. Failures retain
-                                # the normal provider backoff below.
-                                state.retry_at = min(state.retry_at, state.attempted_at + 5)
-                    except WorkClosing:
-                        raise
-                    except Exception:
-                        state.failed(time.monotonic(), base=60, cap=3600)
-                        self.ctx.logger.warning('TV preparation failed; retaining previous videos', exc_info=True)
-            if Job.GROUPS in batch:
-                self._prepare_groups()
-            self._model_active = False
-        self._running = False
+        from yt_playlist.library.worker_composition import pending_commands
+        from yt_playlist.rec.worker_dispatch import PendingDispatch
+        return PendingDispatch(self.jobs, pending_commands(self), stop=self._stop,
+            debounce=self.debounce_s, lock=self._lock, model_lock=self.model_lock,
+            flush=self._flush_measurements, schedule=self._schedule,
+            active=lambda value: setattr(self, '_model_active', value),
+            running=lambda value: setattr(self, '_running', value),
+            clock=lambda: time.monotonic(), logger=self.ctx.logger).run()
 
     def rebuild(self):
         """Run maintenance directly for background callers and command-line tools.
@@ -867,69 +637,23 @@ class RecWorker:
 
     def _prepare_groups(self):
         """Shadow work runs after serving jobs; background arrivals cannot starve it."""
-        from yt_playlist.rec import group_preparation, group_serving
+        from yt_playlist.library.worker_composition import group_commands
         state = self.jobs.retry[Job.GROUPS]
         if time.monotonic() < state.retry_at:
             state.dirty = True
             return
         state.started(time.monotonic())
 
-        def should_stop():
-            # New requests coalesce behind the admitted batch. Cancelling its
-            # capture/calculation here discards progress and can starve it.
-            return self._stop.is_set()
-
-        def report_waiting(phase, reason):
-            try:
-                group_preparation.report(self.ctx.store, phase, self.ctx.now_fn(), reason=reason)
-            except WorkClosing:
-                raise
-            except Exception:
-                self.ctx.logger.warning('Could not persist adaptive grouping %s progress; '
-                                        'retry remains pending', phase, exc_info=True)
-                return False
-            return True
-
-        try:
-            if self.ctx.store.settings.get_setting('rec_group_shadow') == '0':
-                self.ctx.store.maintenance_diagnostics.resolve_wait(group_serving.PHASE, 'disabled')
-                state.succeeded()
-                return
-
-            def prepare():
-                with cancellable_work(should_stop):
-                    self.preparation.groups.step(self.ctx.now_fn())
-                    if self.ctx.store.taste_groups.head() is None:
-                        self.ctx.store.maintenance_diagnostics.record(
-                            'deferred', phase=group_serving.PHASE, reasons=('group-head',))
-                        return None
-                    now = self.ctx.now_fn()
-                    return group_serving.prepare(self.ctx.store, now) if group_serving.due(self.ctx.store, now) else {}
-
-            with self.model_lock:
-                preview = self._stage('adaptive grouping shadow', prepare)
-            if preview is None:
-                state.deferred(time.monotonic())
-                if group_preparation.status(self.ctx.store).get('phase') == 'ready':
-                    group_preparation.report(self.ctx.store, 'deferred', self.ctx.now_fn(), reason='preview-pending')
-            else:
-                state.succeeded()
-                if preview and group_serving.enabled(self.ctx.store):
-                    self._schedule(full=False, home=True)
-                if group_preparation.status(self.ctx.store).get('phase') in {'failed', 'preparing'}:
-                    group_preparation.report(self.ctx.store, 'ready', self.ctx.now_fn())
-        except WorkClosing:
-            raise
-        except WorkBudgetExceeded:
+        with self.model_lock:
+            outcome = group_commands(self).prepare()
+        if outcome.state == 'deferred':
             state.deferred(time.monotonic())
-            self.ctx.store.maintenance_diagnostics.record(
-                'deferred', phase=group_serving.PHASE, reasons=('serving-work',))
-            if not report_waiting('deferred', 'serving-work'):
-                state.failed(time.monotonic(), base=60, cap=3600)
-        except Exception:
+        elif outcome.state == 'failed':
             state.failed(time.monotonic(), base=60, cap=3600)
-            self.ctx.logger.warning('Adaptive grouping deferred; retaining previous shadow', exc_info=True)
-            report_waiting('failed', 'preparation-failed')
+        else:
+            state.succeeded()
+            if outcome.refresh_home:
+                self._schedule(full=False, home=True)
 
     def _do_rebuild(self):
         # Source removal waits for publication, then clears every derived cache
@@ -999,35 +723,15 @@ class RecWorker:
 
     def _rebuild(self):
         """Fit privately; keep the last completed model available throughout the work."""
-        from yt_playlist.rec import model_refresh
-        store = self.ctx.store
+        from yt_playlist.library.worker_composition import model_commands
         with self._lock:
             state = self.jobs.retry[Job.FULL]
             if time.monotonic() < state.retry_at:
                 state.dirty = True
                 return
             state.started(time.monotonic())
-        restore = store.settings.get_setting('rec_selection_restore')
-        restored = False
-        if restore:
-            self._stage('model followup', model_selection.update_followup, store,
-                        self.ctx.now_fn(), now_fn=self.ctx.now_fn)
-            restored = store.model_selection.restore_model_selection(int(restore), self.ctx.now_fn())
-            store.settings.delete_setting('rec_selection_restore')
-        checkpoint = self.preparation.full_checkpoint(self.ctx.now_fn())
-        def fit():
-            try:
-                with cancellable_work(self._stop.is_set):
-                    return model_refresh.rebuild(store, self.ctx.now_fn(), keep_collaborative=restored,
-                                                memory_bytes=self.preparation.budget.full_memory_bytes,
-                                                fit_cache=self._fit_cache)
-            except model_refresh.MemoryBudgetExceeded:
-                store.maintenance_diagnostics.record('deferred', reasons=('full-fit-memory-budget',))
-                return None
-            except WorkBudgetExceeded:
-                store.maintenance_diagnostics.record('deferred', reasons=('full-fit-time-budget',))
-                return None
-        result = self._stage('recommendation models', fit)
+        command = model_commands(self)
+        result = command.fit()
         if result is None:
             self.ctx.logger.debug('rec models deferred: inputs changed during fitting; retaining published model')
             with self._lock:
@@ -1038,11 +742,5 @@ class RecWorker:
             return
         with self._lock:
             state.succeeded()
-        self.preparation.completed_full(checkpoint)
-        try:
-            self._stage('model selection', model_selection.maintain, store, self.ctx.now_fn(), now_fn=self.ctx.now_fn)
-        except WorkClosing:
-            raise
-        except Exception:
-            self.ctx.logger.warning('automatic model comparison failed; retaining published models', exc_info=True)
+        command.complete(result[1])
         self._refresh_bundles()

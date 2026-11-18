@@ -8,6 +8,20 @@ class MusicalProfiles:
         self.repository, self.files, self.metadata = repository, files, metadata
         self.predictions, self.refresh = predictions, refresh
 
+    def _write(self, kind, values):
+        records = self.files.describe(kind, values)
+        identities = self.repository.reserve_files(records)
+        return self.files.write_reserved([record | {'file_id': identity}
+            for record, identity in zip(records, identities, strict=True)])
+
+    def collect(self, now, *, limit=16):
+        removed = 0
+        with self.files.garbage(now - 30*86400, limit=limit) as candidates:
+            for kind, reference, path, info in candidates:
+                if not self.repository.file_required(kind, reference):
+                    removed += self.files.remove(path, info)
+        return removed
+
     def stale(self, version, limit=32):
         return self.repository.stale(version, limit)
 
@@ -38,7 +52,7 @@ class MusicalProfiles:
         self.repository.assert_idle()
         with self.files.retained():
             owners = self.repository.publication_owners('source', [key])
-            references = ([] if owners is None else self.files.write('source',
+            references = ([] if owners is None else self._write('source',
                 [(key, owners[key], payload, version, digest)]))
             return self.repository.publish_source(key, pending, ids, payload, version, digest, now, limit,
                                                   references=references)
@@ -74,7 +88,7 @@ class MusicalProfiles:
         with self.files.retained():
             owners = self.repository.publication_owners('recording',
                 [key for key, payload, _version, _digest in prepared if payload is not None])
-            references = ([] if owners is None else self.files.write('recording',
+            references = ([] if owners is None else self._write('recording',
                 [(key, owners[key], payload, version, digest) for key, payload, version, digest in prepared
                  if payload is not None]))
             changed = self.repository.publish_recordings(prepared, now, references=references)

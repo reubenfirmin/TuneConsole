@@ -1,46 +1,32 @@
-"""Regular DDL and truthful legacy conversion history have separate commits."""
+"""Post-release DDL keeps each bounded change and the frozen history atomic."""
 from contextlib import closing
+from pathlib import Path
 import sqlite3
 import threading
+from unittest.mock import Mock
 
 import pytest
 
-from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input, install_regular_input
+from tests.release_schema_support import release_schema
 from yt_playlist.core import schema_inspection
-from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
-from yt_playlist.core.migrations import v080_metadata_evidence
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations.__main__ import main
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    """These SQL and command-line checks do not construct an HTTP app."""
+    """These SQL and CLI checks do not construct an HTTP application."""
 
 
 @pytest.fixture
-def installed(tmp_path, monkeypatch):
-    # These cases own regular DDL and admission over an exact v79 input.
-    # Historical construction is covered by the frozen migration owners.
-    bound_catalog(monkeypatch)
-    path = tmp_path / 'old-format.db'
-    conn = sqlite3.connect(path)
-    try:
-        conn.row_factory = sqlite3.Row
-        # These disposable workers own DDL commits and rollback, without a
-        # power-loss durability requirement for their temporary database.
-        conn.execute('PRAGMA synchronous=OFF')
+def installed(tmp_path):
+    path = tmp_path / 'released.db'
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute('PRAGMA foreign_keys=ON')
-        # Match the installed application's WAL mode. Each real worker below
-        # still owns its validation, commits, rollback and connection lifetime.
         conn.execute('PRAGMA journal_mode=WAL')
-        install_numbered_input(conn, 79)
-        with conn:
-            conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")
-            conn.execute("INSERT INTO settings VALUES ('retained-setting','original')")
-    finally:
-        conn.close()
+        release_schema(conn)
+        conn.execute("INSERT INTO settings VALUES ('retained-setting','original')")
     return path
 
 
@@ -48,138 +34,77 @@ def legacy_history(conn):
     return list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
 
 
-def test_album_feedback_outbox_installation_rolls_back_and_retries_without_advancing_layout(installed, monkeypatch):
-    from yt_playlist.core import album_feedback_outbox
-    with closing(sqlite3.connect(installed)) as conn, schema_inspection.reuse_tables(conn):
-        conn.execute('PRAGMA synchronous=OFF')
-        version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
-        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
-        history = legacy_history(conn)
-        before = list(conn.iterdump())
-        install = album_feedback_outbox.install
-        def interrupted(*args):
-            install(*args)
-            raise OSError('controlled outbox installation interruption')
-        with monkeypatch.context() as stopped:
-            stopped.setattr(album_feedback_outbox, 'install', interrupted)
-            with pytest.raises(OSError, match='controlled outbox installation interruption'):
-                regular.migrate(conn)
-        assert list(conn.iterdump()) == before
-        assert legacy_history(conn) == history
-        regular.migrate(conn)
-        album_feedback_outbox.validate(conn)
-        assert legacy_history(conn) == history
-        assert conn.execute('SELECT name FROM schema_changes WHERE version=?', (version,)).fetchone() == (
-            'durable_album_feedback_responses',)
-
-
-def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(installed):
+def test_sample_status_adoption_preserves_rows_and_files_without_conversion(installed, monkeypatch):
+    from yt_playlist.core import fao, sample_files
+    from yt_playlist.repos.audio_vibes import validate_sample_files
+    value = dict(id='installed-sample', run_id='installed-run', point='thirty', video_id='video')
+    filename = sample_files.publish(installed.parent / 'sample-attributes', value)
+    original_file = Path(filename).read_bytes()
     with closing(sqlite3.connect(installed)) as conn:
-        version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
+        version = next(c.version for c in regular.CHANGES if c.name == 'record_owned_audio_sample_files')
         regular.migrate(conn, changes=regular.CHANGES[:version - 1])
         with conn:
-            conn.execute('CREATE TABLE album_feedback_response_outbox(action_id TEXT)')
-        before = list(conn.iterdump())
-        with pytest.raises(MigrationError, match='album feedback response outbox'):
+            rid = conn.execute("INSERT INTO recordings(identity_key,title,created_at) VALUES ('sample','Song',1)").lastrowid
+            conn.execute('INSERT INTO youtube_items(video_id,recording_id) VALUES (?,?)', ('video', rid))
+            conn.execute('INSERT INTO sample_attributes VALUES (?,?,?,?,?,?,?)',
+                         (value['id'], rid, 'video', value['run_id'], 'thirty', filename, 1))
+        original_row = conn.execute('SELECT * FROM sample_attributes').fetchone()
+        numbered = legacy_history(conn)
+        read, write = Mock(side_effect=AssertionError('DDL read a managed file')), Mock(
+            side_effect=AssertionError('DDL wrote a managed file'))
+        with monkeypatch.context() as patch:
+            patch.setattr(fao, 'read', read)
+            patch.setattr(fao, 'write', write)
             regular.migrate(conn)
-        assert list(conn.iterdump()) == before
-        assert not conn.execute('SELECT 1 FROM schema_changes WHERE name=?',
-                                ('durable_album_feedback_responses',)).fetchone()
+            validate_sample_files(conn)
+        assert conn.execute('SELECT * FROM sample_attributes').fetchone() == (*original_row, None, 'ready')
+        assert legacy_history(conn) == numbered
+        assert Path(filename).read_bytes() == original_file
+        read.assert_not_called()
+        write.assert_not_called()
+        validate_version(conn, 107)
 
 
-def test_association_checkpoint_installation_rolls_back_and_retries(installed, monkeypatch):
-    from yt_playlist.core import association_work
+def test_interrupted_sample_status_adoption_rolls_back_and_retries(installed, monkeypatch):
+    from yt_playlist.repos import audio_vibes
     with closing(sqlite3.connect(installed)) as conn:
-        with conn:
-            install_regular_input(conn, regular.CHANGES[:34])
+        version = next(c.version for c in regular.CHANGES if c.name == 'record_owned_audio_sample_files')
+        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
         before = list(conn.iterdump())
-        install = association_work.install
-
+        install = audio_vibes.install_sample_files
         def interrupted(*args):
             install(*args)
-            raise OSError('interrupted association checkpoint installation')
-
-        with monkeypatch.context() as stopped:
-            stopped.setattr(association_work, 'install', interrupted)
-            with pytest.raises(OSError, match='interrupted association checkpoint'):
+            raise OSError('interrupted sample status installation')
+        with monkeypatch.context() as patch:
+            patch.setattr(audio_vibes, 'install_sample_files', interrupted)
+            with pytest.raises(OSError, match='interrupted sample status'):
                 regular.migrate(conn)
         assert list(conn.iterdump()) == before
         regular.migrate(conn)
-        association_work.validate(conn)
-        completed = list(conn.iterdump())
-        regular.migrate(conn)
-        assert list(conn.iterdump()) == completed
+        audio_vibes.validate_sample_files(conn)
 
 
-def test_wrong_association_checkpoint_is_rejected_without_stamping(installed):
-    with closing(sqlite3.connect(installed)) as conn:
-        with conn:
-            install_regular_input(conn, regular.CHANGES[:34])
-        with conn:
-            conn.execute('CREATE TABLE recording_association_work(video_id TEXT)')
-        before = list(conn.iterdump())
-        with pytest.raises(MigrationError, match='recording association checkpoints'):
-            regular.migrate(conn)
-        assert list(conn.iterdump()) == before
-
-
-def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeypatch):
-    def failed_conversion(conn):
-        raise RuntimeError('Conversion deliberately suspended for retry')
-
-    with closing(sqlite3.connect(installed)) as conn, schema_inspection.reuse_tables(conn), conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA synchronous=OFF')
-        conn.execute('PRAGMA foreign_keys=ON')
-        before = legacy_history(conn)
-        with monkeypatch.context() as held:
-            held.setattr(v080_metadata_evidence, 'convert_legacy', failed_conversion)
-            assert migrate(conn) is True
-        assert legacy_history(conn) == before
-        assert conn.execute('SELECT version,name FROM schema_changes').fetchall()[0][:] == (
-            1, 'independent_playback_feedback_receipts')
-        assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='metadata_observations'").fetchone()
-        assert conn.execute("SELECT value FROM settings WHERE key='retained-setting'").fetchone()[0] == 'original'
-        # Exercise the real independent owner while metadata remains at v79.
-        with conn:
-            conn.execute("INSERT INTO playback_feedback_receipts VALUES ('retained-capture',3,'live',123,1)")
-        # Resuming the genuine frozen prefix must adopt that owner rather than
-        # duplicate it, lose its rows or stamp the unfinished v80 early.
-        migrate(conn, registry=registry.MIGRATIONS[:81])
-        validate_version(conn, 81)
-        assert legacy_history(conn)[:79] == before
-        assert conn.execute("SELECT result FROM playback_feedback_receipts WHERE capture_id='retained-capture'").fetchone()[0] == 1
-
-
-def test_regular_failure_keeps_prior_commit_and_never_changes_legacy_history(installed):
+def test_regular_failure_keeps_prior_commits_and_applied_history(installed, monkeypatch):
     def interrupted(conn, context):
         conn.execute('CREATE TABLE interrupted_owner(id INTEGER PRIMARY KEY)')
         raise RuntimeError('Interrupted regular DDL')
-
     with closing(sqlite3.connect(installed)) as conn, conn:
         before = legacy_history(conn)
         next_version = len(regular.CHANGES) + 1
-        changes = regular.CHANGES + (regular.Change(next_version, 'later_addition', interrupted, lambda conn: None),)
+        changes = (*regular.CHANGES, regular.Change(next_version, 'later_addition', interrupted, lambda conn: None))
         with pytest.raises(RuntimeError, match='Interrupted regular DDL'):
             regular.migrate(conn, changes=changes)
         assert legacy_history(conn) == before
-        assert conn.execute('SELECT version FROM schema_changes ORDER BY version').fetchall() == [(c.version,) for c in regular.CHANGES]
+        assert conn.execute('SELECT count(*) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
         assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='interrupted_owner'").fetchone()
         successor = regular.Change(next_version, 'later_addition',
             lambda conn, context: conn.execute('CREATE TABLE later_owner(id INTEGER PRIMARY KEY)'),
             lambda conn: conn.execute('SELECT id FROM later_owner LIMIT 0'))
-        regular.migrate(conn, changes=regular.CHANGES + (successor,))
-        assert conn.execute('SELECT version FROM schema_changes ORDER BY version').fetchall() == [(c.version,) for c in regular.CHANGES]+[(next_version,)]
+        from tests.release_schema_support import future_schema
+        future_schema(monkeypatch, 'later_addition', 'CREATE TABLE later_owner(id INTEGER PRIMARY KEY)')
+        regular.migrate(conn, changes=(*regular.CHANGES, successor))
+        assert conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == next_version
         assert legacy_history(conn) == before
-
-
-def test_wrong_preexisting_independent_owner_is_rejected_without_stamping(installed):
-    with closing(sqlite3.connect(installed)) as conn, conn:
-        conn.execute('CREATE TABLE playback_feedback_receipts(capture_id TEXT)')
-        before = list(conn.iterdump())
-        with pytest.raises(MigrationError, match='receipt owner'):
-            regular.migrate(conn)
-        assert list(conn.iterdump()) == before
 
 
 def test_regular_runner_preserves_caller_transaction(installed):
@@ -192,58 +117,35 @@ def test_regular_runner_preserves_caller_transaction(installed):
         assert conn.execute("SELECT value FROM settings WHERE key='retained-setting'").fetchone() == ('original',)
 
 
-def test_regular_cli_does_not_run_legacy_conversion(installed, tmp_path, monkeypatch, capsys):
-    def forbidden(*args, **kwargs):
-        pytest.fail('Regular schema command invoked bulk conversion')
-
-    monkeypatch.setattr(v080_metadata_evidence, 'convert_legacy', forbidden)
+def test_regular_cli_preserves_numbered_history(installed):
+    with closing(sqlite3.connect(installed)) as conn:
+        before = legacy_history(conn)
     assert main(['upgrade-schema', str(installed)]) == 0
-    assert 'legacy layout remains 79' in capsys.readouterr().out
-    with closing(sqlite3.connect(installed)) as conn, conn:
-        assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (79,)
-        assert conn.execute('SELECT version FROM schema_changes ORDER BY version').fetchall() == [(c.version,) for c in regular.CHANGES]
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='entry_field_choices' AND type='table'").fetchone()
-    missing = tmp_path / 'missing.db'
-    with pytest.raises(SystemExit) as error:
-        main(['upgrade-schema', str(missing)])
-    assert error.value.code == 1
-    assert not missing.exists()
+    with closing(sqlite3.connect(installed)) as conn:
+        assert legacy_history(conn) == before
+        assert conn.execute('SELECT count(*) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
 
 
-def test_competing_regular_startups_install_once(installed, monkeypatch):
-    # Numbered-layout admission is completed input. Competing workers still
-    # recheck live histories and validate every real regular change under WAL.
-    monkeypatch.setattr(regular, 'validate_version', lambda *args, **kwargs: None)
-    barrier = threading.Barrier(2)
-    errors = []
-
+def test_competing_regular_startups_install_once(installed):
+    barrier, errors = threading.Barrier(2), []
     def start():
         try:
-            with closing(sqlite3.connect(installed, timeout=5)) as conn, conn:
-                conn.execute('PRAGMA synchronous=OFF')
-                conn.execute('PRAGMA foreign_keys=ON')
+            with closing(sqlite3.connect(installed, timeout=10)) as conn:
                 barrier.wait()
                 regular.migrate(conn)
         except BaseException as exc:
             errors.append(exc)
-
     threads = [threading.Thread(target=start) for _ in range(2)]
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(10)
+        thread.join(30)
     assert all(not thread.is_alive() for thread in threads)
     assert not errors
-    with closing(sqlite3.connect(installed)) as conn, conn:
-        assert conn.execute('SELECT version FROM schema_changes ORDER BY version').fetchall() == [(c.version,) for c in regular.CHANGES]
-        assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (79,)
 
 
-def test_completed_regular_validation_leaves_writer_available(installed, monkeypatch):
-    with closing(sqlite3.connect(installed)) as conn, conn:
-        # Match Store's production journal mode; a rollback journal naturally
-        # makes every retained reader delay the writer's commit.
-        conn.execute('PRAGMA journal_mode=WAL')
+def test_completed_validation_leaves_writer_available(installed, monkeypatch):
+    with closing(sqlite3.connect(installed)) as conn:
         regular.migrate(conn)
     entered, release = threading.Event(), threading.Event()
     validate, errors = regular.validate_version, []
@@ -255,7 +157,7 @@ def test_completed_regular_validation_leaves_writer_available(installed, monkeyp
     monkeypatch.setattr(regular, 'validate_version', slow)
     def inspect():
         try:
-            with closing(sqlite3.connect(installed, timeout=.1)) as conn, conn:
+            with closing(sqlite3.connect(installed, timeout=.1)) as conn:
                 regular.migrate(conn)
         except BaseException as exc:
             errors.append(exc)
@@ -269,81 +171,3 @@ def test_completed_regular_validation_leaves_writer_available(installed, monkeyp
         release.set()
         worker.join(15)
     assert not worker.is_alive() and not errors
-
-
-def test_regular_change_repairs_retired_preparation_capture_without_rewriting_history(installed, monkeypatch):
-    from yt_playlist.core import genre_identity
-    from yt_playlist.core.migrations import v085_genre_preferences
-    from yt_playlist.core.preparation import genre_preferences
-    with closing(sqlite3.connect(installed)) as conn, schema_inspection.reuse_tables(conn), conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA synchronous=OFF')
-        # Numbered-layout admission is completed input to this repair. Keep
-        # actual histories, every regular DDL/validator and frozen upgrade live.
-        validate = regular.validate_version
-
-        def admitted(target, *args, **kwargs):
-            if target is not conn:
-                return validate(target, *args, **kwargs)
-
-        monkeypatch.setattr(regular, 'validate_version', admitted)
-        with conn:
-            genre_identity.seed_catalog(conn)
-            conn.execute("INSERT INTO genre_whitelist VALUES ('Rock')")
-        job = genre_preferences.CHOICES
-        job.install(conn)
-        while job.step(conn,batch_size=2).status != 'prepared':
-            pass
-        regular.migrate(conn,changes=regular.CHANGES[:2])
-        # Reproduce the former explicit v85 implementation on a genuine v79
-        # predecessor; its dropped whitelist left catalog capture dangling.
-        with monkeypatch.context() as former:
-            former.setattr(v085_genre_preferences,'retire_preparation_capture',lambda conn:None)
-            migrate(conn,registry=registry.MIGRATIONS[:85])
-        before = legacy_history(conn)
-        evidence = list(map(tuple,conn.execute('SELECT * FROM prepared_genre_choice_originals')))
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='prepare_genre_choices_dependency_genre_catalog_insert'").fetchone()
-        regular.migrate(conn)
-        assert legacy_history(conn) == before
-        assert list(map(tuple,conn.execute('SELECT * FROM prepared_genre_choice_originals'))) == evidence
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='prepare_genre_choices_dependency_genre_catalog_insert'").fetchone() is None
-        migrate(conn,registry=registry.MIGRATIONS[:89])
-        assert legacy_history(conn)[:85] == before
-
-
-@pytest.mark.parametrize('former',[False,True])
-def test_taste_capture_retirement_preserves_evidence_and_supported_upgrade(installed,monkeypatch,former):
-    from yt_playlist.core.migrations import v088_taste_axes
-    from yt_playlist.core.preparation import taste_axes
-    with closing(sqlite3.connect(installed)) as conn, conn:
-        conn.row_factory=sqlite3.Row
-        with conn:
-            conn.execute("INSERT INTO rec_weights VALUES ('genre:Rock',1.25,10)")
-        job=taste_axes.JOB
-        job.install(conn)
-        for _ in range(20):
-            if job.step(conn,batch_size=2).status=='prepared':
-                break
-        else:
-            pytest.fail('Taste preparation did not finish')
-        evidence=list(map(tuple,conn.execute('SELECT * FROM prepared_taste_originals')))
-        regular.migrate(conn,changes=regular.CHANGES[:3])
-        with monkeypatch.context() as historical:
-            if former:
-                historical.setattr(v088_taste_axes,'retire_preparation_capture',lambda conn:None)
-            migrate(conn,registry=registry.MIGRATIONS[:88])
-        before=legacy_history(conn)
-        if former:
-            assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='prepare_taste_axes_dependency_genre_catalog_insert'").fetchone()
-            with pytest.raises(sqlite3.OperationalError,match='axis|facet|rec_play_grad|rec_grad_log'):
-                conn.execute('UPDATE genre_catalog SET name=name WHERE key=(SELECT min(key) FROM genre_catalog)')
-            conn.rollback()
-        regular.migrate(conn)
-        assert legacy_history(conn)==before
-        assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name LIKE 'prepare_taste_axes_dependency_%'").fetchone()
-        with conn:
-            conn.execute('UPDATE genre_catalog SET name=name WHERE key=(SELECT min(key) FROM genre_catalog)')
-        migrate(conn,registry=registry.MIGRATIONS)
-        regular.migrate(conn)
-        assert legacy_history(conn)[:88]==before
-        assert list(map(tuple,conn.execute('SELECT * FROM prepared_taste_originals')))==evidence

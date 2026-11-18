@@ -6,7 +6,7 @@ import pytest
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
-from yt_playlist.rec import vibe_joint_preparation
+from yt_playlist.rec import vibe_joint_state
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +19,7 @@ def specialist_store(tmp_path, monkeypatch, native_sql_calls):
     # The original subjects have one Psybient artist and two recordings.
     # Keep real SQL, file publication and all model refreshes. Snapshot races,
     # connection admission and joint-model fitting have their own lifecycle tests.
-    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
+    monkeypatch.setattr(vibe_joint_state, 'qualified', lambda: False)
     with bounded_consumer_schema((('psybient', 'Psybient'),), snapshot_guards=False) as schema:
         assert not schema.execute('PRAGMA foreign_key_check').fetchone()
         store = Store(tmp_path / 'specialist.db')

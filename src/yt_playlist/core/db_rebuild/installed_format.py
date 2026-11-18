@@ -6,8 +6,8 @@ from ..migrations.runner import history, validate_version
 
 def validate(conn):
     version = history(conn, MIGRATIONS)
-    if version < 79:
-        raise ValueError('Retained-copy compaction requires a supported installed format (79 or later)')
+    if version != 107:
+        raise ValueError('Retained-copy compaction requires the current release baseline')
     validate_version(conn, version, foreign_keys=False, data=False)
     regular.validate(conn)
     return version

@@ -12,6 +12,8 @@ from tests.repository_mock_support import no_database, repository_store
 from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.controllers.sync import LibrarySync
 from yt_playlist.library import sync
+from yt_playlist.controllers import library_synchronization as acquisition
+from yt_playlist.library import ratings
 from yt_playlist.library.sync_outcomes import RETRY_BASE_S, sync_due
 from yt_playlist.core import playlist_scopes, sync_state
 from yt_playlist.core.album_snapshot import PlaylistSnapshot
@@ -59,7 +61,7 @@ class CountedClient(FakeClient):
 
 @pytest.fixture(autouse=True)
 def no_request_retries(monkeypatch):
-    monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
+    monkeypatch.setattr(acquisition, "with_retry", lambda fn, **kw: fn())
 
 
 def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(no_database, monkeypatch, caplog):
@@ -71,6 +73,7 @@ def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(no
                                    SimpleNamespace(id=second, label='Second')]},
         settings={'get_setting': None, 'set_setting': None, 'publish_values': None},
         tracks={'upsert_track': 1, 'observe_track_entry': None},
+        actions={'versions': {}, 'guard': nullcontext()},
         playlists={'playlist_revisions': {}, 'get_playlists': [], 'get_playlist_groups': {},
                    'playlist_reference': None, 'publish_playlist_snapshot': 1,
                    'get_playlist': None, 'ensure_playlist_thumbnail': None,
@@ -92,8 +95,8 @@ def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(no
     store.sync = LibrarySync(repository, store.settings, recovery, None)
     # This case owns scheduling across a large mixed result. Membership and
     # rating writes have their own real-storage tests in test_sync and repos.
-    monkeypatch.setattr(sync.ratings, 'record_observations', Mock())
-    monkeypatch.setattr(sync.ratings, 'reconcile_pending', Mock())
+    monkeypatch.setattr(ratings, 'record_observations', Mock())
+    monkeypatch.setattr(ratings, 'reconcile_pending', Mock())
     good, bad = CountedClient(133), CountedClient()
     good.partial = {f"PL{i}" for i in range(129, 133)}
     bad.library_failed = True
@@ -190,6 +193,63 @@ def test_retaining_a_failed_listing_keeps_child_deadlines_and_blocks_ineffective
     assert not sync_due(store, 400, 86400)
     assert sync_due(store, 500, 86400)
     assert client.reads["listing"] == 2
+
+
+def test_interrupted_import_reopens_and_resumes_after_committed_playlists(file_backed_store, monkeypatch):
+    from yt_playlist.core.activity import WorkClosing
+
+    store = file_backed_store
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    client = CountedClient(4)
+    client.partial = {'PL1'}
+    client._tracks['PL0'][0]['likeStatus'] = 'LIKE'
+    read = client.get_playlist
+
+    def interrupted(playlistId, limit=None):
+        if playlistId == 'PL2':
+            raise WorkClosing('Backend is stopping')
+        return read(playlistId, limit)
+
+    monkeypatch.setattr(client, 'get_playlist', interrupted)
+    with pytest.raises(WorkClosing):
+        sync.sync_all(store, {iid: client}, 100, automatic=True)
+    assert store.settings.get_setting('last_sync_at') is None
+    reopened = Store(store._db_path)
+    reopened._bind_repositories()
+    try:
+        progress = sync_state.state(reopened)['accounts'][str(iid)]['resources']
+        assert progress['playlists']['items']['PL0']['status'] == 'complete'
+        assert progress['playlists']['items']['PL1']['status'] == 'partial'
+        assert progress['playlists']['items']['PL1']['failures'] == 1
+        assert 'PL2' not in progress['playlists']['items']
+        assert reopened.tracks.item_rating(iid, 'v0')['status'] == 'LIKE'
+        monkeypatch.setattr(client, 'get_playlist', read)
+        # Another shutdown immediately after the resume's listing checkpoint
+        # must retain the completed playlists and existing retry deadlines too.
+        checkpoint = reopened.sync.checkpoint
+
+        def stop_after_checkpoint(*args, **kwargs):
+            checkpoint(*args, **kwargs)
+            raise WorkClosing('Backend stopped again before reading the next playlist')
+
+        monkeypatch.setattr(reopened.sync, 'checkpoint', stop_after_checkpoint)
+        with pytest.raises(WorkClosing):
+            sync.sync_all(reopened, {iid: client}, 101, automatic=True)
+        progress = sync_state.state(reopened)['accounts'][str(iid)]['resources']
+        assert progress['playlists']['items']['PL0']['status'] == 'complete'
+        assert progress['playlists']['items']['PL1']['failures'] == 1
+        monkeypatch.setattr(reopened.sync, 'checkpoint', checkpoint)
+        result = sync.sync_all(reopened, {iid: client}, 102, automatic=True)
+        assert client.reads['listing'] == client.reads['PL0'] == client.reads['PL1'] == 1
+        assert client.reads['PL2'] == client.reads['PL3'] == client.reads['history'] == 1
+        assert result['status'] == 'partial'
+        assert store.settings.get_setting('last_sync_at') is None
+        client.partial.clear()
+        result = sync.sync_all(reopened, {iid: client}, 400, automatic=True)
+        assert result['accounts'][str(iid)]['resources']['playlists']['items']['PL1']['status'] == 'complete'
+        assert client.reads['PL1'] == 2 and client.reads['PL0'] == client.reads['PL2'] == 1
+    finally:
+        reopened.conn.close()
 
 
 @pytest.mark.parametrize('failed', [False, True], ids=['expired-success', 'failed-retry'])
@@ -348,7 +408,9 @@ def test_first_sync_starts_without_waiting_for_periodic_poll(store, monkeypatch,
         client_provider=lambda: {iid: client}, now_fn=lambda: 100,
         rec_worker=None, enrich_worker=None, flag_auth_expired=None, clear_auth_expired=None,
         logger=logging.getLogger(__name__))
-    original = jobs.run_library_sync
+    from yt_playlist.library.sync_composition import commands
+    command = commands(ctx)
+    original = command.run
 
     def sync_and_signal(*args, **kwargs):
         try:
@@ -356,7 +418,7 @@ def test_first_sync_starts_without_waiting_for_periodic_poll(store, monkeypatch,
         finally:
             finished.set()
 
-    monkeypatch.setattr(jobs, "run_library_sync", sync_and_signal)
+    monkeypatch.setattr(command, 'run', sync_and_signal)
     worker = threading.Thread(target=_background_sync_loop, args=(ctx, None, bridge),
         kwargs={"stop": stop, "wake": wake, "poll_s": 60}, daemon=True)
     worker.start()

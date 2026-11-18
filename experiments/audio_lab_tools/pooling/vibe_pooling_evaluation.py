@@ -26,6 +26,10 @@ ROOT = Path(__file__).resolve().parents[3]
 CODE = ('src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_prediction.py',
         'src/yt_playlist/rec/vibe_joint_common.py',
         'src/yt_playlist/rec/vibe_joint_calibrated.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
+        'src/yt_playlist/rec/vibe_joint_state.py', 'src/yt_playlist/rec/vibe_recording_rules.py',
+        'src/yt_playlist/controllers/vibe_joint_preparation.py',
+        'src/yt_playlist/controllers/vibe_recording_preparation.py',
+        'src/yt_playlist/library/vibe_composition.py',
         'src/yt_playlist/rec/musical_profiles.py', 'src/yt_playlist/rec/home_vibe.py',
         'src/yt_playlist/rec/musical_preparation.py', 'src/yt_playlist/rec/vibe_preparation.py',
         'src/yt_playlist/repos/musical_profiles.py', 'src/yt_playlist/repos/prepared_content.py',
@@ -35,7 +39,8 @@ CODE = ('src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_pre
         'src/yt_playlist/core/vibe_manifest.py', 'src/yt_playlist/controllers/vibe_models.py',
         'src/yt_playlist/controllers/musical_profiles.py', 'src/yt_playlist/core/profile_files.py',
         'src/yt_playlist/core/audio_metadata_files.py', 'src/yt_playlist/core/metadata_native.py',
-        'src/yt_playlist/core/preparation/metadata_destinations.py',
+        'src/yt_playlist/core/metadata_runtime.py',
+        'src/yt_playlist/core/metadata_runtime_files.py',
         'src/yt_playlist/repos/vibe_evaluation.py',
         'src/yt_playlist/controllers/vibe_evaluation.py', 'src/yt_playlist/rec/vibe_evaluation.py',
         'src/yt_playlist/controllers/prepared_content.py', 'src/yt_playlist/rec/prepared_content_inputs.py',
@@ -136,7 +141,7 @@ def masked_profile(value):
     raw = json.dumps(value['content'], sort_keys=True, separators=(',', ':'), allow_nan=False)
     rows = [('target', 0, raw, None, True)]
     inputs = {'target': (value['sources'], value['overrides'], value['truncated'])}
-    _key, payload, _version, _digest = musical_preparation.masked_recordings(None, rows, inputs=inputs)[0]
+    _key, payload, _version, _digest = musical_preparation.masked_recordings(rows, inputs=inputs)[0]
     return json.loads(payload) if payload is not None else None
 
 

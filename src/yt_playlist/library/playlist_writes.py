@@ -15,6 +15,9 @@ def retain_addition_snapshot(store, playlist_id, addition, now):
     """Mirror a complete reconciliation read without another fetch or positional writes."""
     if not addition.failure:
         return
+    playlist = store.playlists.get_playlist(playlist_id)
+    addition.failure.local_playlist_id = playlist_id
+    addition.failure.account_id = playlist.account_id if playlist else None
     snapshot = addition.failure.snapshot
     if snapshot is None:
         known = store.tracks.track_ids_for_videos(addition.confirmed)

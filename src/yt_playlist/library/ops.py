@@ -8,6 +8,7 @@ and the orchestration lives in one place.
 Shared song actions use ActionInputError for explicit validation. Provider, parser and
 storage exceptions, including ValueError, must go through the caller's diagnostic handler.
 """
+import json
 import logging
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.action_errors import ActionInputError
@@ -27,6 +28,7 @@ from yt_playlist.library.liked_music import LikedMusic
 from yt_playlist.library.playlist_positions import retry_insertions
 from yt_playlist.library.playlist_deletion import pending_deletion, reconcile_deletion
 from yt_playlist.library.playlist_snapshot import http_status
+from yt_playlist.library.playlist_policy import equivalent_siblings, permission_fallback
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -69,13 +71,10 @@ class PlaylistOps:
         kept = self.store.playlists.get_playlist(keep)
         if kept is None:
             raise ActionInputError('playlist_missing')
-        keep_keys = self.store.playlists.get_playlist_track_keys(keep)
-        siblings = {}
-        for playlist in self.store.playlists.get_playlists():
-            if (playlist.playlist_scope_id != kept.playlist_scope_id
-                    and playlist.provider_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
-                    and self.store.playlists.get_playlist_track_keys(playlist.id) == keep_keys):
-                siblings.setdefault(playlist.playlist_scope_id, []).append(playlist)
+        playlists = self.store.playlists.get_playlists()
+        memberships = {p.id: self.store.playlists.get_playlist_track_keys(p.id) for p in playlists}
+        memberships.setdefault(keep, self.store.playlists.get_playlist_track_keys(keep))
+        siblings = equivalent_siblings(kept, playlists, memberships, analysis.SYSTEM_PLAYLIST_IDS)
         deleted, errors = 0, []
         clients = self._clients()
         for memberships in siblings.values():
@@ -102,7 +101,7 @@ class PlaylistOps:
                     # Only a definitive permission refusal, durably recorded by
                     # the deletion gate, permits another membership attempt. The
                     # next account repeats the complete verification and backup.
-                    if http_status(exc) == 403 and action is not None and action.status == 'delete_failed':
+                    if permission_fallback(http_status(exc), action.status if action else None):
                         if index + 1 < len(candidates):
                             continue
                         errors.append(f"{sib.provider_playlist_id}: no connected account has permission to delete it.")
@@ -247,6 +246,25 @@ class PlaylistOps:
             raise ValueError("missing client for an identity")
         return copy_or_move_playlist(self.store, playlist_id, target_identity, src_client, tgt_client,
                                      self.now_fn(), delete_source=not copy_only)
+
+    # --- action queries -------------------------------------------------------
+    def deletion_snapshot_report(self, action_id, entry_index) -> dict | None:
+        """Inspect saved deletion intent even when sync has removed its local playlist row.
+
+        Returns None when the action/entry doesn't exist (a 404 concern for the caller);
+        raises ValueError/ActionInputError when the recorded account isn't currently available.
+        """
+        action = self.store.actions.get_action(action_id)
+        entries = json.loads(action.undo_json or "{}").get("deletions", []) if action else []
+        if entry_index < 0 or entry_index >= len(entries):
+            return None
+        entry = entries[entry_index]
+        account_id, client = client_for(self.store, self._clients(), account_id=entry["identity"])
+        owner = next((account for account in self.store.accounts.get_accounts() if account.id == account_id), None)
+        if owner is None:
+            raise ValueError("Saved account unavailable")
+        return {"account_id": account_id, "action_id": action_id, "entry_index": entry_index,
+                "reads": client.deletion_read_report(entry["ytm"], owner.brand_account_id)}
 
     # --- undo ---------------------------------------------------------------
     def recheck_deletion(self, action_id):

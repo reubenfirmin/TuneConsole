@@ -12,7 +12,7 @@ from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, native_sql_calls
 from yt_playlist.core import activity
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.rec import account_growth
+from yt_playlist.rec import account_growth, growth_access
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.routes import radio_session as routes
 
@@ -39,7 +39,8 @@ def test_energy_admission_has_an_explicit_receipt_without_the_full_journey(poc, 
     assert c.start()['ok']
     play(c, 'v2')
     before = (list(remote.ids), list(remote.adds), list(remote.removes), list(frames))
-    monkeypatch.setattr(account_growth, 'retained_access', lambda *args: access)
+    monkeypatch.setattr(account_growth, 'retained_usage', lambda *args: 'USAGE')
+    monkeypatch.setattr(growth_access, 'retained_access', lambda usage, area: access)
     monkeypatch.setattr(account_growth, 'vibe_access', lambda *args: False)
     monkeypatch.setattr(account_growth, 'view', lambda *args, **kwargs: pytest.fail('Full journey read'))
     app = FastAPI()

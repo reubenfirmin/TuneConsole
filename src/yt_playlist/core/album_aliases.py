@@ -130,19 +130,8 @@ def _merge(conn, target, retired, digest, now):
         album_feedback_storage.merge(conn,target,retired,now)
         conn.execute('UPDATE discovery_fetch_history SET album_id=? WHERE album_id=?',(target,retired))
         conn.execute('UPDATE album_playback_intents SET album_id=? WHERE album_id=?',(target,retired))
-    # Preserve the pre-reconciliation ownership/ordering evidence. Exact source IDs
-    # on youtube_items and frozen share snapshots remain untouched.
+    # Exact source IDs on youtube_items and frozen share snapshots remain untouched.
     consolidated = album_memberships.available(conn)
-    membership_tables = ('account_albums', 'unattributed_album_memberships') if consolidated else ('album_library_memberships',)
-    tables = ('albums', 'album_provider_ids', 'album_artists', *membership_tables,
-              'album_discovery_memberships', 'album_tracks', 'album_fetch_state')
-    original = {table: [dict(row) for row in conn.execute(
-        f'SELECT * FROM {table} WHERE {"id" if table == "albums" else "album_id"} IN (?,?)',
-        (target, retired))] for table in tables}
-    from . import legacy_evidence
-    legacy_evidence.retain(conn,
-        'album_alias_reconciliation', str(retired), json.dumps(original),
-         f'complete ordered provider responses matched {digest}; canonical album {target}')
     if consolidated:
         album_memberships.merge(conn, target, retired)
     else:

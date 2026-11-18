@@ -105,7 +105,7 @@ def test_preview_and_import_deduplicate_only_within_the_destination(store):
 
 @pytest.mark.parametrize("failure", ["lookup", "save"])
 def test_failure_between_successes_is_isolated_and_retry_keeps_successes(store, monkeypatch, failure):
-    monkeypatch.setattr("yt_playlist.library.spotify_library.with_retry", lambda operation: operation())
+    monkeypatch.setattr("yt_playlist.controllers.spotify_library.with_retry", lambda operation: operation())
     iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = AlbumClient()
     failed = client.failed_searches if failure == "lookup" else client.failed_saves

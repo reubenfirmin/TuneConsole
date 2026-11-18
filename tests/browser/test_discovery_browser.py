@@ -52,7 +52,7 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     assert store.discovery.get_discovered_artists()[0]["offered_count"] == 1
 
 
-@pytest.mark.parametrize("width", [1440])
+@pytest.mark.parametrize("width", [1440, 1920])
 def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, tmp_path):
     store.discovery.upsert_discovered_track("cold", "v1", "Cold Song", "Artist", "Album", None,
                                   "House", "2020", "album", 1,
@@ -73,7 +73,7 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     assert overview.bounding_box()["y"] < row.bounding_box()["y"]
     expect(page.get_by_text("Provider details", exact=False)).to_have_count(0)
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    capture(page, path=tmp_path / f"discovery-pool-metadata-{width}.png", full_page=True)
+    capture(page, path=f'build/test-reports/home-discovery-browser/discovery-pool-{width}.png', full_page=True)
     page.get_by_role("button", name="Albums (0)").click()
     expect(overview).to_be_hidden()
 

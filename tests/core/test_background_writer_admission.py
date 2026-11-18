@@ -26,6 +26,15 @@ def database(file_backed_store):
     return file_backed_store
 
 
+def publish_result(snapshot, value):
+    # Exercise the snapshot publisher's writer reservation with prepared SQL.
+    # SettingsRepo.publish_values owns a separate transaction and cannot join it.
+    def write():
+        assert snapshot.source.conn.in_transaction
+        snapshot.source.conn.execute('INSERT INTO settings(key,value) VALUES (?,?)', ('result', value))
+    return snapshot.publish(write)
+
+
 def operation(store, kind, stack):
     if kind.startswith('provider'):
         configuration = ORIGINAL if kind.endswith('unchanged') else CHANGED
@@ -33,7 +42,7 @@ def operation(store, kind, stack):
     if kind == 'snapshot':
         snapshot = stack.enter_context(store.read_snapshot())
         snapshot.store.settings.get_setting('input')
-        return lambda: snapshot.publish(lambda: store.settings.publish_values({'result': 'published'}))
+        return lambda: publish_result(snapshot, 'published')
     if kind == 'recommendation-retirement':
         from yt_playlist.repos.recommendation_publication import cleanup_pools
         return lambda: cleanup_pools(store.recommendations.repository)
@@ -65,6 +74,9 @@ def test_contended_background_entry_point_leaves_foreground_available(database, 
             latencies = []
             try:
                 assert attempted.is_set() or pending.done()
+                if kind == 'snapshot':
+                    assert attempted.is_set() and not pending.done()
+                    assert store.settings.get_setting('result') is None
                 for _ in range(8):
                     started = time.monotonic()
                     with store._lock:
@@ -141,7 +153,7 @@ def test_external_commit_while_publication_waits_still_rejects_stale_inputs(data
     assert store.settings.get_setting('input') == 'new'
     with store.read_snapshot() as retry:
         assert retry.store.settings.get_setting('input') == 'new'
-        assert retry.publish(lambda: store.settings.publish_values({'result': 'fresh'}))
+        assert publish_result(retry, 'fresh')
     assert store.settings.get_setting('result') == 'fresh'
 
 

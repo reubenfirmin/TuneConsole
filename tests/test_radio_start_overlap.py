@@ -12,7 +12,7 @@ from tests.radio_session_support import (
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, use_native_sql_calls, without_query_timing,
 )
-from yt_playlist.library import playlist_generated
+from yt_playlist.library import generated_acquisition
 from yt_playlist.web.routes import radio_session
 
 
@@ -26,15 +26,15 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def radio_schema():
-    # These request races do not prepare optimistic recommendation snapshots.
-    # Keep actual SQLite admission/WAL; do not build unused TEMP revision guards.
-    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+    # Confirmed creation records measurement through a real captured snapshot.
+    # Keep its revision guards alongside actual SQLite admission and WAL.
+    with bounded_consumer_schema(()) as schema:
         yield schema
 
 
 @pytest.fixture
 def poc(tmp_path, radio_schema, monkeypatch):
-    with _file_consumer_store(tmp_path, radio_schema, snapshot_guards=False) as store:
+    with _file_consumer_store(tmp_path, radio_schema) as store:
         with monkeypatch.context() as inputs:
             use_native_sql_calls(inputs)
             songs = seed_completed_pool(store)
@@ -53,7 +53,7 @@ def test_joined_start_adopts_unsent_handoff_without_overriding_newer_play(
             'launch_id': 'current-launch'}
     entered, release, joined_intent = threading.Event(), threading.Event(), threading.Event()
     creates, intents = [], []
-    create = playlist_generated.create_generated_playlist
+    create = generated_acquisition.create_generated_playlist
     begin = controller.ctx.bridge.begin_playback_intent
     read = remote.get_playlist
     direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
@@ -71,7 +71,7 @@ def test_joined_start_adopts_unsent_handoff_without_overriding_newer_play(
             joined_intent.set()
         return intent
 
-    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', held_create)
+    monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', held_create)
     monkeypatch.setattr(controller.ctx.bridge, 'begin_playback_intent', reserve)
     if pending_readback:
         monkeypatch.setattr(remote, 'get_playlist', lambda *args, **kwargs: {

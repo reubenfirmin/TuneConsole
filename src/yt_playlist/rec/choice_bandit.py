@@ -43,13 +43,8 @@ def _decisions(offers, visible, selections):
             yield oid, offer, chosen, seen, at, start, end
 
 
-def observations(store, offers, responses, now, excluded):
-    """Visibility/time/outcome admission shared by legacy and hierarchical compilers.
-
-    This yields actual served options and their frozen context, without assigning
-    them to today's groups. Mapping and historical compatibility remain separate.
-    """
-    params = parameters(store)
+def admitted_decisions(offers, responses, now, excluded, *, params):
+    """Check clocks and visibility before a controller resolves retained descriptors."""
     since = now - params['window_d'] * 86400
     visible, selections, actions = {}, {}, {}
     withdrawn = {event['details'].get('action_id') for event in responses
@@ -78,7 +73,13 @@ def observations(store, offers, responses, now, excluded):
         if not seen:
             excluded['unseen'] += 1
             continue
-        options = store.rec_ledger.expand_mix_options(offer['options'])
+        yield oid, offer, chosen, seen, at, start, end, actions
+
+
+def observations(decisions, excluded, *, params, expanded_options):
+    """Detached outcome attribution over admitted decisions and verified descriptors."""
+    for oid, offer, chosen, seen, at, start, end, actions in decisions:
+        options = expanded_options[oid]
         def signature(option):
             return (option.get('intent'), option.get('label'), option.get('note'), tuple(option['genres']))
         chosen_option = next((option for option in options if str(option['id']) == chosen), None)
@@ -118,22 +119,16 @@ def observations(store, offers, responses, now, excluded):
                    'expires_at': offer['at'] + params['window_d'] * 86400}
 
 
-def compile(store, offers, responses, now):
-    params = parameters(store)
+def compile(observed, current, now, *, params, axes, mode_axes, excluded):
     since = now - params['window_d'] * 86400
-    current = store.modes.list_modes(active_only=True)
     modes = {mode['mode_id']: mode for mode in current}
     mode_genres = {mid: [entry[0] if isinstance(entry, (list, tuple)) else entry
                         for entry in mode.get('families') or []] for mid, mode in modes.items()}
-    axes = store.genres.feature_axes(genre for genres in mode_genres.values() for genre in genres)
-    mode_families = {mid: {axes.get(genre, ('', None))[0] for genre in genres}
+    mode_families = {mid: {mode_axes.get(genre, ('', None))[0] for genre in genres}
                      for mid, genres in mode_genres.items()}
     units, expirations = {}, []
-    excluded = {'unseen': 0, 'unmapped_mode': 0, 'drifted_mode': 0,
-                'future_context': 0, 'missing_context': 0}
-    for observation in observations(store, offers, responses, now, excluded):
-        axes = store.genres.feature_axes(observation['option']['genres'])
-        families = {value[0] for value in axes.values()}
+    for observation in observed:
+        families = {axes.get(genre, ('', None))[0] for genre in observation['option']['genres']}
         matches = [mid for mid, current_families in mode_families.items() if families & current_families]
         # Legacy modes have no current raw-genre membership. A unique broad
         # family match is admissible; ambiguous children get no invented wins.

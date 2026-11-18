@@ -5,6 +5,7 @@ from copy import deepcopy
 from contextlib import closing, contextmanager
 from functools import wraps
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -17,7 +18,8 @@ from tests.store_fixture_support import (
 from yt_playlist.core import fao, schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence as choices, choice_retention, comparison_storage
-from yt_playlist.rec.choice_context import checkpoint, learning_context, resolve_context
+from yt_playlist.rec.choice_context import checkpoint, learning_context
+from yt_playlist.library.choice_composition import resolve_context
 
 DAY = 86400
 
@@ -95,7 +97,7 @@ def restarting_library(tmp_path, monkeypatch, native_sql_calls):
     # tests/core/test_migrations.py and tests/core/test_schema_contract.py.
     # Keep actual startup repair, repository binding and private revision guards
     # when reopening the persisted learning and diagnostic files below.
-    from yt_playlist.core import migrations, store as store_module
+    from yt_playlist.core import migrations, sqlite_database as store_module
 
     entries = (('jazz', 'Jazz'), ('house', 'House'))
     bound_catalog(monkeypatch, entries=entries)
@@ -183,7 +185,9 @@ def retention_trial(store, monkeypatch):
     # The compaction and failed-publication tests above own real learning
     # publication. This case owns repeated SQL/file retention under its byte cap.
     publish = Mock(return_value={'watermark': 'acknowledged-learning-generation'})
-    monkeypatch.setattr(choices, 'compile_report', publish)
+    from yt_playlist.library import choice_composition
+    monkeypatch.setattr(choice_composition, 'reports', lambda database:
+        SimpleNamespace(compile=lambda now: publish(database, now)))
     # Exercise the byte limit during a trial, well before the 30-day age limit.
     monkeypatch.setattr(choice_retention, 'DIAGNOSTIC_FRACTION', .003)
     return groups, publish

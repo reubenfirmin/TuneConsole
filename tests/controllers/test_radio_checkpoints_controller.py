@@ -26,7 +26,9 @@ def checkpoints():
                                    'account_exists': True, 'operations': True}
     repo.queue_entries.return_value = {}
     repo.publish.return_value = ('episode', 1)
-    files.publish.return_value = ('checkpoint', 'digest', 100)
+    repo.reserve_file.return_value = 41
+    files.describe.return_value = ('digest', 100)
+    files.publish_reserved.return_value = ('checkpoint', 'digest', 100)
     return RadioCheckpoints(repo, settings, tracks, files, nullcontext)
 
 
@@ -40,16 +42,21 @@ def reference(**values):
             'recovery_filename': 'checkpoint', 'recovery_digest': 'digest', 'recovery_bytes': 100, **values}
 
 
-def test_catalog_commits_then_file_then_radio_sql_with_final_recording_references(checkpoints):
+def test_catalog_and_file_record_commit_before_file_and_radio_selection(checkpoints):
     owner = checkpoints
     owner.repository.queue_entries.side_effect = [{}, {'video': (7, 8)}]
     order = Mock()
     order.attach_mock(owner.tracks.observe_track_entry, 'catalog')
-    order.attach_mock(owner.files.publish, 'file')
+    order.attach_mock(owner.repository.reserve_file, 'reserve')
+    order.attach_mock(owner.files.publish_reserved, 'file')
     order.attach_mock(owner.repository.publish, 'sql')
     value = state(tracks=[{'video_id': 'video', 'title': 'Song', 'artist': 'Artist'}], position=0)
     assert owner.save(json.dumps(value), expected=None) == ('episode', 1)
-    assert [call[0] for call in order.mock_calls] == ['catalog', 'file', 'sql']
+    assert [call[0] for call in order.mock_calls] == ['catalog', 'reserve', 'file', 'sql']
+    owner.repository.reserve_file.assert_called_once_with('episode', ('digest', 100))
+    owner.files.publish_reserved.assert_called_once_with(41, 'radio-session', 'episode', value,
+                                                       expected=('digest', 100))
+    assert owner.repository.publish.call_args.kwargs['file_id'] == 41
     owner.tracks.observe_track_entry.assert_called_once_with(
         'video', 'Song', 'Artist', preferred_key='@unresolved-video:video')
     assert owner.repository.publish.call_args.args[4] == [(0, 7, 8, 'video', 'current')]
@@ -66,7 +73,7 @@ def test_existing_upload_is_not_readmitted_and_queue_duplicates_keep_positions(c
 
 def test_failed_file_leaves_catalog_admission_and_does_not_select_checkpoint(checkpoints):
     checkpoints.repository.queue_entries.side_effect = [{}, {'video': (7, 8)}]
-    checkpoints.files.publish.side_effect = OSError('full')
+    checkpoints.files.publish_reserved.side_effect = OSError('full')
     with pytest.raises(OSError):
         checkpoints.save(json.dumps(state(tracks=[{'video_id': 'video'}])), expected=None)
     checkpoints.tracks.observe_track_entry.assert_called_once()
@@ -79,14 +86,16 @@ def test_stale_checkpoint_does_not_admit_tracks_or_publish_files(checkpoints):
         checkpoints.save(json.dumps(state(tracks=[{'video_id': 'new'}])), expected=('episode', 1))
     checkpoints.repository.queue_entries.assert_not_called()
     checkpoints.tracks.observe_track_entry.assert_not_called()
-    checkpoints.files.publish.assert_not_called()
+    checkpoints.files.publish_reserved.assert_not_called()
+    checkpoints.repository.reserve_file.assert_not_called()
 
 
 @pytest.mark.parametrize('change', [{'identity': '3'}, {'episode_id': ''}, {'episode_id': []}])
 def test_invalid_owner_does_not_publish_checkpoint(checkpoints, change):
     with pytest.raises(ValueError, match='Radio checkpoint requires'):
         checkpoints.save(json.dumps(state(**change)), expected=None)
-    checkpoints.files.publish.assert_not_called()
+    checkpoints.files.publish_reserved.assert_not_called()
+    checkpoints.repository.reserve_file.assert_not_called()
     checkpoints.repository.publish.assert_not_called()
 
 
@@ -95,7 +104,7 @@ def test_overlapping_operations_fail_before_catalog_or_files(checkpoints):
     with pytest.raises(ValueError, match='only one active'):
         checkpoints.save(json.dumps(value), expected=None)
     checkpoints.repository.queue_entries.assert_not_called()
-    checkpoints.files.publish.assert_not_called()
+    checkpoints.files.publish_reserved.assert_not_called()
 
 
 def test_untouched_import_adopts_only_exact_predecessor_and_retains_original(checkpoints):
@@ -112,7 +121,7 @@ def test_changed_import_does_not_adopt_predecessor(checkpoints):
     checkpoints.files.read.return_value = state(error='changed')
     with pytest.raises(ValueError, match='changed.*worker'):
         checkpoints.save(json.dumps(state()), expected=None, predecessor=state())
-    checkpoints.files.publish.assert_not_called()
+    checkpoints.files.publish_reserved.assert_not_called()
 
 
 def test_native_queue_projects_current_identity_without_losing_captured_metadata(checkpoints):

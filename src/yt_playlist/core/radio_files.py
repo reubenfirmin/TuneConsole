@@ -3,7 +3,7 @@ import hashlib
 from pathlib import Path
 
 from . import fao
-from .collection_recovery import RecoveryFiles
+from .collection_files import RecoveryFiles
 from .schema_contract import MigrationError
 
 

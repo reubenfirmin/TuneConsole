@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from yt_playlist.core import catalog, metadata, metadata_evidence, metadata_conflicts, metadata_attempts
 from yt_playlist.core import metadata_runtime, metadata_values, genre_classifications
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.repos import metadata_file_writes
 
 class EnrichmentRepo(Repo):
     @synchronized
@@ -99,6 +100,14 @@ class EnrichmentRepo(Repo):
                 self.conn.execute('UPDATE catalog_entries SET id=id WHERE 0')
                 yield
 
+    @contextmanager
+    def file_reservation(self):
+        with self._lock:
+            if self.conn.in_transaction:
+                raise ValueError('Metadata file reservation requires its own transaction')
+            with self.conn.atomic():
+                yield
+
     @snapshot_read
     def conflict_inputs(self, track_id, field=None):
         track_id = catalog.resolve_entry(self.conn, track_id)
@@ -114,7 +123,8 @@ class EnrichmentRepo(Repo):
                 (track_id, recording, metadata_runtime.code(field)) if field is not None else (track_id, recording))
             for row in rows:
                 result.append({**dict(row), 'field': metadata_runtime.FIELDS[row['field'] - 1],
-                    'evidence': {'reference': (row['id'], row['revision']), 'updated_at': row['updated_at']}})
+                    'evidence': {'reference': (row['id'], row['revision']), 'updated_at': row['updated_at'],
+                        'file': metadata_file_writes.reference(self.conn, 'conflicts', (row['id'],), row['revision'])}})
         elif metadata_evidence.available(self.conn):
             layout = 'evidence'
             for row in metadata_conflicts.for_entry(self.conn, track_id, field):
@@ -137,20 +147,28 @@ class EnrichmentRepo(Repo):
     def alternative_references(self, recording_id, providers):
         if not providers:
             return {}
-        return {row['provider']: dict(row) for row in self.conn.execute(
+        return {row['provider']: dict(row) | {'file': metadata_file_writes.reference(self.conn, 'alternatives',
+                    (recording_id, row['provider_id']), float(row['at']))} for row in self.conn.execute(
             'SELECT s.provider,p.id provider_id,s.at FROM enrichment_provider_state s '
             'JOIN metadata_runtime_providers p ON p.name=s.provider WHERE s.recording_id=? '
             f'AND s.provider IN ({",".join("?" for _ in providers)})', (recording_id, *providers))}
 
     @synchronized
     def reserve_conflict_identity(self):
-        return metadata_runtime.next_identity(self.conn, 'metadata_runtime_conflicts')
+        return metadata_file_writes.next_owner_id(self.conn, 'conflicts', 'metadata_runtime_conflicts')
 
     @synchronized
-    def store_conflict(self, inputs, field, candidates, status, at, *, scope, identity=None, revision=None):
+    def reserve_file(self, record):
+        return metadata_file_writes.reserve(self.conn, record)
+
+    @synchronized
+    def store_conflict(self, inputs, field, candidates, status, at, *, scope, identity=None, revision=None, file_record=None):
         entry, recording, layout = inputs['entry_id'], inputs['recording_id'], inputs['layout']
         with self.conn.atomic(join=True):
             if layout == 'runtime':
+                if file_record is None:
+                    raise ValueError('Runtime metadata conflict requires its reserved file')
+                metadata_file_writes.complete(self.conn, file_record, kind='conflicts', owner=(identity,), revision=revision)
                 self.conn.execute('INSERT INTO metadata_runtime_conflicts VALUES (?,?,?,?,?,?,?) '
                     'ON CONFLICT(id) DO UPDATE SET status=excluded.status,revision=excluded.revision,updated_at=excluded.updated_at',
                     (identity, recording if scope == 'recording' else None, None if scope == 'recording' else entry,
@@ -229,7 +247,8 @@ class EnrichmentRepo(Repo):
             return None
         if metadata_runtime.active(self.conn):
             conflict = metadata_runtime.conflict(self.conn, track_id, field)
-            evidence = {'reference': (conflict['id'], conflict['revision']), 'updated_at': conflict['updated_at']}
+            evidence = {'reference': (conflict['id'], conflict['revision']), 'updated_at': conflict['updated_at'],
+                'file': metadata_file_writes.reference(self.conn, 'conflicts', (conflict['id'],), conflict['revision'])}
         else:
             evidence = {'candidates': json.loads(row['candidates'])}
         return {'entry_id': track_id, 'current': row['current_value'], 'evidence': evidence}

@@ -42,7 +42,16 @@ def constraints(store):
         with store.read_view() as reader:
             return constraints(reader)
     values, standing = store.model_selection.comparison_constraints()
-    return hashlib.sha256(canonical([values, standing, album_feedback_state.state(store)])).hexdigest()
+    return constraint_key(values, standing, album_feedback_state.state(store))
+
+
+def constraint_key(values, standing, feedback):
+    return hashlib.sha256(canonical([values, standing, feedback])).hexdigest()
+
+
+def assignment_open(current, paused, now):
+    return (not paused and current.get('phase') == 'observing'
+            and current['started_at'] <= now < current['exposure_until'])
 
 
 def assignment(store, format, window, now, *, existing=None):
@@ -50,9 +59,15 @@ def assignment(store, format, window, now, *, existing=None):
     current = state(store)
     if existing:
         return existing
-    if (store.settings.get_setting('rec_selection_paused') == '1'
-            or current.get('phase') != 'observing' or now >= current['exposure_until']
-            or now < current['started_at'] or constraints(store) != current['constraints']):
+    paused = store.settings.get_setting('rec_selection_paused') == '1'
+    if not assignment_open(current, paused, now):
+        return None
+    return select_assignment(current, format, window, now, paused=paused, constraints=constraints(store))
+
+
+def select_assignment(current, format, window, now, *, paused, constraints):
+    """A deterministic UTC-day assignment from explicit published state and standing intent."""
+    if not assignment_open(current, paused, now) or constraints != current['constraints']:
         return None
     day = int(now // DAY)
     coin = hashlib.sha256(canonical([current['seed'], day])).digest()[0] < 128
@@ -111,9 +126,15 @@ def _interval(old, new, alpha):
 
 def measure(store, current, now):
     """Recompute delayed/corrected outcomes from stable source IDs at one cutoff."""
-    from yt_playlist.library.listen_derive import classify_exit
     ledger = store.rec_ledger.evidence()
-    events = [event for event in ledger.records('response') if event['observed_at'] <= now]
+    responses = list(ledger.records('response'))
+    return measure_inputs(list(ledger.records('opportunity')), responses, current, now)
+
+
+def measure_inputs(opportunities, responses, current, now):
+    """Outcome accounting over detached opportunities and observations."""
+    from yt_playlist.library.listen_derive import classify_exit
+    events = [event for event in responses if event['observed_at'] <= now]
     withdrawn = {event['details'].get('action_id') for event in events if event['kind'] == 'withdraw'}
     by_offer = defaultdict(list)
     for event in events:
@@ -121,7 +142,7 @@ def measure(store, current, now):
             by_offer[event['opportunity_id']].append(event)
     blocks, bounds = defaultdict(list), defaultdict(list)
     counts, source_ids = defaultdict(lambda: defaultdict(int)), []
-    for offer in ledger.records('opportunity'):
+    for offer in opportunities:
         check_cancellable_work()
         monitoring = current.get('mode') == 'monitor'
         assigned = offer.get('monitor' if monitoring else 'comparison') or {}

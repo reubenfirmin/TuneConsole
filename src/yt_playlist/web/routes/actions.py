@@ -6,11 +6,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from yt_playlist.core.accounts import client_for
-
 from yt_playlist.util.action_kinds import (
     ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
-    MOVE_IDENTITY, PLAN, REMOVE_TRACK, REMOVE_LOCAL_PLAYLIST, RENAME_PLAYLIST, UNDO, is_undoable)
+    MOVE_IDENTITY, PLAN, REMOVE_TRACK, REMOVE_LOCAL_PLAYLIST, RENAME_PLAYLIST, SAVE_CATALOG_ENTITY, SAVE_SONG, UNDO, is_undoable)
 from yt_playlist.library.executor import deserialize_plan
 from yt_playlist.library.undo_conflicts import UNDO_NOTICES
 
@@ -19,7 +17,7 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates, logger = ctx.store, ctx.now_fn, ctx.templates, ctx.logger
 
-    def _action_desc(action):
+    def _action_desc(action, playlists):
         # Human summary of what an action touched, surviving pruned playlists (fall back to ytm id).
         params = {}
         try:
@@ -80,6 +78,11 @@ def build(ctx) -> APIRouter:
         if action.kind == ADD_TRACKS:
             n = params.get("added", 0)
             return f"added {n} track{'' if n == 1 else 's'} to “{params.get('playlist')}”"
+        if action.kind == SAVE_SONG:
+            title = (params.get('song') or {}).get('title', '')
+            return f"add “{title}” to the song library" if params.get('saved', True) else f"remove “{title}” from the song library"
+        if action.kind == SAVE_CATALOG_ENTITY:
+            return f"add {params.get('kind')} “{params.get('title', params.get('browse_id', ''))}” to the library"
         if action.kind == REMOVE_TRACK:
             return f"removed a track from “{params.get('playlist')}”"
         if action.kind == RENAME_PLAYLIST:
@@ -91,8 +94,8 @@ def build(ctx) -> APIRouter:
             params = json.loads(action.params_json or "{}")
         except (ValueError, KeyError, TypeError):
             return action.kind
-        src = store.playlists.get_playlist(pe.plan.source_playlist_id)
-        tgt = store.playlists.get_playlist(pe.plan.target_playlist_id)
+        src = playlists.get(pe.plan.source_playlist_id)
+        tgt = playlists.get(pe.plan.target_playlist_id)
         src_name = params.get("source_title") or (src.title if src else None) or pe.source_provider_playlist_id
         tgt_name = params.get("target_title") or (tgt.title if tgt else None) or "target"
         if pe.mode == "delete":
@@ -111,7 +114,8 @@ def build(ctx) -> APIRouter:
     def actions(request: Request):
         # Drafts save merge-editor selections; they haven't changed any playlists.
         rows = []
-        for a in store.actions.get_actions():
+        captured, playlists = ctx.action_queries().listing()
+        for a in captured:
             if a.status == "draft":
                 continue
             try:
@@ -134,7 +138,7 @@ def build(ctx) -> APIRouter:
             if recovery.get('error'):
                 recovery_notice = UNDO_NOTICES.get(recovery.get('reason'),
                     'Undo incomplete. Progress is saved; resume this Undo to continue.')
-            rows.append({"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
+            rows.append({"a": a, "desc": _action_desc(a, playlists), "undoable": is_undoable(a.kind),
                          "when": _when(a.created_at), "recovery_notice": recovery_notice,
                          "notice": notice if not recovery_notice else None,
                          "deletions": undo.get("deletions", []),
@@ -149,22 +153,13 @@ def build(ctx) -> APIRouter:
     @router.get("/actions/{action_id}/deletions/{entry_index}/snapshot-report")
     def deletion_snapshot_report(action_id: int, entry_index: int):
         """Inspect saved intent even when sync has removed its local playlist row."""
-        action = store.actions.get_action(action_id)
-        entries = json.loads(action.undo_json or "{}").get("deletions", []) if action else []
-        if entry_index < 0 or entry_index >= len(entries):
-            raise HTTPException(404, "Saved deletion not found")
-        entry = entries[entry_index]
         try:
-            account_id, client = client_for(store, ctx.client_provider(), account_id=entry["identity"])
+            report = ctx.ops().deletion_snapshot_report(action_id, entry_index)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
-        owner = next((account for account in store.accounts.get_accounts() if account.id == account_id), None)
-        if owner is None:
-            raise HTTPException(409, "Saved account unavailable")
-        return JSONResponse({"account_id": account_id, "action_id": action_id,
-                             "entry_index": entry_index,
-                             "reads": client.deletion_read_report(entry["ytm"], owner.brand_account_id)},
-                            headers={"Cache-Control": "no-store"})
+        if report is None:
+            raise HTTPException(404, "Saved deletion not found")
+        return JSONResponse(report, headers={"Cache-Control": "no-store"})
 
     @router.post("/actions/{action_id}/recheck-deletion")
     def recheck_deletion(action_id: int):
@@ -179,8 +174,8 @@ def build(ctx) -> APIRouter:
 
     @router.post("/undo/{action_id}")
     def undo(action_id: int):
-        act = store.actions.get_action(action_id)
-        desc = _action_desc(act) if act is not None else f"action #{action_id}"
+        act, playlists = ctx.action_queries().action(action_id)
+        desc = _action_desc(act, playlists) if act is not None else f"action #{action_id}"
         try:
             ctx.ops().undo(action_id)   # reverts + best-effort targeted refresh of the target
         except Exception:  # noqa: BLE001

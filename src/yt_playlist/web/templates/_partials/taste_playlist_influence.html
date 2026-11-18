@@ -41,9 +41,9 @@
         <div x-show="active === {{ loop.index0 }}" x-cloak>
           <h3>{{ c.title }}</h3>
           <p><strong>{{ c.percent_label }}</strong> of the interest allocation weight.</p>
-          {% if c.source is defined and c.source.kind == 'album' %}<p>{{ 'Saved album' if c.source.saved else 'Listening returns' }} · {{ c.source.return_days }} listening days · {{ c.source.modeled_tracks }}/{{ c.source.known_tracks }} known tracks modeled.</p><a class="playlist-blend-link" href="/album?browse={{ c.source.browse|urlencode }}">Open album</a>{% endif %}
+          {% if c.source is defined and c.source.kind == 'album' %}<p>{{ 'Saved album' if c.source.saved else 'Listening returns' }} · {{ c.source.return_days }} listening days · {{ c.source.modeled_tracks }}/{{ c.source.known_tracks }} known tracks modeled.</p><a class="playlist-blend-link" href="{{ album_url(c.source.browse) }}">Open album</a>{% endif %}
           {% if c.source is defined and c.source.layer_weights is defined %}<p>{{ c.source.days }} choice days across {{ c.source.episodes }} episodes. Current {{ '%.2f'|format(c.source.layer_weights.now) }} · Session {{ '%.2f'|format(c.source.layer_weights.session) }} · Recent {{ '%.2f'|format(c.source.layer_weights.recent) }} · Saved {{ '%.2f'|format(c.source.layer_weights.saved) }} support.</p>{% endif %}
-          {% if c.pid is not none %}<a class="playlist-blend-link" href="/playlist/{{ c.pid }}">Open playlist</a>{% endif %}
+          {% if c.pid is not none %}<a class="playlist-blend-link" href="{{ playlist_url(c.pid) }}">Open playlist</a>{% endif %}
         </div>
         {% endfor %}
       </figcaption>

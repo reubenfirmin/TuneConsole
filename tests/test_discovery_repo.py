@@ -1,4 +1,6 @@
 """DiscoveryRepo: interested-artist ranking, stale-scan selection, and the accumulating pools."""
+from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 
 def _artist_with(store, iid, name, plays=0, playlists=0, saved=0):
@@ -108,21 +110,31 @@ class _Ctx:
 
 
 def test_run_discovery_accumulates_and_skips_fresh(store, monkeypatch):
+    from yt_playlist.library import discovery_composition
     from yt_playlist.rec import discover
     iid = store.accounts.upsert_account("main", "cred", None, True)
     for n in ("A", "B"):
         t = store.tracks.upsert_track(f"v{n}", f"S{n}", n, None, None)
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"P{n}", "p", 1, "h", 0.0), [t])
     # fake the network: each artist has one unowned album; no new-artist fetch
-    monkeypatch.setattr(discover, "fetch_artist_info",
-                        lambda ctx, name, browse_id=None: {"albums": [
-                            {"browse_id": f"alb_{name}", "title": f"{name} Album", "year": "2024", "thumbnail": None}]})
-    monkeypatch.setattr(discover, "new_artists", lambda ctx: [])
+    artist_info = Mock(side_effect=lambda name, browse_id: {"albums": [
+        {"browse_id": f"alb_{name}", "title": f"{name} Album", "year": "2024", "thumbnail": None}]})
+    catalog = SimpleNamespace(artist=artist_info, populate=Mock(), radio=Mock())
+    artist_query = Mock(return_value=[])
+    monkeypatch.setattr(discovery_composition, 'catalog', lambda _: catalog)
+    monkeypatch.setattr(discovery_composition, 'artists', lambda _: SimpleNamespace(query=artist_query))
     ctx = _Ctx(store)
     discover.run_discovery(ctx, now=1.0e9, budget=10)
     got = {a["browse_id"] for a in store.discovery.get_discovered_albums()}
     assert got == {"alb_A", "alb_B"}                       # both scanned, albums pooled
+    artist_info.assert_has_calls([call('A', None), call('B', None)], any_order=True)
+    assert artist_info.call_count == 2
+    artist_query.assert_called_once_with(15, 30)
     assert set(store.discovery.artists_due_for_scan(1.0e9, budget=10)) == set()   # both now fresh
+    discover.run_discovery(ctx, now=1.0e9 + 1, budget=10)
+    assert artist_info.call_count == 2                    # a fresh pass makes no artist requests
+    assert {a['browse_id'] for a in store.discovery.get_discovered_albums()} == got
     # a later pass past the TTL re-scans without duplicating the pool
     discover.run_discovery(ctx, now=1.0e9 + 6 * 86400, budget=10)
     assert len(store.discovery.get_discovered_albums()) == 2          # accumulate, not duplicate
+    assert artist_info.call_count == 4

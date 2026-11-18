@@ -16,7 +16,6 @@ from yt_playlist.core.metadata_delivery_files import MetadataDeliveryFiles
 from yt_playlist.core.metadata_runtime_files import RuntimeMetadataFiles
 from yt_playlist.core.metadata_observations import MetadataObservation, SubjectChanged
 from yt_playlist.core.metadata_contract import Capture, ALTERNATIVE_SECONDS
-from yt_playlist.core.original_files import OriginalFiles
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import native_metadata_policy as native
 from yt_playlist.repos.enrichment_state import EnrichmentStateRepo
@@ -27,7 +26,20 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def state():
     repo = create_autospec(EnrichmentStateRepo, instance=True, spec_set=True)
-    repo.state_transaction.side_effect = nullcontext
+    writing = False
+
+    @contextmanager
+    def transaction():
+        nonlocal writing
+        assert not writing
+        writing = True
+        try:
+            yield
+        finally:
+            writing = False
+
+    repo.state_transaction.side_effect = transaction
+    repo.reserve_file.return_value = 257
     repo.integration_cooldown.return_value = None
     repo.artwork_state.return_value = None
     repo.configuration_inputs.return_value = {'runtime': False, 'last_attempt': 20, 'configuration': {}, 'frontiers': {}}
@@ -36,11 +48,24 @@ def state():
     files = create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True)
     deliveries = create_autospec(MetadataDeliveryFiles, instance=True, spec_set=True)
     files.retained.side_effect = deliveries.retained.side_effect = nullcontext
-    originals = create_autospec(OriginalFiles, instance=True, spec_set=True)
-    originals.retained.side_effect = nullcontext
+    @contextmanager
+    def write_reserved(records):
+        assert not writing, 'Publish files after committing their reservations'
+        yield
+        assert not writing, 'Release file leases after the head transaction'
+
+    files.write_reserved.side_effect = write_reserved
+    for port in (files, deliveries):
+        def read(*args, _port=port, **kwargs):
+            assert not writing, 'Read detached file references before taking the SQL writer'
+            return _port.read.return_value
+        port.read.side_effect = read
+    files.delete_reserved.return_value = 0
+    repo.retire_expired_alternative_files.return_value = []
+    repo.retire_file_revisions.return_value = []
     return EnrichmentState(repo, create_autospec(MetadataChoices, instance=True, spec_set=True), files, deliveries,
                            create_autospec(MetadataDeliveries, instance=True, spec_set=True),
-                           create_autospec(Enrichment, instance=True, spec_set=True), lambda: ['a', 'b'], originals)
+                           create_autospec(Enrichment, instance=True, spec_set=True), lambda: ['a', 'b'])
 
 
 @pytest.mark.parametrize(('previous', 'retry_after', 'failures', 'deadline'), [
@@ -173,7 +198,7 @@ def test_attempt_backoff_resets_by_cycle_caps_delay_and_honors_provider_deadline
         retry_after=retry_after, error='offline', run_id='run')
     result = state.repository.store_attempt.call_args.args[3]
     assert (result['failures'], result['retry_at'], result['status']) == (failures, deadline, 'retry')
-    document = state.files.publish.call_args.args[3]
+    document = state.files.write_reserved.call_args.args[0][0]['data']
     assert document['error'] == 'offline'
     assert document['expires_at'] == 100 + ALTERNATIVE_SECONDS
     state.repository.completion_inputs.assert_not_called()
@@ -205,12 +230,23 @@ def test_completion_requires_the_whole_captured_result(attempt_state):
 
 def test_attempt_file_failure_cannot_advance_completion_or_clear_refresh_work(attempt_state):
     state = attempt_state
-    state.files.publish.side_effect = OSError('full')
+    state.files.write_reserved.side_effect = OSError('full')
     with pytest.raises(OSError, match='full'):
         state.record_enrichment_attempt('key', 'a', {'genre': 'Jazz'}, now=100)
     state.repository.store_attempt.assert_not_called()
     state.repository.finish_provider_job.assert_not_called()
     state.enrichment.refresh_genre.assert_not_called()
+
+
+def test_attempt_changed_during_file_publication_keeps_the_newer_state(attempt_state):
+    state = attempt_state
+    original = state.repository.attempt_context.return_value
+    state.repository.attempt_context.side_effect = [original, original, {**original, 'cycle': 11}]
+    with pytest.raises(SubjectChanged, match='changed during file publication'):
+        state.record_enrichment_attempt('key', 'a', {'genre': 'Jazz'}, now=100)
+    state.files.write_reserved.assert_called_once()
+    state.repository.store_attempt.assert_not_called()
+    state.repository.finish_provider_job.assert_not_called()
 
 
 @pytest.mark.parametrize(('prior_entry', 'cycle', 'expected'), [
@@ -223,7 +259,7 @@ def test_attempt_retains_only_same_cycle_fields_with_proven_item_scope(attempt_s
     state.files.read.return_value = {'entry_id': prior_entry, 'recording_id': 8, 'input_video_id': 'video',
         'fields': {'genre': 'Jazz', 'year': '1999'}}
     state.record_enrichment_attempt('key', 'a', {'bpm': 120}, now=100)
-    assert state.files.publish.call_args.args[3]['fields'] == expected
+    assert state.files.write_reserved.call_args.args[0][0]['data']['fields'] == expected
 
 
 def test_genre_refresh_and_configuration_reads_follow_the_committed_attempt(attempt_state):
@@ -256,33 +292,25 @@ def test_genre_selection_failure_keeps_the_committed_attempt_and_pending_job(att
     state.repository.finish_provider_job.assert_not_called()
 
 
-@pytest.mark.parametrize('layout', ['inline', 'receipt', 'journal'])
-def test_unresolved_attempts_keep_their_installed_capture_format_without_claiming_a_current_subject(state, layout):
-    state.repository.attempt_context.return_value = {'layout': 'evidence', 'subject': None}
-    state.repository.unresolved_attempt_inputs.return_value = {
-        'source_id': 'independent-event', 'layout': layout, 'publication': 'old', 'reference': None}
-    state.originals.journal_entries.return_value = {}
-    state.originals.publish_journal.return_value = 'new'
-    reference = ('path', 'digest', 200, 50)
-    state.originals.publish_receipts.return_value = [reference]
+@pytest.mark.parametrize('layout', ['legacy', 'evidence'])
+def test_unresolved_legacy_attempt_is_discarded_without_claiming_a_current_subject(state, layout):
+    state.repository.attempt_context.return_value = {'layout': layout, 'subject': None}
     state.record_enrichment_attempt('missing', 'a', {}, now=100)
-    call_ = state.repository.store_unresolved_attempt.call_args
-    assert call_.args[1] == 'missing'
-    assert '"at": 100.0' in call_.args[2]
-    assert call_.kwargs == {'publication': 'new' if layout == 'journal' else None,
-                           'reference': reference if layout == 'receipt' else None}
     state.repository.store_attempt.assert_not_called()
     state.repository.completion_inputs.assert_not_called()
+    state.repository.state_transaction.assert_not_called()
+    state.files.write_reserved.assert_not_called()
+    state.delivery_files.write_reserved.assert_not_called()
 
 
-def test_unresolved_receipt_failure_does_not_install_a_reference(state):
-    state.repository.attempt_context.return_value = {'layout': 'evidence', 'subject': None}
-    state.repository.unresolved_attempt_inputs.return_value = {
-        'source_id': 'event', 'layout': 'receipt', 'publication': None, 'reference': None}
-    state.originals.publish_receipts.side_effect = OSError('full')
-    with pytest.raises(OSError, match='full'):
+@pytest.mark.parametrize('inputs', [{'layout': 'runtime', 'subject': None},
+                                  {'layout': 'evidence', 'subject': None, 'recording_id': 7}])
+def test_missing_current_subject_cannot_be_saved_as_legacy_evidence(state, inputs):
+    state.repository.attempt_context.return_value = inputs
+    with pytest.raises(ValueError, match='current catalog input'):
         state.record_enrichment_attempt('missing', 'a', {}, now=100)
-    state.repository.store_unresolved_attempt.assert_not_called()
+    state.repository.store_attempt.assert_not_called()
+    state.repository.state_transaction.assert_not_called()
 
 
 @pytest.mark.parametrize('row', [None, {'count': 2, 'error': 'later', 'retry_at': 20}])
@@ -378,12 +406,14 @@ def test_expiry_updates_only_candidate_documents_and_keeps_current_native_revisi
     current = {'provider': 'new', 'value': 'Jazz', 'at': 101}
     state.files.read.return_value = {'candidates': [expired, current]}
     events = []
-    state.files.publish.side_effect = lambda *args, **kwargs: events.append('file')
-    state.repository.store_conflict_revision.side_effect = lambda *args: events.append('head')
+    state.files.write_reserved.side_effect = lambda records: events.append('file') or nullcontext()
+    state.repository.store_conflict_revision.side_effect = lambda *args, **kwargs: events.append('head')
     assert state.expire_provider_alternatives(now) == 4
-    state.files.publish.assert_called_once_with('conflicts', (12,), 4, {'candidates': [current]}, current_revision=3)
+    record, = state.files.write_reserved.call_args.args[0]
+    assert (record['kind'], record['owner'], record['revision'], record['data']) == (
+        'conflicts', (12,), 4, {'candidates': [current]})
     assert events == ['file', 'head']
-    state.repository.store_conflict_revision.assert_called_once_with(12, 4)
+    state.repository.store_conflict_revision.assert_called_once_with(12, 4, expected_revision=3, file_record=record)
     assert state.files.prune_revisions.call_args_list == [
         call('conflicts', (12,), (3, 4)), call('native', ('native-key',), (5,))]
     state.repository.store_expiry_cursor.assert_called_once_with(21, 0)
@@ -396,7 +426,7 @@ def test_failed_expiry_publication_preserves_the_previous_conflict_head(expiry_s
     state.repository.expiry_page.return_value = [{'recording_id': 21, 'sources': [],
         'conflicts': [{'id': 12, 'revision': 3, 'updated_at': 0}]}]
     state.files.read.return_value = {'candidates': [{'provider': 'old', 'value': 'Rock'}]}
-    state.files.publish.side_effect = OSError('full')
+    state.files.write_reserved.side_effect = OSError('full')
     with pytest.raises(OSError, match='full'):
         state.expire_provider_alternatives(ALTERNATIVE_SECONDS)
     state.repository.store_conflict_revision.assert_not_called()
@@ -436,7 +466,7 @@ def test_native_result_validates_the_entire_batch_before_any_delivery_or_source(
 
 def test_failed_native_file_publication_cannot_advance_the_source_or_freshness(native_state):
     state = native_state
-    state.files.publish.side_effect = OSError('full')
+    state.files.write_reserved.side_effect = OSError('full')
     with pytest.raises(OSError, match='full'):
         state.record_metadata_observations(7, 'a', [native_observation()], run_id='run', now=10)
     state.repository.store_native_source.assert_not_called()

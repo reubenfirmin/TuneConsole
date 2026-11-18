@@ -1,11 +1,11 @@
 function artistStart(initial) {
   return {
-    selected: initial.selected, minimum: initial.minimum, query: '', results: [], related: [],
-    stage: 'artists', saving: false, searching: false, error: '', searchNote: '', destroyed: false,
+    selected: initial.selected, songs: initial.songs || [], minimum: initial.minimum, related: [],
+    stage: 'artists', saving: false, error: '', destroyed: false,
     relatedNote: '', relatedLoading: false,
-    expanded: false, spotifySteps: false, searchVersion: 0, pendingPlaylist: null, relatedVersion: 0, resuming: false,
+    expanded: false, spotifySteps: false, pendingPlaylist: null, relatedVersion: 0, resuming: false,
     get artistChoices() {
-      const rows = [...this.selected, ...(this.query.trim() ? this.results : this.related)];
+      const rows = [...this.selected, ...this.related];
       const seen = new Set();
       return rows.filter(row => { if (seen.has(row.browse_id)) return false; seen.add(row.browse_id); return true; });
     },
@@ -13,33 +13,19 @@ function artistStart(initial) {
     get hasMoreArtists() { return this.artistChoices.length > this.artistLimit; },
     get visibleArtists() { return this.artistChoices.slice(0, this.expanded ? this.artistChoices.length : this.artistLimit); },
     isSelected(item) { return this.selected.some(row => row.browse_id === item.browse_id); },
-    clearSearch() {
-      this.query = ''; this.results = []; this.searchNote = ''; this.searching = false;
-      this.searchVersion++; this.searchController?.abort();
-      document.getElementById('artist-start-search').focus();
+    applyPicks(state) {
+      this.selected = state.selected;
+      if (Array.isArray(state.saved_songs)) this.songs = state.saved_songs;
+      this.suggestions();
     },
-    async search() {
-      const query = this.query.trim(), version = ++this.searchVersion;
-      this.searchController?.abort(); this.searching = false; this.searchNote = '';
-      if (query.length < 2) { this.results = []; return; }
-      this.searchController = new AbortController(); this.searching = true;
+    async refreshSongs() {
       try {
-        const response = await fetch('/home/onboard/artists/search?q=' + encodeURIComponent(query),
-          {signal: AbortSignal.any([this.searchController.signal, AbortSignal.timeout(20000)])});
-        if (!response.ok) {
-          console.debug('[Artist setup] search response unavailable', response.status, await response.text());
-          throw new Error('Artist search failed');
-        }
-        const body = await response.json();
-        if (version !== this.searchVersion) return;
-        if (!Array.isArray(body.artists)) throw new Error('Artist search response unavailable');
-        this.results = body.artists;
-        this.searchNote = this.results.length ? '' : 'No artists found. Try another name.';
-      } catch (error) {
-        console.debug('[Artist setup] search unavailable', error);
-        if (version === this.searchVersion && !this.destroyed && error.name !== 'AbortError')
-          this.searchNote = 'Search is unavailable. Try again.';
-      } finally { if (version === this.searchVersion) this.searching = false; }
+        const response = await fetch('/home/onboard/artists/state', {signal: AbortSignal.timeout(20000)});
+        if (response.ok && !this.destroyed) this.applyPicks(await response.json());
+      } catch (error) { console.debug('[Music setup] saved picks read unavailable', error); }
+    },
+    clearSearch() {
+      document.getElementById('artist-start-search').focus();
     },
     async toggle(item) {
       if (this.saving) return;
@@ -144,8 +130,7 @@ function artistStart(initial) {
     },
     destroy() {
       this.destroyed = true;
-      this.searchVersion++; this.relatedVersion++;
-      this.searchController?.abort();
+      this.relatedVersion++;
       document.removeEventListener('htmx:beforeSwap', this.beforeSwap);
     },
   };

@@ -3,7 +3,7 @@
 Small responses share bounded packs. SQLite owns every retained range; files
 contain no mutable index and never establish provider delivery identity.
 """
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 from itertools import chain, groupby
 import json
@@ -13,10 +13,11 @@ import tempfile
 
 from .activity import check_cancellable_work
 from .evidence_ledger import canonical
-from . import policy_documents, fao
+from . import policy_documents, fao, file_pack
+from .metadata_file_contract import record_path, record_id
 
 FORMAT = 'metadata-delivery-1'
-MAX_BYTES = 8 * 1024 * 1024
+MAX_BYTES = file_pack.MAX_BYTES
 PACK_BYTES = 256 * 1024
 PACK_HEADER = b'TuneConsole metadata deliveries 1\n'
 CHUNK_ROWS = 512
@@ -64,13 +65,12 @@ def _range(path, digest, byte_size, offset):
     if (not _digest(digest) or type(byte_size) is not int or not 0 < byte_size <= MAX_BYTES
             or type(offset) is not int or offset < 0):
         raise ValueError('Invalid metadata delivery file range')
-    if not _digest(path.stem):
+    if not _digest(path.stem) and record_id(path) is None:
         raise ValueError('Invalid metadata delivery filename')
 
 
-def _decoded(path, digest, byte_size, offset, encoded, kind):
-    if (len(encoded) != byte_size or hashlib.sha256(encoded).hexdigest() != digest
-            or not offset and path.stem != digest):
+def _decoded(path, digest, offset, encoded, kind):
+    if not offset and record_id(path) is None and path.stem != digest:
         raise ValueError('Metadata delivery file does not match its owned content')
     document = json.loads(encoded)
     if (not isinstance(document, dict) or set(document) != {'format', 'kind', 'value'}
@@ -85,12 +85,9 @@ def _read(filename, digest, byte_size, offset, *, kind='response', with_age=Fals
     _range(path, digest, byte_size, offset)
     with fao.read(path) as stream:
         age = stream.info
-        if offset:
-            if offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER:
-                raise ValueError('Invalid metadata delivery pack')
-            stream.seek(offset)
-        encoded = stream.read(byte_size + (not offset))
-    _decoded(path, digest, byte_size, offset, encoded, kind)
+        encoded = file_pack.PackReader(stream, header=PACK_HEADER, max_bytes=MAX_BYTES,
+                                      max_pack_bytes=MAX_BYTES).read(offset, byte_size, digest)
+    _decoded(path, digest, offset, encoded, kind)
     return (encoded, age) if with_age else encoded
 
 
@@ -99,19 +96,12 @@ def _read_records(references):
     for filename, records in groupby(references, key=lambda reference: reference[0]):
         path = Path(filename)
         with fao.read(path) as stream:
-            header = None
+            pack = file_pack.PackReader(stream, header=PACK_HEADER, max_bytes=MAX_BYTES, max_pack_bytes=MAX_BYTES)
             for reference in records:
                 _, digest, size, offset = reference
                 _range(path, digest, size, offset)
-                if offset:
-                    if header is None:
-                        stream.seek(0)
-                        header = stream.read(len(PACK_HEADER))
-                    if offset < len(PACK_HEADER) or header != PACK_HEADER:
-                        raise ValueError('Invalid metadata delivery pack')
-                stream.seek(offset)
-                encoded = stream.read(size + (not offset))
-                yield reference, _decoded(path, digest, size, offset, encoded, 'response')
+                encoded = pack.read(offset, size, digest)
+                yield reference, _decoded(path, digest, offset, encoded, 'response')
 
 
 def read(filename, digest, byte_size, offset):
@@ -138,6 +128,15 @@ class MetadataDeliveryFiles:
 
     def publish(self, encoded):
         return next(publish_encoded(self.root, [encoded]))
+
+    @contextmanager
+    def write_reserved(self, identity, encoded):
+        if not isinstance(encoded, bytes) or not 0 < len(encoded) <= MAX_BYTES:
+            raise ValueError('Invalid encoded metadata delivery')
+        path = record_path(self.root, identity)
+        with fao.prepare(path, fao.Content(encoded, max_bytes=MAX_BYTES)) as pending:
+            pending.publish()
+            yield str(path), hashlib.sha256(encoded).hexdigest(), len(encoded), 0
 
 
 def references(conn):
@@ -206,9 +205,11 @@ def _export(conn, root, *, directory, references, contents):
         staged.execute('CREATE INDEX contents_source ON contents(filename,offset)')
         for filename, in staged.execute('SELECT DISTINCT filename FROM contents ORDER BY filename'):
             source = Path(filename)
-            relative = Path(source.stem[:2], source.stem + '.json')
+            identity = record_id(source)
+            relative = record_path(Path(), identity) if identity is not None else Path(source.stem[:2], source.name)
             copied = root / relative
-            fao.write(copied, fao.read(source, digest=source.stem))
+            fao.write(copied, fao.read(source, max_bytes=MAX_BYTES,
+                                     **({'digest': source.stem} if identity is None else {})))
             staged.execute('UPDATE contents SET target=?,target_offset=offset WHERE filename=?',
                            (str(relative), filename))
         entries, chunks = [], []
@@ -243,13 +244,26 @@ def _copy_contents(staged, root):
             after if after is not None else ()).fetchall()
         if not batch:
             return
-        records = (_read(filename, digest, size, offset, with_age=True) for digest, filename, size, offset in batch)
-        for row, target in zip(batch, policy_documents.repack(root, records, publish_encoded)):
-            filename, digest, size, offset = target
-            if (digest, size) != (row[0], row[2]):
-                raise ValueError('Metadata copy changed captured content')
-            staged.execute('UPDATE contents SET target=?,target_offset=? WHERE digest=? AND filename=?',
-                           (filename, offset, digest, row[1]))
+        for source, rows in groupby(batch, key=lambda row: row[1]):
+            rows = list(rows)
+            identity = record_id(source)
+            if identity is not None:
+                for digest, filename, size, offset in rows:
+                    encoded, age = _read(filename, digest, size, offset, with_age=True)
+                    if offset:
+                        raise ValueError('Native metadata file has an unexpected range')
+                    target = record_path(root, identity)
+                    fao.write(target, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
+                    staged.execute('UPDATE contents SET target=?,target_offset=0 WHERE digest=? AND filename=?',
+                                   (str(target), digest, filename))
+            else:
+                records = (_read(filename, digest, size, offset, with_age=True) for digest, filename, size, offset in rows)
+                for row, target in zip(rows, policy_documents.repack(root, records, publish_encoded)):
+                    filename, digest, size, offset = target
+                    if (digest, size) != (row[0], row[2]):
+                        raise ValueError('Metadata copy changed captured content')
+                    staged.execute('UPDATE contents SET target=?,target_offset=? WHERE digest=? AND filename=?',
+                                   (filename, offset, digest, row[1]))
         after = batch[-1][1], batch[-1][3], batch[-1][0]
 
 
@@ -260,8 +274,10 @@ def _source(root, entry):
             or not isinstance(entry['relative_filename'], str)):
         raise ValueError('Invalid metadata backup owner')
     relative = Path(entry['relative_filename'])
-    if (len(relative.parts) != 2 or not _digest(relative.stem) or relative.suffix != '.json'
+    if record_id(relative) is None and (len(relative.parts) != 2 or not _digest(relative.stem) or relative.suffix != '.json'
             or relative.parts[0] != relative.stem[:2]):
+        raise ValueError('Invalid metadata backup filename')
+    if record_id(relative) is not None and len(relative.parts) != 3:
         raise ValueError('Invalid metadata backup filename')
     path = root / relative
     _read(path, entry['digest'], entry['byte_size'], entry['offset'])
@@ -356,7 +372,8 @@ def collect_orphans(conn):
                 return 0
             try:
                 removed = 0
-                for path in chain(root.glob('*/*.json'), root.glob('*/.pending-*')):
+                for path in chain(root.glob('*/*.json'), root.glob('*/.pending-*'),
+                                  root.glob('by-id/*/*.json'), root.glob('by-id/*/.pending-*')):
                     check_cancellable_work()
                     if not owns_file(conn, path):
                         removed += fao.delete(path, missing_ok=True)

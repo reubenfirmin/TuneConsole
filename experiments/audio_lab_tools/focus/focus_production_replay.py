@@ -13,7 +13,7 @@ from yt_playlist.core import features
 from yt_playlist.core.store import Store
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift, audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared, audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, musical_preparation, progressive, vibe_preparation
 from ..support.external_experiment import digest, save, stamp
 from .focus_experiment import inside, runtime
@@ -21,7 +21,7 @@ from .focus_export import captures, LOCAL
 
 
 def code_hashes():
-    root = Path(shared.__file__).resolve().parents[1]
+    root = Path(focus.__file__).resolve().parents[1]
     return {str(p.relative_to(root)): digest(p) for p in sorted(root.rglob('*.py'))}
 
 

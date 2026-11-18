@@ -138,6 +138,9 @@
       window.dispatchEvent(new CustomEvent('app-page-leaving', {detail: {state}}));
       document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
       updateNavigation(page);
+      window.dispatchEvent(new CustomEvent('setup-needed', {
+        detail: page.querySelector('.setup-status')?.dataset.setupPending === 'true',
+      }));
       renderedUrl = response.redirected ? response.url : event.destination.url;
       if (response.redirected || event.info?.recovery) history.replaceState(history.state, '', renderedUrl);
       // Dispose page scopes while their full subtree is still intact. HTMX

@@ -4,16 +4,14 @@ Specialists own their artifact contracts, native targets and aggregation policy.
 This module owns bounded loading, validation, coefficient arithmetic and optional-model isolation.
 It never loads annotations, research modules or network resources.
 """
-from functools import lru_cache
-import hashlib
-import json
 import math
 import os
-from pathlib import Path
 from statistics import mean
 
-from yt_playlist.core import audio_embedding, fao, features
+from yt_playlist.core import audio_embedding
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
+from yt_playlist.core.audio_model_files import AudioModelFiles, artifact_loader
+from yt_playlist.rec import audio_vibe_arc
 
 MAX_EXCERPTS = 128
 ARITHMETIC_VERSION = 'native-coefficients-sumprod-1'
@@ -21,16 +19,7 @@ MODEL_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, Overfl
 
 
 def configured(name, default):
-    if name in os.environ:
-        return os.environ[name]
-    try:
-        for line in features.LOCAL_ENV.read_text().splitlines():
-            key, separator, value = line.strip().partition('=')
-            if separator and key.strip() == name:
-                return value.strip().strip('\"\'')
-    except OSError:
-        pass
-    return default
+    return AudioModelFiles(os.environ).configured(name, default)
 
 
 def identity(version, selected_mode, path, loader):
@@ -39,7 +28,7 @@ def identity(version, selected_mode, path, loader):
             return '/'.join((version, selected_mode, ARITHMETIC_VERSION, loader(path)['sha256']))
         except MODEL_ERRORS:
             pass
-    return '/'.join((version, selected_mode, 'shared'))
+    return '/'.join((version, selected_mode, 'unavailable'))
 
 
 def valid_hash(value):
@@ -107,32 +96,14 @@ def read_artifact(path, size, max_bytes, unpack, *, exact_size=True):
     Cruise historically permits a size change within its byte bound. Other
     specialists require a positive size and an exact-length read.
     """
-    if size > max_bytes or (exact_size and size <= 0):
-        raise ValueError('Audio-vibe artifact exceeds size bound')
-    with fao.read(path, max_bytes=max_bytes) as stream:
-        raw = stream.read(max_bytes + 1)
-    if len(raw) > max_bytes or (exact_size and len(raw) != size):
-        raise ValueError('Audio-vibe artifact changed or exceeds size bound')
-    try:
-        model = unpack(json.loads(raw))
-    except RecursionError as error:
-        raise ValueError('Invalid audio-vibe artifact nesting') from error
-    model['sha256'] = hashlib.sha256(raw).hexdigest()
+    model, digest = AudioModelFiles(os.environ).load(path, size, max_bytes, unpack, exact_size=exact_size)
+    model['sha256'] = digest
     return model
 
 
 def consensus_loader(validate, max_bytes):
     """Give one specialist its own two-entry cache keyed by physical file identity."""
-    @lru_cache(maxsize=2)
-    def cached(path, file_identity, size):
-        return read_artifact(path, size, max_bytes, lambda artifact: {'header': validate(artifact)})
-
-    def load(path):
-        path = Path(path).resolve()
-        info = fao.read(path).info
-        return cached(str(path), info.identity, info.logical_bytes)
-
-    return load
+    return artifact_loader(lambda artifact: {'header': validate(artifact)}, max_bytes)
 
 
 def predict(model, values):
@@ -172,13 +143,23 @@ def apply(samples, prediction, *, selected_mode, path, loader, scorer, vibe):
         return prediction
     try:
         model = loader(path)
-        if {audio_embedding.signature(sample) for sample in samples} != {model['header']['embedding_signature']}:
-            return prediction
-        candidate = scorer(model, [sample['embedding']['values'] for sample in samples])
+        return apply_loaded(samples, prediction, selected_mode=selected_mode, model=model, scorer=scorer, vibe=vibe)
     except MODEL_ERRORS:
         return prediction
-    suitability = {row['vibe']: row['score'] for row in prediction['ranking']}
-    suitability.update(prediction.get('suitability', {}))
+
+
+def apply_loaded(samples, prediction, *, selected_mode, model, scorer, vibe):
+    """Pure specialist merge with an already loaded and validated artifact."""
+    if selected_mode == 'off':
+        return prediction
+    try:
+        if {audio_embedding.signature(sample) for sample in samples} != {model['header']['embedding_signature']}:
+            return prediction
+        chunks([sample['embedding']['values'] for sample in samples])
+        candidate = audio_vibe_arc.specialist(samples, model, scorer, vibe)
+    except MODEL_ERRORS:
+        return prediction
+    suitability = dict(prediction.get('suitability', {}))
     if selected_mode == 'active':
         suitability[vibe] = candidate['score']
     return {**prediction, 'suitability': suitability,

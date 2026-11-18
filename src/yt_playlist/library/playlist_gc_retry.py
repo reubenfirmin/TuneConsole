@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from yt_playlist.library.playlist_snapshot import http_status
 from yt_playlist.util.retry import error_summary
+from yt_playlist.library.playlist_policy import retry_state
 
 logger = logging.getLogger(__name__)
 PREFIX = "playlist_gc_retry:"
@@ -34,11 +35,8 @@ def read(store, playlist):
 
 def begin(store, playlist, now, previous):
     """Commit the next deadline before network work, including interrupted attempts."""
-    attempt = (previous or {}).get("attempts", 0) + 1
-    delay = min(MAX_DELAY, FIRST_DELAY * 2 ** min(attempt - 1, 5))
-    state = {**(previous or {}), "identity": playlist.account_id,
-             "ytm": playlist.provider_playlist_id, "attempts": attempt,
-             "last_attempt_at": now, "next_retry_at": now + delay}
+    state = retry_state(playlist.account_id, playlist.provider_playlist_id, now, previous,
+                        first_delay=FIRST_DELAY, max_delay=MAX_DELAY)
     store.settings.set_setting(key(playlist.account_id, playlist.provider_playlist_id), json.dumps(state))
     return state
 

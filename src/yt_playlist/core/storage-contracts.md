@@ -4,17 +4,17 @@ This reference collects the retention and compatibility rules established by the
 [retained-copy studies](../../../experiments/retained_copy/README.md). See
 [database maintenance](README.md) for operational commands and
 [managed file ownership](../../../experiments/retained_copy/FAO-OWNERS.md) for
-publication, reader lifetime, expiry, backup and recovery protocols. Exact DDL
+publication, reader lifetime, expiry, backup and recovery protocols. The current
+[runtime file inventory](runtime-file-owners.md) names ID-derived
+paths and the corresponding SQL receipts. Exact DDL
 belongs to each owner's implementation.
 
 ## Preparation and verification
 
-Regular installation creates empty owners and bounded guards. Library-sized
-conversion is explicit, bounded and resumable; supported installed readers and
-writers continue until verified activation. Continuing writes invalidate stale
-preparation. Verify complete source-derived values before a short publication
-transaction checks the captured revision. Preserve applied migration history;
-retiring old owners, adapters and files requires separate verification.
+Regular installation creates empty owners and bounded guards. The supported
+release cutoff and reset policy are defined in [database maintenance](README.md).
+Current-schema rebuilds use resumable copies and preserve applied migration
+history; ordinary migrations do not perform library-sized conversion.
 
 A retained copy preserves installed schema, indexes, views, triggers, IDs,
 implicit row IDs, sequence high-water marks and SQLite application/user versions.
@@ -42,16 +42,18 @@ text, number and canonical genre. Provider cycle, completion time, failures and
 retry deadline preserve scheduling; its compatibility error column contains no
 error body. Field codes are append-only and genre redirects preserve identity.
 
-New runtime SQL contains no response body, candidate list or file locator/checksum.
-Existing pack offsets and historical adapters remain supported until their own
-cutover. Model/input identity and invalidation digests have distinct purposes and
-are not redundant file-integrity columns.
+Runtime SQL contains no response body or candidate list. `metadata_file_writes`
+owns immutable file IDs, integrity digests, sizes and pending/ready status;
+kind/owner/revision references select ready receipts. Existing pack offsets and
+historical adapters remain supported until their own cutover. Model/input
+identity and invalidation digests have distinct purposes.
 
-`<database filename>.metadata-runtime` owns alternatives by recording/provider/time,
-native inputs by encoded source key/revision, and choices/conflicts by integer
-owner/revision. Envelopes identify format, owner, revision and checksum. Committed
-revisions are immutable; replacing an uncommitted revision requires the writer
-reservation. Recovery verifies complete required membership in private staging
+New bodies in `<database filename>.metadata-runtime` use
+`by-id/<ID modulo 256 in hex>/<ID>.json`. Envelopes identify format, owner,
+revision and checksum. The controller commits the pending receipt, prepares and
+publishes its file outside SQL, then completes the receipt and selects the head.
+Installed compound owner/revision paths remain readable. Recovery verifies
+complete required membership in private staging
 before replacing live bytes, preserves age clocks and rejects incomplete custody
 without changing existing documents.
 
@@ -60,29 +62,6 @@ Expiry neither clears selected facts nor resets completion/backoff or triggers a
 fetch. Current native inputs and explicit manual decisions remain durable.
 Expired optional alternatives yield an empty list; missing or corrupt required
 documents fail verification. Collection respects reader and backup snapshots.
-
-Preparation compares native inputs/provenance, decisions and their subjects/times,
-current choices, attribution, genres, alternatives and conflicts. Unknown historical
-decision times remain null. Repeat bounded work until complete, then activate:
-
-```sh
-uv run python -m yt_playlist.core.preparation.metadata_runtime COPY.db --progress PROGRESS.json --batches 20
-uv run python -m yt_playlist.core.preparation.metadata_runtime COPY.db --progress PROGRESS.json --activate
-```
-
-`--restart` discards inactive progress only. Locator retirement additionally
-requires compaction to have emptied historical owners and an independently
-exported runtime-file recovery manifest:
-
-```sh
-uv run python -m yt_playlist.core.preparation.metadata_locators VERIFIED_COPY.db --recovery-manifest RECOVERY/manifest.json
-```
-
-Retirement verifies custody, FKs, stored SQL dependencies and the current data
-version before atomic DDL. Inactive preparation, populated history, unfinished
-rebuilds, incomplete custody or concurrent writes refuse it. Interrupted DDL rolls
-back; repetition is safe. It preserves migration histories and required empty
-compatibility relations, rejects writes to retired history and deletes no files.
 
 ## Artist credits and taste modes
 
@@ -130,8 +109,7 @@ Current musical evidence still owns group formation and splitting. Legacy menus
 without captured rendered genres are marked reconstructed; retain known partial
 labels, but incomplete sets do not support preference learning.
 
-`core.preparation.mix_choices` publishes compact projections before releasing old
-choice roots, 128 version references per transaction. Current groups, operational
+Current groups, operational
 predecessors, builds, readers and actual outputs retain their roots. Album/Radio
 evidence remains independent. Old JSON stays readable until separate cleanup.
 An unacknowledged event projection is reconciled under publication admission.

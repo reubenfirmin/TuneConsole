@@ -29,7 +29,7 @@ def test_generated_excluded_from_overlaps(store):
     iid, (t1, t2, t3) = _seed(store)
     a = _pl(store, iid, "PLA", "User A", [t1, t2, t3])
     g = _pl(store, iid, "PLGEN", "Gen mix", [t1, t3], generated=True)   # shares with A -> would overlap
-    ov = analysis.find_overlaps(store)
+    ov = analysis.find_overlaps(analysis.prepare_cleanup(store))
     assert all(g not in (o.playlist_a.id, o.playlist_b.id) for o in ov)
 
 
@@ -37,8 +37,8 @@ def test_generated_excluded_from_dupes_and_identical_groups(store):
     iid, (t1, t2, t3) = _seed(store)
     a = _pl(store, iid, "PLA", "User A", [t1, t2, t3])
     g = _pl(store, iid, "PLGEN", "Gen mix", [t1, t2, t3], generated=True)  # identical to A
-    assert all(g not in (d.playlist_a.id, d.playlist_b.id) for d in analysis.find_dupes(store))
-    groups = analysis.find_identical_groups(store)
+    assert all(g not in (d.playlist_a.id, d.playlist_b.id) for d in analysis.find_dupes(analysis.prepare_cleanup(store)))
+    groups = analysis.find_identical_groups(analysis.prepare_cleanup(store))
     assert all(g not in {p.id for p in grp.playlists} for grp in groups)
     # A alone is no longer a duplicate of anything once G is excluded
     assert groups == []
@@ -49,7 +49,7 @@ def test_generated_excluded_from_near_dupes(store):
     t4 = store.tracks.upsert_track("v4", "S4", "X", None, 1)
     a = _pl(store, iid, "PLA", "User A", [t1, t2, t3, t4])
     g = _pl(store, iid, "PLGEN", "Gen mix", [t1, t2, t3], generated=True)   # ~0.75 similar, not identical
-    near = analysis.find_near_duplicate_groups(store)
+    near = analysis.find_near_duplicate_groups(analysis.prepare_cleanup(store))
     assert all(g not in {p.id for p in grp.playlists} for grp in near)
 
 
@@ -57,15 +57,15 @@ def test_generated_excluded_from_empty_and_tiny(store):
     iid, (t1, t2, t3) = _seed(store)
     ge = _pl(store, iid, "PLGE", "Gen empty", [], generated=True)
     gt = _pl(store, iid, "PLGT", "Gen tiny", [t1], generated=True)
-    assert all(p.id != ge for p in analysis.find_empty_playlists(store))
-    assert all(p.id != gt for p in analysis.find_tiny_playlists(store))
+    assert all(p.id != ge for p in analysis.find_empty_playlists(analysis.prepare_cleanup(store)))
+    assert all(p.id != gt for p in analysis.find_tiny_playlists(analysis.prepare_cleanup(store)))
 
 
 def test_generated_excluded_from_cleanup_summary(store):
     iid, (t1, t2, t3) = _seed(store)
     a = _pl(store, iid, "PLA", "User A", [t1, t2, t3])
     g = _pl(store, iid, "PLGEN", "Gen mix", [t1, t2, t3], generated=True)
-    summary = analysis.cleanup_summary(store)
+    summary = analysis.cleanup_summary(analysis.prepare_cleanup(store))
     assert all(p.id != g for p in summary.playlists)
 
 
@@ -74,5 +74,5 @@ def test_user_playlists_still_detected(store):
     iid, (t1, t2, t3) = _seed(store)
     a = _pl(store, iid, "PLA", "User A", [t1, t2, t3])
     b = _pl(store, iid, "PLB", "User B", [t1, t3])      # overlaps A, both user playlists
-    ov = analysis.find_overlaps(store)
+    ov = analysis.find_overlaps(analysis.prepare_cleanup(store))
     assert any({a, b} == {o.playlist_a.id, o.playlist_b.id} for o in ov)

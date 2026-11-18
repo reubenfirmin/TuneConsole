@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from yt_playlist.core.features import audio_vibes_enabled
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core import audio_embedding
-from yt_playlist.rec import audio_vibe_feedback, audio_vibe_prediction, home_vibe
+from yt_playlist.rec import audio_vibe_feedback, audio_vibe_prediction, audio_vibe_session, home_vibe
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +229,7 @@ async def parse(request, schema):
 
 
 def build(ctx):
+    from yt_playlist.web.context import Ctx
     router = APIRouter()
     ctx.templates.env.globals['audio_vibes_enabled'] = audio_vibes_enabled
     choices = {
@@ -240,40 +241,21 @@ def build(ctx):
     ctx.templates.env.globals['audio_vibe_taxonomy_version'] = audio_vibe_prediction.TAXONOMY_VERSION
 
     def state(run_id, video_id=None):
-        playback = ctx.store.audio_vibes.playback(run_id)
-        if not audio_vibes_enabled():
-            # Collection needs acknowledgements, not the developer's annotation
-            # history or full diagnostic payloads. Preparation predicts off-thread.
-            return {'run_id': run_id, 'playback': playback,
-                    'samples': ctx.store.audio_vibes.sample_receipts(run_id),
-                    'taxonomy_version': audio_vibe_prediction.TAXONOMY_VERSION}
-        samples = ctx.store.audio_vibes.samples(run_id)
-        metadata = ctx.store.audio_vibes.base_metadata(samples[0]['video_id']) if samples else None
-        video_id = playback['video_id'] if playback else video_id
-        feedback = ctx.store.audio_vibes.feedback(run_id)
-        previous = (ctx.store.audio_vibes.latest_feedback(video_id, exclude_run_id=run_id)
-                    if video_id and feedback is None else None)
-        return {'run_id': run_id, 'playback': playback,
-                'samples': samples, 'choices': choices,
-                'taxonomy_version': audio_vibe_prediction.TAXONOMY_VERSION,
-                'prediction': audio_vibe_prediction.predict(samples, metadata=metadata),
-                'feedback': feedback, 'previous_feedback': previous,
-                'legacy_feedback': ctx.store.audio_vibes.earlier_feedback(run_id)}
+        return Ctx.audio_capture(ctx, choices=choices).state(run_id, video_id)
 
-    def persist_audio(run_id, save):
+    def persist_audio(command, *args):
         # Admission survives HTTP cancellation through Activity.to_thread. Keep
         # publication, response reads/prediction and encoding in the same worker.
         try:
-            save()
+            result = command(*args)
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
-        return JSONResponse(state(run_id))
+        return JSONResponse(result)
 
     @router.post('/audio-vibes/runs')
     async def started(request: Request):
         value = await parse(request, Playback)
-        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
-            lambda: ctx.store.audio_vibes.save_playback(**value, now=ctx.now()))
+        return await activity_for(ctx).to_thread(persist_audio, Ctx.audio_capture(ctx, choices=choices).started, value)
 
     @router.get('/audio-vibes/runs/{run_id}')
     def run(run_id: str, video_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None):
@@ -286,16 +268,14 @@ def build(ctx):
     @router.post('/audio-vibes/samples')
     async def sample(request: Request):
         value = await parse(request, Sample)
-        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
-            lambda: ctx.store.audio_vibes.save_sample(value, ctx.now()))
+        return await activity_for(ctx).to_thread(persist_audio, Ctx.audio_capture(ctx, choices=choices).sample, value)
 
     @router.post('/audio-vibes/feedback')
     async def feedback(request: Request):
         require_enabled()
         value = await parse(request, Feedback)
-        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
-            lambda: audio_vibe_feedback.save(ctx.store, value['run_id'], value['sample_ids'], value['vibes'],
-                                           value['taxonomy_version'], ctx.now()))
+        return await activity_for(ctx).to_thread(persist_audio, Ctx.audio_capture(ctx, choices=choices).feedback,
+            value['run_id'], value['sample_ids'], value['vibes'], value['taxonomy_version'])
 
     @router.post('/audio-vibes/failures')
     async def failure(request: Request):

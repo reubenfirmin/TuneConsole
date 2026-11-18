@@ -31,6 +31,13 @@ html:not([data-onboarding-played]) :is([data-onboarding-play], [data-onboarding-
   animation: onboarding-breathe 2.8s ease-in-out infinite;
 }
 .global-now-playing.is-onboarding-cue { overflow: visible; }
+.onboarding-player-tour { position: fixed; z-index: 40; width: min(22rem, calc(100vw - 2rem));
+  box-sizing: border-box; padding: 1.3rem; border: 2px solid var(--teal); border-radius: var(--radius);
+  background: var(--surface-card); color: var(--text); box-shadow: 0 1rem 3rem rgb(0 0 0 / .4); }
+.onboarding-player-tour .player-tour-count { color: var(--teal); font-size: var(--type-xs); }
+.onboarding-player-tour h2 { font-size: var(--type-lg); margin: .6rem 0; }
+.onboarding-player-tour p { color: var(--dim); line-height: 1.5; margin: 0 0 1rem; }
+.onboarding-player-tour > div { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
 @keyframes onboarding-orbit { to { --onboarding-angle: 360deg; } }
 @keyframes onboarding-breathe {
   0%, 100% { opacity: .42; }

@@ -53,7 +53,7 @@ def form_routes(path, monkeypatch, without_metadata_providers):
     ('/home/format', {'panel': 'radio'}),
     ('/home/format', {'format': 'radio'}),
     ('/home/growth/format', {'format': 'radio'}),
-    ('/home/generate', {'tracks': '[]'}),
+    ('/home/generate', {'tracks': '[{"video_id":"song","title":"Song","artist":"Artist"}]'}),
     ('/clusters/save', {'keep_keys': '[]'}),
     ('/overlaps/suppress-many', {'pairs': '[["PLA","PLB"]]'}),
     ('/taste/weight', {'axis': 'genre:house', 'weight': '0.5'}),
@@ -89,13 +89,20 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request,
         # access checks still open the real database and must wait for the
         # actual connection lock held below. Keep accepted settings writes real.
         request.getfixturevalue('unlocked_home_controls')
-    app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
+    clients = {}
+    if path == '/home/generate':
+        from tests.conftest import FakeClient, _track
+        account = store.accounts.upsert_account('main', 'cred', None, True)
+        provider = FakeClient(catalog={'song': _track('song', 'Song', 'Artist')})
+        clients[account] = provider
+        store.tracks.upsert_track('song', 'Song', 'Artist', '', 180)
+    app = create_app(store, lambda: clients, now_fn=lambda: 1000, background_work=False)
     monkeypatch.setattr(app.state.ctx.bridge, 'send_control', lambda frame, *, intent: True)
     if path == '/home/vibe':
         # The request's real admission/settings writes must wait off the event
         # loop. Numerical menu generation is a lower-layer collaborator, owned
         # by test_vibe_requests; it need not run for this contention check.
-        monkeypatch.setattr(app.state.ctx.vibe_requests, '_build', lambda request: None)
+        monkeypatch.setattr(app.state.ctx.vibe_requests, 'build', lambda request, finish: None)
     if guarded_home:
         from yt_playlist.web.routes.home_access import state
         growth = state(app.state.ctx)
@@ -141,6 +148,10 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request,
             assert result.status_code in expected
             if path == '/play':
                 assert result.json()['ok'] is True
+            if path == '/home/generate':
+                assert len(provider.created) == 1
+                playlist = store.playlists.get_playlist_for_account(account, provider.created[0][0])
+                assert playlist is not None and playlist.track_count == 1
             if path == '/home/vibe':
                 accepted = app.state.ctx.vibe_requests.state()
                 assert accepted['id'] == result.headers['X-Home-Vibe-Request']
@@ -238,7 +249,8 @@ def test_cluster_save_keeps_event_loop_responsive_throughout(store, monkeypatch,
                 response = await http.get('/_test/event-loop')
                 assert response.status_code == 200 and time.monotonic() - started < 1
                 assert not request.done()
-                assert '_save_cluster' in app.state.ctx.work.active
+                assert 'save' in app.state.ctx.work.active
+                assert 'request /clusters/save' in app.state.ctx.work.active
             finally:
                 release.set()
                 result = await asyncio.wait_for(request, 5)

@@ -1,383 +1,138 @@
-"""Album landing page: cover, track table, save/open, "create a playlist from this album", and
-(for saved albums folded into the library) genre/year enrichment with the same live flow as playlists."""
+"""Album HTTP validation and presentation over complete application commands."""
 import json
 import re
 import uuid
-from yt_playlist.core.activity import activity_for
-from yt_playlist.core.accounts import catalog_client,main_client
-from yt_playlist.core.action_errors import ActionInputError
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from yt_playlist.library.album_fetch import fetch_album, is_upload_album, shareable_album_tracks
-from yt_playlist.library.album_catalog import remember_album
-from yt_playlist.providers import enrichment, waterfall
-from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_cache
-from yt_playlist.util.duration import parse_duration
-from yt_playlist.util.thumbnails import best_thumb, is_placeholder_art
+from yt_playlist.core.action_errors import ActionInputError
+from yt_playlist.core.activity import activity_for
+from yt_playlist.web.album_art import cover_and_mosaic
+from yt_playlist.web.context import Ctx
+from yt_playlist.util.navigation import playlist_url
 
 
-_MOSAIC_TILES = 4
-
-
-def cover_and_mosaic(album, tracks):
-    """(cover, mosaic) for the album head. A personal compilation has no cover of its own, and
-    YouTube hands back a generic grey disc rather than nothing, so fall back to a mosaic of the
-    tracks' own covers: honest that it is a collection, where picking one track's art to stand for
-    the whole thing would not be. Returns a single cover when the album really has one."""
-    cover = (album or {}).get("thumbnail")
-    if cover and not is_placeholder_art(cover):
-        return cover, []
-    seen = []
-    for t in tracks or []:
-        art = t.get("thumbnail")
-        if art and not is_placeholder_art(art) and art not in seen:
-            seen.append(art)
-            if len(seen) == _MOSAIC_TILES:
-                break
-    if len(seen) == 1:            # one cover is not a mosaic, it is just the cover
-        return seen[0], []
-    return (None, seen) if seen else (cover, [])
-
-
-def build(ctx) -> APIRouter:
+def build(ctx):
     router = APIRouter()
-    store, templates = ctx.store, ctx.templates
+    commands = Ctx.album_commands(ctx)
+    templates = ctx.templates
 
-    def _toast(request, message):
-        return templates.TemplateResponse(
-            request, "_partials/error_toast.html", {"message": message},
-            status_code=422, headers={"HX-Reswap": "none"})
-
-    def _live_album(browse_id):
-        clients = ctx.client_provider()
-        client = main_client(store, clients) if is_upload_album(browse_id) else catalog_client(clients)
-        if not client or not browse_id:
-            return None
-        a = fetch_album(client, browse_id)
-        if not a or not a.get('title'):
-            return None
-        if not getattr(store, 'activity_paused', False):
-            remember_album(store, browse_id, a)
-        return {
-            'title': a.get('title'),
-            'artist': ', '.join(x.get('name', '') for x in a.get('artists') or []),
-            'audio_playlist_id': a.get('audioPlaylistId'),
-            'year': a.get('year'), 'thumbnail': best_thumb(a.get('thumbnails')),
-            'tracks': [{'title': t.get('title'), 'video_id': t.get('videoId'),
-                        'artist': ', '.join(x.get('name', '') for x in t.get('artists') or []),
-                        'duration': t.get('duration')} for t in a.get('tracks') or []]}
+    def toast(request, message):
+        return templates.TemplateResponse(request, '_partials/error_toast.html', dict(message=message),
+            status_code=422, headers={'HX-Reswap': 'none'})
 
     @router.get('/album/track-plays')
     def track_plays(request: Request):
-        # Local listening evidence only. Polling must never fetch an album or
-        # count a click/heartbeat as a play, and works for unsaved releases too.
         videos = list(dict.fromkeys(filter(None, request.query_params.get('videos', '').split(','))))
         if len(videos) > 500 or any(len(video) > 128 for video in videos):
             raise HTTPException(400, 'Too many track IDs')
-        known = {row['video_id']: row['plays'] for row in store.charts.video_tracks_detail(videos)}
-        return JSONResponse({'plays': {video: known.get(video, 0) for video in videos}},
-                            headers={'Cache-Control': 'no-store'})
+        return JSONResponse(dict(plays=commands.plays(videos)), headers={'Cache-Control': 'no-store'})
 
     @router.get('/album/inline')
     def album_inline(request: Request, browse: str, opportunity: str = ''):
-        """Opening a record fetches its tracks without leaving the held Home menu."""
         return templates.TemplateResponse(request, '_partials/album_expansion.html',
-            _album_context(browse, opportunity, inline=True))
+            commands.context(browse, opportunity, inline=True))
 
-    @router.get("/album")
+    @router.get('/album')
     def album_page(request: Request):
-        browse_id = (request.query_params.get("browse") or "").strip()
-        opportunity = request.query_params.get("opportunity")
-        if opportunity:
-            choice_evidence.safe_respond(store, opportunity, "open", ctx.now_fn(), option_id=browse_id)
-        return templates.TemplateResponse(request, "album.html", _album_context(browse_id, opportunity))
+        return templates.TemplateResponse(request, 'album.html', commands.context(
+            (request.query_params.get('browse') or '').strip(), request.query_params.get('opportunity'), opened=True))
 
-    def _album_context(browse_id, opportunity, *, inline=False):
-        """One album, table and set of actions for the page and its Home expansion."""
-        album = None
-        try:
-            album = _live_album(browse_id)
-        except Exception:  # noqa: BLE001 - no client / network / parse all degrade gracefully
-            ctx.logger.info("album fetch failed for %r (non-fatal)", browse_id, exc_info=True)
-        saved = browse_id in store.collection.saved_album_ids()
-        upload = is_upload_album(browse_id)
-        # An album is "in your library" when you saved it, or when it IS your library: an upload
-        # (privately owned release) is yours by definition, and can never appear in saved_albums
-        # because saving means liking an audioPlaylistId, which an upload has none of.
-        in_library = saved or upload
-        # Capture metadata for library editing independently of occurrence count:
-        # repeats and unavailable positions are not extra catalog members.
-        if not getattr(store, 'activity_paused', False) and in_library and album:
-            for t in album.get('tracks') or []:
-                if t.get('video_id') and t.get('title'):
-                    store.tracks.upsert_track(t['video_id'], t['title'],
-                        t.get('artist') or album.get('artist') or '', album.get('title') or '',
-                        parse_duration(t.get('duration')), album_browse_id=browse_id,
-                        thumbnail=album.get('thumbnail'))
-        # Complete publication owns the displayed sequence for every release.
-        # Before publication, incidental library evidence cannot shadow a live response.
-        library_tracks = store.charts.album_tracks_detail(browse_id) if browse_id else []
-        tracks = library_tracks if in_library else []
-        complete = store.collection.has_published_album_tracklist(browse_id)
-        fallback_tracks = library_tracks if complete else tracks if not inline else []
-        if fallback_tracks and not (album and album.get("title")):
-            meta = next((a for a in store.collection.get_saved_albums() if a["browse"] == browse_id), {})
-            album = {"title": meta.get("title") or fallback_tracks[0]["album"] or "Album",
-                     "artist": meta.get("artist") or fallback_tracks[0]["artist"], "year": meta.get("year"),
-                     "thumbnail": meta.get("thumbnail") or fallback_tracks[0]["thumbnail"], "tracks": fallback_tracks}
-        # Unsaved releases use the same row component. Merge known metadata by exact
-        # upload while retaining the full fetched sequence and keeping library ownership intact.
-        table_tracks = (library_tracks if complete else tracks) if album else []
-        if album and not complete and (not in_library or getattr(store, 'activity_paused', False)):
-            known = {t['video_id']: t for t in store.charts.video_tracks_detail(
-                [t['video_id'] for t in album.get('tracks') or [] if t.get('video_id')])}
-            table_tracks = [{
-                **known.get(t.get('video_id'), {}),
-                'video_id': t.get('video_id') if t.get('title') else '',
-                'title': t.get('title') or 'Unavailable track',
-                'available': known.get(t.get('video_id'), {}).get('available') if t.get('title') else 0,
-                'artist': t.get('artist') or album.get('artist') or '',
-                'album': album['title'], 'album_browse': browse_id,
-                'thumbnail': t.get('thumbnail') or album.get('thumbnail'),
-                'duration': parse_duration(t.get('duration')),
-                'genre': known.get(t.get('video_id'), {}).get('genre', ''),
-                'year': known.get(t.get('video_id'), {}).get('year') or album.get('year') or '',
-                'liked': known.get(t.get('video_id'), {}).get('liked', False),
-                'plays': known.get(t.get('video_id'), {}).get('plays'),
-            } for t in album.get('tracks') or []]
-        if album and complete:
-            album = {**album, 'tracks': table_tracks}
-        cover, mosaic = cover_and_mosaic(album, tracks)
-        editorial = {'browse_id': browse_id, 'title': (album or {}).get('title'),
-                     'artist': (album or {}).get('artist')}
-        if album and not inline and not getattr(store, 'activity_paused', False):
-            store.album_notes.request([editorial], ctx.now_fn(), visible=True)
-            if ctx.rec_worker:
-                ctx.rec_worker.trigger_home_refresh()
-        prepared = home_cache.read(store, 'home_prepared') or {}
-        anchor = next((a for a in prepared.get("album_choices", []) if a["browse_id"] == browse_id), None)
-        companion = []
-        if not inline and anchor and anchor.get("companion"):
-            companion = anchor["companion"]
-        companion_recipe = None
-        if companion:
-            oid = None
-            try:
-                oid = choice_evidence.present(store, "mixes", [{"id": "companion", "tracks": companion,
-                    "intent": "album_companion", "album_browse_id": browse_id}], ctx.now_fn(),
-                    context=prepared.get("choice_context", {}), window=[browse_id, opportunity,
-                        int(ctx.now_fn() // 86400)])
-            except Exception:
-                ctx.logger.warning("Companion mix measurement failed", exc_info=True)
-            companion_recipe = {"lane": "album_companion", "anchor_album": browse_id,
-                                "opportunity_id": oid, "option_id": "companion"}
-        return {
-            "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
-            "table_tracks": table_tracks,
-            "saved_owners": store.collection.saved_album_owners(browse_id).get(browse_id, []),
-            "editorial": editorial, "notes": album_notes.read(store, editorial),
-            "opportunity_id": opportunity,
-            "album_feedback": album_choices.feedback_state(store, [browse_id]).get(browse_id, {}).get("kind"),
-            "companion": companion, "companion_recipe": companion_recipe,
-            "is_upload": upload, "in_library": in_library,
-            "library_track_count": len({t["track_id"] for t in library_tracks if t.get('track_id') is not None}),
-            "cover": cover, "mosaic": mosaic,
-            "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
-            "active_job": ctx.jobs.find_active_album(browse_id),
-            "conflict_count": store.enrichment_reports.conflict_count_for_album(browse_id)}
-
-    @router.post("/album/feedback")
+    @router.post('/album/feedback')
     async def album_feedback(request: Request):
         form = await request.form()
         try:
-            album_choices.set_feedback(store, (form.get("browse_id") or "").strip(),
-                form.get("kind"), ctx.now_fn(), form.get("opportunity_id"))
+            commands.set_feedback((form.get('browse_id') or '').strip(), form.get('kind'), form.get('opportunity_id'))
         except ActionInputError as exc:
-            return _toast(request, str(exc))
+            return toast(request, str(exc))
         except Exception:
-            ctx.logger.exception("Album feedback failed")
-            return Response(status_code=503, headers={"HX-Reswap": "none"})
-        if ctx.rec_worker:
-            ctx.rec_worker.trigger_home_refresh()
+            ctx.logger.exception('Album feedback failed')
+            return Response(status_code=503, headers={'HX-Reswap': 'none'})
         return Response(status_code=204)
 
-    @router.post("/album/play")
+    @router.post('/album/play')
     async def album_play(request: Request):
         form = await request.form()
-        browse = (form.get("browse_id") or "").strip()
-        opportunity = form.get("opportunity_id")
-        action_id = (form.get('action_id') or uuid.uuid4().hex).strip()
+        browse = (form.get('browse_id') or '').strip()
         if not browse:
-            return _toast(request, "Choose an album to play.")
-        intent = ctx.bridge.begin_playback_intent()
-
-        def start():
-            if not ctx.bridge.connected:
-                raise ValueError("Connect the TuneConsole extension to play this album.")
-            clients = ctx.client_provider()
-            client = main_client(store, clients) if is_upload_album(browse) else catalog_client(clients)
-            album = fetch_album(client, browse) if client else {}
-            playlist = album.get("audioPlaylistId")
-            tracks = album.get("tracks") or []
-            video = next((track.get("videoId") for track in tracks if track.get("videoId")), None)
-            if not playlist or not video:
-                raise ValueError("The complete album queue is unavailable. Open its details and try again.")
-            if not getattr(store, 'activity_paused', False):
-                remember_album(store, browse, album)
-            if opportunity and not getattr(store, 'activity_paused', False):
-                choice_evidence.safe_respond(store, opportunity, "choice", ctx.now_fn(), option_id=browse,
-                    action_id=action_id,
-                    details={"playlist": playlist, "video_id": video,
-                             "tracks": [{"video_id": track['videoId'],
-                                         'key': store.tracks.identity_key_for_video(track['videoId'])}
-                                        for track in tracks if track.get('videoId')]})
-                store.rec_ledger.remember_album_playback_context({"opportunity_id":opportunity,
-                    "browse":browse,"playlist":playlist,"at":ctx.now_fn(),'action_id':action_id,
-                    'videos':[track['videoId'] for track in tracks if track.get('videoId')]})
-            ctx.bridge.send_control({"type": "navigate", "url":
-                "https://music.youtube.com/watch?v=" + quote(video, safe="") + "&list=" + quote(playlist, safe="")},
-                intent=intent)
+            return toast(request, 'Choose an album to play.')
+        intent = commands.admit_play()
         try:
-            await activity_for(ctx).to_thread(start)
+            listening = await activity_for(ctx).to_thread(commands.play, browse, form.get('opportunity_id'),
+                (form.get('action_id') or uuid.uuid4().hex).strip(), intent)
         except Exception:
-            ctx.logger.exception("Album playback failed: %s", browse)
-            return Response(status_code=503, headers={"HX-Reswap": "none"})
-        return Response(status_code=204)
+            ctx.logger.exception('Album playback failed: %s', browse)
+            return Response(status_code=503, headers={'HX-Reswap': 'none'})
+        return Response(status_code=204, headers={'HX-Trigger': json.dumps({'album-play-started': listening})})
 
-    @router.get("/album/{browse}/share.txt")
+    @router.get('/album/{browse}/share.txt')
     def album_share(browse: str):
-        """Download a verified complete, ordered album, including offline cached snapshots."""
-        title, vids = None, []
-        cached = store.collection.cached_album_share(browse)
-        if cached:
-            title, vids = cached["title"], cached["video_ids"]
-        if not vids:
-            problem = "The full album could not be fetched. Reconnect to YouTube Music and try sharing again."
-            try:
-                clients = ctx.client_provider()
-                client = main_client(store,clients) if is_upload_album(browse) else catalog_client(clients)
-                a = fetch_album(client, browse) if client else {}
-                tracks = shareable_album_tracks(a)
-                title = a.get("title")
-                vids = [track["videoId"] for track in tracks]
-                if not getattr(store, 'activity_paused', False):
-                    remember_album(store, browse, a)
-            except ActionInputError as exc:
-                problem = str(exc)
-            except Exception:
-                ctx.logger.info("album share fetch failed for %r (non-fatal)", browse, exc_info=True)
-            if not vids:
-                raise HTTPException(status_code=503, detail=problem)
-        lines = [f"https://music.youtube.com/watch?v={v}" for v in vids]
-        safe = re.sub(r'[\\/:*?"<>|]', "_", title or "album").strip() or "album"
-        ascii_name = safe.encode("ascii", "ignore").decode() or "album"
-        return PlainTextResponse("\n".join(lines) + "\n", headers={
-            "Content-Disposition": f'attachment; filename="{ascii_name}.txt"; '
-                                   f"filename*=UTF-8''{quote(safe)}.txt"})
+        try:
+            title, videos = commands.share(browse)
+        except ActionInputError as exc:
+            raise HTTPException(503, str(exc)) from None
+        except Exception:
+            ctx.logger.info('album share fetch failed for %r', browse, exc_info=True)
+            raise HTTPException(503, 'The full album could not be fetched. Reconnect to YouTube Music and try sharing again.') from None
+        safe = re.sub(r'[\\/:*?"<>|]', '_', title or 'album').strip() or 'album'
+        ascii_name = safe.encode('ascii', 'ignore').decode() or 'album'
+        return PlainTextResponse('\n'.join(f'https://music.youtube.com/watch?v={v}' for v in videos) + '\n',
+            headers={'Content-Disposition': f'attachment; filename="{ascii_name}.txt"; filename*=UTF-8\'\'{quote(safe)}.txt'})
 
-    def _album_row(request, browse, vid):
-        for i, t in enumerate(store.charts.album_tracks_detail(browse), start=1):
-            if t["video_id"] == vid:
-                return templates.TemplateResponse(request, "_partials/album_track_row.html", {"t": t, "idx": i})
-        return Response(status_code=204)
+    def row(request, browse, video):
+        data = Ctx.library_actions(ctx).album_row(browse, video)
+        return templates.TemplateResponse(request, '_partials/album_track_row.html', data) if data else Response(status_code=204)
 
-    @router.post("/album/{browse}/track-genre")
+    async def edit(request, browse, field):
+        form = await request.form()
+        video = (form.get('video_id') or '').strip()
+        try:
+            Ctx.library_actions(ctx).edit_field(video, field, (form.get(field) or '').strip())
+        except ValueError as exc:
+            return toast(request, str(exc))
+        return row(request, browse, video)
+
+    @router.post('/album/{browse}/track-genre')
     async def album_set_track_genre(browse: str, request: Request):
-        form = await request.form()
-        vid, genre = (form.get("video_id") or "").strip(), (form.get("genre") or "").strip()
-        if not vid:
-            return _toast(request, "no track given")
-        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
-        if tid is None:
-            return _toast(request, "track not found")
-        store.tracks.set_track_genre(tid, genre)
-        ctx.rec_worker.trigger_content_update(video_ids=[vid])
-        return _album_row(request, browse, vid)
+        return await edit(request, browse, 'genre')
 
-    @router.post("/album/{browse}/track-year")
+    @router.post('/album/{browse}/track-year')
     async def album_set_track_year(browse: str, request: Request):
-        form = await request.form()
-        vid, year = (form.get("video_id") or "").strip(), (form.get("year") or "").strip()
-        if not vid:
-            return _toast(request, "no track given")
-        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
-        if tid is None:
-            return _toast(request, "track not found")
-        store.tracks.set_track_year(tid, year)
-        ctx.rec_worker.trigger_content_update(video_ids=[vid])
-        return _album_row(request, browse, vid)
+        return await edit(request, browse, 'year')
 
-    @router.post("/album/create-playlist")
+    @router.post('/album/create-playlist')
     async def album_create_playlist(request: Request):
         form = await request.form()
-        browse_id = (form.get("browse_id") or "").strip()
-        name = (form.get("name") or "").strip()
-        if not browse_id:
-            return _toast(request, "No album to create from.")
+        browse, name = (form.get('browse_id') or '').strip(), (form.get('name') or '').strip()
+        if not browse:
+            return toast(request, 'No album to create from.')
         try:
-            res = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_album, browse_id, name)
-        except ActionInputError as e:
-            return _toast(request, str(e))
-        except Exception:  # noqa: BLE001
-            ctx.logger.exception("create playlist from album %r failed", browse_id)
-            return Response(status_code=503, headers={"HX-Reswap": "none"})
-        return Response(status_code=200, headers={"HX-Redirect": f"/playlist/{res['db_pid']}"})
+            result = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_album, browse, name)
+        except ActionInputError as exc:
+            return toast(request, str(exc))
+        except Exception:
+            ctx.logger.exception('create playlist from album %r failed', browse)
+            return Response(status_code=503, headers={'HX-Reswap': 'none'})
+        return Response(headers={'HX-Redirect': playlist_url(result['db_pid'])})
 
-    @router.post("/album/{browse}/enrich")
+    @router.post('/album/{browse}/enrich')
     def album_enrich(browse: str):
-        """Run the enrichment waterfall over a saved album's folded-in tracks, same harness and SSE
-        stream as playlist enrichment, scoped by album_browse instead of a playlist."""
-        job, created = ctx.jobs.create_or_rejoin_album(browse)
-        if not created:
-            return JSONResponse({"job_id": job.id})
+        return JSONResponse(dict(job_id=Ctx.enrichment_commands(ctx).start(album_browse=browse).id))
 
-        def run():
-            try:
-                from yt_playlist.web.jobs import record_enrichment_progress
-                pending = store.tracks.album_tracks_for_waterfall(browse)
-                waterfall.run_waterfall(store, pending, enrichment.load_config(store),
-                                        on_progress=lambda event: record_enrichment_progress(ctx, job, event))
-            except Exception as e:  # noqa: BLE001
-                ctx.logger.exception("Album enrichment job %s failed", job.id)
-                detail = str(e) or type(e).__name__
-                job.error = detail
-                job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
-            finally:
-                job.done = True
+    def conflicts(request, browse):
+        return templates.TemplateResponse(request, '_partials/conflicts_modal.html',
+            {**Ctx.enrichment_commands(ctx).conflicts(album_browse=browse), 'resolve_url': f'/album/{browse}/conflicts/resolve'})
 
-        try:
-            activity_for(ctx).start_thread(run)
-        except BaseException as exc:
-            job.error = str(exc) or type(exc).__name__
-            job.done = True
-            raise
-        return JSONResponse({"job_id": job.id})
-
-    @router.get("/album/{browse}/conflicts")
+    @router.get('/album/{browse}/conflicts')
     def album_conflicts(request: Request, browse: str):
-        return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.enrichment_reports.unresolved_conflicts_for_album(browse),
-            "resolve_url": f"/album/{browse}/conflicts/resolve",
-            "count_left": store.enrichment_reports.conflict_count_for_album(browse)})
+        return conflicts(request, browse)
 
-    @router.post("/album/{browse}/conflicts/resolve")
+    @router.post('/album/{browse}/conflicts/resolve')
     async def album_resolve_conflicts(request: Request, browse: str):
         form = await request.form()
-        for key, value in form.multi_items():
-            if ":" not in key or not value:
-                continue
-            tid, _, field = key.partition(":")
-            if tid.isdigit():
-                try:
-                    store.enrichment.resolve_conflict(int(tid), field, value)
-                except ValueError:
-                    pass
-        return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.enrichment_reports.unresolved_conflicts_for_album(browse),
-            "resolve_url": f"/album/{browse}/conflicts/resolve",
-            "count_left": store.enrichment_reports.conflict_count_for_album(browse)})
+        Ctx.enrichment_commands(ctx).resolve_many(list(form.multi_items()))
+        return conflicts(request, browse)
 
     return router

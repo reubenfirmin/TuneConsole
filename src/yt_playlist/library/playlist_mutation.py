@@ -1,9 +1,9 @@
 """Verified, ordered playlist writes, independent of HTTP and radio session state."""
 from dataclasses import dataclass
-from collections import Counter, defaultdict, deque
 from typing import Literal
 
 from yt_playlist.library.playlist_snapshot import validate_playlist
+from yt_playlist.library.playlist_policy import missing_occurrences, excess_occurrences, occurrence_order
 from yt_playlist.util.retry import with_retry
 
 
@@ -123,41 +123,19 @@ def restore_playlist_sequence(client, playlist_id, desired_video_ids):
     error = None
     try:
         tracks = _read(client, playlist_id)
-        wanted = Counter(desired)
-        present = Counter(t["videoId"] for t in tracks)
-        remaining = wanted - present
-        additions = []
-        for vid in desired:
-            if remaining[vid]:
-                additions.append(vid)
-                remaining[vid] -= 1
+        additions, duplicates = missing_occurrences(tracks, desired)
         if additions:
             # YouTube otherwise rejects the entire batch when adding a repeated occurrence.
-            if any(present[v] or wanted[v] > 1 for v in additions):
+            if duplicates:
                 client.add_playlist_items(playlist_id, additions, duplicates=True)
             else:
                 client.add_playlist_items(playlist_id, additions)
         tracks = _read(client, playlist_id)
-        kept = Counter()
-        extras = []
-        for track in tracks:
-            vid = track["videoId"]
-            if kept[vid] < wanted[vid]:
-                kept[vid] += 1
-            else:
-                if wanted[vid] and not track.get("setVideoId"):
-                    raise ValueError("YouTube has not exposed the repeated item's removal handle")
-                extras.append(track)
+        extras = excess_occurrences(tracks, desired)
         if extras:
             client.remove_playlist_items(playlist_id, extras)
         tracks = _read(client, playlist_id)
-        if Counter(t["videoId"] for t in tracks) != wanted:
-            raise ValueError("YouTube did not restore all playlist occurrences. Retry Undo to continue.")
-        # Identify occurrences separately even when several share the same playback ID.
-        occurrences = defaultdict(deque)
-        for index, track in enumerate(tracks):
-            occurrences[track["videoId"]].append(index)
-        target = [occurrences[vid].popleft() for vid in desired]
+        target = occurrence_order(tracks, desired)
         apply_playlist_permutation(client, playlist_id, tracks, target)
     except Exception as exc:
         error = str(exc) or type(exc).__name__

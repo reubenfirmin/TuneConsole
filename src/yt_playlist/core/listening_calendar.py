@@ -6,11 +6,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 def _subjects(conn):
     """Frozen migrations can reconcile the installed pre-subject vocabulary."""
-    from . import entity_names
     typed = conn.execute("SELECT 1 FROM sqlite_schema WHERE name='play_event_subjects'").fetchone()
     return ('listening_observation_subjects' if typed else 'listening_observations',
             'play_event_subjects' if typed else 'play_events',
-            'account_id' if entity_names.accounts(conn)=='accounts' else 'identity_id')
+            'account_id')
 
 
 def zone(name):

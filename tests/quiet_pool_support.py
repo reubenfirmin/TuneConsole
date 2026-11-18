@@ -10,8 +10,9 @@ import pytest
 from tests.home_fixture_support import prepared_client, publish_menu, returning_listener
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.core.store import Store
-from yt_playlist.rec import (choice_evidence, fresh_pool, home_cache, home_cards,
-                             measurement, mode_surfaces, road_trip_candidates)
+from yt_playlist.controllers.pool_preparation import FreshAcquisition
+from yt_playlist.rec import (choice_evidence, home_cache, home_cards,
+                             measurement, mode_inputs, mode_surfaces, road_trip_candidates)
 
 
 DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
@@ -75,7 +76,7 @@ def quiet_case(store, selected, monkeypatch):
         calls=[], calculations=[], refreshes=[], schedules=[], entered=threading.Event(), release=threading.Event())
     case.release.set()
     local = threading.local()
-    populate = fresh_pool.populate
+    populate = FreshAcquisition.populate
     keys = store.discovery.discovered_track_keys
     completed = home_cache.read(store, 'home_prepared')['menus'][0]['protos']
 
@@ -86,11 +87,11 @@ def quiet_case(store, selected, monkeypatch):
             raise json.JSONDecodeError(DIAGNOSTIC, '<html>invalid response</html>', 0)
         raise ValueError(DIAGNOSTIC)
 
-    def observe_populate(owner, **parameters):
-        case.calls.append({key: value for key, value in parameters.items() if key != 'on_progress'})
+    def observe_populate(acquisition, client, now, include=(), avoid=(), progress=lambda message: None):
+        case.calls.append({'include_genres': include, 'avoid_genres': avoid})
         local.populating = True
         try:
-            return populate(owner, **parameters)
+            return populate(acquisition, client, now, include, avoid, progress)
         finally:
             local.populating = False
 
@@ -112,9 +113,9 @@ def quiet_case(store, selected, monkeypatch):
         pools['fresh'] = []
         return {'all': pools, '_meta': {'full_pools': True, 'comfort_pool': 0}}, []
 
-    monkeypatch.setattr(fresh_pool, 'populate', observe_populate)
+    monkeypatch.setattr(FreshAcquisition, 'populate', observe_populate)
     monkeypatch.setattr(store.discovery, 'discovered_track_keys', read_keys)
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate_bundles)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate_bundles)
     # Genre research is the external acquisition boundary. No discoveries is a
     # real successful empty search; preparation/publication still run on recovery.
     monkeypatch.setattr(road_trip_candidates, 'genre_artists', lambda *args, **kwargs: [])

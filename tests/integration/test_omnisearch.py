@@ -24,13 +24,28 @@ def test_artist_pivot_sets_primary_and_sections(store):
     assert res["primary_artist"]["name"] == "Ritmo"          # most tracks => primary
     kinds = [s["kind"] for s in res["sections"]]
     assert "artist" in kinds
-    assert "tracks_by" in kinds
+    assert "songs" in kinds
+    assert "tracks_by" not in kinds
     assert "albums_by" in kinds
     assert "playlists_featuring" in kinds
 
 
 def _section(result, kind):
     return next((s["rows"] for s in result["sections"] if s["kind"] == kind), [])
+
+
+def test_song_search_matches_reordered_title_artist_and_apostrophes(store):
+    store.tracks.upsert_track('bon-song', 'It’s My Life', 'Bon Jovi')
+    store.tracks.upsert_track('bon-prayer', "Livin' On A Prayer", 'Bon Jovi')
+    store.tracks.upsert_track('cover-song', "It's My Life (Bon Jovi cover)", 'Other artist')
+    store.tracks.upsert_track('unrelated', 'My Life', 'Another artist')
+    store.tracks.upsert_track('infix', 'Tree of Life', 'Tommy Baynen')
+    for query in ('bon jovi my life', "IT'S MY LIFE bon", 'life jovi my bon', 'bon jov my lif'):
+        rows = _section(store.search.omni_search(query), 'songs')
+        assert rows[0]['video_id'] == 'bon-song'
+        assert all(row['video_id'] != 'unrelated' for row in rows)
+    assert _section(store.search.omni_search('bon jovi prayer'), 'songs')[0]['video_id'] == 'bon-prayer'
+    assert all(row['video_id'] != 'infix' for row in _section(store.search.omni_search('my life'), 'songs'))
 
 
 def test_same_name_artists_keep_distinct_links_and_primary_pivots(store):
@@ -59,7 +74,7 @@ def test_same_name_artists_keep_distinct_links_and_primary_pivots(store):
         assert store.artists.get_artist(row["artist_id"])["name"] == "Homonym"
         assert expected in {s["title"] for s in store.charts.artist_songs(row["artist_id"])}
     assert result["primary_artist"]["artist_id"] == first
-    assert {r["label"] for r in _section(result, "tracks_by")} == {"First song", "First artist encore"}
+    assert {r["label"] for r in _section(result, "songs")} == {"First song", "First artist encore", "Second song"}
     assert [r["href"] for r in _section(result, "albums_by")] == ["/album?browse=channel1"]
     assert [r["href"] for r in _section(result, "playlists_featuring")] == [f"/playlist/{playlists[0]}"]
 
@@ -73,8 +88,8 @@ def test_collaboration_is_found_under_each_ordered_artist_credit(store):
     for name in ["Alpha", "Beta"]:
         result = store.search.omni_search(name)
         assert [r["label"] for r in _section(result, "artist")] == [name]
-        assert [r["label"] for r in _section(result, "tracks_by")] == ["Together"]
-        assert _section(result, "tracks_by")[0]["sub"] == "Alpha & Beta"
+        assert [r["label"] for r in _section(result, "songs")] == ["Together"]
+        assert _section(result, "songs")[0]["sub"] == "Alpha & Beta"
         assert [r["href"] for r in _section(result, "albums_by")] == ["/album?browse=joint"]
         assert [r["href"] for r in _section(result, "playlists_featuring")] == [f"/playlist/{pid}"]
     assert not _section(store.search.omni_search("Alpha & Beta"), "artist")
@@ -88,7 +103,7 @@ def test_artist_alias_matches_preserve_canonical_identity_and_label(store):
     result = store.search.omni_search("Alias 100%")
     assert result["primary_artist"]["artist_id"] == artist_id
     assert [r["label"] for r in _section(result, "artist")] == ["Canonical"]
-    assert [r["label"] for r in _section(result, "tracks_by")] == ["Song"]
+    assert [r["label"] for r in _section(result, "songs")] == ["Song"]
     assert not _section(store.search.omni_search("Alias 100_"), "artist")
 
 
@@ -100,7 +115,7 @@ def test_saved_album_credits_are_searchable_without_library_tracks(store):
         result = store.search.omni_search(name)
         assert result["primary_artist"]["name"] == name
         assert [r["href"] for r in _section(result, "albums_by")] == ["/album?browse=saved"]
-        assert not _section(result, "tracks_by")
+        assert not _section(result, "songs")
     assert not _section(store.search.omni_search("Uncollected"), "artist")
 
 
@@ -115,7 +130,7 @@ def test_reconciled_artist_search_uses_surviving_identity_only(store):
     assert store.artists.resolve(old) == target
     result = store.search.omni_search("Alias")
     assert [r["artist_id"] for r in _section(result, "artist")] == [target]
-    assert {r["label"] for r in _section(result, "tracks_by")} == {"Old song", "Known song"}
+    assert {r["label"] for r in _section(result, "songs")} == {"Old song", "Known song"}
 
 
 def test_generated_playlists_excluded(store):
@@ -141,8 +156,8 @@ def test_like_wildcards_are_escaped(store):
     assert labels == ["100%"]
 
 
-def test_cross_section_dedup(store):
-    """Tracks and playlists shown under the artist pivot must not reappear in direct-match sections."""
+def test_artist_and_direct_song_matches_share_one_section(store):
+    """Artist and title matches describe the same recordings, not separate result types."""
     iid = store.accounts.upsert_account("main", "cred", None, True)
 
     # "Zola" is the primary artist (most tracks => pivot artist).
@@ -160,23 +175,11 @@ def test_cross_section_dedup(store):
     res = store.search.omni_search("zola")
     assert res["primary_artist"]["name"] == "Zola"
 
-    # Collect identity_keys in "tracks_by" and "songs" sections.
-    tracks_by_section = next((s for s in res["sections"] if s["kind"] == "tracks_by"), None)
-    songs_section = next((s for s in res["sections"] if s["kind"] == "songs"), None)
-
-    # The overlapping track must appear in tracks_by (it is by Zola).
-    assert tracks_by_section is not None
-    tracks_by_hrefs = {r["href"] for r in tracks_by_section["rows"]}
-    assert any("z1" in href for href in tracks_by_hrefs), (
-        "Overlapping track should be in tracks_by section"
-    )
-
-    # The same track must NOT appear in the direct songs section.
-    if songs_section:
-        songs_hrefs = {r["href"] for r in songs_section["rows"]}
-        assert not any("z1" in href for href in songs_hrefs), (
-            "Overlapping track should be de-duped out of songs section"
-        )
+    song_sections = [s for s in res['sections'] if any(row['type'] == 'track' for row in s['rows'])]
+    assert len(song_sections) == 1
+    assert song_sections[0]['title'] == 'Songs'
+    assert {row['video_id'] for row in song_sections[0]['rows']} == {'z1', 'z2'}
+    assert len(song_sections[0]['rows']) == 2
 
     # Collect pids in "playlists_featuring" and "playlists" sections.
     featuring_section = next((s for s in res["sections"] if s["kind"] == "playlists_featuring"), None)

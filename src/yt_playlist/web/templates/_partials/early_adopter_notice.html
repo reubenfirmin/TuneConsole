@@ -1,0 +1,11 @@
+<dialog class="modal shared-confirmation early-adopter-notice" data-early-adopter-notice="{{ early_adopter_notice() }}"
+        aria-labelledby="early-adopter-title" aria-describedby="early-adopter-message">
+  <h3 id="early-adopter-title">Early adopter notice</h3>
+  <div id="early-adopter-message">
+    <p>Thank you for playing with Tuneconsole. We're working hard on stabilizing and organizing the data model.</p>
+    <p>We had to reset some of your data to perform a feature upgrade; don't worry, no preferences were lost, as they live in Youtube. We don't expect this to happen again.</p>
+    <p>Please send us feedback if you have ideas for the product.&nbsp;<a href="mailto:rf@4rc.io">rf@4rc.io</a>. Thanks</p>
+  </div>
+  <div class="modal-actions"><button type="button" class="btn-primary" data-dismiss-early-adopter autofocus>Got it</button></div>
+</dialog>
+<script src="/static/early-adopter-notice.js?v={{ asset_v }}" defer></script>

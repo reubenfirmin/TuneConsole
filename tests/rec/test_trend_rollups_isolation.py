@@ -10,7 +10,9 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from yt_playlist.core.activity import Activity
+from yt_playlist.core.db_snapshot import ReadSnapshot
 from yt_playlist.rec import trend_rollups
+from yt_playlist.controllers import trend_preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.trends import TrendsRepo
 
@@ -79,19 +81,19 @@ def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, mo
 def test_source_reset_during_calculation_cannot_publish_stale_rollup(database, monkeypatch):
     store = database
     store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
-    calculate = trend_rollups._calculate
+    calculate = trend_preparation.calculate
 
     def reset_during_calculation(reader, now):
         payload = calculate(reader, now)
         store.history.reset_play_history(1)
         return payload
 
-    monkeypatch.setattr(trend_rollups, "_calculate", reset_during_calculation)
+    monkeypatch.setattr(trend_preparation, "calculate", reset_during_calculation)
     assert trend_rollups.build(store, 6 * 86400) is None
     assert not store.trends.first_play_map("track")
     assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
     assert not store.conn.in_transaction
-    monkeypatch.setattr(trend_rollups, "_calculate", calculate)
+    monkeypatch.setattr(trend_preparation, "calculate", calculate)
     assert trend_rollups.build(store, 6 * 86400)["story"] is None
 
 
@@ -109,6 +111,56 @@ def test_failed_publication_keeps_previous_index_rollup_and_review_stamp(databas
     assert store.trends.first_play_map("track") == {"song": 5}
     assert store.rec_proposals.get_proposals("trend_rollups") == {"saved": True}
     assert store.settings.get_setting("trend_spotlight_review_month") == "saved"
+    assert not store.conn.in_transaction
+
+
+@pytest.mark.parametrize('reset_after', ['reader_release', 'first_play'])
+def test_reset_cannot_interleave_final_recap_publication(database, monkeypatch, reset_after):
+    store = database
+    store.trends.refresh_first_play()
+    store.rec_proposals.put_proposals('trend_rollups', {'saved': True})
+    release = ReadSnapshot.release_reader
+    reset, blocked = [], []
+
+    def release_then_reset(snapshot):
+        release(snapshot)
+        if reset_after == 'reader_release' and snapshot.source is store and not reset:
+            store.history.reset_play_history(1)
+            reset.append(True)
+
+    monkeypatch.setattr(ReadSnapshot, 'release_reader', release_then_reset)
+    repository = store.trends.repository
+    publish = repository.publish_first_play
+
+    def publish_then_try_reset(*args, **kwargs):
+        assert not store.conn.in_transaction
+        publish(*args, **kwargs)
+        assert not store.conn.in_transaction  # Each repository commits independently.
+        if reset_after == 'first_play':
+            def competing_reset():
+                if not store._lock.acquire(blocking=False):
+                    blocked.append(True)
+                    return
+                try:
+                    store.history.reset_play_history(1)
+                    reset.append(True)
+                finally:
+                    store._lock.release()
+            contender = threading.Thread(target=competing_reset)
+            contender.start()
+            contender.join(5)
+            assert not contender.is_alive()
+
+    monkeypatch.setattr(repository, 'publish_first_play', publish_then_try_reset)
+    result = trend_rollups.build(store, 35 * 86400)
+    if reset_after == 'reader_release':
+        assert reset and result is None
+        assert not store.trends.first_play_map('track')
+        assert store.rec_proposals.get_proposals('trend_rollups') == {'saved': True}
+    else:
+        assert blocked and not reset
+        assert result is not None
+        assert store.rec_proposals.get_proposals('trend_rollups') == result
     assert not store.conn.in_transaction
 
 

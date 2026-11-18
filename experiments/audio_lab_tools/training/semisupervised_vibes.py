@@ -18,7 +18,7 @@ import sqlite3
 
 from experiments.audio_lab_tools.training import robust_vibes as robust, train_vibes as trainer
 from yt_playlist.core import audio_vibe_metadata
-from yt_playlist.rec import audio_vibe_model as model, audio_vibe_prediction as heuristic
+from experiments.audio_lab_tools.legacy import audio_vibe_model as model, audio_vibe_prediction as heuristic
 
 
 # The training-only graph is an ablation: any benefit from smoothing the known

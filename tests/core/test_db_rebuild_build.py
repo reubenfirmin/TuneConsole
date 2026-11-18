@@ -3,14 +3,13 @@
 These controlled fixtures test transaction and recovery behavior. They do not
 stand in for the production schema-64 or actual-library conversion acceptance.
 """
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import replace
 import json
 import sqlite3
 
 import pytest
 
-from tests.db_rebuild_support import production64
 from tests.store_fixture_support import native_sql_calls, reuse_reporting_reader, without_query_timing
 from yt_playlist.core.db_rebuild import build
 
@@ -133,6 +132,42 @@ def test_stage_cannot_commit_data_without_its_bookmark(conversion):
     assert build.construct(source, output, destination)['rows'] == {'choices': 11}
 
 
+def test_preparation_lease_spans_bookmark_commit_and_releases_after_failed_copy(conversion):
+    source, output, destination, _ = conversion
+    leased, completed = [], []
+    original = destination.stages[0].copy
+    fail = True
+
+    @contextmanager
+    def prepare(reader, target, cursor, limit):
+        assert not target.in_transaction
+        leased.append(cursor)
+        try:
+            yield 'file-receipt'
+        finally:
+            leased.pop()
+            # A successful copy commits its checkpoint before releasing files.
+            # A failed copy releases them during rollback unwinding.
+            if not target.in_transaction:
+                completed.append(pending(output)['cursor'])
+
+    def copy(reader, target, cursor, limit, publication):
+        nonlocal fail
+        assert leased == [cursor] and publication == 'file-receipt'
+        batch = original(reader, target, cursor, limit)
+        if fail:
+            fail = False
+            raise InterruptedError('before bookmark')
+        return batch
+
+    contract = replace(destination, stages=(build.Stage('choices', copy, prepare=prepare),))
+    with pytest.raises(InterruptedError, match='before bookmark'):
+        build.construct(source, output, contract, batch_size=3)
+    assert not leased and pending(output)['cursor'] is None
+    assert build.construct(source, output, contract, batch_size=3)['rows'] == {'choices': 11}
+    assert not leased and completed == [3, 6, 9, None]
+
+
 def test_domain_savepoint_stays_inside_the_atomic_batch(conversion):
     source, output, destination, _ = conversion
     original = destination.stages[0].copy
@@ -167,17 +202,16 @@ def test_sql_copy_resumes_exact_key_ranges_and_retains_storage_types(tmp_path, w
     before = source.read_bytes()
     statements = []
     def initialize(target):
-        target.execute(definition.replace('captures','retained').replace('name TEXT','renamed TEXT'))
-        target.execute("INSERT INTO retained VALUES('initial',NULL,NULL,NULL)")
-    mapping = {'name':'renamed','body':'body','text':'text','number':'number'}
+        target.execute(definition)
+    mapping = {name: name for name in ('name', 'body', 'text', 'number')}
     if not without_rowid:
-        mapping = {'_legacy_id':'rowid',**mapping}
+        mapping = {'_legacy_id': 'rowid', **mapping}
     def copy(reader, target, cursor, limit):
         target.set_trace_callback(statements.append)
-        return schema._copy(reader,target,cursor,limit,table='captures',destination='retained',mapping=mapping)
+        return schema._copy(reader,target,cursor,limit,table='captures',mapping=mapping)
     def verify(reader,target):
         assert target.execute('SELECT '+('' if without_rowid else 'rowid,')
-                              +'* FROM retained ORDER BY '+('renamed' if without_rowid else 'rowid')).fetchall()==expected
+                              +'* FROM captures ORDER BY '+('name' if without_rowid else 'rowid')).fetchall()==expected
     contract = build.Destination('sql-copy-v1',initialize,(build.Stage('rows',copy,batch_size=8192),),verify)
     def interrupt(phase,detail):
         if phase=='copy':
@@ -185,7 +219,7 @@ def test_sql_copy_resumes_exact_key_ranges_and_retains_storage_types(tmp_path, w
     with pytest.raises(InterruptedError,match='range committed'):
         build.construct(source,output,contract,batch_size=2,progress=interrupt)
     with closing(sqlite3.connect(output)) as target:
-        assert target.execute('SELECT count(*) FROM retained').fetchone()[0]==2
+        assert target.execute('SELECT count(*) FROM captures').fetchone()[0]==2
     build.construct(source,output,contract,batch_size=2)
     assert any('FROM rebuild_source."captures"' in statement for statement in statements)
     assert source.read_bytes()==before
@@ -217,13 +251,14 @@ def test_converter_cannot_write_through_the_attached_source(conversion):
 
 
 def test_repository_writes_and_bookmark_share_one_transaction(
-        production64, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+        conversion, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
     from tests.genre_catalog_support import bound_catalog
     from yt_playlist.core.db_rebuild import destination as schema
     from yt_playlist.core.migrations import current, regular
     from yt_playlist.core.store import Store
 
     output = tmp_path / 'repositories.db'
+    source = conversion[0]
     fail = True
     bound_catalog(monkeypatch, entries=())
     reporting = ExitStack()
@@ -262,11 +297,11 @@ def test_repository_writes_and_bookmark_share_one_transaction(
          build.Stage('preparation', prepare, repositories=True)), verify)
     with reporting:
         with pytest.raises(InterruptedError, match='before bookmark'):
-            build.construct(production64, output, contract)
+            build.construct(source, output, contract)
         assert pending(output)['cursor'] == 1
         with closing(sqlite3.connect(output)) as conn:
             assert conn.execute("SELECT value FROM settings WHERE key='repository_batch'").fetchone()[0] == '1'
-        assert build.construct(production64, output, contract)['rows']['preparation'] == 3
+        assert build.construct(source, output, contract)['rows']['preparation'] == 3
 
 
 def test_validation_failure_is_resumable_without_recopy(conversion):
@@ -329,33 +364,3 @@ def test_invalid_reference_cannot_pass_installation_validation(conversion):
     with pytest.raises(ValueError, match='foreign'):
         build.construct(source, output, replace(destination, initialize=schema))
     assert pending(output)['stage'] == 1
-
-
-def test_engine_reads_populated_released_source_without_advancing_its_history(production64, tmp_path):
-    """Exercise the engine against genuine source DDL, with a narrow domain.
-
-    This establishes source readability and ID/order preservation by the engine;
-    the final destination's full domain mappings have separate acceptance.
-    """
-    source, output = production64, tmp_path/'candidate.db'
-    before = source.read_bytes()
-    def initialize(target):
-        target.execute('CREATE TABLE queues(playlist INTEGER,account INTEGER,provider_id TEXT,'
-                       'video TEXT,position INTEGER,PRIMARY KEY(playlist,position))')
-    def copy(reader, target, cursor, limit):
-        rows = reader.execute('SELECT p.id,p.identity_id,p.ytm_playlist_id,i.video_id,i.position '
-            'FROM playlists p JOIN playlist_items i ON i.playlist_id=p.id '
-            'ORDER BY p.id,i.position LIMIT ? OFFSET ?', (limit, cursor or 0)).fetchall()
-        target.executemany('INSERT INTO queues VALUES(?,?,?,?,?)', rows)
-        return build.Batch(cursor=(cursor or 0)+len(rows), rows=len(rows), done=len(rows)<limit)
-    def verify(reader, target):
-        assert target.execute('SELECT DISTINCT playlist,account,provider_id FROM queues ORDER BY playlist').fetchall() == [
-            (41, 11, 'LM'), (73, 29, 'LM')]
-        for playlist in (41, 73):
-            assert target.execute('SELECT video FROM queues WHERE playlist=? ORDER BY position',
-                                  (playlist,)).fetchall() == [('video-19',), ('video-3',), ('video-8',)]
-        assert reader.execute('SELECT max(version) FROM schema_migrations').fetchone() == (64,)
-        assert reader.execute('SELECT id,recording_id FROM play_events').fetchall() == [(91, 8)]
-    destination = build.Destination('queue-engine-check-v1', initialize, (build.Stage('queues', copy),), verify)
-    assert build.construct(source, output, destination, batch_size=2)['rows'] == {'queues': 6}
-    assert source.read_bytes() == before

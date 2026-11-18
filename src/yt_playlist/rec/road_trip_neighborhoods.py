@@ -122,19 +122,19 @@ class ArtistNeighborhoods:
             kept.append(candidate)
         return ClusterRepair(kept, removed, changed)
 
-    def ensure_contexts(self, store, client):
+    def ensure_contexts(self, context, project, feature_axes):
         """Hydrate old drafts only in the acquisition worker, using the original seed pages."""
         for name in self.artists:
             if name not in self.contexts:
-                batch = candidates.artist_context(client, name)
-                self.remember(name, candidates.to_candidates(batch.rows, store), batch.related)
-        genre_axes = store.genres.feature_axes(self.contexts[name]['genre'] for name in self.artists)
+                batch = context(name)
+                self.remember(name, project(batch.rows), batch.related)
+        genre_axes = feature_axes(self.contexts[name]['genre'] for name in self.artists)
         for name in self.artists:
             self.contexts[name]['family'] = genre_axes.get(self.contexts[name]['genre'], ('', None))[0]
 
-    def resolve(self, pool, store, client, genre, cap):
+    def resolve(self, pool, genre, cap, *, context, project, feature_axes, songs):
         """Return a bounded seed neighborhood; None allows an independent genre acquisition."""
-        self.ensure_contexts(store, client)
+        self.ensure_contexts(context, project, feature_axes)
         contexts = self.for_genre(genre)
         if not contexts:
             if (self.artists and all(self.contexts.get(n, {}).get("genre") for n in self.artists)
@@ -142,7 +142,7 @@ class ArtistNeighborhoods:
                 return ClusterBatch(pool, [])  # an obsolete derived slider cannot broaden discovery
             return None
         genre = axes.canonical_genre(genre)
-        family = store.genres.feature_axes([genre]).get(genre, ('', None))[0]
+        family = feature_axes([genre]).get(genre, ('', None))[0]
         kept = []
         for candidate in pool:
             if candidate["source"] == "theirs" and axes.matches(candidate, "genre:" + genre):
@@ -159,9 +159,9 @@ class ArtistNeighborhoods:
         for name in names[:candidates.GENRE_ARTISTS]:
             if name in self.artists and name not in contexts:
                 continue
-            rows = [r for r in candidates.artist_songs(client, name) if r["video_id"] not in known]
+            rows = [r for r in songs(name) if r["video_id"] not in known]
             accepted = 0
-            for candidate in candidates.to_candidates(rows[:per_artist * 3], store):
+            for candidate in project(rows[:per_artist * 3]):
                 anchors = self.anchors(candidate, contexts)
                 compatible = (not candidate["genre"] or candidate["genre"] == genre
                               or (family and candidate["family"] == family))

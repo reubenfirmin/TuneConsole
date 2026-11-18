@@ -1,14 +1,3 @@
-function trackUrl(song) {
-  const video = song?.video_id || song?.videoId || song?.vid;
-  if (!video) return '';
-  const query = new URLSearchParams();
-  for (const field of ['title', 'artist', 'album', 'thumbnail', 'duration']) {
-    if (song[field] !== undefined && song[field] !== null && song[field] !== '') query.set(field, song[field]);
-  }
-  if (song.album_browse || song.album_browse_id) query.set('album_browse', song.album_browse || song.album_browse_id);
-  return '/track/' + encodeURIComponent(video) + (query.size ? '?' + query : '');
-}
-
 // Launchers carry song data only. Every view uses the same menu, dialog, and operations.
 document.addEventListener('click', event => {
   const trigger = event.target.closest('[data-song]');
@@ -40,11 +29,21 @@ function applySongMetadata(videoId, metadata) {
       }
     };
     setText('.ptitle, .gen-title, .rt-c-title, .tile-cap-title', title);
-    setText('.alink[href^="/artist?"], .gen-artist, .rt-c-artist', artist);
+    setText('.gen-artist, .rt-c-artist', artist);
     setText('.rt-c-genre', genre);
     setText('.rt-c-year', year || '');
-    for (const link of row.querySelectorAll('a[href^="/artist?"]')) {
-      link.href = '/artist?name=' + encodeURIComponent(artist);
+    for (const credit of row.querySelectorAll('[data-artist-credit]')) {
+      const links = metadata.artist_links || [];
+      const nodes = [];
+      for (const [index, value] of links.entries()) {
+        if (index) nodes.push(document.createTextNode(', '));
+        const node = document.createElement(value.href ? 'a' : 'span');
+        node.className = 'alink';
+        if (value.href) node.href = value.href;
+        node.textContent = value.name;
+        nodes.push(node);
+      }
+      credit.replaceChildren(...(nodes.length ? nodes : [document.createTextNode(artist)]));
     }
     for (const node of row.querySelectorAll('.ydisplay')) node.textContent = year || '—';
     for (const node of row.querySelectorAll('.genre-display-wrap')) {
@@ -77,11 +76,22 @@ function applySongMetadata(videoId, metadata) {
   window.dispatchEvent(new CustomEvent('song-metadata-updated', { detail: { videoId, title, artist } }));
 }
 
+function genreLookupStatus(event) {
+  // Provider diagnostics stay in logs, including warnings in successful streams.
+  if (event.type === 'err' || (event.type === 'end' && event.error))
+    return 'Genre lookup did not finish. Your changes are kept.';
+  if (event.warning || event.deferred)
+    return 'Some suggestions are not available yet. Checking the rest…';
+  if (event.type === 'done') return 'Genre lookup finished.';
+  return 'Looking up genres…';
+}
+
 function songActions() {
   // Keep DOM nodes and the originating Alpine scope outside reactive data.
   let trigger = null, owner = null, request = 0, lookupStream = null, maintenanceObserver = null;
-  let lookupTimer;
-  const stopLookup = () => { clearTimeout(lookupTimer); lookupStream?.close(); lookupStream = null; };
+  let lookupTimer, lookupController;
+  const stopStream = () => { clearTimeout(lookupTimer); lookupStream?.close(); lookupStream = null; };
+  const stopLookup = () => { stopStream(); lookupController?.abort(); lookupController = null; };
   const metadataSaves = new Map();
   const metadataEdits = new Map();
   function markMetadataEdit(videoId, pending) {
@@ -195,6 +205,13 @@ function songActions() {
       htmx.ajax('POST', '/recs/feedback', { values, target: trigger.closest('.tile'), swap: 'outerHTML' });
     },
     destroy() { request++; stopLookup(); maintenanceObserver?.disconnect(); },
+    leavePage() {
+      request++;
+      stopLookup();
+      this.closeMenu();
+      this.$refs.dialog.close();
+      this.busy = false;
+    },
     async openDialog(mode) {
       if (document.documentElement.dataset.storageCompacting === 'true') return;
       stopLookup();
@@ -251,23 +268,24 @@ function songActions() {
     async lookupGenres() {
       if (this.lookupRunning || !this.trackId) return;
       const current = request;
+      const controller = lookupController = new AbortController();
+      const active = () => current === request && lookupController === controller;
       this.lookupRunning = true; this.lookupStatus = 'Looking up genres…';
       const unavailable = () => {
+        if (!active()) return;
         stopLookup();
-        if (current === request) {
-          this.lookupRunning = false;
-          this.lookupStatus = 'Genre lookup did not finish. Your changes are kept.';
-        }
+        this.lookupRunning = false;
+        this.lookupStatus = 'Genre lookup did not finish. Your changes are kept.';
       };
       const watch = () => { clearTimeout(lookupTimer); lookupTimer = setTimeout(unavailable, 20000); };
       try {
-        const job = await this.json(`/track/${this.trackId}/genre-lookup`, {});
-        if (current !== request) return;
+        const job = await this.json(`/track/${this.trackId}/genre-lookup`, {}, controller.signal);
+        if (!active()) return;
         if (!Number.isSafeInteger(job.job_id)) throw new Error('Invalid genre lookup job');
         const stream = lookupStream = new EventSource(`/track/genre-lookup/events/${job.job_id}`);
         watch();
         stream.onmessage = async message => {
-          if (current !== request) { stream.close(); return; }
+          if (!active()) { stream.close(); return; }
           let event;
           try {
             event = JSON.parse(message.data);
@@ -277,23 +295,25 @@ function songActions() {
           watch();
           this.lookupStatus = genreLookupStatus(event);
           if (event.type !== 'end') return;
-          stopLookup();
-          if (event.error) { this.lookupRunning = false; return; }
+          stopStream();
+          if (event.error) { stopLookup(); this.lookupRunning = false; return; }
           try {
-            const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(this.song.video_id));
-            if (current === request) {
+            const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(this.song.video_id),
+              undefined, controller.signal);
+            if (active()) {
               this.genreOptions = data.genre_options;
               this.lookupStatus = data.genre_options.length ? 'Choose a suggestion or enter your own genre.' : 'No genre suggestions found.';
             }
           } catch (error) {
             console.warn('Genre suggestions could not be refreshed', error);
-            if (current === request) this.lookupStatus = 'Suggestions are not available yet. Your changes are kept.';
-          } finally { if (current === request) this.lookupRunning = false; }
+            if (active()) this.lookupStatus = 'Suggestions are not available yet. Your changes are kept.';
+          } finally { if (active()) { stopLookup(); this.lookupRunning = false; } }
         };
         stream.onerror = unavailable;
       } catch (error) {
         console.warn('Genre lookup start was not confirmed', error);
-        if (current === request) {
+        if (active()) {
+          stopLookup();
           this.lookupRunning = false;
           this.lookupStatus = 'Genre lookup was not confirmed. Your changes are kept.';
         }
@@ -316,10 +336,11 @@ function songActions() {
       }));
     },
     closeDialog() {
-      if (this.busy) return;
+      if (this.busy && this.mode !== 'metadata') return;
       request++;
       stopLookup();
       this.$refs.dialog.close();
+      this.busy = false;
       trigger?.focus();
       if (this.result && (this.context.refresh_on_save || this.result.url === location.pathname)) location.replace(location.href);
     },
@@ -344,7 +365,7 @@ function songActions() {
       const query = this.query.trim().toLocaleLowerCase();
       return this.playlists.filter(p => (p.title + ' ' + p.identity).toLocaleLowerCase().includes(query));
     },
-    async json(url, body) {
+    async json(url, body, cancellation) {
       let validation;
       const messages = {
         playlist_missing: 'Playlist no longer exists',
@@ -356,9 +377,11 @@ function songActions() {
         song_add_rejected: "YouTube couldn't add this song. Please try another song or playlist."
       };
       try {
-        const response = await fetch(url, body === undefined ? { signal: AbortSignal.timeout(20000) } : {
+        const timeout = AbortSignal.timeout(20000);
+        const signal = cancellation ? AbortSignal.any([cancellation, timeout]) : timeout;
+        const response = await fetch(url, body === undefined ? { signal } : {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-          signal: AbortSignal.timeout(20000)
+          signal
         });
         const data = await response.json();
         if (response.ok) return data;
@@ -372,7 +395,7 @@ function songActions() {
       }
     },
     saveMetadata() {
-      if (!this.metadataLoaded) return;
+      if (!this.metadataLoaded || this.busy || metadataSaves.has(this.song.video_id)) return;
       const edit = { fields: {
         song: { ...this.song }, context: { ...this.context }, metadata: { ...this.metadata },
         initialMetadata: { ...this.initialMetadata }, originals: { ...this.originals },
@@ -381,15 +404,20 @@ function songActions() {
       const changes = Object.fromEntries(Object.entries(edit.fields.metadata)
         .filter(([field, value]) => value !== edit.fields.initialMetadata[field]));
       const videoId = edit.fields.song.video_id;
-      this.closeDialog();
+      const current = ++request;
+      stopLookup();
+      this.lookupRunning = false;
+      this.busy = true; this.error = '';
       const save = async () => {
         try {
           await this.json('/songs/metadata', { song: edit.fields.song, ...changes });
           const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(videoId));
-          if (data.metadata) applySongMetadata(videoId, data.metadata);
+          if (!data.metadata) throw new Error('Saved metadata could not be read');
           metadataEdits.delete(videoId);
           if (this.song.video_id === videoId) this.metadataPending = false;
           markMetadataEdit(videoId, false);
+          if (current === request) this.closeDialog();
+          applySongMetadata(videoId, data.metadata);
         } catch (error) {
           // Keep this song's edits without taking over another song's form.
           // Its existing Edit Metadata control restores the draft on demand.
@@ -397,8 +425,11 @@ function songActions() {
           metadataEdits.set(videoId, edit);
           if (this.song.video_id === videoId) this.metadataPending = true;
           markMetadataEdit(videoId, true);
+          if (current === request)
+            this.error = 'This edit was not confirmed. Review your changes before saving again.';
         } finally {
           metadataSaves.delete(videoId);
+          if (current === request) this.busy = false;
         }
       };
       metadataSaves.set(videoId, save());
@@ -406,16 +437,25 @@ function songActions() {
     async submit() {
       if (this.busy || this.loading || this.result) return;
       if (this.mode === 'metadata') { this.saveMetadata(); return; }
+      const current = request;
+      const song = { ...this.song };
+      const creating = this.mode === 'create';
+      const body = creating ? { song, name: this.name.trim() } : { song, playlist_id: Number(this.selected) };
       this.busy = true; this.error = '';
       try {
-        this.result = await this.json('/songs/' + (this.mode === 'create' ? 'create-playlist' : 'add-to-playlist'), {
-          song: this.song, ...(this.mode === 'create' ? { name: this.name.trim() } : { playlist_id: Number(this.selected) })
-        });
-        this.focusDialog('resultLink');
+        const result = await this.json(creating ? '/songs/create-playlist' : '/songs/add-to-playlist', body);
+        if (current === request) {
+          this.result = result;
+          this.focusDialog('resultLink');
+        }
+        // Search still needs the confirmed membership if the original dialog has closed.
+        if (result.added !== false && result.status !== 'partial') {
+          window.dispatchEvent(new CustomEvent('song-playlist-updated', {detail: song}));
+        }
       } catch (error) {
-        this.error = error.message || 'Couldn’t save this song. Please try again.';
+        if (current === request) this.error = error.message || 'Couldn’t save this song. Please try again.';
       } finally {
-        this.busy = false;
+        if (current === request) this.busy = false;
       }
     }
   };

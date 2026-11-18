@@ -7,11 +7,12 @@ from yt_playlist.core import (
     collection_recovery_epoch, credit_retention, embedding_files, group_checkpoint_retention, group_progress, group_retention_progress,
     group_preview_work, home_revisit_progress, legacy_journals, metadata_native, metadata_runtime, mix_choices,
     mode_retention, policy_history, profile_files, recommendation_revalidations, served_facts, vibe_provenance,
-    vibe_versions, tv_launch_state,
+    vibe_versions, tv_launch_state, song_library,
 )
 from yt_playlist.core.migrations import current, migrate, regular
-from yt_playlist.core.preparation import installed_genre_contract
-from yt_playlist.repos import vibe_models
+from yt_playlist.core import genre_schema as installed_genre_contract
+from yt_playlist.repos import metadata_file_writes, delivery_file_writes, evidence_file_writes, impression_file_writes
+from yt_playlist.repos import action_backup_writes, annotation_file_writes, collection_file_writes, description_file_writes, embedding_file_writes, group_file_writes, playlist_backups, policy_file_writes, policy_history_files, profile_file_writes, provenance_file_writes, recommendation_file_writes, vibe_model_file_writes, vibe_models
 
 
 CHANGE_NAMES = (
@@ -40,6 +41,25 @@ CHANGE_NAMES = (
     'resumable_recording_associations',
     'durable_home_revisit_progress',
     'durable_adaptive_preview_pages',
+    'native_song_library_and_starter_picks',
+    'record_owned_audio_sample_files',
+    'record_owned_collection_documents',
+    'record_owned_recommendation_files',
+    'record_owned_action_backups',
+    'record_owned_annotation_files',
+    'record_owned_playlist_captures',
+    'record_owned_policy_files',
+    'record_owned_policy_history',
+    'record_owned_embedding_files',
+    'record_owned_group_files',
+    'record_owned_profile_files',
+    'record_owned_vibe_model_files',
+    'record_owned_prediction_provenance',
+    'record_owned_paid_description_files',
+    'record_owned_runtime_metadata',
+    'record_owned_metadata_deliveries',
+    'record_owned_listening_evidence',
+    'pending_served_diagnostic_files',
 )
 
 
@@ -57,6 +77,8 @@ def register_independent_ddl(monkeypatch, conn):
     )
     assert not conn.execute(
         "SELECT 1 FROM main.sqlite_schema WHERE name='independent_preparation_ddl'").fetchone()
+    from tests.release_schema_support import future_schema
+    future_schema(monkeypatch, change.name, 'CREATE TABLE independent_preparation_ddl (id INTEGER)')
     monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, change))
     return change
 
@@ -64,106 +86,3 @@ def register_independent_ddl(monkeypatch, conn):
 def captured(conn):
     return {name: sorted((tuple(row) for row in conn.execute('SELECT * FROM "'+name+'"')), key=repr)
             for name, in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
-
-
-def admit_regular_schema(store, *, clock=1234):
-    return admit_regular_connection(store.conn, clock=clock)
-
-
-def admit_regular_connection(conn, *, clock=1234):
-    """Preserve every original owner, allowing only named DDL and seed rows.
-
-    Read the domain declarations, not the runner's apply callbacks. Unknown
-    registry entries, tables, changed programs, data or histories fail here.
-    These fixtures have no unfinished preparation capture to retire.
-    """
-    expected = regular_expectation(conn, clock=clock)
-    compatibility = migrate(conn, clock=lambda: clock)
-    assert compatibility == expected['compatibility']
-    assert_regular_expectation(conn, expected)
-    return captured(conn)
-
-
-def regular_expectation(conn, *, clock=1234):
-    """Capture the independent row/DDL oracle before the actual runner starts."""
-    before = captured(conn)
-    assert 'schema_changes' not in before
-    assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES
-    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 38))
-    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (103, 107)
-    definitions = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
-    allowed = {'schema_changes': regular.HISTORY_SQL,
-               'metadata_native_delivery_heads': metadata_native.RUNTIME_HEAD_SQL,
-               'prediction_provenance': vibe_provenance.SQL,
-               'recording_association_work': association_work.SQL,
-               'home_revisit_progress': home_revisit_progress.SQL,
-               'album_feedback_response_outbox': album_feedback_outbox.SQL,
-               'ix_album_feedback_response_pending': album_feedback_outbox.INDEX}
-    for declarations in (
-        group_progress.definitions(conn), group_retention_progress.definitions(conn),
-        installed_genre_contract.definitions(conn), metadata_runtime.definitions(),
-        served_facts.definitions(), mix_choices.definitions(), vibe_provenance.guards(),
-        profile_files.definitions(), embedding_files.definitions(),
-        vibe_provenance.lifecycle_sql(), policy_history.definitions(),
-        vibe_versions.definitions(), policy_history.capture_guards(),
-        embedding_files.legacy_order_definitions(),
-        group_checkpoint_retention.definitions(conn),
-        collection_recovery_epoch.definitions(conn),
-        collection_recovery_epoch.key_definitions(conn),
-        recommendation_revalidations.definitions(),
-        vibe_models.schema(conn),
-        embedding_files.bounded_basis_guards(),
-        tv_launch_state.definitions(conn),
-        vibe_models.metadata_guards(conn),
-    ):
-        allowed.update(declarations)
-    for sql in (*credit_retention.statements(), *mode_retention.statements(),
-                *vibe_provenance.allocation_sql(), legacy_journals.SQL, legacy_journals.CUTOVER_SQL):
-        allowed[sql.split()[2]] = sql
-
-    # Preview guards cover consumed owners created by earlier pending changes
-    # too. Project their declared empty tables without running apply callbacks
-    # or copying any installed data into this independent oracle.
-    with closing(sqlite3.connect(':memory:')) as projected:
-        for name, sql in {**definitions, **allowed}.items():
-            if not name.startswith('sqlite_') and sql.startswith('CREATE TABLE'):
-                projected.execute(sql)
-        allowed.update(group_preview_work.definitions(projected))
-
-    # New owners, including changes 29-31, start empty. Existing owners retain
-    # their complete captured contents; joint-vibe guards do not seed settings.
-    additions = {name: [] for name, sql in allowed.items()
-                 if sql.startswith('CREATE TABLE') and name not in before}
-    additions.update({
-        'recording_association_work': [],
-        'schema_changes': sorted(((version, name, float(clock))
-                                  for version, name in enumerate(CHANGE_NAMES, 1)), key=repr),
-        'group_preparation_progress': [tuple(row) for row in conn.execute(
-            'SELECT singleton,phase,reported_at,reason FROM group_preparation_state')],
-        # Change 26 adds checkpoint custody guards and invalidates the old
-        # retirement closure once, without scanning or rewriting its members.
-        'group_retention_epoch': [(1, 1)],
-        'collection_recovery_epoch': [(1, 0)],
-        'metadata_runtime_state': [(1, 0, 0, 0, 0)],
-        'served_fact_state': [(1, 0, 1)],
-        'artist_credit_retention': [(1, 0, 0, 0, 0)],
-        'taste_mode_retention': [(1, 0, 0, max((row[0] for row in before['taste_modes']), default=0), 0)],
-        'prediction_id_state': [(1, max((row[0] for row in before['predictions']), default=0))],
-    })
-    return {'rows': {**before, **additions}, 'definitions': {**definitions, **allowed},
-            'compatibility': len(before['schema_migrations']) < current.VERSION}
-
-
-def assert_regular_expectation(conn, expected):
-    """Compare actual committed output with the separately captured oracle."""
-    rows = expected['rows']
-    actual_rows = captured(conn)
-    changed = {name: (rows.get(name), actual_rows.get(name))
-               for name in rows.keys() | actual_rows.keys()
-               if rows.get(name) != actual_rows.get(name)}
-    assert not changed, changed
-    actual = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
-    assert {name: current._tokens(sql) for name, sql in actual.items()} == {
-        name: current._tokens(sql) for name, sql in expected['definitions'].items()}
-    assert regular.validate(conn) == len(CHANGE_NAMES)
-    return captured(conn)

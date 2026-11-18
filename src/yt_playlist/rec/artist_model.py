@@ -17,9 +17,13 @@ def artist_baskets(store):
     decade) to distinct-artist sets, so two artists relate when their tracks repeatedly co-occur.
     Baskets that collapse to a single artist (the per-artist basket, or a one-artist playlist) are
     dropped: they would only self-relate an artist. Returns a list of distinct normalized-artist lists."""
-    out = []
     refs = store.artists.track_keys(library=True)
-    for basket in store.rec_evidence.rec_baskets():
+    return artist_baskets_from_tracks(store.rec_evidence.rec_baskets(), refs)
+
+
+def artist_baskets_from_tracks(baskets, refs):
+    out = []
+    for basket in baskets:
         artists = {a for k in basket for a in refs.get(k,())}
         artists.discard("")
         if len(artists) >= 2:
@@ -31,7 +35,10 @@ def build_collab_artist_vectors(store, dim=training.DIM):
     """(artists, V): L2-normalized collaborative artist vectors from PPMI + truncated SVD over the
     artist baskets (reusing training.svd, already generic over baskets of tokens). Empty when there's
     too little co-curation to model (fewer artists than the SVD needs)."""
-    baskets = artist_baskets(store)
+    return fit_artist_baskets(artist_baskets(store), dim)
+
+
+def fit_artist_baskets(baskets, dim=training.DIM):
     artists = sorted({a for b in baskets for a in b})
     if len(artists) < dim + training.MIN_VOCAB_MARGIN:
         return [], np.zeros((0, dim), dtype=np.float32)
@@ -48,15 +55,18 @@ def artist_content_profiles(store):
     """{normalized_artist: profile} aggregated over the artist's library tracks. profile =
     {'families': set, 'subs': set, 'decades': set, 'audio': {feat: mean}}. Grouped by the identity_key
     artist (already normalized), so it shares the §A vocabulary. The artist analogue of track_content."""
-    dao = store.rec_query
-    prof: dict = {}
     refs = store.artists.track_keys(library=True)
+    content = store.rec_query.track_content()
+    axes = store.genres.feature_axes({genre for genre, _year in content.values()})
+    return profiles_from_tracks(content, store.rec_query.track_audio_features(), refs, axes)
+
+
+def profiles_from_tracks(content, audio, refs, axes):
+    prof: dict = {}
 
     def _p(artist):
         return prof.setdefault(artist, {"families": set(), "subs": set(), "decades": set(), "audio": {}})
 
-    content = dao.track_content()
-    axes = store.genres.feature_axes({genre for genre, _year in content.values()})
     for k, (genre, year) in content.items():
         for artist in refs.get(k,()):
             p = _p(artist)
@@ -69,7 +79,7 @@ def artist_content_profiles(store):
                 p["decades"].add(int(str(year)[:4]) // 10 * 10)
 
     accum: dict = {}   # artist -> {feat: [sum, count]}, for the per-artist audio mean
-    for k, d in dao.track_audio_features().items():
+    for k, d in audio.items():
         for artist in refs.get(k,()):
             ac = accum.setdefault(artist, {})
             for f in content_model.CONTINUOUS_AUDIO:
@@ -133,11 +143,17 @@ def encode_artist_content(model, profile):
 def _discovered_artist_profiles(store):
     """Genre-only content profiles for the out-of-corpus discovered-artist pool (from each entry's
     `genre` field), so OOC artists encode into the SAME artist-content space and become placeable."""
-    out = {}
     discovered = store.discovery.get_discovered_artists()
     axes = store.genres.feature_axes({a.get('genre') for a in discovered})
+    artists = {a.get('artist_id') or a.get('artist'): store.artists.key(a.get('artist_id') or a.get('artist'))
+               for a in discovered}
+    return discovered_profiles_from_inputs(discovered, axes, artists)
+
+
+def discovered_profiles_from_inputs(discovered, axes, artists):
+    out = {}
     for a in discovered:
-        artist, genre = store.artists.key(a.get('artist_id') or a.get('artist')), a.get("genre")
+        artist, genre = artists.get(a.get('artist_id') or a.get('artist')), a.get('genre')
         if artist and genre:
             family, sub = axes[genre]
             out[artist] = {"families": {family}, "subs": {sub} if sub else set(), "decades": set(), "audio": {}}
@@ -165,26 +181,33 @@ def _blended_set_scores(store, seeds):
     seeds = set(seeds)
     w = float(rec_params.get_param(store, "artist_content_weight"))
     artists, V, idx = load_artist_vectors(store)
+    content = load_artist_content_vectors(store) if w > 0. else ([], None, {})
+    w_edge = float(rec_params.get_param(store, "artist_edge_weight"))
+    edges = [(store.artists.key(name), match) for seed in seeds
+             for name, match in store.artist_similarity.artist_similar_edges(seed)] if w_edge > 0. else []
+    return blended_scores_from_inputs(seeds, (artists, V, idx), content, edges,
+        content_weight=w, edge_weight=w_edge)
+
+
+def blended_scores_from_inputs(seeds, collaborative, content, edges, *, content_weight, edge_weight):
+    artists, V, idx = collaborative
     collab_s = {}
     si = [idx[a] for a in seeds if V is not None and a in idx]
     if si:
         sims = V @ vector_math.normalize(V[si].mean(0))
         collab_s = {artists[i]: float(sims[i]) for i in range(len(artists))}
     content_s = {}
-    if w > 0.0:
-        cart, CV, cidx = load_artist_content_vectors(store)
+    if content_weight > 0.0:
+        cart, CV, cidx = content
         ci = [cidx[a] for a in seeds if CV is not None and a in cidx]
         if ci:
             csims = CV @ vector_math.normalize(CV[ci].mean(0))
             content_s = {cart[i]: float(csims[i]) for i in range(len(cart))}
-    blended = vector_math.blend_spaces(collab_s, content_s, w)
-    w_edge = float(rec_params.get_param(store, "artist_edge_weight"))
-    if w_edge > 0.0:
-        for seed in seeds:
-            for name, match in store.artist_similarity.artist_similar_edges(seed):
-                cand = store.artists.key(name)
-                if cand and cand not in seeds:
-                    blended[cand] = blended.get(cand, 0.0) + w_edge * float(match)
+    blended = vector_math.blend_spaces(collab_s, content_s, content_weight)
+    if edge_weight > 0.0:
+        for cand, match in edges:
+            if cand and cand not in seeds:
+                blended[cand] = blended.get(cand, 0.0) + edge_weight * float(match)
     return blended
 
 

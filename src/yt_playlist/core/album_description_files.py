@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 
 from .evidence_ledger import canonical
+from .description_paths import record_id, record_path
 from . import fao
 
 FORMAT = 'album-description-1'
@@ -58,10 +59,23 @@ def _existing(path, *, with_age=False):
     return (encoded, age) if with_age else encoded
 
 
+def describe(raw):
+    encoded = document(raw)
+    return hashlib.sha256(encoded).hexdigest(), len(encoded)
+
+
+def publish_reserved(root, identity, raw, *, age=None):
+    encoded = document(raw)
+    path = record_path(root, identity)
+    with fao.prepare(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES)) as prepared:
+        prepared.publish()
+    return str(path), hashlib.sha256(encoded).hexdigest(), len(encoded)
+
+
 def read(filename, digest, *, with_age=False):
     encoded, age = _existing(filename, with_age=True)
     if (len(encoded) > MAX_BYTES or hashlib.sha256(encoded).hexdigest() != digest
-            or Path(filename).stem != digest):
+            or (record_id(filename) is None and Path(filename).stem != digest)):
         raise ValueError('Album description file does not match its digest')
     value = json.loads(encoded)
     if (not isinstance(value, dict) or set(value) != {'format', 'record_json'}
@@ -88,7 +102,9 @@ def export(conn, root):
     entries, chunks = [], []
     for owner, key, filename, digest in _references(conn):
         value, age = read(filename, digest, with_age=True)
-        target, copied, _size = publish(root, value, age=age)
+        identity = record_id(filename)
+        target, copied, _size = (publish(root, value, age=age) if identity is None
+                                else publish_reserved(root, identity, value, age=age))
         if copied != digest:
             raise ValueError('Paid description backup changed original evidence')
         entries.append({'owner': owner, 'key': key, 'digest': digest,
@@ -132,10 +148,15 @@ def restore(conn, manifest, *, memory_key=None):
         for entry in chunk['entries']:
             if (not isinstance(entry, dict) or set(entry) != {'owner', 'key', 'digest', 'relative_filename'}
                     or entry['owner'] not in OWNERS or not isinstance(entry['key'], list)
+                    or not isinstance(entry['relative_filename'], str)
                     or len(entry['key']) != len(OWNERS[entry['owner']][0])):
                 raise ValueError('Invalid paid description backup entry')
             digest = _digest(entry['digest'])
-            if entry['relative_filename'] != str(Path(digest[:2]) / (digest + '.json')):
+            relative = Path(entry['relative_filename'])
+            identity = record_id(relative)
+            expected_path = (Path(digest[:2]) / (digest + '.json') if identity is None
+                             else record_path(Path(), identity))
+            if relative != expected_path:
                 raise ValueError('Invalid paid description backup path')
             identity = (entry['owner'], _key(entry['owner'], entry['key']))
             if identity in entries:
@@ -145,13 +166,18 @@ def restore(conn, manifest, *, memory_key=None):
         raise ValueError('Paid description restore requires its own writer reservation')
     conn.execute('BEGIN IMMEDIATE')
     try:
-        expected = {(owner, key): digest for owner, key, _filename, digest in _references(conn)}
-        if expected != {identity: entry['digest'] for identity, entry in entries.items()}:
+        expected = {(owner, key): (digest, record_id(filename))
+                    for owner, key, filename, digest in _references(conn)}
+        if expected != {identity: (entry['digest'], record_id(entry['relative_filename']))
+                        for identity, entry in entries.items()}:
             raise ValueError('Paid description backup does not match the restored database')
         targets = []
         for (owner, key), entry in entries.items():
             value, age = read(root / entry['relative_filename'], entry['digest'], with_age=True)
-            filename, copied, _size = publish(directory(conn, memory_key), value, age=age)
+            identity = record_id(entry['relative_filename'])
+            target = directory(conn, memory_key)
+            filename, copied, _size = (publish(target, value, age=age) if identity is None
+                                      else publish_reserved(target, identity, value, age=age))
             if copied != entry['digest']:
                 raise ValueError('Paid description restore changed original evidence')
             targets.append((owner, key, filename))

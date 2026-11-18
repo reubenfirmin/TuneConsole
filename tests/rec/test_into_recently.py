@@ -1,8 +1,25 @@
 from yt_playlist.rec import into_recently
+from yt_playlist.controllers.story_preparation import StoryPreparation
 from types import SimpleNamespace
 from unittest.mock import Mock
 from yt_playlist.web import theme
 from yt_playlist.util import genre_map
+
+
+def test_captured_story_taxonomy_preserves_installed_identity_family_and_label_rules(monkeypatch):
+    from yt_playlist.core import fao
+    from yt_playlist.util import genre_catalog
+    taxonomy = into_recently.capture_taxonomy()
+    _, labels = genre_catalog.catalog()
+    expected = {name: (genre_catalog.canonical_name(name), genre_map.family(name)) for name in labels}
+    family_names = set(genre_map.all_families()) | {name.lower() for name in genre_catalog.family_labels().values()}
+    def forbid_read(*args, **kwargs):
+        raise AssertionError('Captured taxonomy reopened an installed file')
+    monkeypatch.setattr(fao, 'read', forbid_read)
+    assert taxonomy.family_names == family_names
+    for name, (canonical, family) in expected.items():
+        assert taxonomy.canonical_name(name) == canonical
+        assert taxonomy.family(name) == family
 
 
 class FakeWiki:
@@ -227,7 +244,9 @@ def test_story_connections_follow_specific_equivalent_genres_and_recent_rank():
     store = SimpleNamespace(charts=SimpleNamespace(story_activity=lambda since: {'recordings': recordings}),
                             wiki=SimpleNamespace(get=lambda subject: None))
 
-    groups = into_recently._connected_subjects(store, subjects)
+    groups = StoryPreparation(charts=store.charts, genres=None, wiki=store.wiki,
+        proposals=None, ledger=None, leans=None,
+        taxonomy=into_recently.capture_taxonomy()).connected(subjects)
     assert [[s['display'] for s in group] for group in groups] == [
         ['minimal', 'Minimal artist', 'Second minimal artist'], ['Acid artist'],
         ['Third minimal artist'], ['shoegaze'], ['idm', 'IDM artist']]

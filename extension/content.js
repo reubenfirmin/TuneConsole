@@ -7,7 +7,7 @@
 (() => {
   const SENSOR_VERSION = 4;
   const MIN_SENSOR_REVISION = 8;
-  const RECEIVER_REVISION = 15;
+  const RECEIVER_REVISION = 16;
   const previous = window.__tcBridgeLoaded;
   if (Number.isSafeInteger(previous?.revision) && previous.revision >= RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
@@ -575,7 +575,7 @@
         type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
         metadataVerified: np.metadataVerified === true,
         videoVerified: np.videoVerified === true,
-        likeStatus, videoId: vid, playlist: lst, albumBrowseId, position, duration, paused: !!np.paused,
+        likeStatus, videoId: vid, playlist: lst, queueItem: np.queueItem, albumBrowseId, position, duration, paused: !!np.paused,
         muted: !!np.muted, brandKnown: !!np.brandKnown, brandId: np.brandId || "",
       }); } catch (e) {}
       return;
@@ -586,7 +586,7 @@
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
       metadataVerified: np.metadataVerified === true,
       videoVerified: np.videoVerified === true,
-      likeStatus, videoId: vid, playlist: lst, albumBrowseId, position, duration,
+      likeStatus, videoId: vid, playlist: lst, queueItem: np.queueItem, albumBrowseId, position, duration,
       brandId: np.brandId || "", brandKnown: true,
       paused: !!np.paused, muted: !!np.muted, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
@@ -679,8 +679,12 @@
         try { albumBrowseId = decodeURIComponent(new URL(albumLink.href, location.href).pathname.split("/browse/")[1] || ""); } catch (e) {}
       }
       // Keep the actual queue through MAIN-world throttling only when the DOM confirms its song.
+      let queueItem;
       if (videoId && lastMain && lastMain.videoId === videoId && lastAccount &&
-          lastMain.brandKnown && lastMain.brandId === lastAccount.brandId) playlist = lastMain.playlist || "";
+          lastMain.brandKnown && lastMain.brandId === lastAccount.brandId) {
+        playlist = lastMain.playlist || "";
+        if (lastMainAt !== null && Date.now() - lastMainAt <= 10000) queueItem = lastMain.queueItem;
+      }
       return {
         title: t.textContent.trim(),
         // Matching DOM fields describe the bar, not proof that its bindings describe the player.
@@ -688,7 +692,7 @@
         metadataVerified: false,
         artist: b ? b.textContent.trim().split("•")[0].trim() : "",
         thumbnail: img ? img.src : "",
-        videoId, playlist, likeStatus: videoId ? readLikeStatus() : "", albumBrowseId,
+        videoId, playlist, queueItem, likeStatus: videoId ? readLikeStatus() : "", albumBrowseId,
         // Only MAIN can read the per-song player clock. A media stream may span songs.
         position: null,
         duration: null,

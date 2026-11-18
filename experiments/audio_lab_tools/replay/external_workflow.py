@@ -26,11 +26,11 @@ def runtime_hashes():
 
 def evaluate(database, *, capture_seconds=120):
     from experiments.investigations.bench_musical_character import test_saved_catalog_musical_character_audit
-    from yt_playlist.rec import audio_vibe_model
+    from experiments.audio_lab_tools.legacy import audio_vibe_model
 
     before = runtime_hashes()
     target = RUN / ('listening-workflow-' + stamp().replace(':', '').replace('+', '_'))
-    model = ROOT / 'src/yt_playlist/rec/data/emotify-vibes.json'
+    model = ROOT / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json'
     frozen_model = RUN / ('workflow-comparator-' + digest(model)[:12] + '.json')
     if not frozen_model.exists():
         shutil.copyfile(model, frozen_model)

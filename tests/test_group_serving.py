@@ -128,28 +128,36 @@ def pools(store, tracks, *, one_album=False):
     publish_bundles(store, {'all': {'wheelhouse': pool, 'fresh': pool}})
 
 
-def test_full_mix_requires_twelve_actual_diverse_eligible_members(store):
+def test_full_mix_fills_a_scarce_album_pool_and_prefers_diverse_members(store):
     tracks = recordings([('House', 20, .4)])
     head = publish(store, tracks)
     pools(store, tracks, one_album=True)
     first = group_serving.calculate(store, head, 1100)
-    assert not first['groups'][0]['frames']['wheelhouse']['full_mix']
-    assert first['groups'][0]['frames']['wheelhouse']['eligible'] == 2
+    scarce = first['groups'][0]['frames']['wheelhouse']
+    # The soft caps from #1248 prefer variety but still fill a scarce pool.
+    assert scarce['full_mix'] and scarce['eligible'] == 12
+    assert len({item['key'] for item in scarce['tracks']}) == 12
     pools(store, tracks)
     second = group_serving.calculate(store, head, 1100)
     mix = second['groups'][0]['frames']['wheelhouse']
     assert mix['full_mix'] and len(mix['tracks']) == 12
     assert {item['key'] for item in mix['tracks']} <= set(head['groups'][0]['members'])
+    albums = {item['key']: item['album'] for item in catalog_inputs(tracks)}
+    from collections import Counter
+    assert max(Counter(albums[item['key']] for item in mix['tracks']).values()) == 2
 
 
-def test_minority_album_is_represented_even_when_it_cannot_fill_a_mix(store):
+def test_minority_album_fills_its_mix_without_unrelated_backfill(store):
     tracks = recordings([('Death Metal', 80, .9), ('Pop', 12, .2)])
     head = publish(store, tracks)
     pools(store, tracks, one_album=True)
     preview = group_serving.calculate(store, head, 1100)
     pop = next(group for group in preview['groups'] if group['name'] == 'Pop')
     assert pop['size'] == 12
-    assert not pop['frames']['wheelhouse']['full_mix']
+    assert pop['frames']['wheelhouse']['full_mix']
+    assert len({item['key'] for item in pop['frames']['wheelhouse']['tracks']}) == 12
+    assert {item['key'] for item in pop['frames']['wheelhouse']['tracks']} <= set(
+        next(group for group in head['groups'] if group['name'] == 'Pop')['members'])
     assert pop['frames']['wheelhouse']['fallback_version'] is None  # No unrelated global-root backfill.
 
 

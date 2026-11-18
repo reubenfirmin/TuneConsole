@@ -6,7 +6,9 @@ import re
 import pytest
 
 from yt_playlist.web.app import create_app
-from yt_playlist.web.routes.charts import _build_ticker, _ticker_periods
+from yt_playlist.rec.ticker import periods as _ticker_periods
+from yt_playlist.controllers.analytics_queries import AnalyticsQueries
+from yt_playlist.web.analytics_views import ticker
 
 
 def _seed(store):
@@ -121,7 +123,7 @@ def test_same_title_playlists_keep_counts_history_artwork_and_navigation(store, 
     assert store.charts.listen_distribution('playlist', until=NOW - 7 * 86400) == {old_key: 1}
 
     periods, _, _ = _ticker_periods(NOW - 21 * 86400, NOW, 7)
-    rows = {r['cat']: r for r in _build_ticker(store, 'playlist', periods)['rows']}
+    rows = {r['cat']: r for r in ticker(AnalyticsQueries.ticker(store, 'playlist', periods), 'playlist')['rows']}
     assert set(rows) == {old_key, recent_key}
     assert (rows[old_key]['open'], rows[old_key]['close']) == (1, 0)
     assert (rows[recent_key]['open'], rows[recent_key]['close']) == (0, 1)

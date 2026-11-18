@@ -34,6 +34,7 @@ FOLLOWUP_CHECKS = [
 
 def snapshot(db, output):
     from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
+    from yt_playlist.controllers.vibe_predictions import overlay_profiles
 
     counts, versions, cases = Counter(), Counter(), {}
     with closing(connect(db)) as conn:
@@ -45,7 +46,7 @@ def snapshot(db, output):
         for row in conn.execute('''SELECT p.identity_key,p.payload,r.title,r.artist
                 FROM rec_musical_profiles p JOIN recordings r ON r.identity_key=p.identity_key ORDER BY r.id'''):
             profile = json.loads(profile_files.read(conn, 'recording', row['identity_key']))
-            overlay.overlay({row['identity_key']: profile})
+            overlay_profiles({row['identity_key']: profile}, overlay.overlay_rows([row['identity_key']]))
             counts['profiles'] += 1
             versions[profile['version']] += 1
             flags = {f"vibe:{fit['source']}" for fit in profile.get('vibes', {}).get('fits', {}).values()}

@@ -88,7 +88,7 @@ def test_new_reader_detects_replacement_with_same_schema_version(tmp_path):
         store.conn.close()
 
 
-@pytest.mark.parametrize('version', [79, 94, 107])
+@pytest.mark.parametrize('version', [107])
 def test_supported_installed_layouts_keep_private_read_projections(
         tmp_path, _pristine_installed_schema, version):
     database = tmp_path / f'installed-{version}.db'

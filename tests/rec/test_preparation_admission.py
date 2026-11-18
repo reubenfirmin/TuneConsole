@@ -5,7 +5,8 @@ import pytest
 
 from tests.test_mode_refresh_worker import scheduled
 from yt_playlist.core import playback_feedback
-from yt_playlist.rec import candidate_refresh, mode_surfaces, rec_worker
+from yt_playlist.rec import candidate_refresh, rec_worker
+from yt_playlist.library import mode_composition
 from yt_playlist.rec.worker_queue import Job
 
 
@@ -42,7 +43,8 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
     monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append(('ratings', clock[0])) or set())
     monkeypatch.setattr(worker, '_do_rebuild', lambda: None)
     monkeypatch.setattr(worker, 'trigger_home_refresh', lambda: None)
-    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', pools)
+    monkeypatch.setattr(mode_composition, 'preparation', lambda owner:
+        SimpleNamespace(prepare=pools))
     monkeypatch.setattr(playback_feedback, 'try_drain', lambda *args: False)
     for name in ('_poll_evidence_storage', '_poll_retention', '_retry_home',
                  '_poll_choices', '_retry_measurements', '_poll_tv'):

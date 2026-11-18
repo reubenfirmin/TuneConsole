@@ -7,7 +7,6 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.genres import Genres
 from yt_playlist.repos.genres import GenreRepo
-from yt_playlist.controllers.discovery import Discovery
 from yt_playlist.util import genre_catalog
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -27,53 +26,14 @@ def genres(monkeypatch):
     repository = create_autospec(GenreRepo, instance=True, spec_set=True)
     repository.transaction.side_effect = nullcontext
     repository.uses_keyed_preferences.return_value = True
-    repository.current_key.side_effect = lambda key: key
     repository.label_matches.side_effect = lambda label, normalized: {normalized}
     repository.axis_matches.side_effect = lambda labels: {
         label: {normalized: None} for label, normalized in labels}
     repository.genre_name.return_value = None
-    repository.alias_conflicts.return_value = False
     repository.get_genre_whitelist.return_value = ['Jazz', 'Custom']
     repository.configuration_settings.return_value = {'genres_seeded': '1', 'genre_catalog_revision': 'old',
                                                      'genre_defaults': json.dumps(['Rock', 'Jazz'])}
-    return Genres(repository, create_autospec(Discovery, instance=True, spec_set=True).merge_genre_origins)
-
-
-@pytest.mark.parametrize('name', [None, '', '  ', 'é' * 513])
-def test_invalid_rename_does_not_start_a_write(genres, name):
-    with pytest.raises(ValueError, match='nonblank text'):
-        genres.rename_genre('rock', name)
-    genres.repository.transaction.assert_not_called()
-
-
-def test_rename_preserves_original_alias_and_invalidates_after_write(genres):
-    genres.repository.genre_name.return_value = 'Original Name'
-    genres.repository.label_matches.side_effect = None
-    genres.repository.label_matches.return_value = {'rock'}
-    genres.rename_genre('rock', 'New Name')
-    genres.repository.rename.assert_called_once_with('rock', 'New Name', old_label_key='original name',
-                                                     old_label='Original Name')
-    genres.repository.invalidate.assert_called_once_with()
-
-
-@pytest.mark.parametrize('resolution', [{'another'}, {'rock', 'another'}])
-def test_rename_cannot_capture_another_identity_or_ambiguous_name(genres, resolution):
-    genres.repository.genre_name.return_value = 'Original'
-    genres.repository.label_matches.side_effect = None
-    genres.repository.label_matches.return_value = resolution
-    with pytest.raises(ValueError, match='conflicts'):
-        genres.rename_genre('rock', 'Taken')
-    genres.repository.rename.assert_not_called()
-    genres.repository.invalidate.assert_not_called()
-
-
-def test_alias_conflict_cannot_change_identity_or_invalidate(genres):
-    genres.repository.genre_name.return_value = 'Rock'
-    genres.repository.alias_conflicts.return_value = True
-    with pytest.raises(ValueError, match='Alias conflicts'):
-        genres.set_genre_alias('Other', 'rock')
-    genres.repository.save_alias.assert_not_called()
-    genres.repository.invalidate.assert_not_called()
+    return Genres(repository)
 
 
 def test_custom_addition_resolves_before_admitting_a_new_identity(genres):
@@ -204,69 +164,3 @@ def test_model_axes_reject_ambiguity_and_use_catalog_family_changes(genres, monk
     fallback.assert_called_once_with('Rock')
     genres.repository.axis_matches.assert_called_once_with(
         [('Alias', 'alias'), ('Ambiguous', 'ambiguous'), ('Custom', 'custom'), ('Rock', 'rock')])
-
-
-@pytest.mark.parametrize('preferences,expected', [
-    ([], None),
-    ([{'enabled': 0, 'origin': 'default'}, {'enabled': 1, 'origin': 'user'}], (1, 'user')),
-    ([{'enabled': 1, 'origin': 'user'}, {'enabled': 0, 'origin': 'custom'}], (0, 'user')),
-    ([{'enabled': 1, 'origin': 'default'}, {'enabled': 0, 'origin': 'default'}], (0, 'default')),
-])
-def test_merge_preference_is_explicit_and_discovery_finishes_before_taxonomy_write(genres, preferences, expected):
-    from contextlib import contextmanager
-    writing = False
-    calls = []
-
-    @contextmanager
-    def transaction():
-        nonlocal writing
-        assert not writing
-        writing = True
-        try:
-            yield
-        finally:
-            writing = False
-
-    def discovery(previous, target):
-        assert not writing
-        calls.append('discovery')
-
-    def taxonomy(*args, **kwargs):
-        assert writing
-        calls.append('taxonomy')
-
-    genres.repository.transaction.side_effect = transaction
-    genres.repository.genre_name.return_value = 'Known'
-    genres.repository.genre_axis.return_value = None
-    genres.repository.preferences.return_value = preferences
-    genres.repository.apply_merge.side_effect = taxonomy
-    genres.reconcile_origins.side_effect = discovery
-    genres.merge_genres('previous', 'target', now=100)
-    assert calls == ['discovery', 'taxonomy']
-    genres.repository.apply_merge.assert_called_once_with('previous', 'target', expected,
-        old_axis=None, new_axis=None, now=100)
-
-
-def test_conflicting_axes_reject_before_any_discovery_or_taxonomy_write(genres):
-    genres.repository.genre_name.return_value = 'Known'
-    genres.repository.genre_axis.return_value = 1
-    genres.repository.family_exists.return_value = False
-    genres.repository.axis_id.return_value = 2
-    genres.repository.axis_counts.return_value = {'rec_lean': 2}
-    with pytest.raises(ValueError, match='Conflicting current taste axes in rec_lean'):
-        genres.merge_genres('previous', 'target')
-    genres.reconcile_origins.assert_not_called()
-    genres.repository.transaction.assert_not_called()
-    genres.repository.apply_merge.assert_not_called()
-
-
-def test_merge_creates_the_broad_family_axis_when_the_target_key_is_a_family(genres):
-    genres.repository.genre_name.return_value = 'Known'
-    genres.repository.genre_axis.return_value = 1
-    genres.repository.family_exists.return_value = True
-    genres.repository.axis_id.return_value = None
-    genres.repository.create_axis.return_value = 2
-    genres.repository.preferences.return_value = []
-    genres.merge_genres('previous', 'jazz', now=100)
-    genres.repository.create_axis.assert_called_once_with('family', 'jazz')
-    genres.repository.apply_merge.assert_called_once_with('previous', 'jazz', None, old_axis=1, new_axis=2, now=100)

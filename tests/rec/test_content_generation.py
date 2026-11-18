@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 
 from yt_playlist.core.store import Store
-from yt_playlist.rec import content_model, embedding_vectors as vectors, layers, mode_surfaces, ppr, rec_params, surfaces, taste_modes
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import mode_inputs
+from yt_playlist.rec import content_model, embedding_vectors as vectors, mode_surfaces, ppr, rec_params, surfaces, taste_modes
 from tests import model_support
 
 
@@ -178,14 +180,14 @@ def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, mon
         keys, np.eye(len(keys)), {key: i for i, key in enumerate(keys)}))
 
     calculated = []
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def capture(*args):
         result = calculate(*args)
         calculated.append(result[0])
         return result
 
-    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", capture)
+    monkeypatch.setattr(mode_inputs, "_calculate_bundles", capture)
     assert mode_surfaces.prepare_bundles(store, 100_000) is not None
     assert store.recommendations.head('home') is not None
     payload = calculated[0]

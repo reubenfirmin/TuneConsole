@@ -6,6 +6,7 @@ import pytest
 
 from yt_playlist.core.identities import build_client
 from yt_playlist.library import sync
+from yt_playlist.controllers import library_synchronization as acquisition
 
 
 def _album(bid):
@@ -17,9 +18,9 @@ def mirror(store, monkeypatch):
     first = store.accounts.upsert_account('main', 'bridge', None, True)
     second = store.accounts.upsert_account('brand', 'bridge', 'brand-id', False)
     store.collection.add_saved_album({'browse': 'OLD', 'title': 'Previously saved', 'artist': 'Artist'})
-    monkeypatch.setattr(sync, 'with_retry', lambda fn, **kwargs: fn())
+    monkeypatch.setattr(acquisition, 'with_retry', lambda fn, **kwargs: fn())
     materialized = []
-    monkeypatch.setattr(sync, '_materialize_album_tracks',
+    monkeypatch.setattr(acquisition, '_materialize_album_tracks',
                         lambda store, clients, saved, progress: materialized.append(saved))
     return SimpleNamespace(store=store, first=first, second=second,
                            before=store.collection.get_saved_albums(), materialized=materialized)

@@ -3,6 +3,7 @@ from unittest.mock import Mock
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
+from itertools import count
 
 import pytest
 
@@ -20,12 +21,16 @@ def publications():
     service = RecommendationPublications(Mock(spec=RecommendationPublicationsRepo), Mock(), Mock(), Mock(),
                                         Mock(spec=RecommendationFiles))
     service.query.group_candidates.return_value = {}
+    service.query.artist_memberships.return_value = {}
     service.discovery.candidate_tracks_by_keys.return_value = {}
     service.modes.years_for.return_value = {}
     service.repository.candidate_details.return_value = {}
     service.repository.candidate_play_counts.return_value = {}
     service.files.display.return_value = {}
     service.files.retained.side_effect = nullcontext
+    service.files.describe.side_effect = lambda raw: (hashlib.sha256(raw).hexdigest(), len(raw))
+    service.files.publish_reserved.side_effect = lambda identity, raw, **kwargs: ('path', *kwargs['expected'])
+    service.repository.reserve_file.side_effect = count(1)
     service.repository.staged_slots.return_value = {}
     service.repository.staged_outputs.return_value = {}
     return service
@@ -90,11 +95,14 @@ def test_metadata_cursor_covers_missing_recordings(publications):
     publications.repository.recording_metadata_rows.return_value = (7, [
         {'id': 5, 'identity_key': 'missing'}, {'id': 8, 'identity_key': 'new'}])
     publications.query.group_candidates.return_value = {}
+    publications.query.artist_memberships.return_value = {'new': {21, 12}}
     publications.discovery.discovered_tracks_by_keys.return_value = {'new': {'video_id': 'video'}}
     page = publications.recording_metadata_page('home', after=2, limit=2)
     assert page['after'] == 8 and not page['exhausted']
     assert page['tracks'] == [{'key': 'new', 'recording_id': 8, 'video_id': 'video',
+                              'artist_ids': [12, 21],
                               'serving_context': {'recommendation_generation_id': 7}}]
+    publications.query.artist_memberships.assert_called_once_with(['new'])
     publications.discovery.discovered_tracks_by_keys.assert_called_once_with(['missing', 'new'], available_only=True)
 
 
@@ -163,7 +171,7 @@ def test_output_batches_publish_before_owners_with_file_lifetime_through_commit(
         finally:
             retained = False
 
-    def publish(encoded):
+    def publish(identity, encoded, *, expected):
         assert retained
         events.append('file')
         return ('path', hashlib.sha256(encoded).hexdigest(), len(encoded))
@@ -173,7 +181,7 @@ def test_output_batches_publish_before_owners_with_file_lifetime_through_commit(
         events.append(('owners', len(files)))
 
     publications.files.retained.side_effect = lease
-    publications.files.publish.side_effect = publish
+    publications.files.publish_reserved.side_effect = publish
     publications.repository.record_outputs.side_effect = commit
     publications.repository.ready.side_effect = lambda *args: events.append('ready')
     assert publications.stage(plan, build(plan))
@@ -185,18 +193,18 @@ def test_cancelled_staging_retains_committed_prefix_and_resumes_without_republis
     plan = output_plan(17)
     current = Mock(side_effect=[True, False])
     assert not publications.stage(plan, build(plan), still_current=current)
-    assert publications.files.publish.call_count == 16
+    assert publications.files.publish_reserved.call_count == 16
     publications.repository.ready.assert_not_called()
     publications.repository.staged_outputs.side_effect = [
         {(output.surface, output.chunk_key): hashlib.sha256(output.encoded).hexdigest() for output in plan.outputs[:16]}, {}]
     assert publications.stage(plan, build(plan))
-    assert publications.files.publish.call_count == 17
+    assert publications.files.publish_reserved.call_count == 17
     assert publications.repository.record_outputs.call_count == 2
 
 
 def test_file_failure_leaves_manifest_and_ready_unwritten(publications):
     plan = output_plan()
-    publications.files.publish.side_effect = OSError('disk full')
+    publications.files.publish_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         publications.stage(plan, build(plan))
     publications.repository.record_outputs.assert_not_called()
@@ -208,7 +216,8 @@ def test_failed_manifest_keeps_head_unacknowledged(publications):
     publications.repository.record_outputs.side_effect = RuntimeError('write failed')
     with pytest.raises(RuntimeError, match='write failed'):
         publications.stage(plan, build(plan))
-    publications.files.publish.assert_called_once_with(plan.outputs[0].encoded)
+    publications.files.publish_reserved.assert_called_once_with(1, plan.outputs[0].encoded,
+        expected=(hashlib.sha256(plan.outputs[0].encoded).hexdigest(), len(plan.outputs[0].encoded)))
     publications.repository.ready.assert_not_called()
     publications.repository.publish.assert_not_called()
 
@@ -270,7 +279,7 @@ def test_changed_plan_is_rejected_before_any_staging_write(publications):
         publications.stage(plan, recommendation_plan.Build(7, 'worker', 'different'))
     publications.repository.staged_outputs.assert_not_called()
     publications.repository.ready.assert_not_called()
-    publications.files.publish.assert_not_called()
+    publications.files.publish_reserved.assert_not_called()
 
 
 def test_bundle_preparation_uses_explicit_identities_and_revalidates_reused_pool(publications):
@@ -297,7 +306,7 @@ def test_bundle_preparation_uses_explicit_identities_and_revalidates_reused_pool
     assert prepared.outputs[0].pool_digest == old.content_digest
     assert recommendation_outputs._decode(prepared.outputs[0].encoded)['output']['rows'][0][2] == {'reason': 'Captured'}
     assert prepared.outputs[0].chunk_key != first.outputs[0].chunk_key
-    publications.files.publish.assert_not_called()
+    publications.files.publish_reserved.assert_not_called()
 
 
 def test_bundle_preparation_rejects_policy_family_before_publication(publications):
@@ -310,7 +319,7 @@ def test_bundle_preparation_rejects_policy_family_before_publication(publication
         publications.prepare_bundles({'all': {'fresh': [{'key': 'one', 'pool_policy': 'foreign'}]}},
             None, previous=publications, external_key='prepared', policy_version='root', input_revision=2, created_at=100)
     repository.claim.assert_not_called()
-    publications.files.publish.assert_not_called()
+    publications.files.publish_reserved.assert_not_called()
 
 
 def test_bundle_preparation_requires_private_readers(publications):

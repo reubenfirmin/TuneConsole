@@ -64,6 +64,55 @@ def test_generated_membership_is_eligible_but_a_real_recent_generated_play_count
     assert surfaces.rediscover_tracks(store, NOW) == []
 
 
+def test_comfort_requires_a_quiet_liked_or_often_played_song(store):
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    song(store, iid, 'liked-unheard', liked=True)
+    song(store, iid, 'unliked-unheard')
+    song(store, iid, 'only-three', plays=3, age=60)
+    song(store, iid, 'old-favorite', plays=4, age=60)
+    song(store, iid, 'recent-favorite', plays=10, age=1, liked=True)
+    song(store, iid, 'exact-boundary', plays=4, age=30)
+    assert {t.key for t in surfaces.comfort_listening(store, NOW)} == {
+        'liked-unheard', 'old-favorite', 'exact-boundary'}
+
+
+@pytest.mark.parametrize('source', ['generated', 'calendar'])
+def test_comfort_rechecks_real_listening_when_prepared_pool_is_reused(store, source):
+    from yt_playlist.rec import library_pool, vibe_pools
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    key = song(store, iid, 'favorite', plays=4, age=60)
+    parameters = {'lane': 'comfort', 'epoch': 0, 'include_genres': [], 'avoid_genres': []}
+    library_pool.prepare(store, NOW, parameters)
+    prepared = library_pool.pick(store, NOW, parameters)
+    assert [t['key'] for t in prepared] == [key]
+    if source == 'generated':
+        pid = store.playlists.upsert_playlist(iid, 'GEN', 'Generated', 1, None, NOW)
+        tid = store.tracks.track_ids_for_videos(['v-favorite'])['v-favorite']
+        store.playlists.set_playlist_tracks(pid, [tid])
+        store.playlists.mark_generated_playlist('GEN')
+        store.history.record_play_event(iid, key, 'v-favorite', NOW-DAY,
+                                        playlist_ytm_id='GEN', source_timezone='UTC')
+    else:
+        store.history.record_history_plays(iid, NOW-DAY, [(key, 'Today')], source_timezone='UTC')
+    assert surfaces.comfort_listening(store, NOW) == []
+    assert library_pool.pick(store, NOW, parameters) == []
+    assert vibe_pools.eligible(store, prepared, NOW, 'comfort') == []
+
+
+def test_held_comfort_menu_rechecks_listening_without_mutating_the_saved_offer(store, monkeypatch):
+    from yt_playlist.rec import home_cache
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    key = song(store, iid, 'favorite', plays=4, age=60)
+    menu = {'epoch': 0, 'protos': [{'lane': 'comfort', 'tracks': [{'key': key}]}]}
+    payload = {'tuning': 'same', 'menus': [menu]}
+    monkeypatch.setattr(home_cache, 'read', lambda *args: {
+        'epoch': 0, 'tuning': 'same', 'experiments': [], 'menu': menu})
+    assert home_prepared._prepared_choice(store, payload, NOW, 0, 'same', record=False)[2] == menu['protos']
+    store.history.record_play_event(iid, key, 'v-favorite', NOW, source_timezone='UTC')
+    assert home_prepared._prepared_choice(store, payload, NOW, 0, 'same', record=False)[2] == []
+    assert menu['protos'][0]['tracks'] == [{'key': key}]
+
+
 def test_calendar_imports_count_once_per_account_day_without_recounting_exact_events(store):
     main = store.accounts.upsert_account('Main', 'cred', None, True)
     other = store.accounts.upsert_account('Other', 'cred', 'other', False)

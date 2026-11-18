@@ -43,15 +43,16 @@ class AudioVibes:
 
     def samples(self, run_id):
         result = []
-        for reference in self.repository.sample_facts(run_id):
-            try:
-                result.append(self.sample_files.read(reference))
-            except (OSError, ValueError):
-                continue
+        with self.sample_files.retained():
+            for reference in self.repository.sample_facts(run_id):
+                try:
+                    result.append(self.sample_files.read(reference))
+                except (OSError, ValueError):
+                    continue
         return result
 
     def save_sample(self, sample, now):
-        with self._lock:
+        with self._lock, self.sample_files.retained():
             self._require_video(self.playback(sample['run_id']), sample['video_id'])
             existing = self.repository.sample_conflicts(sample['run_id'], sample['id'])
             for previous in existing:
@@ -59,19 +60,23 @@ class AudioVibes:
                     self._require_video(previous, sample['video_id'])
                 if previous['point'] == sample['point'] or previous['id'] == sample['id']:
                     if (any(previous[name] != sample[name] for name in ('id', 'run_id', 'point', 'video_id'))
-                            or not self.sample_files.matches(previous['filename'], sample)):
+                            or not self.sample_files.matches_reference(previous, sample)):
                         raise ValueError('This sampling point has already been saved')
-                    self.sample_files.repair(previous['filename'], sample)
+                    self.sample_files.publish_reserved(previous, sample)
+                    self.repository.complete_sample(sample['id'], previous)
                     # Requeue on an identical retry too: a prior acknowledgement
                     # may have failed after repairing the file but before enqueue.
                     self.prepared_content.requeue_recording(previous['recording_id'])
                     return
-            filename = self.sample_files.write(sample)
-            self.repository.save_sample(sample, filename, now, expected=existing)
+            reference = self.sample_files.reference(sample)
+            self.repository.reserve_sample(sample, reference, now, expected=existing)
+            self.sample_files.publish_reserved(reference, sample)
+            self.repository.complete_sample(sample['id'], reference)
 
     def feedback(self, run_id):
-        row = self.repository.annotation(run_id, kind='session', taxonomy_version=TAXONOMY_VERSION)
-        return self._feedback(row) if row else None
+        with self.annotation_files.retained():
+            row = self.repository.annotation(run_id, kind='session', taxonomy_version=TAXONOMY_VERSION)
+            return self._feedback(row) if row else None
 
     def _feedback(self, row):
         document = self.annotation_files.read(row)
@@ -105,7 +110,7 @@ class AudioVibes:
 
     def save_feedback(self, run_id, sample_ids, vibes, taxonomy_version, prediction, now):
         sample_ids, vibes, _state = annotations.validate(run_id, sample_ids, vibes, now)
-        with self._lock:
+        with self._lock, self.annotation_files.retained():
             if self.repository.playback(run_id) is None:
                 raise ValueError('A new annotation requires an existing playback run')
             known, vocabulary = self.repository.taxonomy(taxonomy_version)
@@ -129,9 +134,11 @@ class AudioVibes:
             document = dict(format=annotations.FILE_FORMAT, run_key=run_id, kind='session',
                             taxonomy_version=taxonomy_version, revision=revision,
                             prediction=prediction, unresolved_samples=[])
-            with self.annotation_files.write(document) as reference:
+            integrity = self.annotation_files.describe(document)
+            file_id = self.repository.reserve_annotation_file(run_id, taxonomy_version, revision, integrity)
+            with self.annotation_files.write_reserved(file_id, document, expected=integrity) as reference:
                 self.repository.publish_annotation(run_id, sample_ids, vibes, taxonomy_version,
-                    now, state=state, revision=revision, reference=reference, evaluation=evaluation,
+                    now, state=state, revision=revision, file_id=file_id, reference=reference, evaluation=evaluation,
                     expected=previous['id'] if previous else None)
 
     def resolve_annotations(self, run_id):

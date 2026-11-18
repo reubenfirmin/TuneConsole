@@ -5,13 +5,21 @@ import json
 from yt_playlist.core import catalog, genre_classifications, genre_identity, metadata, metadata_evidence, metadata_runtime
 from yt_playlist.core.metadata_values import ITEM_FIELDS, RECORDING_FIELDS
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos import metadata_file_writes
 
 
 class MetadataChoiceRepo(Repo):
     @contextmanager
+    def reservation(self):
+        with self._lock:
+            if self.conn.in_transaction:
+                raise ValueError('Metadata file reservation requires its own transaction')
+            with self.conn.atomic():
+                yield
+
+    @contextmanager
     def transaction(self):
-        # Reserve this metadata writer before assigning a file revision. Other
-        # writers cannot publish different content at the same revision.
+        # Recheck the selected revision and install the completed file together.
         with self._lock:
             with self.conn.atomic(join=True):
                 yield
@@ -32,12 +40,27 @@ class MetadataChoiceRepo(Repo):
         return {'track': dict(row), 'layout': layout, 'choice': dict(choice) if choice else None}
 
     @synchronized
+    def selection_input(self, entry):
+        entry = catalog.resolve_entry(self.conn, entry)
+        row = self.conn.execute('SELECT id,recording_id,video_id,title,artist FROM catalog_tracks WHERE id=?',
+                                (entry,)).fetchone()
+        if row is None:
+            raise ValueError('Unknown metadata catalog input')
+        layout = ('runtime' if metadata_runtime.active(self.conn) else
+                  'evidence' if metadata_evidence.available(self.conn) else 'legacy')
+        return {'track': dict(row), 'layout': layout}
+
+    @synchronized
     def genre_matches(self, label, normalized):
         return genre_identity.axis_match_rows(self.conn, [(label, normalized)]).get(label, {})
 
     @synchronized
     def reserve_identity(self):
-        return metadata_runtime.next_identity(self.conn, 'metadata_runtime_choices')
+        return metadata_file_writes.next_owner_id(self.conn, 'choices', 'metadata_runtime_choices')
+
+    @synchronized
+    def reserve_file(self, record):
+        return metadata_file_writes.reserve(self.conn, record)
 
     @synchronized
     def import_inputs(self, entry, source):
@@ -116,7 +139,7 @@ class MetadataChoiceRepo(Repo):
         return {**dict(row), 'observations': observations}
 
     @synchronized
-    def store(self, inputs, field, value, prepared, *, withdraw, source, at, identity=None, revision=None):
+    def store(self, inputs, field, value, prepared, *, withdraw, source, at, identity=None, revision=None, file_record=None):
         track, layout = inputs['track'], inputs['layout']
         entry, recording, video = track['id'], track['recording_id'], track['video_id']
         with self.conn.atomic(join=True):
@@ -124,6 +147,9 @@ class MetadataChoiceRepo(Repo):
             if current['layout'] != layout or current['track']['recording_id'] != recording or current['choice'] != inputs['choice']:
                 raise ValueError('Metadata decision input changed')
             if layout == 'runtime':
+                if file_record is None:
+                    raise ValueError('Runtime metadata choice requires its reserved file')
+                metadata_file_writes.complete(self.conn, file_record, kind='choices', owner=(identity,), revision=revision)
                 genre = metadata_runtime.genre_id(self.conn, prepared.genre_key)
                 kind = (0 if withdraw else {'null': 1, 'blank': 2, 'value':
                     4 if prepared.number is not None else 5 if genre is not None else 3,
@@ -166,11 +192,21 @@ class MetadataChoiceRepo(Repo):
 
     @synchronized
     def store_base(self, inputs, field, value, prepared, source, at, *, delivery_id=None, observation_id=None):
+        self.store_bases(inputs, {field: (value, prepared)}, source, at,
+                         deliveries={field: delivery_id}, observations={field: observation_id})
+
+    @synchronized
+    def store_bases(self, inputs, selections, source, at, *, deliveries, observations):
+        current = self.selection_input(inputs['track']['id'])
+        if current['layout'] != inputs['layout'] or current['track']['recording_id'] != inputs['track']['recording_id']:
+            raise ValueError('Metadata selection input changed')
+        for field, (value, prepared) in selections.items():
+            self._store_base(inputs, field, value, prepared, source, at,
+                             delivery_id=deliveries.get(field), observation_id=observations.get(field))
+
+    def _store_base(self, inputs, field, value, prepared, source, at, *, delivery_id=None, observation_id=None):
         track, layout = inputs['track'], inputs['layout']
         entry, recording, video = track['id'], track['recording_id'], track['video_id']
-        current = self.input(entry, field)
-        if current['layout'] != layout or current['track']['recording_id'] != recording:
-            raise ValueError('Metadata selection input changed')
         if layout == 'evidence':
             if observation_id is None:
                 observation_id = metadata_evidence.record_prepared(self.conn, delivery_id, {field: prepared})[field]

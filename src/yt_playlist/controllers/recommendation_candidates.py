@@ -1,5 +1,5 @@
 """Candidate policy and eligibility composed above bounded SQL ranking."""
-from yt_playlist.rec.candidate_policy import (revisit_criteria, comfort_recency_seconds,
+from yt_playlist.rec.candidate_policy import (revisit_criteria, comfort_criteria,
     COMFORT_ORDER, ROTATION_ORDER, DEEP_CUT_ORDER, PLAYLIST_ORDER)
 
 
@@ -12,9 +12,9 @@ class RecommendationCandidates:
             revisit_criteria(now), maximum_duration=self.eligibility.maximum_duration(),
             keys=keys, limit=limit)
 
-    def comfort_candidates(self, now, min_plays=4, recency_full_days=30, limit=50):
+    def comfort_candidates(self, now, min_plays=4, recency_full_days=30, limit=50, *, keys=None):
         return self.repository.comfort_candidates(
-            now, min_plays=min_plays, full_seconds=comfort_recency_seconds(recency_full_days),
+            comfort_criteria(now, min_plays, recency_full_days), keys=keys,
             maximum_duration=self.eligibility.maximum_duration(), order=COMFORT_ORDER, limit=limit)
 
     def more_like_rotation(self, seed_limit=40, limit=40):

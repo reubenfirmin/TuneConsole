@@ -30,8 +30,7 @@ def choose_field(conn, entry_id, field, value, source='user', *, now=None):
     previous = provider_queries.identity(conn, entry_id, field)
     observation = metadata.record_choice(conn,entry_id,field,value,source,now=now)
     if field == 'artist' and value:
-        from .artist_credits import projection_table
-        credits = conn.execute(f'SELECT artist_id FROM {projection_table(conn)} WHERE entry_id=?', (entry_id,)).fetchall()
+        credits = conn.execute('SELECT artist_id FROM entry_artists WHERE entry_id=?', (entry_id,)).fetchall()
         if len(credits) == 1:
             conn.execute("INSERT OR IGNORE INTO artist_aliases VALUES (?,?,'user_correction')",
                          (credits[0][0],value))
@@ -153,10 +152,6 @@ def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=N
         from .listening_calendar import reconcile_recordings
         reconcile_recordings(conn, {subject, recording_id})
     for row in conn.execute('SELECT rowid,* FROM rec_feedback WHERE recording_id=?', (subject,)).fetchall():
-        payload = json.dumps(dict(row))
-        from . import legacy_evidence
-        legacy_evidence.retain(conn, 'feedback_reassociation', f'{subject}:{row["rowid"]}:{old_key}',
-                               payload, 'verified association or alias disambiguation; learning is not replayed')
         conn.execute('DELETE FROM rec_feedback WHERE rowid=?', (row['rowid'],))
         if previous_recording_id is not None and row['kind'] in ('like', 'dislike', 'like_grad'):
             # Association rating feedback and guards have one owner: the projector

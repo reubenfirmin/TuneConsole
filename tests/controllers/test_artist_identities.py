@@ -7,7 +7,6 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.artists import Artists
 from yt_playlist.controllers.artist_state import ArtistState
-from yt_playlist.controllers.retained_originals import RetainedOriginals
 from yt_playlist.repos.artists import ArtistRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -42,8 +41,7 @@ def artists():
         assert not writing, 'Feature writes must run after the identity transaction closes'
     state = create_autospec(ArtistState, instance=True, spec_set=True)
     state.reconcile_artist.side_effect = independent
-    return Artists(repository, state, Mock(side_effect=independent),
-                   create_autospec(RetainedOriginals, instance=True, spec_set=True))
+    return Artists(repository, state, Mock(side_effect=independent))
 
 
 def test_known_provider_identity_is_reused_even_when_the_display_name_changes(artists):
@@ -75,7 +73,7 @@ def test_unidentified_name_reuses_its_provisional_identity(artists):
 
 
 def test_credit_correction_adds_an_alias_without_replacing_a_verified_identity(artists):
-    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [12], 'typed': True}
+    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [12]}
     artists.record_credit_choice(99, 'Correct spelling', now=10)
     artists.repository.add_alias.assert_called_once_with(12, 'Correct spelling', 'user_correction')
     artists.repository.create.assert_not_called()
@@ -83,23 +81,22 @@ def test_credit_correction_adds_an_alias_without_replacing_a_verified_identity(a
 
 
 def test_credit_correction_does_not_assign_one_alias_to_multiple_artists(artists):
-    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [12, 13], 'typed': True}
+    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [12, 13]}
     artists.record_credit_choice(7, 'Display credit', now=10)
     artists.repository.add_alias.assert_not_called()
     artists.repository.store_credit.assert_not_called()
 
 
-@pytest.mark.parametrize('typed', [True, False])
-def test_uncredited_correction_prepares_exact_credit_before_persistence(artists, typed):
-    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [], 'typed': typed}
+def test_uncredited_correction_prepares_exact_credit_before_persistence(artists):
+    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': []}
     artists.record_credit_choice(99, 'New credit', now=10)
     args, kwargs = artists.repository.store_credit.call_args
     assert args[0] == 7
     credit = args[1]
     assert credit.display_credit == 'New credit'
     assert [(m.artist_id, m.credit_text, m.presence) for m in credit.members] == [(42, 'New credit', 1)]
-    assert args[2:] == ([{'name': 'New credit', 'id': None}], 'user_correction', 10)
-    assert kwargs == {'typed': typed}
+    assert args[2:] == ('user_correction', 10)
+    assert kwargs == {}
     artists.repository.add_alias.assert_called_once_with(42, 'New credit', 'user_correction')
 
 
@@ -216,7 +213,6 @@ def test_shared_unresolved_credit_retains_ambiguity_without_identifying_other_re
     artists.repository.release_context.return_value = dict(identity=identity(7, provisional=True, identified=False),
         other_albums=other_albums, other_entries=other_entries)
     assert artists.release_subject(12, 7) is None
-    artists.originals.retain.assert_called_once()
     artists.repository.mark_ambiguity.assert_called_once_with(7)
     artists.repository.reconcile_identity.assert_not_called()
 
@@ -225,11 +221,11 @@ def test_ambiguous_credit_cannot_be_reused_after_other_memberships_are_removed(a
     artists.repository.release_context.return_value = dict(
         identity=identity(7, provisional=True, identified=False, ambiguous=True), other_albums=[], other_entries=[])
     assert artists.release_subject(12, 7) is None
-    artists.originals.retain.assert_not_called()
+    artists.repository.mark_ambiguity.assert_not_called()
 
 
 def test_credit_observation_validates_the_whole_structure_before_identity_changes(artists):
-    artists.repository.credit_observation_inputs.return_value = dict(entry_id=7, typed=True, credits=[])
+    artists.repository.credit_observation_inputs.return_value = dict(entry_id=7, credits=[])
     with pytest.raises(ValueError, match='structured artist credit'):
         artists.observe(7, 'Artist', [{'name': 'Artist', 'id': 'channel', 'unexpected': True}])
     artists.repository.create.assert_not_called()
@@ -239,20 +235,20 @@ def test_credit_observation_validates_the_whole_structure_before_identity_change
 
 def test_exact_credit_context_and_delivery_are_preserved_in_observation(artists):
     existing = [{'artist_id': 7, 'credit': 'Artist'}]
-    artists.repository.credit_observation_inputs.return_value = dict(entry_id=3, typed=True, credits=existing)
+    artists.repository.credit_observation_inputs.return_value = dict(entry_id=3, credits=existing)
     artists.repository.credit_subject_candidates.return_value = {7}
     artists.repository.identity_inputs.return_value = identity(7, provisional=True, identified=False)
     artists.observe(99, 'Artist', [{'name': 'Artist', 'id': 'channel'}], metadata_delivery_id=10, now=20)
     args, kwargs = artists.repository.store_credit.call_args
     assert args[0] == 3 and args[1].members[0].artist_id == 7
-    assert args[2:] == ([{'name': 'Artist', 'id': 'channel'}], 'youtube', 20)
-    assert kwargs == dict(typed=True, delivery_key=None, metadata_delivery_id=10)
+    assert args[2:] == ('youtube', 20)
+    assert kwargs == dict(delivery_key=None, metadata_delivery_id=10)
 
 
 @pytest.mark.parametrize('browse_id,candidates', [(None, {7}), ('channel', set()), ('channel', {7, 8})])
 def test_unstructured_refresh_cannot_replace_an_unproven_existing_credit(artists, browse_id, candidates):
     artists.repository.credit_observation_inputs.return_value = dict(
-        entry_id=7, typed=True, credits=[{'artist_id': 7, 'credit': 'Artist'}])
+        entry_id=7, credits=[{'artist_id': 7, 'credit': 'Artist'}])
     artists.repository.credit_subject_candidates.return_value = candidates
     artists.observe(7, 'Other', browse_id=browse_id)
     artists.repository.create.assert_not_called()

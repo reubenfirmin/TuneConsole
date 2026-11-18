@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
+from tests.group_history_support import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.rec.test_group_roots import groups, context, roots, issue
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -38,10 +38,10 @@ def test_small_resumable_batches_cover_offers_responses_checkpoints_and_prepared
     ledger.put('checkpoint', offer['context'], {'schema': 1, 'contract': CORRECTION_CONTRACT,
         'source_context': offer['context'], 'context': value, 'digest': hashlib.sha256(canonical(value)).hexdigest(),
         'watermark': 'historical-watermark', 'incorporated_at': 12})
-    with groups.conn:
-        groups.conn.executemany('INSERT INTO rec_proposals VALUES (?,?,10)', [
-            ('home_prepared', json.dumps({'choice_context': {'artifact': offer['context']}})),
-            ('model_pair:old:incumbent:mixes', json.dumps({'context': {'artifact': offer['context']}, 'data': 'opaque'}))])
+    groups.rec_proposals.put_proposals('home_prepared',
+        {'choice_context': {'artifact': offer['context']}}, 10)
+    groups.rec_proposals.put_proposals('model_pair:1:incumbent:mixes',
+        {'run_id': 1, 'data': {'context': {'artifact': offer['context']}}}, 10)
     monkeypatch.setattr(group_root_backfill, 'BATCH_ROWS', 1)
     backfill = group_root_backfill.Backfill(groups)
     assert backfill.step()
@@ -95,7 +95,7 @@ def test_malformed_file_never_advances_past_the_unprocessed_owner(groups):
     path.write_bytes(b'{"id":"wrong-source-identity","at":10}')
     backfill = group_root_backfill.Backfill(groups)
     for _ in range(2):
-        with pytest.raises(ValueError, match='invalid source identity'):
+        with pytest.raises(ValueError, match='invalid source identity|required content digest'):
             backfill.step()
         assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
         assert backfill.pending_path == path

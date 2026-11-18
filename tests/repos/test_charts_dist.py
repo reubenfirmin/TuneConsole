@@ -103,12 +103,14 @@ def test_listen_distribution_playlist_counts_per_membership(store):
 
 def test_listen_distribution_artist(store):
     _seed(store)   # Alpha/Gamma = Artist A, Beta = Artist B; recent plays Alpha x2, Beta x1
-    assert store.charts.listen_distribution("artist", since=None) == {"Artist A": 3, "Artist B": 1}
+    labels = store.charts.artist_labels()
+    assert {labels[k]: v for k, v in store.charts.listen_distribution('artist').items()} == {'Artist A': 3, 'Artist B': 1}
 
 
 def test_corpus_distribution_artist_counts_distinct_songs(store):
     _seed(store)
-    assert store.charts.corpus_distribution("artist") == {"Artist A": 2, "Artist B": 1}
+    labels = store.charts.artist_labels()
+    assert {labels[k]: v for k, v in store.charts.corpus_distribution('artist').items()} == {'Artist A': 2, 'Artist B': 1}
 
 
 def test_corpus_distribution_genre_counts_distinct_songs(store):

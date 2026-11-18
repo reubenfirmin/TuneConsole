@@ -1,4 +1,4 @@
-{# Optional history import, offered after onboarding. #}
+{# Optional history import, reminded one week after its unlock recommendation. #}
 {% if show_takeout_nag %}
 <section class="alerts" aria-label="Needs attention">
   <div class="alert-card card card--featured alert-nudge" id="takeout-nag">
@@ -8,7 +8,7 @@
          onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
     <div class="alert-body">
       <span class="alert-title">Want better recommendations? Add your past YouTube Music listening with a Google Takeout history import. Your history stays on this machine.</span>
-      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">Add listening history {{ arrow_icon('right') }}</a></div>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import#setup-takeout">Add listening history {{ arrow_icon('right') }}</a></div>
     </div>
   </div>
 </section>

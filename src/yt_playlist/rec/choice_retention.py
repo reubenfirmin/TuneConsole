@@ -6,8 +6,8 @@ from yt_playlist.core import fao
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceConflict
-from yt_playlist.rec.choice_context import (CORRECTION_CONTRACT, checkpoint,
-                                           correction_context, resolve_context)
+from yt_playlist.rec.choice_context import CORRECTION_CONTRACT, checkpoint, correction_context
+from yt_playlist.controllers.choice_context import ChoiceContexts
 from yt_playlist.rec import group_roots
 
 BATCH = 32
@@ -23,8 +23,8 @@ class _Scan:
     process restart. No raw evidence is released by this cursor.
     """
     def __init__(self, ledger, after):
-        self.paths = iter(sorted(path for path in (ledger.directory / 'opportunity').glob('*/*.json')
-                                 if path.stem > after))
+        self.paths = iter(sorted((path for path in ledger.paths('opportunity')
+                                  if path.stem > after), key=lambda path: path.stem))
         self.path = next(self.paths, None)
         self.identity = self.context = None
         self.historical = []
@@ -62,7 +62,7 @@ def _acknowledge(store, now, publish):
                 break
             if scan.identity is None:
                 try:
-                    offer = ledger.project_opportunity(json.loads(fao.read(scan.path).bytes))
+                    offer = ledger.read_path(scan.path)
                 except FileNotFoundError:
                     scan.advance(store)
                     continue
@@ -78,7 +78,7 @@ def _acknowledge(store, now, publish):
                 continue
             try:
                 if scan.context is None:
-                    scan.context = resolve_context(store, {'artifact': identity})
+                    scan.context = ChoiceContexts(ledger).resolve({'artifact': identity})
                 context = scan.context
                 if context.get('at', now) > now:
                     scan.advance(store)

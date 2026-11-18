@@ -1,5 +1,7 @@
 """Model health diagnostics, automatic selection and recovery controls."""
 import json
+from pathlib import Path
+from unittest.mock import Mock
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -46,8 +48,16 @@ def test_historical_production_comparison_reports_formats_and_pause_without_over
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
+@pytest.fixture
+def health_live_app(request, store, monkeypatch):
+    counts = Mock(return_value={"play": 38, "like": 8, "slider": 3})
+    monkeypatch.setattr(store.rec_signals, "graduation_log_counts", counts)
+    return request.getfixturevalue('live_app'), counts
+
+
 @pytest.mark.parametrize("width", [1440])
-def test_model_health_groups_results_and_explains_tuning(live_app, store, page, monkeypatch, width, tmp_path):
+def test_model_health_groups_results_and_explains_tuning(health_live_app, store, page, monkeypatch, width, tmp_path, request):
+    live_app, counts = health_live_app
     iid = store.accounts.get_accounts()[0].id
     tracks, vectors = [], []
     for i in range(24):
@@ -77,7 +87,6 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
                          "by_ownership": {"cold": {"played": 2, "impressions": 8, "powered": False}},
                          "by_metadata": {"genre": {"missing": {"played": 1, "impressions": 5,
                                                                   "powered": False}}}})
-    monkeypatch.setattr(store.rec_signals, "graduation_log_counts", lambda: {"play": 38, "like": 8, "slider": 3})
     store.settings.set_setting(autotune_run.RESULT_SETTING, json.dumps({
         "ran_at": 1_792_512_000,
         "winner": {"method": "svd", "dim": 64, "recall": .34},
@@ -121,6 +130,7 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
     expect(health.locator(".model-health-tests .model-health-reading")).to_have_text(["34%", "68%", "52%"])
     expect(health.get_by_text("Early result:", exact=False)).to_be_visible()
     expect(health.get_by_text("Saved slider settings", exact=True)).to_be_visible()
+    counts.assert_called_with()
     results = health.get_by_role("table", name="Model prediction comparison", exact=True)
     expect(results.get_by_role("row", name="Difference", exact=False)).to_contain_text("+5.0 pts")
     expect(results.get_by_role("row", name="Difference", exact=False)).to_contain_text("+10.0 pts")
@@ -130,7 +140,7 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
     expect(health.get_by_text("Genre, year, audio", exact=True)).to_be_visible()
     health.locator(".model-health-tuning").screenshot(path=str(tmp_path / f"model-selection-{width}.png"))
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    page.screenshot(path=str(tmp_path / f"taste-health-{width}.png"), full_page=True)
+    page.screenshot(path=str(Path(request.config.getoption('output')) / f"taste-health-{width}.png"), full_page=True)
     expect(health.get_by_role("heading", name="Recent sound", exact=True)).to_have_count(0)
     expect(health.get_by_role("heading", name="Playlist influence", exact=False)).to_have_count(0)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -160,6 +170,7 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.get_by_role("link", name="Back to Model health", exact=True).click()
     expect(page.get_by_role("tab", name="Model health", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(health.locator(".model-health-tests .model-health-reading")).to_have_text(["34%", "68%", "52%"])
     assert errors == []
 
 

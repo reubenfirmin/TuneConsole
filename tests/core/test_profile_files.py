@@ -1,19 +1,21 @@
 """Exact profile heads survive partial conversion, failed writes and recovery."""
 from tests.file_custody_support import export_owner, restore_owner
+from tests.store_fixture_support import file_consumer_store
 from tests.file_content_support import read_bytes as original_bytes
 from tests.file_content_support import patch_byte_reads
 import hashlib
 import json
 import shutil
 import sqlite3
-import time
+from contextlib import closing
 
 import pytest
 
-from yt_playlist.core import fao, file_collection, policy_documents, profile_files as owner
+from yt_playlist.core import fao, profile_files as owner
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.preparation import profiles
+from tests.file_preparation_support import profiles
 from yt_playlist.core.store import Store
+from yt_playlist.core.profile_paths import record_path
 
 
 def payload(value):
@@ -141,93 +143,41 @@ def test_snapshot_retains_old_body_and_independent_restore(store, tmp_path):
         restored.conn.close()
 
 
-@pytest.mark.parametrize('extension', ('json', 'bin'))
-def test_collection_bounds_dense_shards_and_resumes_behind_reader_and_writer_fences(tmp_path, monkeypatch, extension):
-    root, database = tmp_path/'publications', tmp_path/'state.db'
-    conn = sqlite3.connect(database, timeout=0)
-    previous = None
-    try:
-        conn.execute('CREATE TABLE heads(publication BLOB PRIMARY KEY)')
-        # Genuine content hashes concentrated in one shard challenge traversal
-        # continuation, rather than assuming every shard fits in one turn.
-        paths, publications = [], []
-        number = 0
-        while len(paths) < 130:
-            encoded = json.dumps({'publication': number}).encode()
-            number += 1
-            publication = hashlib.sha256(encoded).digest()
-            if publication[0] != 0:
-                continue
-            path = root/'recording'/'00'/(publication.hex()+'.'+extension)
-            fao.write(path, encoded)
-            paths.append(path)
-            publications.append(publication)
-        conn.execute('INSERT INTO heads VALUES (?)', (publications[0],))
-        conn.commit()
-        examined, opened = [], []
-        walk = file_collection.walk_entries
+@pytest.mark.parametrize('boundary', ['file', 'status'])
+def test_runtime_profile_interruption_keeps_selected_bytes_and_committed_pending_work(file_consumer_store, monkeypatch, boundary):
+    from yt_playlist.repos import profile_file_writes
+    store = file_consumer_store
+    keys, bodies = seed(store)
+    profiles.prepare(store)
+    raw, digest = payload('replacement')
+    files = store.musical_profiles.files
+    write, complete = files.write_reserved, profile_file_writes.complete
+    observed = []
 
-        def counted(*args, **kwargs):
-            opened.append(args[0])
-            for entry in walk(*args, **kwargs):
-                examined.append((entry, conn.in_transaction))
-                yield entry
+    def interrupted_file(records):
+        assert not store.conn.in_transaction
+        with closing(sqlite3.connect(store._db_path)) as observer:
+            observed.extend(observer.execute('SELECT id,file_status FROM profile_file_writes'))
+        raise OSError('file interrupted')
 
-        monkeypatch.setattr(file_collection, 'walk_entries', counted)
+    def interrupted_status(conn, kind, references):
+        complete(conn, kind, references)
+        raise OSError('status interrupted')
 
-        def step(now):
-            examined.clear()
-            opened.clear()
-            removed = owner.collect_unreferenced(conn, root, {'recording': 'heads'}, now, 16, '*/*/*.'+extension)
-            assert len(examined) <= 16 and len(opened) <= 16
-            assert all(reserved for _, reserved in examined)
-            return removed
-
-        assert step(time.time()) == 0  # Recent orphans retain their age policy.
-        with policy_documents.retained_reader(root):
-            assert step(10**10) == 0
-            assert not examined and not opened
-        # A file whose publisher has not committed must not become collectible.
-        other = sqlite3.connect(database)
-        try:
-            other.execute('BEGIN IMMEDIATE')
-            other.execute('INSERT INTO heads VALUES (?)', (publications[1],))
-            with pytest.raises(sqlite3.OperationalError, match='locked'):
-                step(10**10)
-            assert paths[1].exists()
-            other.commit()
-        finally:
-            other.close()
-        removed = step(10**10)
-        assert 0 < removed < 128
-        previous = conn
-        previous.close()
-        conn = sqlite3.connect(database, timeout=0)
-        # Restart re-examines at most the partially completed hash shard.
-        for _ in range(100):
-            removed += step(10**10)
-            if removed == 128:
-                break
-        assert removed == 128
-        assert all(not path.exists() for path in paths[2:])
-        assert all(path.exists() for path in paths[:2])
-        assert step(10**10) == 0
-        assert 0 < json.loads(fao.read(root / '.collection.json').bytes)['shard'] < 256
-        conn.execute('DELETE FROM heads WHERE publication=?', (publications[0],))
-        conn.commit()
-        previous = conn
-        previous.close()
-        conn = sqlite3.connect(database, timeout=0)
-        # A completed-shard bookmark survives restart. The newly superseded
-        # first-shard publication is visited only when the round-robin wraps.
-        assert step(10**10) == 0
-        assert paths[0].exists()
-        for _ in range(100):
-            step(10**10)
-            if not paths[0].exists():
-                break
-        assert not paths[0].exists() and paths[1].exists()
-    finally:
-        conn.close()
-        if previous is not None:
-            previous.close()
+    with monkeypatch.context() as patch:
+        if boundary == 'file':
+            patch.setattr(files, 'write_reserved', interrupted_file)
+        else:
+            patch.setattr(profile_file_writes, 'complete', interrupted_status)
+        with pytest.raises(OSError, match='interrupted'):
+            store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 2)
+    assert owner.read(store.conn, 'recording', keys[0]) == bodies[keys[0]]
+    assert store.conn.execute('SELECT file_status FROM profile_file_writes').fetchone()[0] == 'pending'
+    if boundary == 'file':
+        assert len(observed) == 1 and observed[0][1] == 'pending'
+    store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 3)
+    assert owner.read(store.conn, 'recording', keys[0]) == raw
+    identity = store.conn.execute('SELECT file_id FROM recording_profile_files WHERE recording_id='
+        '(SELECT id FROM recordings WHERE identity_key=?)', (keys[0],)).fetchone()[0]
+    assert store.conn.execute('SELECT file_status FROM profile_file_writes WHERE id=?', (identity,)).fetchone()[0] == 'ready'
+    assert (owner.directory(store.conn) / record_path('recording', identity)).is_file()

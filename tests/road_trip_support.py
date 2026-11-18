@@ -31,11 +31,11 @@ def no_network(monkeypatch):
 
 def _library(monkeypatch, store, songs):
     """Stand in for the whole collection. `songs` are (key, video_id, title, artist, plays, liked)."""
-    monkeypatch.setattr(store.rec_query, "library_songs", lambda: [
+    monkeypatch.setattr(type(store.rec_query), "library_songs", lambda self: [
         {"key": k, "video_id": v, "title": ti, "artist": ar, "album": "Alb", "thumbnail": None,
          "duration": 300, "genre": "", "year": None, "liked": liked}
         for k, v, ti, ar, plays, liked in songs])
-    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {
+    monkeypatch.setattr(type(store.rec_query), "play_counts", lambda self: {
         k: plays for k, v, ti, ar, plays, liked in songs})
 
 
@@ -55,9 +55,9 @@ def _stub_pools(monkeypatch, store=None, own_count=40, other_count=40, own_plays
               "genre": own_genre(i), "year": own_year(i), "liked": False}
              for i in range(own_count)]
     if store is not None:
-        monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
-        monkeypatch.setattr(store.rec_query, "play_counts",
-                            lambda: {f"k{i}": (own_plays or (lambda i: i))(i) for i in range(own_count)})
+        monkeypatch.setattr(type(store.rec_query), "library_songs", lambda self: songs)
+        monkeypatch.setattr(type(store.rec_query), "play_counts",
+                            lambda self: {f"k{i}": (own_plays or (lambda i: i))(i) for i in range(own_count)})
 
     def songs_fn(client, kind, name, cap, store=None, decade=None):
         rows = [{"video_id": f"t{i}", "title": f"Theirs {i}", "artist": f"Their Artist {i}",

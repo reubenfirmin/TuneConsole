@@ -11,7 +11,8 @@ from tests.store_fixture_support import bounded_consumer_schema, file_consumer_s
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift, audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
+from yt_playlist.rec import audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation, vibe_joint_preparation
 
 SPECIALISTS = (cruise, release, relax, uplift, energize, focus)
@@ -56,14 +57,13 @@ def test_focus_preserves_five_specialists_and_shared_classification(count, monke
     rows = samples()[:count]
     original = deepcopy(rows)
     before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
-    assert {k: v for k, v in before.items() if k not in ('suitability', 'individual_models')} == {
-        k: v for k, v in after.items() if k not in ('suitability', 'individual_models')}
+    assert after['arc'] == before['arc']
     assert set(after['individual_models']) == set(shared.LABELS)
     for vibe in shared.LABELS:
         if vibe != focus.VIBE:
             assert after['individual_models'][vibe] == before['individual_models'][vibe]
             assert after['suitability'][vibe] == before['suitability'][vibe]
-    assert after['suitability'][focus.VIBE] != before['suitability'][focus.VIBE]
+    assert focus.VIBE not in before['suitability']
     assert after['individual_models'][focus.VIBE]['sample_count'] == count
     assert all(module.apply(rows, after) == after for module in SPECIALISTS)
     assert rows == original
@@ -139,14 +139,14 @@ def test_invalid_optional_artifact_retains_five_specialists(failure, tmp_path, m
 def test_provenance_input_bounds_and_disabled_shared(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert predictor.predict(rows)['suitability'] == {}
     model = focus.load(focus.DEFAULT_PATH)
     for values in ([], [[.2] * 200] * 129, [[float('nan')] * 200], [[1e7] * 200], [[.2] * 199]):
         with pytest.raises(ValueError):
             focus.score(model, values)
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert set(predictor.predict(rows)['suitability']) == set(shared.LABELS)
 
 
 def test_default_active_local_override_and_identity(monkeypatch):

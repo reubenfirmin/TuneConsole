@@ -103,6 +103,52 @@ def test_adding_or_changing_effective_key_schedules_only_that_provider(store, mo
     assert w.drain_once() == 0
 
 
+def test_saving_lastfm_key_reenriches_the_existing_catalog_across_batches_and_restart(store, monkeypatch):
+    monkeypatch.setattr(lastfm, 'api_key', lambda source: source.settings.get_setting('lastfm_api_key') or None)
+    owned = [store.tracks.upsert_track(f'owned-{i}', f'Owned {i}', 'Artist', None, 200) for i in range(2)]
+    discovered_key = store.discovery.upsert_discovered_track(
+        'discovered|artist', 'discovered', 'Discovered', 'Artist', None, None, None, None, 'radio:seed', 1)
+    discovered = store.discovery.discovered_tracks_by_keys([discovered_key])[discovered_key]['id']
+    entries = set(owned + [discovered])
+    original = Provider('musicbrainz')
+    added = Provider('lastfm', available=lambda source: lastfm.api_key(source) is not None)
+    added.api_key = lastfm.api_key
+    config(store, {'musicbrainz', 'lastfm'})
+    w = worker(store, [original, added])
+    assert w.drain_once() == len(entries)
+    assert set(original.calls) == entries and not added.calls
+    assert store.enrichment_reports.queue_remaining() == 0
+    store.tracks.set_track_genre(owned[0], 'My explicit genre')
+    subjects = {entry: store.tracks.catalog_subject(entry)['recording_id'] for entry in entries}
+    before = {row['id']: row['first_enriched_at'] for row in store.conn.execute(
+        'SELECT id,first_enriched_at FROM recordings')}
+
+    client = _client(store)
+    client.app.state.ctx.enrich_worker = w
+    assert client.post('/settings/lastfm-key', data={'key': ' new-lastfm-key '}).status_code == 204
+    assert w._wake.is_set()
+    assert store.settings.get_setting('lastfm_api_key') == 'new-lastfm-key'
+    assert store.tracks.get_track_enrichment(owned[0])[0] == 'My explicit genre'
+    assert w.drain_once(limit=1) == 1
+    assert store.enrichment_reports.queue_remaining() == len(entries) - 1
+
+    # Persisted provider jobs resume without replaying completed recordings or
+    # querying the original provider again, even when all metadata was populated.
+    w = worker(store, [original, added])
+    for _ in range(len(entries) - 1):
+        assert w.drain_once(limit=1) == 1
+    assert w.drain_once(limit=1) == 0
+    assert set(added.calls) == entries and len(added.calls) == len(entries)
+    assert set(original.calls) == entries and len(original.calls) == len(entries)
+    assert all(store.enrichment_state.provider_coverage(recording)['lastfm'] == 'found'
+               for recording in subjects.values())
+    assert store.enrichment_reports.queue_remaining() == 0
+    assert {row['id']: row['first_enriched_at'] for row in store.conn.execute(
+        'SELECT id,first_enriched_at FROM recordings')} == before
+    assert store.tracks.get_track_enrichment(owned[0])[0] == 'My explicit genre'
+    assert w.ctx.rec_worker.trigger_content_update.call_count == len(entries) - 1
+
+
 @pytest.mark.parametrize('newer_status', [None, 'found', 'retry'])
 def test_provider_refresh_retains_durable_evidence_and_newer_state(store, newer_status):
     from yt_playlist.core import metadata_attempts

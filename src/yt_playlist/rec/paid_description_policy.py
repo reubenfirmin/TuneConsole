@@ -1,16 +1,57 @@
 """Admission and outcome rules for paid album descriptions."""
 import hashlib
 import math
+import re
 
 from yt_playlist.core.evidence_ledger import canonical
 
 LEASE_SECONDS = 60
+DEFAULT_DAILY_LIMIT = 20
+MAX_DAILY_LIMIT = 100
 FAILURES = ('auth', 'balance', 'rate_limit', 'unavailable', 'invalid_response', 'paused')
 TOKEN_KINDS = ('prompt_tokens', 'completion_tokens', 'total_tokens')
 REQUEST_ORDER = ('ready', 'uncertain', 'sent', 'claimed')
 ACTIVE_STATES = ('claimed', 'sent')
 FINISHABLE_STATES = ('claimed', 'sent', 'uncertain')
 PENDING_STATES = ('pending', 'claimed', 'sent')
+
+
+def configuration(*, key, saved, environment, enabled, limit, usage, requests_today, wait, now):
+    from yt_playlist.integrations.deepseek import credential_id
+    try:
+        limit = int(limit)
+    except (ValueError, TypeError):
+        limit = DEFAULT_DAILY_LIMIT
+    return {'configured': bool(key), 'saved_key': bool(saved),
+            'key_source': 'environment' if environment else 'settings' if saved else 'config' if key else None,
+            'enabled': enabled == '1', 'daily_limit': max(0, min(MAX_DAILY_LIMIT, limit)),
+            'requests_today': requests_today,
+            'status': wait.get('status') or (usage.get('status') if usage.get('credential') == credential_id(key) else None),
+            'retry_at': wait.get('retry_at', 0)}
+
+
+def configuration_change(*, key='', enabled=False, daily_limit=None, disconnect=False, key_only=False):
+    """Validate a complete settings mutation before any saved value changes."""
+    if disconnect:
+        return {'deepseek_api_key': '', 'deepseek_album_descriptions_enabled': '0'}
+    key = key.strip() if isinstance(key, str) else ''
+    error = None
+    if not key_only:
+        try:
+            limit = int(daily_limit)
+            if not 0 <= limit <= MAX_DAILY_LIMIT:
+                raise ValueError
+        except (TypeError, ValueError):
+            error = 'Choose a daily request limit between 0 and 100.'
+    if (key or key_only) and not re.fullmatch(r'sk-[A-Za-z0-9_-]{8,240}', key):
+        error = 'Enter a valid DeepSeek API key.'
+    if error:
+        raise ValueError(error)
+    values = {} if key_only else {'deepseek_daily_limit': str(limit),
+                                  'deepseek_album_descriptions_enabled': '1' if enabled else '0'}
+    if key:
+        values['deepseek_api_key'] = key
+    return values
 
 
 def validate_time(now):

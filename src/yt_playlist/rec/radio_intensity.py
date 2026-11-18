@@ -30,17 +30,20 @@ def prepare(store, catalog, profiles, metadata):
     for start in range(0, len(keys), 512):
         check_cancellable_work()
         genres.update(store.rec_query.track_genres(keys[start:start + 512]))
+    catalog['intensity'] = intensity_bands(members, profiles, genres, metadata)
+
+
+def intensity_bands(members, profiles, genres, metadata):
+    """Plan bands from a captured membership, profile and genre snapshot."""
     clusters = {}
     for mid, keys in members.items():
         bands = defaultdict(lambda: defaultdict(list))
         for key in keys:
-            check_cancellable_work()
             value = musical_character.intensity({'musical': profiles.get(key)})
             label = genres.get(key) or metadata.get(key, {}).get('genre') or ''
             bands[str(round(value * RESOLUTION))][label].append(key)
         clusters[mid] = {band: dict(groups) for band, groups in bands.items()}
-    catalog['intensity'] = {'version': VERSION, 'profile_version': musical_character.VERSION,
-                            'clusters': clusters}
+    return {'version': VERSION, 'profile_version': musical_character.VERSION, 'clusters': clusters}
 
 
 def ordered_groups(bands, target):

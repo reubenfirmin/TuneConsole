@@ -10,6 +10,13 @@ from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import bundle_storage
 
 
+def publish_setting(store, key, value):
+    """Write inside the snapshot's transaction, without starting another owner."""
+    store.conn.execute('INSERT INTO settings(key,value) VALUES (?,?) '
+                       'ON CONFLICT(key) DO UPDATE SET value=excluded.value '
+                       'WHERE value IS NOT excluded.value', (key, value))
+
+
 @pytest.fixture
 def database(file_backed_store):
     file_backed_store.conn.execute('PRAGMA wal_autocheckpoint=17')
@@ -48,7 +55,7 @@ def test_checkpoint_observes_finished_transaction_without_holding_serving_lock(d
         def publish():
             assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
             assert store.conn.execute('PRAGMA synchronous').fetchone()[0] == synchronous
-            store.settings.publish_values({'model': 'new'})
+            publish_setting(store, 'model', 'new')
             if failure == 'rollback':
                 raise ValueError('publication failed')
             if failure == 'cancel':
@@ -77,7 +84,7 @@ def test_checkpoint_error_does_not_report_a_committed_model_as_failed(database, 
         checkpoint_sqlite = SimpleNamespace(**vars(sqlite3))
         checkpoint_sqlite.connect = unavailable
         monkeypatch.setattr(db_checkpoint, 'sqlite3', checkpoint_sqlite)
-        assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
+        assert snapshot.publish(lambda: publish_setting(store, 'model', 'new'))
     assert len(attempted) == 1
     assert attempted[0][0] == (store._db_path.as_uri() + '?mode=rw',)
     assert store.settings.get_setting('model') == 'new'
@@ -87,7 +94,7 @@ def test_checkpoint_error_does_not_report_a_committed_model_as_failed(database, 
 def test_explicit_inline_publication_keeps_existing_checkpoint_policy(database, monkeypatch):
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
     with database.read_snapshot() as snapshot:
-        assert snapshot.publish(lambda: database.settings.publish_values({'model': 'new'}),
+        assert snapshot.publish(lambda: publish_setting(database, 'model', 'new'),
                                 defer_checkpoint=False)
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
 
@@ -141,7 +148,7 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
                     rows, '{"generation":"2"}', 2., None)
             else:
                 database.recommendations.publish(build, 2.)
-            database.settings.publish_values({'projection-version': '2'})
+            database.settings.set_setting('projection-version', '2')
         assert snapshot.publish_ordered(publish)
     assert observed == [(expected, '2')]
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
@@ -151,7 +158,7 @@ def test_unchanged_publication_does_not_checkpoint(database, monkeypatch):
     database.settings.set_setting('model', 'same')
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
     with database.read_snapshot() as snapshot:
-        assert snapshot.publish(lambda: database.settings.publish_values({'model': 'same'}))
+        assert snapshot.publish(lambda: publish_setting(database, 'model', 'same'))
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
 
 
@@ -159,7 +166,7 @@ def test_explicitly_disabled_checkpoint_policy_is_preserved(database, monkeypatc
     database.conn.execute('PRAGMA wal_autocheckpoint=0')
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
     with database.read_snapshot() as snapshot:
-        assert snapshot.publish(lambda: database.settings.publish_values({'model': 'new'}))
+        assert snapshot.publish(lambda: publish_setting(database, 'model', 'new'))
     assert database.settings.get_setting('model') == 'new'
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
 
@@ -170,7 +177,7 @@ def test_in_memory_publication_does_not_attempt_a_file_checkpoint(store, monkeyp
     policy = store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0]
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
     with store.read_snapshot() as snapshot:
-        assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
+        assert snapshot.publish(lambda: publish_setting(store, 'model', 'new'))
     assert store.settings.get_setting('model') == 'new'
     assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == policy
 
@@ -190,7 +197,7 @@ def test_cancellation_during_policy_cleanup_does_not_discredit_commit(database, 
 
     monkeypatch.setattr(type(database.conn), 'execute', execute)
     with database.read_snapshot() as snapshot:
-        assert snapshot.publish(lambda: database.settings.publish_values({'model': 'new'}))
+        assert snapshot.publish(lambda: publish_setting(database, 'model', 'new'))
     assert interrupted
     assert database.settings.get_setting('model') == 'new'
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17

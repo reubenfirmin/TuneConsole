@@ -24,10 +24,9 @@ def load(conn):
 
 
 def load_native(conn):
-    scopes = entity_names.owner(conn, 'playlist_scopes')
-    rows = list(conn.execute(f'SELECT i.*,s.{scopes.column("provider_playlist_id")} AS provider_playlist_id,q.position,q.video_id '
+    rows = list(conn.execute('SELECT i.*,s.provider_playlist_id,q.position,q.video_id '
         'FROM album_playback_intents i '
-        f'JOIN {scopes.table} s ON s.{scopes.column("id")}=i.playlist_scope_id '
+        'JOIN playlist_scopes s ON s.id=i.playlist_scope_id '
         'LEFT JOIN album_playback_intent_items q ON q.intent_id=i.singleton '
         'WHERE i.singleton=1 ORDER BY q.position'))
     if not rows:

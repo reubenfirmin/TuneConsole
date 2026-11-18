@@ -13,7 +13,6 @@ from yt_playlist.controllers.albums import Albums
 from yt_playlist.controllers.genres import Genres
 from yt_playlist.controllers.metadata_choices import MetadataChoices
 from yt_playlist.controllers.recording_keys import RecordingKeys
-from yt_playlist.controllers.retained_originals import RetainedOriginals
 from yt_playlist.controllers.recommendation_eligibility import RecommendationEligibility
 from yt_playlist.core import discovery_policy
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -34,50 +33,24 @@ def discovery():
     files.retained.side_effect = nullcontext
     proposals = create_autospec(RecommendationProposals, instance=True, spec_set=True)
     settings = create_autospec(Settings, instance=True, spec_set=True)
-    originals = create_autospec(RetainedOriginals, instance=True, spec_set=True)
     repository.origin_inputs.return_value = dict(video=None, album=None, artists=set(), account=False)
-    return Discovery(repository, artists, eligibility, files, originals=originals, proposals=proposals, settings=settings,
+    return Discovery(repository, artists, eligibility, files, proposals=proposals, settings=settings,
         tracks=create_autospec(Tracks, instance=True, spec_set=True), albums=create_autospec(Albums, instance=True, spec_set=True),
         genres=create_autospec(Genres, instance=True, spec_set=True), metadata=create_autospec(MetadataChoices, instance=True, spec_set=True),
         keys=create_autospec(RecordingKeys, instance=True, spec_set=True))
 
 
-def test_artist_reconciliation_preserves_explanation_before_clearing_derived_state(discovery):
+def test_artist_reconciliation_clears_derived_explanation_without_reading_its_old_file(discovery):
     candidate = dict(artist_id=7, found_at=2, recovery_filename='file', recovery_digest='digest', recovery_bytes=20)
     discovery.repository.artist_reconciliation_inputs.return_value = dict(typed=True,
         artist_scans=[], discovered_artists=[candidate], sources=[], impressions=[], legacy=[], duplicates=0)
     discovery.repository.origin_merge_inputs.return_value = []
-    discovery.files.read.return_value = {'because': ['captured'], 'fits': ['genre']}
+    discovery.files.read.side_effect = OSError('expired explanation')
     discovery.reconcile_artist(7, 12, source='youtube')
-    discovery.files.read.assert_called_once_with(('file', 'digest', 20), kind='discovery-candidate', owner=7)
-    archive = json.loads(discovery.originals.retain.call_args.args[3])
-    assert archive['explanation'] == {'because': ['captured'], 'fits': ['genre']}
+    discovery.files.read.assert_not_called()
     merged = discovery.repository.apply_artist_reconciliation.call_args.args[-1]
     assert merged == {**candidate, 'artist_id': 12, 'recovery_filename': None, 'recovery_digest': None, 'recovery_bytes': None}
     assert candidate['recovery_filename'] == 'file'
-
-
-def test_missing_original_explanation_prevents_artist_merge(discovery):
-    discovery.repository.artist_reconciliation_inputs.return_value = dict(typed=True, artist_scans=[],
-        discovered_artists=[dict(artist_id=7, found_at=2, recovery_filename='file', recovery_digest='digest', recovery_bytes=20)],
-        sources=[], impressions=[], legacy=[], duplicates=0)
-    discovery.repository.origin_merge_inputs.return_value = []
-    discovery.files.read.side_effect = OSError('expired')
-    with pytest.raises(OSError, match='expired'):
-        discovery.reconcile_artist(7, 12, source='youtube')
-    discovery.repository.apply_artist_reconciliation.assert_not_called()
-
-
-def test_genre_origin_merge_retains_colliding_contributions_before_sql(discovery):
-    origin = dict(id=4, kind='genre', genre_key='old')
-    track = dict(id=3, recording_id=10, input_video_id='v', first_found_at=1, last_found_at=2)
-    artist = dict(artist_id=7, origin_id=4, score=.5)
-    inputs = [dict(origin=origin, target=9, sources=[track], artists=[artist])]
-    discovery.repository.origin_merge_inputs.return_value = inputs
-    discovery.merge_genre_origins('old', 'new')
-    assert [call.args[1] for call in discovery.originals.retain.call_args_list] == [
-        'discovery_origin_merge', 'discovery_source_origin_merge', 'discovery_artist_origin_merge']
-    discovery.repository.apply_origin_merge.assert_called_once_with('genre_key', 'new', inputs)
 
 
 def test_album_merge_prepares_combined_membership_and_retains_distinct_impressions(discovery):
@@ -94,19 +67,8 @@ def test_album_merge_prepares_combined_membership_and_retains_distinct_impressio
     member = discovery.repository.apply_album_merge.call_args.args[-1]
     assert member == dict(album_id=1, found_at=3, first_shown=7, last_shown=10,
                          legacy_first_shown=4, legacy_last_shown=6, offered_count=3, legacy_offered_count=3)
-    assert [call.args[1] for call in discovery.originals.retain.call_args_list] == [
-        'discovery_impression_merge', 'discovery_legacy_offer_merge']
+    assert discovery.repository.apply_album_merge.call_args.args[2] == inputs
     assert json.dumps(inputs, sort_keys=True) == before
-
-
-def test_album_merge_cannot_destroy_originals_after_retention_failure(discovery):
-    discovery.repository.album_merge_inputs.return_value = dict(typed=True, memberships=[], legacy=[],
-        impressions=[dict(id=9, album_id=2, shown_at=7)])
-    discovery.repository.origin_merge_inputs.return_value = []
-    discovery.originals.retain.side_effect = OSError('unavailable')
-    with pytest.raises(OSError, match='unavailable'):
-        discovery.merge_albums(2, 1)
-    discovery.repository.apply_album_merge.assert_not_called()
 
 
 def test_artist_origin_collision_uses_rebound_sources_without_resurrecting_retired_artist(discovery):
@@ -195,13 +157,16 @@ def test_artist_explanation_is_prepared_before_sql_and_pinned_during_publication
     discovery.artists.state_id.return_value = 7
     discovery.repository.explanation_files.return_value = native
     discovery.genres.resolve.return_value = ('rock', None)
-    discovery.files.publish.side_effect = lambda *args: steps.append('file') or ('filename', 'digest', 10)
+    discovery.repository.reserve_explanation_file.side_effect = lambda *args: steps.append('reserve') or 41
+    discovery.files.describe.return_value = ('digest', 10)
+    discovery.files.publish_reserved.side_effect = lambda *args, **kwargs: steps.append('file') or ('filename', 'digest', 10)
     discovery.repository.store_discovered_artist.side_effect = lambda *args, **kwargs: steps.append('sql')
     discovery.upsert_discovered_artist('Artist', 9, ['because'], ['fits'], 'image', 12, 'Rock', source='spotify_model')
-    assert steps == (['pin', 'file', 'sql', 'release'] if native else ['pin', 'sql', 'release'])
+    assert steps == (['pin', 'reserve', 'file', 'sql', 'release'] if native else ['pin', 'sql', 'release'])
     discovery.repository.store_discovered_artist.assert_called_once_with(
         7, 9, 'image', 12, 'Rock', source='spotify_model',
-        reference=('filename', 'digest', 10) if native else None, encoded=('["because"]', '["fits"]'),
+        reference=('filename', 'digest', 10) if native else None, file_id=41 if native else None,
+        encoded=('["because"]', '["fits"]'),
         origin=discovery._origin('spotify_model') if native else None, genre_key='rock')
 
 
@@ -209,13 +174,13 @@ def test_invalid_explanation_cannot_create_identity_or_publish(discovery):
     with pytest.raises(ValueError):
         discovery.upsert_discovered_artist('Artist', 1, [float('nan')], [], None, 1)
     discovery.artists.state_id.assert_not_called()
-    discovery.files.publish.assert_not_called()
+    discovery.files.publish_reserved.assert_not_called()
     discovery.repository.store_discovered_artist.assert_not_called()
 
 
 def test_explanation_file_failure_cannot_replace_stored_candidate(discovery):
     discovery.repository.explanation_files.return_value = True
-    discovery.files.publish.side_effect = OSError('disk full')
+    discovery.files.publish_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         discovery.upsert_discovered_artist('Artist', 1, [], [], None, 1)
     discovery.repository.store_discovered_artist.assert_not_called()

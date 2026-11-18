@@ -14,7 +14,7 @@ from pathlib import Path
 from threadpoolctl import threadpool_limits
 
 from experiments.audio_lab_tools.training import robust_vibes as robust, train_vibes as trainer
-from yt_playlist.rec import audio_vibe_model as model
+from experiments.audio_lab_tools.legacy import audio_vibe_model as model
 
 
 CANDIDATES = {**robust.CANDIDATES, **{

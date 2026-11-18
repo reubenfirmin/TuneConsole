@@ -257,6 +257,15 @@ def _prepare_impressions(store, items, now, *, lane="", mode_id=None, ranker="la
                 for key, item in zip(keys, items)]
     genre_axes = store.genres.feature_axes(
         details.get('genre') or content.get(key, {}).get('genre') for key, details in zip(keys, resolved) if key)
+    rows = impression_facts(items, keys, resolved, content, discovered, last_plays, genre_axes,
+        audio_cols=store.rec_query.AUDIO_COLS, version=version, lane=lane, mode_id=mode_id,
+        ranker=ranker, provenance=provenance, policy_kind=policy_kind, propensity=propensity, experiment=experiment)
+    return version, config, rows
+
+
+def impression_facts(items, keys, resolved, content, discovered, last_plays, genre_axes, *,
+                     audio_cols, version, lane, mode_id, ranker, provenance, policy_kind, propensity, experiment):
+    """Describe only the offered candidates, from coherent captured metadata."""
     rows = []
     for rank, (key, item, details) in enumerate(zip(keys, items, resolved), 1):
         if not key:
@@ -269,7 +278,7 @@ def _prepare_impressions(store, items, now, *, lane="", mode_id=None, ranker="la
             "genre": genre_axes[genre][0] if genre else None,
             "coverage": {"genre": bool(genre), "year": bool(year),
                          "audio": bool(details.get("audio") or inputs.get("audio") or
-                                       any(details.get(c) not in (None, "") for c in store.rec_query.AUDIO_COLS))},
+                                       any(details.get(c) not in (None, "") for c in audio_cols))},
             "ownership": "owned" if key in content else "cold" if key in discovered or
                          item.get("out_of_corpus") else "unknown",
             "last_played": last_plays.get(key), "video_id": details.get("video_id"),
@@ -283,7 +292,7 @@ def _prepare_impressions(store, items, now, *, lane="", mode_id=None, ranker="la
                                     "experiment": experiment,
                                     "pool_policy": item.get("pool_policy"),
                                     "score_available": item.get("score") is not None}})
-    return version, config, rows
+    return rows
 
 
 def stamp_pool(store, items, now, ranker="candidate-pool"):

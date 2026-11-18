@@ -1,9 +1,15 @@
 """SQL heads, captured modes and file manifests for paired model output."""
 from yt_playlist.core import group_evidence, model_projections
 from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
+from . import recommendation_file_writes
 
 
 class ComparisonOutputsRepo(Repo):
+    @synchronized
+    def reserve_file(self, surface, chunk_key, integrity):
+        with self.conn.atomic():
+            return recommendation_file_writes.reserve(self.conn, 'model_pair_files', surface, chunk_key, integrity)
+
     def native(self):
         return self._store._model_projections
 
@@ -25,8 +31,13 @@ class ComparisonOutputsRepo(Repo):
         return {**dict(row), 'parts': [dict(part) for part in parts], 'modes': [dict(mode) for mode in modes]}
 
     @synchronized
-    def publish(self, prepared, durable, generation, roots):
+    def publish(self, prepared, durable, generation, roots, *, file_ids):
         with self.conn.atomic(join=True):
+            if len(file_ids) != len(durable):
+                raise ValueError('Comparison files require their pending SQL identities')
+            for position, (identity, reference) in enumerate(zip(file_ids, durable)):
+                recommendation_file_writes.complete(self.conn, identity, 'model_pair_files',
+                    prepared.surface, str(position), reference)
             return model_projections.publish_files(self.conn, prepared, durable, generation=generation, roots=roots)
 
     @synchronized

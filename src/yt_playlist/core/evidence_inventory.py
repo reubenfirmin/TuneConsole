@@ -39,12 +39,12 @@ class Inventory:
     def __init__(self, ledger, *, progress=None):
         self.ledger = ledger
         self.progress = progress if progress is not None else {}
-        self.path = ledger.directory / '.retention-inventory'
+        self.path = getattr(ledger, 'inventory_path', ledger.directory / '.retention-inventory')
         try:
             saved = json.loads(fao.read(self.path).bytes)
             if not isinstance(saved, dict) or not isinstance(saved.get('entries'), dict):
                 raise ValueError('Invalid retention inventory cache')
-            self.entries = saved['entries'] if saved.get('schema') == 1 else {}
+            self.entries = saved['entries'] if saved.get('schema') == 2 else {}
         except (FileNotFoundError, fao.CorruptFile, ValueError, KeyError, TypeError):
             # This is a reconstructible cache, never proof that evidence can
             # be retired. Damaged required evidence still fails its own read.
@@ -54,13 +54,13 @@ class Inventory:
 
     def _save(self):
         if self.dirty:
-            fao.write(self.path, canonical({'schema': 1, 'entries': self.entries}))
+            fao.write(self.path, canonical({'schema': 2, 'entries': self.entries}))
             self.progress['files_saved'] = len(self.entries)
             self.dirty = 0
 
     def scan(self):
         found = {}
-        paths = sorted(self.ledger.directory.glob('*/*/*.json'))
+        paths = self.ledger.paths()
         self.progress['files_total'] = len(paths)
         for path in paths:
             check_cancellable_work()
@@ -68,10 +68,11 @@ class Inventory:
             try:
                 info = fao.read(path).info
                 entry = self.entries.get(key)
-                if entry is None or entry['identity'] != list(info.identity):
-                    value = json.loads(fao.read(path).bytes)
+                kind = self.ledger.path_kind(path)
+                if entry is None or entry['identity'] != list(info.identity) or entry.get('kind') != kind:
+                    value = json.loads(self.ledger._read_bytes(path)) if kind != 'orphan' else None
                     entry = dict(identity=list(info.identity), size=info.logical_bytes,
-                                 mtime=info.mtime_ns / 1e9, data=_metadata(path.parts[-3], value))
+                                 mtime=info.mtime_ns / 1e9, kind=kind, data=_metadata(kind, value))
                     self.entries[key] = entry
                     self.dirty += 1
                     if self.dirty >= SAVE_EVERY:

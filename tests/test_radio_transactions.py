@@ -15,8 +15,8 @@ from tests.radio_session_support import (
     uncontended_poc as poc, completed_radio_schema, completed_radio_store, play,
 )
 from tests.conftest import FakeClient
-from yt_playlist.library import playlist_generated
-from yt_playlist.library.playlist_generated import create_generated_playlist
+from yt_playlist.library import generated_acquisition
+from yt_playlist.library.generated_acquisition import create_generated_playlist
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +58,7 @@ def test_prepared_radio_starts_readonly_then_retains_its_publication_on_resume(p
         'videoId': track['video_id'], 'title': track['title'],
         'artists': [{'name': track['artist']}], 'duration_seconds': 180} for track in pool})
     c.ctx.client_provider = lambda: {account: provider}
-    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_generated_playlist)
+    monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create_generated_playlist)
     generation = store.recommendations.head('home')['id']
     store.activity_paused = True
     store.conn.execute('PRAGMA query_only=ON')
@@ -92,7 +92,7 @@ def test_radio_creation_finishing_after_repair_retains_only_source_provenance(po
     remote = FakeClient(catalog={t['video_id']: {'videoId': t['video_id'], 'title': t['title'],
         'artists': [{'name': t['artist']}], 'duration_seconds': 180} for t in pool})
     c.ctx.client_provider = lambda: {iid: remote}
-    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_generated_playlist)
+    monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create_generated_playlist)
     add = remote.add_playlist_items
 
     def finish_repair_then_add(*args, **kwargs):

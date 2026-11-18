@@ -1,21 +1,21 @@
+{% from '_partials/song_affordances.html' import song_art %}
 <div id="onboarding-start" class="artist-start" data-onboarding-artists data-artist-stage="artists"
-     x-data='artistStart({{ {"selected": artist_choices, "minimum": minimum_artists}|tojson }})'
+     x-data='artistStart({{ {"selected": artist_choices, "songs": song_choices|default([]), "minimum": minimum_artists}|tojson }})'
      :data-artist-stage="stage" @bridge-status.window="playback($event.detail)"
+     @music-song-saved.window="refreshSongs()" @music-artists-updated.window="applyPicks($event.detail)"
      @artist-choose="stage = 'artists'; resuming = false">
   <section x-show="stage === 'artists'" aria-labelledby="artist-start-title">
     <header class="artist-start-head">
-      <h2 id="artist-start-title">Pick 3 artists you love.</h2>
-      <span class="artist-start-count" x-show="selected.length" x-text="selected.length + ' selected'" x-cloak></span>
+      <h2 id="artist-start-title">Start with songs or artists you love.</h2>
+      <span class="artist-start-count" x-show="selected.length || songs.length" x-text="[songs.length ? songs.length + (songs.length === 1 ? ' song added' : ' songs added') : '', selected.length ? selected.length + (selected.length === 1 ? ' artist selected' : ' artists selected') : ''].filter(Boolean).join(' · ')" x-cloak></span>
     </header>
-    <form class="artist-start-search" role="search" @submit.prevent="search()">
-      <label class="sr-only" for="artist-start-search">Search YouTube Music artists</label>
+    <p class="artist-start-intro">Add a favorite song, choose three artists, or try both.</p>
+    <button id="artist-start-search" class="artist-start-search artist-start-search-open" type="button"
+            onclick="openMusicSearch({onboarding: true, query: '', source: this})" aria-haspopup="dialog" aria-controls="music-search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 6 6"/></svg>
-      <input id="artist-start-search" type="search" placeholder="Search artists" maxlength="80"
-             x-model="query" @input.debounce.350ms="search()" autocomplete="off">
-      <button class="artist-start-clear" type="button" x-show="query" @click="clearSearch()" aria-label="Clear artist search">×</button>
-    </form>
-    <p class="artist-start-feedback" role="status" aria-live="polite" x-show="searching || searchNote" x-text="searching ? 'Searching YouTube Music…' : searchNote" x-cloak></p>
-    <div x-show="selected.length && !query && (relatedLoading || relatedNote)" x-cloak>
+      <span>Search songs and artists</span>
+    </button>
+    <div x-show="selected.length && (relatedLoading || relatedNote)" x-cloak>
       <p class="artist-start-feedback" role="status" x-text="relatedLoading ? 'Finding related artists…' : relatedNote"></p>
       <button class="btn-ghost" type="button" x-show="relatedNote && !relatedLoading" @click="suggestions()">Try related artists again</button>
     </div>
@@ -36,10 +36,18 @@
         </button>
       </template>
     </div>
+    <div class="artist-start-songs" x-show="songs.length" x-cloak aria-label="Songs added to your library">
+      <template x-for="song in songs" :key="song.video_id">
+        <div class="artist-start-song">{{ song_art(dynamic='song') }}
+          <span><strong x-text="song.title"></strong><small x-text="song.artist"></small></span>
+          <span class="artist-start-song-saved">In library</span>
+        </div>
+      </template>
+    </div>
     <button class="btn-ghost" type="button" x-show="hasMoreArtists" @click="expanded = !expanded"
             x-text="expanded ? 'Show fewer artists' : 'Show more artists'"></button>
     <p class="artist-start-status" role="status" x-show="error" x-text="error" x-cloak></p>
-    <div class="artist-start-continue" x-show="selected.length >= minimum" x-cloak>
+    <div class="artist-start-continue" x-show="songs.length || selected.length >= minimum" x-cloak>
       <button class="btn btn-primary artist-start-primary" type="button" :disabled="saving" @click="listen()">
         <span>Find my first set</span>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><path d="M3 12h17m-7-7 7 7-7 7"/></svg>
@@ -51,15 +59,15 @@
   <section class="artist-start-listen" x-show="stage === 'listen'" x-cloak>
     <div x-show="resuming" :data-artist-resuming="resuming" x-cloak><h2>Your first set is waiting.</h2><a class="btn btn-primary artist-start-primary" :href="'https://music.youtube.com/watch?list=' + encodeURIComponent(pendingPlaylist)" target="_blank" rel="noopener">Open my first set {{ arrow_icon('external') }}</a></div>
     <div id="artist-first-listen" aria-live="polite"></div>
-    <button class="btn-ghost" type="button" @click="stage = 'artists'; resuming = false">Change artists</button>
+    <button class="btn-ghost" type="button" @click="stage = 'artists'; resuming = false">Change my picks</button>
   </section>
 
   <section class="artist-start-spotify-help" x-show="stage === 'spotify'" x-cloak aria-labelledby="artist-spotify-title">
     <h2 id="artist-spotify-title">Your old favorites can come too.</h2>
     <p class="artist-start-intro">Bring playlists, albums or past listens from Spotify.</p>
-    <p>Spotify can take a few days to send your files. Pick your artists and listen now; add your files later in Setup, Import.</p>
+    <p>Spotify can take a few days to send your files. Pick songs or artists and listen now; add your files later in Setup, Import.</p>
     <div class="artist-start-help-actions">
-      <button class="btn btn-primary artist-start-primary" type="button" @click="stage = 'artists'">Back to my artists</button>
+      <button class="btn btn-primary artist-start-primary" type="button" @click="stage = 'artists'">Back to my picks</button>
       <button class="btn-ghost" type="button" @click="spotifySteps = !spotifySteps" :aria-expanded="spotifySteps">How to request my files</button>
       <a href="/setup?tab=import" target="_blank" rel="noopener">I already have my files {{ arrow_icon('external') }}</a>
     </div>

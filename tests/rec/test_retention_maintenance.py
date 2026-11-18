@@ -17,7 +17,6 @@ def owners():
             (Retention, 'maintain_prediction_provenance', 'vibes', 0),
             (Retention, 'collect_musical_profiles', 'profiles', 0),
             (Retention, 'collect_embeddings', 'embeddings', 0),
-            (Retention, 'expire_legacy_diagnostics', 'diagnostics', 0),
             (Retention, 'maintain_runtime_history', 'runtime', {'credits': 0, 'modes': 0}),
             (group_roots, 'maintain_retention', 'derived', {'pending': False}),
             (measurement, 'maintain_storage', 'policies', {'pending': False}))
@@ -73,7 +72,7 @@ def test_persistent_early_failure_cannot_starve_healthy_owners(maintenance, monk
         at = next_at
     counts = Counter(name for name, at in m.calls)
     assert all(counts[name] == 4 for name in
-               ('files', 'vibes', 'profiles', 'embeddings', 'diagnostics', 'runtime', 'derived', 'policies')
+               ('files', 'vibes', 'profiles', 'embeddings', 'runtime', 'derived', 'policies')
                if name != domain)
     failures = [at for name, at in m.calls if name == domain]
     assert 4 < len(failures) < 15
@@ -99,12 +98,12 @@ def test_malformed_bookmark_is_preserved_and_failed_owner_recovers(maintenance, 
     state = m.worker.retention.progress['prediction provenance retirement']
     assert state.failures == 1 and state.error.startswith('JSONDecodeError:')
     assert Counter(name for name, at in m.calls) == {
-        'files': 1, 'profiles': 1, 'embeddings': 1, 'diagnostics': 1,
+        'files': 1, 'profiles': 1, 'embeddings': 1,
         'runtime': 1, 'derived': 1, 'policies': 1}
     m.run(105)
     assert state.failures == 2 and state.retry_at == 115
     assert fao.read(bookmark).bytes == damaged
-    assert len(m.calls) == 7  # Healthy idle owners keep their own deadlines.
+    assert len(m.calls) == 6  # Healthy idle owners keep their own deadlines.
     m.clock[0] = 114.9
     m.worker._poll_retention()
     assert not m.targets
@@ -113,7 +112,7 @@ def test_malformed_bookmark_is_preserved_and_failed_owner_recovers(maintenance, 
     m.run(115)
     assert state.error is None and state.failures == 0 and not state.pending
     assert state.result == 0 and state.retry_at == 415
-    assert len(m.calls) == 7
+    assert len(m.calls) == 6
     assert m.worker.jobs.retry[Job.RETENTION].retry_at == 400
 
 
@@ -139,10 +138,10 @@ def test_only_pending_owner_retries_promptly(maintenance, monkeypatch, domain):
     assert not m.targets
     m.run(105)
     assert attempts == [100, 105]
-    assert len(m.calls) == 7 + int(releases)
+    assert len(m.calls) == 6 + int(releases)
     assert m.worker.jobs.retry[Job.RETENTION].retry_at == 400
     m.run(400)
-    assert len(m.calls) == 14 and attempts == [100, 105]
+    assert len(m.calls) == 12 and attempts == [100, 105]
     assert m.worker.jobs.retry[Job.RETENTION].retry_at == 405
 
 
@@ -197,7 +196,7 @@ def test_inflight_retention_coalesces_ticker_polls_and_preserves_serving(mainten
                         lambda: m.calls.append(('ratings', m.clock[0])) or set())
     m.run(100)
     assert m.calls[-1] == ('ratings', 700)
-    assert len(m.calls) == 8
+    assert len(m.calls) == 7
     assert m.worker.jobs.retry[Job.RETENTION].retry_at == 1000
 
 
@@ -256,4 +255,4 @@ def test_idle_retention_recovers_backlog_before_hourly_deadline(maintenance, mon
                         lambda *args: m.calls.append(('priority cleanup', m.clock[0])))
     m.run(100)
     assert m.calls[0] == ('priority cleanup', 100)
-    assert len(m.calls) == 9
+    assert len(m.calls) == 8

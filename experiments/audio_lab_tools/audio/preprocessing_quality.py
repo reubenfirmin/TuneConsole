@@ -42,7 +42,7 @@ CODE = ('experiments/audio_lab_tools/audio/preprocessing_quality.py',
         'experiments/audio_lab_tools/cruise/cruise_baselines.py',
         'experiments/audio_lab_tools/studies/candidate_followup.py',
         'src/yt_playlist/rec/audio_vibe_cruise.py',
-        'src/yt_playlist/rec/audio_vibe_external.py',
+        'experiments/audio_lab_tools/legacy/audio_vibe_external.py',
         'src/yt_playlist/core/audio_embedding.py')
 
 
@@ -129,7 +129,8 @@ def freeze(directory):
         shutil.copyfile(source, directory / 'inputs' / name)
         references.append(pinned(source))
     for source_name, target_name in (('emotify-vibes.json', 'shared.json'), ('cruise-vibes.json', 'cruise.json')):
-        source = ROOT / 'src/yt_playlist/rec/data' / source_name
+        source = (ROOT / 'experiments/audio_lab_tools/legacy/data' / source_name
+                  if source_name == 'emotify-vibes.json' else ROOT / 'src/yt_playlist/rec/data' / source_name)
         if digest(source) != digest(BASELINE / ('checkpoint.json' if target_name == 'shared.json' else 'cruise-specialist.json')):
             raise ValueError('Current production models differ from historical comparison')
         shutil.copyfile(source, directory / target_name)

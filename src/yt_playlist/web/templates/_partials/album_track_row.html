@@ -24,7 +24,7 @@
     {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
     </div>
   </td>
-  <td class="t-wrap" title="{{ t.artist }}"><div class="track-cell track-cell--text"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></div></td>
+  <td class="t-wrap" title="{{ t.artist }}"><div class="track-cell track-cell--text">{% from '_partials/artist_links.html' import artist_credit with context %}{{ artist_credit(t) }}</div></td>
   <td class="num mono mb-year">
     <div class="track-cell">
     <span class="ydisplay">{% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">—</span>{% endif %}</span>

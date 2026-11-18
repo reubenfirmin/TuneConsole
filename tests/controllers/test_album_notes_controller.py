@@ -1,5 +1,5 @@
 """Editorial policy and file ordering with mocked storage owners."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from unittest.mock import Mock, create_autospec
 
 import pytest
@@ -18,6 +18,8 @@ def notes():
     repo = create_autospec(AlbumNotesRepo, instance=True, spec_set=True)
     repo.requests.return_value = {}
     repo.matches.return_value = True
+    repo.reserve_file.return_value = 41
+    repo.publish_output.return_value = True
     writing = False
 
     @contextmanager
@@ -29,13 +31,15 @@ def notes():
         finally:
             writing = False
 
-    def publish(encoded):
+    def publish(identity, encoded, *, expected):
         assert not writing, 'Editorial files must be published before opening the SQL unit'
         return ('file', 'digest', 10)
 
     repo.transaction.side_effect = transaction
     files = create_autospec(RecommendationFiles, instance=True, spec_set=True)
-    files.publish.side_effect = publish
+    files.retained.side_effect = nullcontext
+    files.describe.return_value = ('digest', 10)
+    files.publish_reserved.side_effect = publish
     proposals = Mock()
     proposals.get_proposals.return_value = None
     return AlbumNotes(repo, proposals, files, installed=True, paused=lambda: False)
@@ -92,21 +96,23 @@ def test_visible_demand_is_coalesced_bounded_and_expires(notes):
 
 def test_publication_saves_file_before_sql_reference_and_exact_request_completion(notes):
     assert notes.publish('release', {'label': 'Current'}, 100, expected_request=(7, 2))
-    notes.repository.replace_output.assert_called_once_with('release', ('file', 'digest', 10), 100, 128)
-    notes.repository.remove_request.assert_called_once_with('release', (7, 2))
+    notes.repository.publish_output.assert_called_once_with('release', 41, ('file', 'digest', 10), 100, 128,
+                                                          expected_request=(7, 2))
+    notes.repository.transaction.assert_not_called()
 
 
-@pytest.mark.parametrize('matches,file_written', [([False], False), ([True, False], True)])
+@pytest.mark.parametrize('matches,file_written', [(False, False), (True, True)])
 def test_superseded_worker_cannot_publish_or_complete_newer_demand(notes, matches, file_written):
-    notes.repository.matches.side_effect = matches
+    notes.repository.matches.return_value = matches
+    notes.repository.publish_output.return_value = False
     assert not notes.publish('release', {'label': 'Stale'}, 100, expected_request=(7, 2))
-    assert bool(notes.files.publish.call_count) == file_written
+    assert bool(notes.files.publish_reserved.call_count) == file_written
     notes.repository.replace_output.assert_not_called()
     notes.repository.remove_request.assert_not_called()
 
 
 def test_file_failure_preserves_last_good_and_demand(notes):
-    notes.files.publish.side_effect = OSError('disk unavailable')
+    notes.files.publish_reserved.side_effect = OSError('disk unavailable')
     with pytest.raises(OSError, match='disk unavailable'):
         notes.publish('release', {'label': 'New'}, 100, expected_request=(7, 2))
     notes.repository.transaction.assert_not_called()
@@ -120,4 +126,4 @@ def test_paused_work_leaves_storage_untouched(notes):
     assert not notes.publish('release', {}, 100)
     notes.proposals.get_proposals.assert_not_called()
     notes.repository.transaction.assert_not_called()
-    notes.files.publish.assert_not_called()
+    notes.files.publish_reserved.assert_not_called()

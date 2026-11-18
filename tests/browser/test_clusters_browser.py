@@ -7,6 +7,7 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.prepared_fixture_support import prepared_template
+from tests.visual_support import capture
 from yt_playlist.util.matching import identity_key
 
 
@@ -52,7 +53,7 @@ def _add(page, label, kind):
     expect(page.locator(".cluster-center")).to_have_attribute("aria-busy", "false")
 
 
-@pytest.mark.parametrize("width", [1440])
+@pytest.mark.parametrize("width", [1440, 1920])
 def test_seed_songs_wrapping_and_restore(page, cluster_library, width):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -97,6 +98,7 @@ def test_seed_songs_wrapping_and_restore(page, cluster_library, width):
     assert 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= width
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     assert not errors
+    capture(page, path=f'build/test-reports/home-discovery-browser/clusters-{width}.png')
 
 
 def test_removing_an_artist_keeps_developed_branches(page, cluster_library):

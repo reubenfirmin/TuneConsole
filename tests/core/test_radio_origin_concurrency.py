@@ -11,7 +11,7 @@ from yt_playlist.repos.radio_checkpoints import RadioCheckpointRepo
 from yt_playlist.web.radio_launch import RadioLaunch
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('consumer', ['adoption', 'taste'])
 def test_radio_origins_use_owned_connection_while_enrichment_holds_writer(installed, monkeypatch, consumer):
     store, _ = installed
@@ -53,7 +53,7 @@ def test_radio_origins_use_owned_connection_while_enrichment_holds_writer(instal
     assert len(connections) == 1
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_nested_origin_read_keeps_own_transaction_and_updates(installed):
     store, _ = installed
     with store._lock:

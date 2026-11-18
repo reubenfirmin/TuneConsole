@@ -9,9 +9,9 @@ from contextlib import contextmanager, ExitStack
 from yt_playlist.core import album_aliases, album_memberships, discovery_provenance as provenance
 
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
-from yt_playlist.core import artist_keys, entity_names, genre_classifications
+from yt_playlist.core import artist_keys, genre_classifications
 from yt_playlist.repos import proposal_cache
-from yt_playlist.core.preparation.discovery_publication import read_owners
+from yt_playlist.core.discovery_reads import read_owners
 
 # Audio/content columns persisted per discovered track (mirrors the library `tracks` audio set).
 _DTRACK_AUDIO = ("bpm", "energy", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
@@ -26,6 +26,12 @@ _GENERATED_PL = "(SELECT playlist_scope_id FROM quarantined_playlists)"
 
 
 class DiscoveryRepo(Repo):
+    @synchronized
+    def reserve_explanation_file(self, artist_id, integrity):
+        from yt_playlist.repos import collection_file_writes
+        with self.conn.atomic():
+            return collection_file_writes.reserve(self.conn, 'discovery-candidate', artist_id, integrity)
+
     @snapshot_read
     def track_reassociation_inputs(self, video, previous, target):
         typed = provenance.available(self.conn)
@@ -34,15 +40,8 @@ class DiscoveryRepo(Repo):
             (previous, video)).fetchone()[0]
         sources = [dict(row) for row in self.conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? ' +
             ('' if remaining is None else 'AND input_video_id=?'), (previous,) if remaining is None else (previous, video))]
-        originals = []
-        for row in sources:
-            predicate = 'origin_id=? AND input_video_id IS ?' if typed else 'source_token=?'
-            parameters = (row['origin_id'], row['input_video_id']) if typed else (row['source_token'],)
-            collision = self.conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? AND ' + predicate,
-                (target, *parameters)).fetchone()
-            originals.extend([row] + ([dict(collision)] if collision else []))
         return dict(typed=typed, previous=previous, target=target, video=video, remaining=remaining,
-            member=dict(member) if member else None, sources=sources, originals=originals,
+            member=dict(member) if member else None, sources=sources,
             impressions=[dict(row) for row in self.conn.execute(
                 'SELECT * FROM discovery_impressions WHERE recording_id IN (?,?)', (previous, target))] if typed and remaining is None else [],
             legacy=[dict(row) for row in self.conn.execute(
@@ -121,7 +120,7 @@ class DiscoveryRepo(Repo):
 
     @snapshot_read
     def origin_merge_inputs(self, column, previous, target):
-        if column not in ('artist_id', 'album_id', 'genre_key'):
+        if column not in ('artist_id', 'album_id'):
             raise ValueError('Unsupported discovery origin identity')
         if not provenance.available(self.conn):
             return []
@@ -135,13 +134,6 @@ class DiscoveryRepo(Repo):
                 'artists': [dict(source) for source in self.conn.execute(
                     'SELECT * FROM discovery_artist_sources WHERE origin_id=?', (row['id'],))]})
         return inputs
-
-    @synchronized
-    def apply_origin_merge(self, column, target, origins):
-        if column not in ('artist_id', 'album_id', 'genre_key'):
-            raise ValueError('Unsupported discovery origin identity')
-        with self.conn.atomic(join=True):
-            self._move_origins(column, target, origins)
 
     def _move_origins(self, column, target, origins):
         for item in origins:
@@ -280,6 +272,23 @@ class DiscoveryRepo(Repo):
             "JOIN artist_provider_ids p ON p.artist_id=a.id AND p.provider='youtube' "
             f"LEFT JOIN {owners.relation('discovered_artists')} d ON d.artist_id=a.id "
             "WHERE o.kind='artist_start' AND o.artist_id=a.id ORDER BY a.id,p.provider_id")]
+
+    @synchronized
+    def select_starter_song(self, video_id, now):
+        with self.conn:
+            self.conn.execute('INSERT INTO starter_song_choices(video_id,selected_at) VALUES (?,?) '
+                              'ON CONFLICT(video_id) DO NOTHING', (video_id, now))
+
+    @snapshot_read
+    def starter_songs(self):
+        return [dict(row) for row in self.conn.execute(
+            'SELECT t.identity_key AS key,t.identity_key,t.video_id,t.title,t.artist,t.album,t.thumbnail,t.duration_s '
+            'FROM starter_song_choices s JOIN tracks t ON t.video_id=s.video_id '
+            'WHERE COALESCE(t.available,1)<>0 ORDER BY s.selected_at,s.video_id')]
+
+    @snapshot_read
+    def starter_song_videos(self):
+        return [row[0] for row in self.conn.execute('SELECT video_id FROM starter_song_choices')]
 
     @lookup_read
     def starter_count(self, excluding):
@@ -441,7 +450,7 @@ class DiscoveryRepo(Repo):
         video = self.conn.execute('SELECT video_id FROM youtube_items WHERE video_id=?', (value,)).fetchone()
         album = self.conn.execute("SELECT album_id FROM album_provider_ids WHERE provider='youtube' AND provider_id=?", (value,)).fetchone()
         return dict(video=video[0] if video else None, album=album[0] if album else None,
-            account=self.conn.execute(f'SELECT 1 FROM {entity_names.accounts(self.conn)} WHERE id=?', (account,)).fetchone() is not None,
+            account=self.conn.execute('SELECT 1 FROM accounts WHERE id=?', (account,)).fetchone() is not None,
             artists={artist_keys.canonical_id(self.conn, row[0]) for row in self.conn.execute(
                 "SELECT artist_id FROM artist_provider_ids WHERE provider='youtube' AND provider_id=?", (value,))})
 
@@ -450,8 +459,8 @@ class DiscoveryRepo(Repo):
         return provenance.available(self.conn)
 
     @synchronized
-    def store_discovered_artist(self, aid, score, thumbnail, now, genre, *, source, reference, encoded, origin, genre_key):
-        with self.conn:
+    def store_discovered_artist(self, aid, score, thumbnail, now, genre, *, source, reference, file_id, encoded, origin, genre_key):
+        with self.conn.atomic():
             typed = provenance.available(self.conn)
             self._store_artist_source(aid, score, source, origin)
             self.conn.execute(
@@ -460,6 +469,8 @@ class DiscoveryRepo(Repo):
                 "thumbnail=COALESCE(NULLIF(excluded.thumbnail,''), discovered_artists.thumbnail)",
                 (aid,score,thumbnail,now) + (() if typed else (f'@artist:{aid}',)))
             if typed:
+                from yt_playlist.repos import collection_file_writes
+                collection_file_writes.complete(self.conn, file_id, 'discovery-candidate', aid, reference)
                 self.conn.execute('UPDATE discovered_artists SET recovery_filename=?,recovery_digest=?,recovery_bytes=? '
                                   'WHERE artist_id=?', (*reference, aid))
             else:
@@ -815,16 +826,14 @@ class DiscoveryRepo(Repo):
     def cleanup_track_details(self, keys):
         keys = list(keys)
         sources, owned = set(), set()
-        native = read_owners(self.conn).native
         for offset in range(0, len(keys), 500):
             page = keys[offset:offset + 500]
             marks = ','.join('?' for _ in page)
             sources.update(row[0] for row in self.conn.execute(
-                ('SELECT t.source_token FROM discovery_sources s '
-                 'JOIN discovery_origin_tokens t ON t.id=s.origin_id ' if native else
-                 'SELECT s.source_token FROM discovery_sources s ') +
+                'SELECT t.source_token FROM discovery_sources s '
+                'JOIN discovery_origin_tokens t ON t.id=s.origin_id ' +
                 'JOIN recordings r ON r.id=s.recording_id WHERE r.identity_key IN (' + marks + ') AND ' +
-                ("t.kind" if native else 's.source_type') + " IN ('album','radio','genre','artist')", page))
+                "t.kind IN ('album','radio','genre','artist')", page))
             owned.update(row[0] for row in self.conn.execute(
                 f'SELECT identity_key FROM tracks WHERE identity_key IN ({marks})', page))
         return {'sources': sources, 'unowned': set(keys) - owned}

@@ -22,7 +22,8 @@ def test_album_waterfall_fills_genres(store, monkeypatch, canonical_genre_matche
     pending = store.tracks.album_tracks_for_waterfall("BID")
     assert len(pending) == 4
     monkeypatch.setattr(musicbrainz, "enrich_full",
-                        lambda title, artist, *, observations=None: ("rock", "2001", None, [], []))
+                        lambda title, artist, *, observations=None, matcher=None, credits=None:
+                            ("rock", "2001", None, [], []))
 
     waterfall.run_waterfall(store, pending, [{"name": "musicbrainz", "enabled": True}],
                             lambda ev: None)

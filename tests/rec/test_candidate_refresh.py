@@ -23,6 +23,8 @@ from tests.store_fixture_support import (
 )
 from yt_playlist.core.store import Store
 from yt_playlist.core import embeddings, model_contract
+from yt_playlist.library import surface_composition
+from yt_playlist.rec import mode_inputs
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, home_prepared, model_refresh, mode_surfaces, rec_params, surfaces
 from yt_playlist.util import genre_map
 
@@ -90,6 +92,16 @@ def completed_retention_maintenance(monkeypatch):
 def refresh(store, now=2000):
     assert model_refresh.rebuild(store, now) is not None
     assert mode_surfaces.prepare_bundles(store, now) is not None
+
+
+def test_artist_policy_change_refreshes_existing_rankings_without_a_catalog_write(preference_store, monkeypatch):
+    from yt_playlist.rec import artist_variety
+    store = preference_store
+    previous = candidate_refresh.preferences(store, 100)
+    store.settings.set_setting('rec_candidate_preferences', previous)
+    assert not candidate_refresh.due(store, 100)
+    monkeypatch.setattr(artist_variety, 'VERSION', artist_variety.VERSION + 1)
+    assert candidate_refresh.due(store, 100)
 
 
 def candidate(store, key):
@@ -212,7 +224,7 @@ def completed_ranking_inputs(native_sql_calls, without_query_timing, store, monk
         return {'all': {'wheelhouse': policies.stamp(deepcopy(items), 'wheelhouse')},
                 '_meta': {'full_pools': True, 'comfort_pool': 0}}, None
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate)
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     return vectors
 
@@ -237,7 +249,7 @@ def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(
 
     # Completed ranking is the lower input. Keep actual vibe preparation,
     # version derivation and native publication together across the upgrade.
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
 
     def with_vibes(reader, now, policies):
         bundle, fresh = calculate(reader, now, policies)
@@ -249,7 +261,7 @@ def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(
         assert prepared['pools']['relax']['explore']
         return bundle, fresh
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', with_vibes)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', with_vibes)
     # Fingerprint construction and retired-policy collection have separate
     # owners; version-driven worker admission still uses its real preferences.
     monkeypatch.setattr(measurement, 'serving_policy',
@@ -321,7 +333,7 @@ def genre_ranking(preference_store, monkeypatch, taste_parameter_inputs):
     # The fitted preference geometry is an input. Keep the actual vector read,
     # facet weighting, muted eligibility, ranker, policy capture and publication.
     taste = SimpleNamespace(allocated_scores=lambda matrix: np.full(len(matrix), .5))
-    monkeypatch.setattr(surfaces, 'playlist_taste', lambda *a, **kw: taste)
+    monkeypatch.setattr(surface_composition, 'playlist_taste', lambda *a, **kw: taste)
     monkeypatch.setattr(type(store.rec_candidates), 'deep_cuts', lambda self, **kw: [])
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
 
@@ -330,7 +342,7 @@ def genre_ranking(preference_store, monkeypatch, taste_parameter_inputs):
         return {'all': {'wheelhouse': policies.stamp(ranked, 'wheelhouse')},
                 '_meta': {'full_pools': True}}, None
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate)
     completed_policy_inputs(store, monkeypatch)
     vectors = store.rec_model.get_rec_vectors()
     yield store, 'genre 0|artist', 'genre:' + genre_map.family('Techno')
@@ -417,12 +429,12 @@ def test_completed_ranking_retains_captured_preferences_and_leaves_later_edits_d
         store, monkeypatch, completed_ranking):
     completed_ranking()
     store.rec_model.set_weight('genre:techno', 0.5, now=2000)
-    original = mode_surfaces._calculate_bundles
+    original = mode_inputs._calculate_bundles
     def superseded(reader, now, policies):
         result = original(reader, now, policies)
         store.rec_model.set_weight('genre:techno', 1.5, now=now)
         return result
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', superseded)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', superseded)
     before = store.recommendations.head('home')['id']
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert store.recommendations.head('home')['id'] != before
@@ -442,12 +454,12 @@ def small_taste_ranking(preference_store, monkeypatch, taste_parameter_inputs):
     keys = [store.tracks.identity_key_for_video(f'control-{i}') for i in range(4)]
     store.history.import_play_events(iid, [
         (key, f'control-{i}', 1000 - day * 86400)
-        for i, key in enumerate(keys) for day in range(1, 6)])
+        for i, key in enumerate(keys) for day in range(31, 36)])
     store.rec_model.replace_rec_vectors([
         (key, np.array([1., i / 4], np.float32).tobytes()) for i, key in enumerate(keys)])
     metadata = store.rec_query.tracks_by_keys(keys)
     rows = [{**metadata[key], 'key': key, 'plays': 0, 'shared_playlists': 1} for key in keys]
-    monkeypatch.setattr(surfaces, 'playlist_taste', lambda *a, **kw: None)
+    monkeypatch.setattr(surface_composition, 'playlist_taste', lambda *a, **kw: None)
     # Preparation opens a separate snapshot-bound controller. Supply completed
     # candidate inputs there too, while retaining real ranking and publication.
     monkeypatch.setattr(type(store.rec_candidates), 'more_like_rotation',
@@ -464,7 +476,7 @@ def small_taste_ranking(preference_store, monkeypatch, taste_parameter_inputs):
                         for lane, items in lanes.items()},
                 '_meta': {'full_pools': True, 'comfort_pool': len(lanes['comfort'])}}, None
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate)
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     completed_policy_inputs(store, monkeypatch)
     vectors = store.rec_model.get_rec_vectors()

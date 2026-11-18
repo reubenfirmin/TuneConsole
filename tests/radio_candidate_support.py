@@ -55,7 +55,7 @@ def intensity_inputs(monkeypatch):
             muted_artists=list, get_weights=lambda **kwargs: weights,
             content_vector_pools=lambda keys: {'library': {key: vectors[key] for key in keys},
                                                'discovered': {}}),
-        genres=SimpleNamespace(feature_axes=axes),
+        genres=SimpleNamespace(feature_axes=axes, all_genres=lambda: labels, get_genre_whitelist=list),
         rec_proposals=SimpleNamespace(get_proposals=lambda surface: None),
         recommendations=SimpleNamespace(ranks=lambda *args, **kwargs: {},
             intensity_bands=lambda *args, **kwargs: [2, 48]),
@@ -65,6 +65,8 @@ def intensity_inputs(monkeypatch):
             rotation_facts=lambda keys: {key: {'owned': not all_tracks[key].get('_radio_fresh'),
                 'heard': bool(all_tracks[key].get('plays')), 'last_started': None, 'last_offered': None}
                 for key in keys if key in all_tracks}))
+
+    store.read_view = lambda: nullcontext(store)
 
     def intensity_pool(bands, mode, energy, *, allowed, genre_allowed, excluded, used, limit=LOOKAHEAD):
         assert 1 <= limit <= LOOKAHEAD
@@ -107,6 +109,8 @@ def intensity_inputs(monkeypatch):
                 side_effect=lambda *args, **kwargs: intensity_pool(bands, *args, **kwargs)))
 
     def inputs(*args, **kwargs):
+        if kwargs.get('capture'):
+            kwargs['capture'](store)
         return None, 'controlled', 'controlled', modes, {
             '_radio': {'generation': None, 'space': 'controlled',
                        'members': {mid: len(rows) for mid, rows in pools.items()} if inputs_state.indexed else {}},

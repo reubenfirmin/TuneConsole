@@ -1,8 +1,7 @@
 """Canonical releases and their track occurrences. Callers own transactions and locks."""
-import json
 import time
 
-from . import artists, artist_credits, legacy_evidence, album_tracklists
+from . import artists, legacy_evidence, album_tracklists
 
 
 def lookup(conn, browse_id):
@@ -19,14 +18,10 @@ def _credit_subject(conn, album_id, previous):
         return previous
     other_albums = [r[0] for r in conn.execute('SELECT album_id FROM album_artists '
                     'WHERE artist_id=? AND album_id<>?',(previous,album_id))]
-    other_entries = [r[0] for r in conn.execute(f'SELECT ta.entry_id FROM {artist_credits.projection_table(conn)} ta '
+    other_entries = [r[0] for r in conn.execute('SELECT ta.entry_id FROM entry_artists ta '
         'WHERE ta.artist_id=? AND NOT EXISTS(SELECT 1 FROM album_tracks at '
         'WHERE at.album_id=? AND at.entry_id=ta.entry_id)',(previous,album_id))]
     if other_albums or other_entries:
-        legacy_evidence.retain(conn,
-            'ambiguous_album_artist',str(previous),json.dumps({'artist_id':previous,'album_id':album_id,
-                'other_albums':other_albums,'other_entries':other_entries}),
-             'exact release identifies only its own unresolved credit; shared-name state remains ambiguous')
         legacy_evidence.mark_artist_ambiguity(conn, previous)
     return None if artists.ambiguous_context(conn,previous) else previous
 
@@ -86,7 +81,7 @@ def link(conn, entry_id, browse_id=None, *, title=None, artist=None, source='you
     credit = conn.execute('SELECT aa.artist_id,aa.credit,a.provisional FROM album_artists aa JOIN artists a ON a.id=aa.artist_id WHERE aa.album_id=?', (aid,)).fetchall()
     if len(credit)==1 and credit[0]['provisional']:
         subjects = {r[0] for r in conn.execute(
-            f'SELECT DISTINCT ta.artist_id FROM album_tracks at JOIN {artist_credits.projection_table(conn)} ta ON ta.entry_id=at.entry_id '
+            'SELECT DISTINCT ta.artist_id FROM album_tracks at JOIN entry_artists ta ON ta.entry_id=at.entry_id '
             'JOIN artist_provider_ids p ON p.artist_id=ta.artist_id WHERE at.album_id=?', (aid,))}
         if len(subjects)==1:
             subject = next(iter(subjects))

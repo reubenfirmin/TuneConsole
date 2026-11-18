@@ -1,5 +1,6 @@
 """Prepare versioned musical interests and mix candidates from production pools."""
 import json
+import logging
 from dataclasses import dataclass, field
 import threading
 import uuid
@@ -8,11 +9,11 @@ from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_sto
 from yt_playlist.core import group_preview_work
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import maintenance_job
-from yt_playlist.rec import group_learning, group_preparation, mode_surfaces, rec_params
-from yt_playlist.rec.eligibility import home_exclusions
+from yt_playlist.rec import group_learning, group_preparation, mode_surfaces
 
 SURFACE = 'adaptive_group_preview'
-SCHEMA = 2
+SCHEMA = 3
+WORK_PREFIX = f'preview-{SCHEMA}:'
 PHASE = 'rec: adaptive mix shadow'
 
 
@@ -37,68 +38,21 @@ def calculate(store, head, now, *, progress=None, checkpoint=None):
 
 def prepare_candidates(store, head, now, *, progress=None, checkpoint=None):
     """Candidate eligibility and diversity do not consume allocation reports."""
-    progress = progress if progress is not None else {}
-    completed = progress.setdefault('frames', {})
-    groups = [group for group in head['groups'] if not group.get('legacy')]
-    typed = getattr(store, '_recommendation_files', False)
-    generation = None
-    if typed:
-        from yt_playlist.rec import stored_groups
-        header = store.recommendations.head('home')
-        generation = header['id'] if header else None
-        pools = {lane: None for lane in mode_surfaces.CARD_SURFACES + ('temporal',)
-                 if generation is not None and store.recommendations.pool('home', 'all', lane,
-                                                                          generation=generation) is not None}
-        blocked = set()
-    else:
-        bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
-        pools = bundles.get('all', {})
-        keys = {item['key'] for pool in pools.values() for item in pool if item.get('key')}
-        blocked = home_exclusions(store, keys, now)
-    muted = store.rec_model.muted_artists()
-    cap_artist = int(rec_params.get_param(store, 'modes_artist_cap'))
-    cap_album = int(rec_params.get_param(store, 'modes_album_cap'))
-    prepared = {}
-    for group in groups:
-        check_stopping()
-        members = set(group.get('members', {}))
-        frames = {}
-        for frame, pool in pools.items():
-            frame_key = (group['version'], frame)
-            if typed:
-                state = completed.setdefault(frame_key, stored_groups.PreviewFrame())
-                frames[frame] = stored_groups.preview_frame(store, generation, group['version'], frame, now,
-                    cap_artist, cap_album, muted, progress=state, checkpoint=checkpoint)
-                continue
-            if frame_key in completed:
-                frames[frame] = completed[frame_key]
-                continue
-            eligible, seen = [], set()
-            for item in pool:
-                key = item.get('key')
-                if key in members and key not in blocked and key not in seen and item.get('artist') not in muted:
-                    eligible.append(item)
-                    seen.add(key)
-            diverse = mode_surfaces._diversify(eligible, cap_artist, cap_album)
-            frames[frame] = {'eligible': len(diverse), 'full_mix': len(diverse) >= mode_surfaces.PROTO_SIZE,
-                             # Keep inspectable identities, not repeated copies of
-                             # every track's model/provenance payload at each parent.
-                             'tracks': [{field: item.get(field) for field in ('key', 'title', 'artist')}
-                                        for item in diverse[:mode_surfaces.PROTO_SIZE]],
-                             'keys': [item['key'] for item in eligible]}
-            completed[frame_key] = frames[frame]
-            if checkpoint is not None:
-                checkpoint(group['version'], frame, -1, {'legacy': frames[frame]})
-        prepared[group['group_id']] = {key: group.get(key) for key in
-            ('group_id', 'version', 'parent_version', 'name', 'subtitle', 'size', 'leaf', 'display')}
-        prepared[group['group_id']]['frames'] = frames
-    return {'groups': prepared, 'pools': tuple(pools), 'generation': generation, 'typed': typed}
+    from yt_playlist.library.group_composition import candidates
+    return candidates(store).prepare(head, now, progress=progress, checkpoint=checkpoint)
 
 
 def compose(store, head, now, prepared_candidates, *, progress, allocation_at=None):
     """Apply current learning after the expensive, independently guarded pages."""
     stats = group_learning.current_state(store, head, now if allocation_at is None else allocation_at)
     progress['allocation_expires_at'] = stats.get('expires_at')
+    return compose_facts(head, now, prepared_candidates, stats=stats, enabled=enabled(store))
+
+
+from yt_playlist.rec.group_preview_values import candidate_frame
+
+
+def compose_facts(head, now, prepared_candidates, *, stats, enabled):
     allocation = group_learning.allocation(head, stats)
     groups = [group for group in head['groups'] if not group.get('legacy')]
     by_version = {group['version']: group for group in groups}
@@ -137,8 +91,8 @@ def compose(store, head, now, prepared_candidates, *, progress, allocation_at=No
     context = {'schema': 1, 'at': now, 'grouping_policy': head['policy'], 'group_generation': head['generation'],
                'musical_groups': [{key: group.get(key) for key in
                    ('group_id', 'version', 'parent_version', 'name', 'size')} for group in groups]}
-    result = {'schema': SCHEMA, 'at': now, 'generation': head['generation'], 'shadow': not enabled(store),
-            'serving_policy': 'adaptive' if enabled(store) else 'legacy',
+    result = {'schema': SCHEMA, 'at': now, 'generation': head['generation'], 'shadow': not enabled,
+            'serving_policy': 'adaptive' if enabled else 'legacy',
             'groups': list(prepared.values()), 'context': context,
             'counts': head['payload']['counts'], 'menus': menus}
     if prepared_candidates['typed']:
@@ -154,7 +108,7 @@ class PreviewWork:
     progress: dict = field(default_factory=dict)
     result: dict | None = None
     candidates: dict | None = None
-    token: str = field(default_factory=lambda: uuid.uuid4().hex)
+    token: str = field(default_factory=lambda: WORK_PREFIX + uuid.uuid4().hex)
     expected_token: str | None = None
     dependencies: set = field(default_factory=set)
 
@@ -206,7 +160,8 @@ class Preparation:
                                 return None
                             if self.pending is None:
                                 saved = reader.rec_proposals.preview_work()
-                                if (saved is not None and not saved['invalid'] and saved['schema_version'] == snapshot._schema
+                                if (saved is not None and saved['token'].startswith(WORK_PREFIX)
+                                        and not saved['invalid'] and saved['schema_version'] == snapshot._schema
                                         and saved['at'] <= now
                                         and (saved['expires_at'] is None or now < saved['expires_at'])):
                                     from yt_playlist.rec.stored_groups import restore_preview_pages
@@ -251,21 +206,22 @@ class Preparation:
                                          progress=work.progress, allocation_at=now)
                         encoded = json.dumps(result)
 
-                        def publish():
-                            if not work.current(now):
-                                raise WorkBudgetExceeded('Adaptive preview candidate inputs changed before publication')
-                            store.rec_proposals.publish_prepared_home(encoded, work.at, surface=SURFACE,
-                                                                     input_revision=publication._changes)
+                        with store.rec_proposals.prepare_home(encoded, work.at, surface=SURFACE) as prepared:
+                            def publish():
+                                if not work.current(now):
+                                    raise WorkBudgetExceeded('Adaptive preview candidate inputs changed before publication')
+                                store.rec_proposals.publish_home(prepared, input_revision=publication._changes)
 
-                        check_stopping()
-                        if publication.publish(publish, allow_stale_tables=group_preview_work.TABLES):
-                            work.guard, work.result = publication, result
-                            self.complete, self.pending = work, None
-                            work.progress.pop('frames', None)
-                            work.candidates = None
-                            store.maintenance_diagnostics.record('completed', phase=PHASE)
-                            return result
-            except WorkBudgetExceeded:
+                            check_stopping()
+                            if publication.publish(publish, allow_stale_tables=group_preview_work.TABLES):
+                                work.guard, work.result = publication, result
+                                self.complete, self.pending = work, None
+                                work.progress.pop('frames', None)
+                                work.candidates = None
+                                store.maintenance_diagnostics.record('completed', phase=PHASE)
+                                return result
+            except WorkBudgetExceeded as error:
+                logging.getLogger(__name__).debug('Adaptive preview deferred: %s', error)
                 store.maintenance_diagnostics.record('deferred', phase=PHASE, reasons=('group-preview-budget',))
             except WorkClosing:
                 self.pending = None

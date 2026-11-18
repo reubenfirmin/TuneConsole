@@ -1,9 +1,10 @@
 """Checkpointed, bounded TV continuations through the generated-playlist writer."""
 import uuid
 
-from yt_playlist.library.playlist_generated import create_generated_playlist
+from yt_playlist.library.generated_composition import commands as generated_commands
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.library.playlist_writes import account_additions, add_items, PlaylistAddUncertain
+from yt_playlist.library.playlist_policy import tv_continuation
 from yt_playlist.rec import tv
 
 
@@ -11,14 +12,16 @@ class PendingTV(Exception):
     """A provider read has not confirmed the previous write yet."""
 
 
-def refill(store, client, account_id, playlist, recipe, token, request_id, items, now):
+def refill(store, client, account_id, playlist, recipe, token, request_id, items, now, *,
+           destination=None, policy='upload'):
     """Never replay an uncertain append, mutate an adopted/saved source, or grow beyond 60 videos."""
     receipt_key = f'{playlist.id}:{token}:{request_id}'
     if receipt := store.tv.receipt(receipt_key):
         if receipt.get('pending'):
             raise ValueError('YouTube has not confirmed the new TV playlist. Reset TV to start a fresh session.')
         return receipt['playlist_id'], receipt['stream'], receipt['items']
-    result = _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key)
+    result = _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key,
+                     destination=destination, policy=policy)
     # Retain the response at the original request address as well as the target
     # playlist. Retrying a lost rollover response must not create another list.
     pid, stream, confirmed = result
@@ -27,7 +30,8 @@ def refill(store, client, account_id, playlist, recipe, token, request_id, items
     return result
 
 
-def _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key):
+def _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key, *,
+            destination=None, policy='upload'):
     live = (token and token == recipe.get('tv_stream')
             and store.playlists.is_quarantined_playlist(playlist.playlist_scope_id))
     if live:
@@ -38,10 +42,10 @@ def _refill(store, client, account_id, playlist, recipe, token, request_id, item
             return _confirm(store, client, playlist, recipe, previous, now)
     if not items:
         raise PendingTV()
-    membership = {t['video_id'] for t in store.charts.playlist_tracks_detail(playlist.id)} if live else set()
-    old = [t for t in recipe.get('videos', []) if t['video_id'] in membership] if live else []
-    known = {t['video_id'] for t in old}
-    additions = [t for t in items if t['video_id'] not in known]
+    if destination is None:
+        destination = [(t['identity_key'], t['video_id']) for t in
+                       store.charts.playlist_tracks_detail(playlist.id)] if live else []
+    old, additions = tv_continuation(items, destination if live else [], recipe=recipe if live else {}, policy=policy)
     if not live or len(old) + len(additions) > tv.MAX_POOL:
         # Opening a saved video playlist never grants permission to alter it.
         # A long stream rolls to another bounded Generated playlist as needed.
@@ -52,7 +56,7 @@ def _refill(store, client, account_id, playlist, recipe, token, request_id, item
                   'max_minutes': tv.max_minutes(store), 'videos': items,
                   'tv_refill': {'request_id': request_id, 'state': 'complete', 'items': items}}
         limit = tv.max_minutes(store)
-        result = create_generated_playlist(store, 'TV', items, client, now, account_id, recipe=recipe,
+        result = generated_commands(store, now).create('TV', items, client=client, account_id=account_id, recipe=recipe,
                                            max_duration_s=float('inf') if limit is None else limit * 60)
         confirmed = {t['video_id'] for t in store.charts.playlist_tracks_detail(result['pid'])}
         accepted = [t for t in items if t['video_id'] in confirmed]

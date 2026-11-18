@@ -3,7 +3,7 @@ playlists, kept pairs, plus the category-scoped cleanup ignores (per-playlist em
 and per-merge dismissals)."""
 import json
 from yt_playlist.core.playlist_scopes import ensure
-from yt_playlist.core import entity_names, playlist_scope_state as scope_state
+from yt_playlist.core import playlist_scope_state as scope_state
 
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import CleanupPreferences
@@ -22,8 +22,7 @@ class OverlapRepo(Repo):
     def suppress_overlap(self, ytm_a, ytm_b, now) -> None:
         ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
         first_playlist_scope_id, second_playlist_scope_id = sorted((ytm_a, ytm_b))  # normalize order so the pair is unordered
-        pairs = entity_names.owner(self.conn, 'suppressed_overlaps')
-        self.conn.execute(f'INSERT OR IGNORE INTO {pairs.table}({pairs.column("first_playlist_scope_id")},{pairs.column("second_playlist_scope_id")},created_at) VALUES (?,?,?)',
+        self.conn.execute('INSERT OR IGNORE INTO suppressed_overlaps(first_playlist_scope_id,second_playlist_scope_id,created_at) VALUES (?,?,?)',
                           (first_playlist_scope_id, second_playlist_scope_id, now))
         self.conn.commit()
 
@@ -40,17 +39,15 @@ class OverlapRepo(Repo):
         with self.conn:
             refs = {ref: ensure(self.conn, ref) for ref in sorted({ref for pair in pairs for ref in pair})}
             normalized = {tuple(sorted((refs[first_playlist_scope_id], refs[second_playlist_scope_id]))) for first_playlist_scope_id, second_playlist_scope_id in pairs}
-            owner = entity_names.owner(self.conn, 'suppressed_overlaps')
             self.conn.executemany(
-                f'INSERT OR IGNORE INTO {owner.table}({owner.column("first_playlist_scope_id")},{owner.column("second_playlist_scope_id")},created_at) VALUES (?,?,?)',
+                'INSERT OR IGNORE INTO suppressed_overlaps(first_playlist_scope_id,second_playlist_scope_id,created_at) VALUES (?,?,?)',
                 [(first_playlist_scope_id, second_playlist_scope_id, now) for first_playlist_scope_id, second_playlist_scope_id in sorted(normalized)])
 
     @synchronized
     def unsuppress_overlap(self, ytm_a, ytm_b) -> None:
         ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
         first_playlist_scope_id, second_playlist_scope_id = sorted((ytm_a, ytm_b))
-        pairs = entity_names.owner(self.conn, 'suppressed_overlaps')
-        self.conn.execute(f'DELETE FROM {pairs.table} WHERE {pairs.column("first_playlist_scope_id")}=? AND {pairs.column("second_playlist_scope_id")}=?', (first_playlist_scope_id, second_playlist_scope_id))
+        self.conn.execute('DELETE FROM suppressed_overlaps WHERE first_playlist_scope_id=? AND second_playlist_scope_id=?', (first_playlist_scope_id, second_playlist_scope_id))
         self.conn.commit()
 
     @synchronized
@@ -96,8 +93,7 @@ class OverlapRepo(Repo):
     def keep_overlap_pair(self, ytm_a, ytm_b, now) -> None:
         ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
         first_playlist_scope_id, second_playlist_scope_id = sorted((ytm_a, ytm_b))   # pair the user wants to keep visible despite ignoring first_playlist_scope_id playlist
-        pairs = entity_names.owner(self.conn, 'overlap_kept')
-        self.conn.execute(f'INSERT OR IGNORE INTO {pairs.table}({pairs.column("first_playlist_scope_id")},{pairs.column("second_playlist_scope_id")},created_at) VALUES (?,?,?)', (first_playlist_scope_id, second_playlist_scope_id, now))
+        self.conn.execute('INSERT OR IGNORE INTO overlap_kept(first_playlist_scope_id,second_playlist_scope_id,created_at) VALUES (?,?,?)', (first_playlist_scope_id, second_playlist_scope_id, now))
         self.conn.commit()
 
     @synchronized
@@ -111,16 +107,14 @@ class OverlapRepo(Repo):
         """Dismiss one playlist from ONE cleanup category (e.g. 'this is empty, stop suggesting it').
         Scoped: it stays eligible in every other category."""
         ytm = ensure(self.conn,ytm)
-        ignored = entity_names.owner(self.conn, 'cleanup_ignored')
-        self.conn.execute(f'INSERT OR IGNORE INTO {ignored.table}({ignored.column("playlist_scope_id")},category,created_at) VALUES (?,?,?)',
+        self.conn.execute('INSERT OR IGNORE INTO cleanup_ignored(playlist_scope_id,category,created_at) VALUES (?,?,?)',
                           (ytm, category, now))
         self.conn.commit()
 
     @synchronized
     def unignore_cleanup(self, ytm, category) -> None:
         ytm = ensure(self.conn,ytm)
-        ignored = entity_names.owner(self.conn, 'cleanup_ignored')
-        self.conn.execute(f'DELETE FROM {ignored.table} WHERE {ignored.column("playlist_scope_id")}=? AND category=?', (ytm, category))
+        self.conn.execute('DELETE FROM cleanup_ignored WHERE playlist_scope_id=? AND category=?', (ytm, category))
         self.conn.commit()
 
     @synchronized

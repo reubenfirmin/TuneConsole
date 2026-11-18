@@ -136,16 +136,16 @@ def test_discovery_and_comfort_use_current_listening_and_ownership(
     prepared = radio_rotation_template.restore(store)
     if launch:
         from tests.radio_session_support import radio_controller, play
-        from yt_playlist.library import playlist_generated
+        from yt_playlist.library import generated_acquisition
         from yt_playlist.web import radio_session
         from yt_playlist.web.radio_session import PlaylistRadio
 
-        create = playlist_generated.create_generated_playlist
+        create = generated_acquisition.create_generated_playlist
         with radio_controller(monkeypatch, store, prepared) as (c, remote, _, _, _):
             # Only provider I/O is controlled. Keep real initial creation, SQL
             # readback, listening evidence, planning and checkpoint restoration.
             monkeypatch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
-            monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create)
+            monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create)
             remote.create_playlist = lambda *args: 'PLSESSION'
             remote.get_song = lambda video: {'videoDetails': {'lengthSeconds': '200'}}
             c.ctx.now_fn = lambda: 1_000_000.

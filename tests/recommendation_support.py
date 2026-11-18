@@ -7,6 +7,26 @@ from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import measurement, mode_surfaces
 
 
+def seed_library_favorites(store, tracks, *, now=1):
+    """Retain Liked Music membership without configuring a live account."""
+    account = store.conn.execute('SELECT id FROM accounts WHERE label=?',
+                                 ('prepared favorites',)).fetchone()
+    if account is None:
+        account_id = store.accounts.upsert_account('prepared favorites', 'fixture', None, False)
+        with store.conn:
+            store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (account_id,))
+    else:
+        account_id = account['id']
+    playlist = store.playlists.get_playlist_for_account(account_id, 'LM')
+    ids = store.playlists.get_playlist_track_ids(playlist.id) if playlist else []
+    ids.extend(store.conn.execute('SELECT id FROM tracks WHERE identity_key=?',
+                                 (track['key'],)).fetchone()[0] for track in tracks)
+    ids = list(dict.fromkeys(ids))
+    playlist_id = store.playlists.upsert_playlist(account_id, 'LM', 'Liked Music', len(ids),
+                                                 'prepared-favorites', now)
+    store.playlists.set_playlist_tracks(playlist_id, ids)
+
+
 def seed_compact_group_history(store):
     """Two real published group generations below recommendation consumers."""
     with store.conn:
@@ -37,6 +57,7 @@ def seed_compact_group_history(store):
                 'similarity,support,profile_digest,prepared_at) SELECT g.id,2,a.group_version_id,.7,.6,?,? '
                 'FROM group_generations g JOIN group_version_aliases a ON a.external_version=? '
                 'WHERE g.external_key=?', ('profile-digest', at, generation + '-leaf', generation))
+    return prepared
 
 
 def seed_publication_subjects(store, items, *, discoveries=(), unowned=(), now=1):
@@ -92,25 +113,24 @@ def seed_bundle_subjects(store, bundle, *, fresh=()):
                     tracks[item['key']] = (lane != 'fresh' or bool(previous and previous[0]), item)
     for item in fresh:
         tracks.setdefault(item['key'], (False, item))
-    # The complete candidate input is one fixture batch. Individual catalog
-    # operations keep their real SQL and guards without committing each field.
-    with atomic_write(store):
-        owned = store.rec_query.tracks_by_keys(tracks)
-        discovered = store.discovery.discovered_tracks_by_keys(tracks)
-        for key, (library, item) in tracks.items():
-            if key in owned or key in discovered:
-                continue
-            video = item.get('video_id') or 'fixture-' + key
-            existing = store.conn.execute('SELECT r.identity_key FROM youtube_items y JOIN recordings r '
-                                          'ON r.id=y.recording_id WHERE y.video_id=?', (video,)).fetchone()
-            if existing and existing[0] != key:
-                video = 'fixture-' + key
-            if library:
-                seed_catalog_track(store, key, item['title'], item['artist'], video_id=video,
-                                   album=item.get('album'), genre=item.get('genre'))
-            else:
-                store.discovery.upsert_discovered_track(key, video, item['title'], item['artist'],
-                    item.get('album'), item.get('thumbnail'), item.get('genre'), item.get('year'), None, 1)
+    owned = store.rec_query.tracks_by_keys(tracks)
+    discovered = store.discovery.discovered_tracks_by_keys(tracks)
+    for key, (library, item) in tracks.items():
+        if key in owned or key in discovered:
+            continue
+        video = item.get('video_id') or 'fixture-' + key
+        existing = store.conn.execute('SELECT r.identity_key FROM youtube_items y JOIN recordings r '
+                                      'ON r.id=y.recording_id WHERE y.video_id=?', (video,)).fetchone()
+        if existing and existing[0] != key:
+            video = 'fixture-' + key
+        if library:
+            seed_catalog_track(store, key, item['title'], item['artist'], video_id=video,
+                               album=item.get('album'), genre=item.get('genre'))
+        else:
+            # Discovery ingestion coordinates committed SQL reservations and
+            # metadata files; its controller must own those transactions.
+            store.discovery.upsert_discovered_track(key, video, item['title'], item['artist'],
+                item.get('album'), item.get('thumbnail'), item.get('genre'), item.get('year'), None, 1)
 
 
 def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False,

@@ -14,6 +14,7 @@ from yt_playlist.rec import listening_analytics as analytics, maintenance
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 from yt_playlist.rec.listening_policy import PLAYER_KINDS
+from yt_playlist.controllers import analytics_preparation
 from yt_playlist.web.app import create_app
 
 NOW = datetime(2026, 10, 24, 12, tzinfo=timezone.utc).timestamp()
@@ -48,7 +49,7 @@ def test_empty_generation_and_serving_never_calculate(store, monkeypatch):
         payload = analytics.build(store, NOW)
         assert payload['rows'] == []
         encoded = store.listening_analytics.encoded()
-        monkeypatch.setattr(analytics, 'calculate', lambda *a: pytest.fail('calculated on request'))
+        monkeypatch.setattr(analytics_preparation, 'calculate', lambda *a: pytest.fail('calculated on request'))
         response = client.get('/charts/listening-data')
         assert response.status_code == 200 and response.text == encoded
         assert response.headers['cache-control'] == 'no-store'
@@ -195,15 +196,15 @@ def test_conflicting_sources_keep_last_good_and_scans_require_private_reader(sto
     iid = seed(store)
     assert analytics.build(store, NOW)
     encoded = store.listening_analytics.encoded()
-    original = analytics.calculate
+    original = analytics_preparation.calculate
 
-    def conflict(reader, now):
-        assert reader._read_only and reader.conn is not store.conn
-        result = original(reader, now)
+    def conflict(analytics_port, playlists, settings, now):
+        assert analytics_port.repository.conn is not store.conn
+        result = original(analytics_port, playlists, settings, now)
         event(store, iid, 'tick', NOW, 10)
         return result
 
-    monkeypatch.setattr(analytics, 'calculate', conflict)
+    monkeypatch.setattr(analytics_preparation, 'calculate', conflict)
     assert analytics.build(store, NOW) is None
     assert store.listening_analytics.encoded() == encoded
     with pytest.raises(RuntimeError, match='private worker snapshot'):
@@ -297,5 +298,5 @@ def test_catalog_scan_rejects_writer_before_sql_and_guards_schema_discovery(stor
             rows = next(stream)
             assert {row['identity_key'] for row in rows} == {'a', 'b', 'c'}
             assert not lock._is_owned()
-            assert any('sqlite_' in sql for sql in queries)
+            assert queries and all(sql.lstrip().startswith('SELECT') for sql in queries)
             stream.close()

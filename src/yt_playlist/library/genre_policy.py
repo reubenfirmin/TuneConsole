@@ -45,13 +45,6 @@ def matcher(facts):
             if len(keys) == 1 and next(iter(keys)) in enabled}
 
 
-def merge_preference(preferences):
-    if not preferences:
-        return None
-    explicit = [row for row in preferences if row['origin'] in ('user', 'custom', 'legacy')]
-    return min(row['enabled'] for row in explicit or preferences), 'user' if explicit else 'default'
-
-
 def configuration(current, settings, *, reset=False):
     defaults = genre_catalog.builtin_names()
     upgrading = settings.get('genre_catalog_revision') != genre_catalog.REVISION

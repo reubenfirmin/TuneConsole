@@ -1,0 +1,75 @@
+{% from '_partials/song_affordances.html' import song_art, playlist_add %}
+{% from '_partials/playback_art.html' import playback_art %}
+{% from '_partials/music_library_control.html' import library_control %}
+<dialog id="music-search" class="music-search" x-data="musicSearch()" aria-labelledby="music-search-title"
+        data-section-order='{{ music_search_sections|tojson }}'
+        @music-search-open.window="openSearch($event.detail)" @cancel.prevent="close()"
+        @click="if ($event.target === $el) close()"
+        @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)">
+  <div class="music-search-panel">
+    <header class="music-search-header">
+      <div><h2 id="music-search-title" x-text="onboarding ? 'Find your first favorites' : 'Search music'"></h2>
+        <p x-text="onboarding ? 'Add songs or choose artists to shape your first set.' : 'Explore your library and save music from YouTube Music.'"></p></div>
+      <button type="button" class="music-search-close" @click="close()" aria-label="Close music search">×</button>
+    </header>
+    <form class="music-search-query" role="search" @submit.prevent="search()">
+      <label class="sr-only" for="music-search-query">Search music</label>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 6 6"/></svg>
+      <input id="music-search-query" x-ref="query" type="search" x-model="query" maxlength="80"
+             placeholder="Song, album, artist or playlist" autocomplete="off" @input.debounce.300ms="search()">
+    </form>
+    <div class="music-search-empty" x-show="query.trim().length < 2">Start with a song or artist you love.</div>
+    <div class="music-search-tabs music-search-sources" role="tablist" aria-label="Search source"
+         @keydown.right.prevent.stop="sourceTab = sourceTab === 'library' ? 'catalog' : 'library'; $nextTick(() => $el.querySelector('[aria-selected=true]').focus())"
+         @keydown.left.prevent.stop="sourceTab = sourceTab === 'library' ? 'catalog' : 'library'; $nextTick(() => $el.querySelector('[aria-selected=true]').focus())">
+      <button id="music-library-tab" type="button" role="tab" aria-label="My library" :aria-selected="sourceTab === 'library'" :tabindex="sourceTab === 'library' ? 0 : -1" aria-controls="music-library-results" :aria-describedby="libraryDone ? 'music-library-count' : null" @click="sourceTab = 'library'">
+        My library <span id="music-library-count" class="music-search-count" x-cloak x-show="libraryDone" x-text="libraryCount" :aria-label="libraryCount + (libraryCount === 1 ? ' result' : ' results')"></span>
+      </button>
+      <button id="music-catalog-tab" type="button" role="tab" aria-label="YouTube Music" :aria-selected="sourceTab === 'catalog'" :tabindex="sourceTab === 'catalog' ? 0 : -1" aria-controls="music-catalog-results" :aria-describedby="catalogReady ? 'music-catalog-count' : null" @click="sourceTab = 'catalog'">
+        YouTube Music <span id="music-catalog-count" class="music-search-count" x-cloak x-show="catalogReady" x-text="catalogCount" :aria-label="catalogCount + (catalogCount === 1 ? ' result' : ' results')"></span>
+      </button>
+    </div>
+    <div class="music-search-results" x-show="query.trim().length >= 2" data-music-results>
+      <section id="music-library-results" class="music-search-library" role="tabpanel" aria-labelledby="music-library-tab" x-show="sourceTab === 'library'">
+        <p class="music-search-note" x-show="libraryLoading" role="status">Searching your library…</p>
+        <div x-ref="library" @click="if ($event.target.closest('a') && !$event.target.closest('.pl-play')) close()"></div>
+        <button class="btn-ghost" type="button" x-show="!libraryLoading && !libraryDone" @click="search()">Search library again</button>
+      </section>
+      <section id="music-catalog-results" class="music-search-catalog" role="tabpanel" aria-labelledby="music-catalog-tab" x-show="sourceTab === 'catalog'">
+        <p class="music-search-note" role="status" x-show="loading || sectionsLoading">Searching YouTube Music…</p>
+        <p class="music-search-note" x-show="catalogDone && sectionsDone && !catalogCount">No matches found. Try another title or artist.</p>
+        <button class="btn-ghost" type="button" x-show="!loading && !sectionsLoading && (!catalogDone || !sectionsDone)" @click="search()">Search YouTube Music again</button>
+        <template x-for="section in catalogSections" :key="section.kind">
+          <section x-show="section.rows.length" :aria-label="section.title">
+            <h3 class="omni-head" x-text="section.title"></h3>
+            <template x-for="item in section.rows" :key="item.video_id || item.browse_id">
+              <div :class="section.kind === 'song' ? 'music-search-song' : 'music-search-entity'"
+                   :data-video-id="item.video_id || null" :data-catalog-kind="section.kind !== 'song' ? section.kind : null">
+                <template x-if="section.kind === 'song'">{{ song_art(dynamic='item') }}</template>
+                <template x-if="section.kind !== 'song'">{{ playback_art('item.thumbnail', 'item.title', 'item.play_url', dynamic=True, dynamic_kind='section.kind', album_browse='item.browse_id') }}</template>
+                <template x-if="section.kind === 'song'">
+                  <div class="music-search-song-copy"><strong x-text="item.title"></strong><span x-text="item.artist"></span>
+                    <small x-text="[item.album, item.duration].filter(Boolean).join(' · ')"></small></div>
+                </template>
+                <a class="music-search-entity-copy" :href="item.href" x-show="section.kind !== 'song' && !(section.kind === 'artist' && onboarding)"
+                   :data-yt-info="section.kind === 'playlist' ? '' : null" :target="section.kind === 'playlist' ? '_blank' : null" rel="noopener" @click="close()">
+                  <strong x-text="item.title"></strong><span x-text="section.kind === 'artist' ? 'Artist' : item.sub"></span>
+                </a>
+                <button type="button" class="music-search-artist-choice" x-show="section.kind === 'artist' && onboarding" :aria-pressed="isSelected(item)"
+                        :aria-label="(isSelected(item) ? 'Remove ' : 'Choose ') + item.name" :disabled="!!artistBusy" @click="chooseArtist(item)">
+                  <strong x-text="item.name"></strong><span x-text="artistBusy === item.browse_id ? 'Saving…' : isSelected(item) ? 'Selected' : 'Choose artist'"></span>
+                </button>
+                <div class="music-search-actions">
+                  {{ library_control() }}
+                  <template x-if="section.kind === 'song'">{{ playlist_add(dynamic='item') }}</template>
+                </div>
+              </div>
+            </template>
+            <p class="music-search-note" role="status" x-show="section.kind === 'artist' && artistNote" x-text="artistNote"></p>
+          </section>
+        </template>
+      </section>
+    </div>
+    <footer x-show="onboarding"><button type="button" class="btn btn-primary" @click="close()">Back to my picks</button></footer>
+  </div>
+</dialog>

@@ -1,18 +1,14 @@
-"""The two explicitly supported rebuild inputs and their stable row cursors.
+"""Explicitly supported rebuild inputs and their stable row cursors.
 
 This is a read contract, not an upgrade runner. In particular, admission of the
 released layout must never execute a populated historical migration.
 """
-from .. import released_schema
-from ..migrations import regular
+from ..migrations import current, regular
 from ..migrations.registry import MIGRATIONS
 from ..migrations.runner import MigrationError, history, validate_version
 from .build import quote
 
 
-RELEASE_VERSION = released_schema.VERSION
-DEVELOPMENT_VERSION = 93
-RELEASE_DDL = released_schema.DDL
 MAX_BATCH_BYTES = 8 * 1024**2
 
 
@@ -24,13 +20,11 @@ def tables(conn):
 def admit(conn):
     """Check structure only, without a write reservation or library scan."""
     version = history(conn, MIGRATIONS)
-    if version == RELEASE_VERSION:
-        released_schema.validate(conn)
-    elif version == DEVELOPMENT_VERSION:
-        validate_version(conn, version, foreign_keys=False, data=False)
+    if version == current.VERSION:
+        current.validate(conn, foreign_keys=False, data=False)
         regular.validate(conn)
     else:
-        raise MigrationError('Direct rebuild supports released schema 64 and the development schema 93')
+        raise MigrationError('Direct rebuild requires the current release baseline')
     return version
 
 

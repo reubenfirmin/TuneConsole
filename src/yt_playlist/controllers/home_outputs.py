@@ -11,6 +11,7 @@ class Publication:
     filenames: tuple
     policies: frozenset
     roots: tuple | None
+    file_ids: tuple = ()
 
 
 class HomeOutputs:
@@ -24,16 +25,29 @@ class HomeOutputs:
         prepared = raw if isinstance(raw, home_outputs.Prepared) else home_outputs.prepare(surface, raw, now)
         if prepared.surface != surface or prepared.built_at != now:
             raise ValueError('Prepared Home surface or observation time does not match')
+        native = self.repository.native()
+        if native and self.repository.unchanged(prepared):
+            try:
+                if self.encoded(surface) == prepared.raw:
+                    return Publication(prepared, (), frozenset(), None)
+            except (OSError, ValueError):
+                pass  # A matching SQL digest cannot establish file health.
         roots = self.references.prepare_references(surface, prepared.value, now)
-        filenames = []
-        if self.repository.native():
-            write = self.files.write_cache if cache else self.files.publish
-            filenames = [(surface, str(position), *write(encoded)) for position, encoded in enumerate(prepared.parts)]
-        return Publication(prepared, tuple(filenames), frozenset(home_outputs.policy_references(prepared.value)), roots)
+        filenames, file_ids = [], []
+        if native:
+            for position, encoded in enumerate(prepared.parts):
+                key = str(position)
+                integrity = self.files.describe(encoded)
+                identity = self.repository.reserve_file(surface, key, integrity)
+                reference = self.files.publish_reserved(identity, encoded, expected=integrity)
+                file_ids.append(identity)
+                filenames.append((surface, key, *reference))
+        return Publication(prepared, tuple(filenames), frozenset(home_outputs.policy_references(prepared.value)),
+                           roots, tuple(file_ids))
 
     def publish(self, publication, *, input_revision=None):
         return self.repository.publish(publication.prepared, publication.filenames, publication.policies,
-                                       publication.roots, input_revision=input_revision)
+                                       publication.roots, input_revision=input_revision, file_ids=publication.file_ids)
 
     def put(self, surface, raw, now, *, input_revision=None, validate=True):
         with self.files.retained():

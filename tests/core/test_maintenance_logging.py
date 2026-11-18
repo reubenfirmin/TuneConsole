@@ -10,7 +10,8 @@ from yt_playlist.core import db_diagnostics, work_diagnostics
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
-from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_prepared, measurement, mode_surfaces
+from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_prepared, measurement
+from yt_playlist.library import mode_composition
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_tasks import ServingTasks
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
@@ -198,7 +199,8 @@ def test_bundle_failure_preserves_traceback_retry_and_last_good_pool(store, monk
     def failed(*args):
         raise RuntimeError('forced preparation failure')
 
-    monkeypatch.setattr(mode_surfaces, 'prepare_bundles', failed)
+    monkeypatch.setattr(mode_composition, 'preparation', lambda owner:
+        SimpleNamespace(prepare=failed))
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 1000,
                                       logger=logging.getLogger('test')), debounce_s=0)
     try:
@@ -309,8 +311,8 @@ def test_home_revisit_partial_publications_preserve_wait_then_complete(revisit_s
 
         monkeypatch.setattr(home_prepared.surfaces, 'rediscover_tracks', tracks)
         with monkeypatch.context() as refresh:
-            display = Mock(wraps=store.rec_proposals.home.put)
-            refresh.setattr(store.rec_proposals.home, 'put', display)
+            display = Mock(wraps=store.rec_proposals.publish_home)
+            refresh.setattr(store.rec_proposals, 'publish_home', display)
             if interruption is WorkClosing:
                 with pytest.raises(WorkClosing):
                     home_prepared.prepare_revisit(store, 2000 + index * 60)
@@ -321,8 +323,8 @@ def test_home_revisit_partial_publications_preserve_wait_then_complete(revisit_s
             del store._preparation_memos
             resumed = Store.open_current(store._db_path)
             with closing(resumed.conn):
-                resumed_display = Mock(wraps=resumed.rec_proposals.home.put)
-                refresh.setattr(resumed.rec_proposals.home, 'put', resumed_display)
+                resumed_display = Mock(wraps=resumed.rec_proposals.publish_home)
+                refresh.setattr(resumed.rec_proposals, 'publish_home', resumed_display)
                 assert home_prepared.prepare_revisit(resumed, 2030 + index * 60) is True
                 resumed_display.assert_called_once()
         assert completed == ['playlist', 'album']

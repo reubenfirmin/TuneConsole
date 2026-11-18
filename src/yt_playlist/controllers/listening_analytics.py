@@ -14,14 +14,14 @@ class ListeningGeneration:
     durable: tuple
     documents: tuple
     retained_surfaces: tuple
+    file_ids: tuple = ()
 
 
 class ListeningAnalytics:
-    def __init__(self, repository, publish_file, read_file, read_prepared, exists_file):
+    def __init__(self, repository, files, read_file, exists_file):
         self.repository = repository
-        self.publish_file = publish_file
+        self.files = files
         self.read_file = read_file
-        self.read_prepared = read_prepared
         self.exists_file = exists_file
 
     def catalog_rows(self):
@@ -63,8 +63,6 @@ class ListeningAnalytics:
         if facts['source'] == 'legacy':
             return facts['raw']
         try:
-            if facts['source'] == 'prepared':
-                return self.read_prepared(facts['header']) if facts['header'] is not None else None
             reference = facts['reference']
             return self.read_file(*reference, surface=identity[0], chunk_key=identity[1]) if reference else None
         except (OSError, ValueError, MigrationError):
@@ -81,9 +79,6 @@ class ListeningAnalytics:
         facts = self.repository.output(surface, *identity)
         if facts['source'] == 'legacy':
             return facts['raw'] is not None and facts['raw'] not in ('null', '{}')
-        if facts['source'] == 'prepared':
-            header = facts['header']
-            return header is not None and self.exists_file(header['filename'])
         reference = facts['reference']
         return reference is not None and self.exists_file(reference[0])
 
@@ -91,11 +86,15 @@ class ListeningAnalytics:
         if self.repository.uses_files():
             publication = listening_outputs.prepare(chunks, manifest, edition, now, input_revision=input_revision)
             times = {(surface, key): at for surface, key, at in publication.output_times}
-            durable = []
+            durable, file_ids = [], []
             for surface, key, encoded in publication.outputs:
                 check_cancellable_work()
-                durable.append((surface, key, *self.publish_file(encoded), times[surface, key]))
-            return ListeningGeneration(publication, tuple(durable), (), ())
+                integrity = self.files.describe(encoded)
+                identity = self.repository.reserve_file(surface, key, integrity)
+                reference = self.files.publish_reserved(identity, encoded, expected=integrity)
+                durable.append((surface, key, *reference, times[surface, key]))
+                file_ids.append(identity)
+            return ListeningGeneration(publication, tuple(durable), (), (), tuple(file_ids))
         previous = self.prepared() or {}
         retained = {'listening_chunk:' + item['key'] for item in previous.get('chunks', [])}
         retained.update('listening_chunk:' + key for key in chunks)
@@ -107,7 +106,7 @@ class ListeningAnalytics:
         """The guarded publication callback performs only this repository's SQL."""
         if generation.publication is not None:
             return self.repository.publish_files(generation.publication, generation.durable,
-                                                 keep_previous=True, timezone=timezone)
+                                                 keep_previous=True, timezone=timezone, file_ids=generation.file_ids)
         return self.repository.publish_legacy(generation.documents,
             retained_surfaces=generation.retained_surfaces, timezone=timezone)
 
@@ -126,5 +125,7 @@ class ListeningAnalytics:
             raise ValueError('Listening chunks must publish with their complete manifest')
         chunks = {ref['key']: self.encoded('listening_chunk:' + ref['key'])
                   for ref in (json.loads(manifest).get('chunks', []) if manifest else [])}
-        generation = self.prepare_generation(chunks, manifest, edition, now, input_revision=None)
-        return self.repository.publish_files(generation.publication, generation.durable, keep_previous=True)
+        with self.files.retained():
+            generation = self.prepare_generation(chunks, manifest, edition, now, input_revision=None)
+            return self.repository.publish_files(generation.publication, generation.durable,
+                                                 keep_previous=True, file_ids=generation.file_ids)

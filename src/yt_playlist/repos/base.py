@@ -39,13 +39,26 @@ def synchronized(method):
     """Serialize a DAO method on the shared connection's re-entrant lock.
 
     The lock releases between calls, so long network-bound work in callers never blocks the DB.
+    A failed call that entered on an idle connection must settle its own pending
+    writes before releasing the lock. Enclosing transactions keep their owner.
     """
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         with database_operation(method.__qualname__), self._lock:
-            check_cancellable_work()
-            _refresh_listening_reads(self)
-            return method(self, *args, **kwargs)
+            conn = self.conn
+            borrowed = conn.in_transaction
+            try:
+                check_cancellable_work()
+                _refresh_listening_reads(self)
+                return method(self, *args, **kwargs)
+            except BaseException:
+                # A bare execute or commit can fail with its transaction still
+                # open. Never let a later repository call commit that action.
+                # Startup/replacement may already have retired this handle.
+                if (not borrowed and self.conn is conn
+                        and not getattr(conn, '_handle_closed', False) and conn.in_transaction):
+                    conn.rollback()
+                raise
     return wrapper
 
 
@@ -113,25 +126,20 @@ class Repo:
         return self._store.conn
 
     @property
-    @lookup_read
     def entry_artists_table(self):
-        from yt_playlist.core.artist_credits import projection_table
-        return projection_table(self.conn)
+        return 'entry_artists'
 
     @property
     @lookup_read
     def album_tracks_table(self):
-        from yt_playlist.core.preparation.album_publication import relation
-        return relation(self.conn, 'album_tracks')
+        return 'album_tracks'
 
     @property
     @lookup_read
     def album_fetch_state_table(self):
-        from yt_playlist.core.preparation.album_publication import relation
-        return relation(self.conn, 'album_fetch_state')
+        return 'album_fetch_state'
 
     @property
     @lookup_read
     def album_track_links_table(self):
-        from yt_playlist.core.preparation.album_publication import relation
-        return relation(self.conn, 'album_track_links')
+        return 'album_track_links'

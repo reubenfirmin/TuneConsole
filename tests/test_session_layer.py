@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from yt_playlist.rec import layers
+from yt_playlist.library import listening_composition as layers
 
 
 @pytest.fixture(autouse=True)

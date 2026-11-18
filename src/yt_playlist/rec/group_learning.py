@@ -4,7 +4,7 @@ from yt_playlist.rec import choice_bandit, group_versions
 POLICY = 'theme-raw-genres-current-hierarchy-4'
 
 
-def compile(store, offers, responses, now, head):
+def compile(observations, now, head, *, params, excluded):
     groups = {group['group_id']: group for group in head['groups'] if not group.get('legacy')}
     by_version = {group['version']: group for group in groups.values()}
     def ancestors(gid):
@@ -28,12 +28,10 @@ def compile(store, offers, responses, now, head):
         common = set(paths[0]).intersection(*(set(path) for path in paths[1:]))
         return next((gid for gid in paths[0] if gid in common), None)
 
-    excluded = {'unseen': 0, 'future_context': 0, 'missing_context': 0, 'unmapped_definition': 0,
-                'legacy_ambiguous': 0}
     menus = {}
     visible, picked = {}, {}
     expiry = []
-    for observation in choice_bandit.observations(store, offers, responses, now, excluded):
+    for observation in observations:
         option = observation['option']
         version = observation['context_id']  # Broad descriptor identity, not a group version.
         gid = destination(option)
@@ -86,7 +84,6 @@ def compile(store, offers, responses, now, head):
                      'days': len(own), 'menus': sorted(all_menus), 'shared_strength': strength,
                      'shared_from': parent['version'] if parent and shared else None,
                      'alpha': alpha, 'beta': beta, 'estimate': alpha / (alpha + beta)}
-    params = choice_bandit.parameters(store)
     return {'schema': 1, 'policy': POLICY, 'generation': head['generation'], 'parameters': params,
             'at': now, 'expires_at': min(expiry) if expiry else None, 'rows': list(rows.values()),
             'offered': sum(len(items) for items in visible.values()),
@@ -98,8 +95,12 @@ def compile(store, offers, responses, now, head):
 def current_state(store, preview, now):
     """Validate the report before applying its current numerical estimates."""
     stats = store.rec_proposals.get_proposals('group_choice_bandit') or {}
-    if (stats.get('policy') != POLICY or stats.get('generation') != preview['generation']
-            or stats.get('parameters') != choice_bandit.parameters(store)
+    return verified_state(stats, preview['generation'], now, choice_bandit.parameters(store))
+
+
+def verified_state(stats, generation, now, parameters):
+    if (stats.get('policy') != POLICY or stats.get('generation') != generation
+            or stats.get('parameters') != parameters
             or stats.get('at', now) > now
             or stats.get('expires_at') is not None and now >= stats['expires_at']):
         stats = {}

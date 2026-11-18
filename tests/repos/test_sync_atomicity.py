@@ -6,7 +6,7 @@ from yt_playlist.core import sync_state
 from yt_playlist.library import sync_outcomes
 
 
-@pytest.mark.parametrize('installed', [79, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_failed_sync_publication_rolls_back_result_and_freshness(installed, monkeypatch):
     store, _ = installed
     first = store.sync.begin_attempt(100)

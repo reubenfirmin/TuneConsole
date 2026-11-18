@@ -4,16 +4,23 @@ from yt_playlist.library.album_fetch import shareable_album_tracks
 from yt_playlist.util.duration import parse_duration
 
 
+def response_completeness(album):
+    tracks = (album or {}).get('tracks') or []
+    advertised = (album or {}).get('trackCount')
+    expected = int(str(advertised).replace(',', '')) if str(advertised).replace(',', '').isdigit() else None
+    complete = bool(tracks) and all(isinstance(t, dict) for t in tracks) and (
+        not album.get('continuations') and not album.get('continuation') and
+        (advertised is None or expected == len(tracks)))
+    return complete, expected
+
+
 def remember_album(store, browse_id, album, fallback=None):
     """Retain fetched occurrences; publish only a complete response."""
     fallback = fallback or {}
     tracks = (album or {}).get("tracks") or []
     if not tracks or not all(isinstance(t,dict) for t in tracks):
         return
-    advertised = album.get("trackCount")
-    expected = int(str(advertised).replace(',','')) if str(advertised).replace(',','').isdigit() else None
-    complete = (not album.get('continuations') and not album.get('continuation') and
-                (advertised is None or expected==len(tracks)))
+    complete, expected = response_completeness(album)
     def artists(value):
         return ", ".join(a.get("name", "") for a in value.get("artists", []) or [] if a.get("name"))
 

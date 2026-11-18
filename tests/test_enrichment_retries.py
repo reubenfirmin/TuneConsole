@@ -13,7 +13,7 @@ from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator,
     native_sql_calls, without_query_timing,
 )
-from yt_playlist.core import migrations, store as store_module
+from yt_playlist.core import migrations, sqlite_database as store_module
 from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.integrations.musicbrainz import MusicBrainzIAO

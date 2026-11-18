@@ -1,14 +1,15 @@
 """Tools › Enrichment: corpus coverage charts + worker state/pause, all served from the store's
 enrichment stats. The page polls /enrich/stats so the bars advance live as the worker drains."""
 import math
-from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from yt_playlist.providers import enrichment, genres as genre_lib, waterfall
+from yt_playlist.providers import enrichment, genres as genre_lib
 from yt_playlist.web import viz
 from yt_playlist.web.routes.genres import genre_list_context
+from yt_playlist.controllers.enrichment import EnrichmentCommands
+from yt_playlist.core.activity import activity_for
 
 
 def _genre_progress(event):
@@ -30,6 +31,11 @@ def _genre_progress(event):
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
+    commands = EnrichmentCommands(store.enrichment_reports, store.enrichment_queue, store.enrichment_state,
+        store.enrichment, store.tracks, store.settings, now=ctx.now_fn, worker=ctx.enrich_worker,
+        refresh=lambda **kwargs: ctx.rec_worker.trigger_content_update(**kwargs) if ctx.rec_worker else None,
+        jobs=ctx.jobs, logger=ctx.logger,
+        start_thread=activity_for(ctx).start_thread)
     provider_labels = {p["name"]: p["label"] for p in enrichment.PROVIDERS}
 
     def age(timestamp):
@@ -45,37 +51,20 @@ def build(ctx) -> APIRouter:
         return f"{seconds // 86400}d ago"
 
     def _ctx():
-        cov = store.enrichment_reports.coverage_stats(include_discovery=True)
+        facts = commands.query()
+        cov = facts['cov']
         total = cov["total"]
         def pct(k):
             if k == "processed" and total:
                 # Never claim 100% while a few tracks still await their first pass.
                 return math.floor(1000 * cov[k] / total) / 10
             return round(100 * cov[k] / total) if total else 0
-        queue = store.enrichment_reports.queue_stats()
+        queue = facts['queue']
         remaining = queue["total"]
         now = ctx.now_fn()
-        progress = store.enrichment_reports.enrichment_activity_stats(now)
-        enabled = store.settings.get_setting("enrich_worker_enabled", "1") == "1"
-        busy = bool(ctx.enrich_worker and ctx.enrich_worker.busy)
-        activity = ctx.enrich_worker.activity if ctx.enrich_worker else {}
-        retry = store.enrichment_state.enrichment_retry_status()
-        art_retry = store.enrichment_state.artwork_retry_status()
-        if not enabled:
-            state = "paused"
-        elif activity.get("state") in ("blocked", "error"):
-            state = activity["state"]
-        elif busy and activity.get("state") == "waiting":
-            state = "waiting"
-        elif busy:
-            state = "running"
-        elif retry["count"]:
-            state = "retry"
-        elif remaining:
-            state = "queued"
-        else:
-            state = "idle"
-        timeline = store.enrichment_reports.processed_timeline()
+        progress, enabled = facts['progress'], facts['enabled']
+        activity, retry, art_retry, state = (facts[key] for key in ('activity', 'retry', 'art_retry', 'state'))
+        timeline = facts['timeline']
         spark = viz.area_spark(timeline)
         refresh_spark = viz.area_spark([
             {"t": point["t"], "n": point["refresh"]} for point in timeline],
@@ -87,7 +76,7 @@ def build(ctx) -> APIRouter:
             "pct": {k: pct(k) for k in
                     ("processed", "genre", "year", "bpm", "energy", "danceability")},
             "remaining": remaining, "queue": queue,
-            "conflicts": store.enrichment_reports.outstanding_conflicts(),
+            "conflicts": facts['conflicts'],
             "enabled": enabled, "state": state,
             "activity": activity, "activity_age": age(activity.get("updated_at")),
             "retry": retry, "retry_seconds": max(0, math.ceil((retry["retry_at"] or now) - now)),
@@ -110,19 +99,8 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "_partials/enrich_stats.html", _ctx())
 
     def detail(request, view, page):
-        total = (store.enrichment_reports.queue_remaining() if view == "queue" else
-                 store.enrichment_reports.coverage_stats(include_discovery=True)["processed"] if view == "processed" else
-                 store.enrichment_reports.outstanding_conflicts())
-        size = 20 if view == "conflicts" else 40
-        pages = max(1, (total + size - 1) // size)
-        page = min(page, pages)
-        offset = (page - 1) * size
-        fetch = {"queue": store.enrichment_queue.next_enrich_batch, "processed": store.enrichment_reports.enriched_tracks,
-                 "conflicts": store.enrichment_reports.unresolved_enrichment_conflicts}[view]
         return templates.TemplateResponse(request, "enrich_detail.html", {
-            "view": view, "rows": fetch(size, offset), "total": total, "page": page,
-            "pages": pages, "start": offset + 1 if total else 0,
-            "end": min(offset + size, total), "age": age,
+            **commands.detail(view, page), "age": age,
             "provider_labels": provider_labels,
         })
 
@@ -142,85 +120,38 @@ def build(ctx) -> APIRouter:
     async def resolve_enrich_conflict(request: Request, track_id: int, field: str,
                                      page: int = Query(1, ge=1)):
         value = (await request.form()).get("value")
-        if not isinstance(value, str) or not store.enrichment.resolve_enrichment_candidate(
-                track_id, field, value, now=ctx.now_fn()):
-            raise HTTPException(status_code=400, detail="Choose a current provider candidate.")
+        try:
+            conflict = commands.resolve_conflict(track_id, field, value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if request.headers.get("HX-Request") == "true":
             return templates.TemplateResponse(request, "_partials/enrich_conflict.html", {
-                "c": store.enrichment_reports.enrichment_conflict_detail(track_id, field), "saved": True,
+                "c": conflict, "saved": True,
                 "provider_labels": provider_labels, "page": page,
             })
         return RedirectResponse(f"/enrich/conflicts?page={page}", status_code=303)
 
     @router.post("/enrich/toggle")
     def enrich_toggle(request: Request):
-        was_on = store.settings.get_setting("enrich_worker_enabled", "1") == "1"
-        store.settings.set_setting("enrich_worker_enabled", "0" if was_on else "1")
-        if was_on is False and ctx.enrich_worker:     # just turned ON -> wake the drain loop
-            ctx.enrich_worker.trigger()
+        commands.toggle()
         return templates.TemplateResponse(request, "_partials/enrich_stats.html", _ctx())
-
-    def _genre_candidates(request, track_id):
-        track = store.enrichment_reports.genre_provenance(track_id)
-        if track is None:
-            return Response(status_code=404)
-        return templates.TemplateResponse(request, "_partials/genre_candidates.html", {"track": track})
-
-    @router.get("/track/{track_id}/genre-candidates")
-    def genre_candidates(request: Request, track_id: int):
-        return _genre_candidates(request, track_id)
 
     @router.post("/track/{track_id}/genre-lookup")
     def genre_lookup(track_id: int):
         """Start the normal provider waterfall for one track; progress streams over SSE."""
-        track = store.tracks.track_for_waterfall(track_id)
-        if track is None:
+        job = commands.lookup_genre(store, track_id)
+        if job is None:
             return Response(status_code=404)
-        job = ctx.jobs.create()
-        job.source = "genre-dialog"
-
-        def progress(event):
-            if event.get('warning') or event.get('deferred') or event.get('type') == 'err':
-                ctx.logger.warning('Genre lookup %s for track %s: %r', job.id, track_id, event)
-            job.events.append(event)
-
-        def run():
-            try:
-                waterfall.run_waterfall(store, [track], enrichment.load_config(store), progress)
-            except Exception as exc:  # noqa: BLE001
-                ctx.logger.exception('Genre lookup %s for track %s failed', job.id, track_id)
-                job.error = str(exc) or type(exc).__name__
-                job.events.append({"type": "err", "text": f"Lookup failed: {job.error}"})
-            finally:
-                job.done = True
-
-        activity_for(ctx).start_thread(run)
         return JSONResponse({"job_id": job.id})
 
     @router.get("/track/genre-lookup/events/{job_id}")
     async def genre_lookup_events(request: Request, job_id: int):
         job = ctx.jobs.get(job_id)
-        if job is None or job.source != "genre-dialog":
+        if job is None or job.source != "genre-lookup":
             raise HTTPException(status_code=404, detail="Genre lookup is missing or expired.")
 
         from yt_playlist.web.job_events import stream_job
         return StreamingResponse(stream_job(job, request, transform=_genre_progress,
             terminal=lambda: {'type': 'end', 'error': bool(job.error)}), media_type="text/event-stream")
-
-    @router.post("/track/{track_id}/genre-candidates")
-    async def choose_genre_candidate(request: Request, track_id: int):
-        track = store.enrichment_reports.genre_provenance(track_id)
-        if track is None:
-            return Response(status_code=404)
-        value = ((await request.form()).get("genre") or "").strip()
-        # Provider candidates and custom user labels deliberately share one write path.
-        if not value or len(value) > 80:
-            return Response(status_code=400)
-        store.tracks.set_track_genre(track_id, value)
-        ctx.rec_worker.trigger_content_update(video_ids=[track["video_id"]])
-        # The same track can occur on several visible rows. A reload updates all of them and their
-        # sort data consistently; candidate choice is rare enough that a partial multi-row swap is
-        # needless complexity.
-        return Response(status_code=204, headers={"HX-Refresh": "true"})
 
     return router

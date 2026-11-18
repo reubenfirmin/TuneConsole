@@ -8,13 +8,13 @@ import json
 import logging
 import multiprocessing
 import os
-from pathlib import Path
 import signal
 import sqlite3
 import sys
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,17 +24,17 @@ from tests.core.test_group_content import prepared
 from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import returning_listener, without_metadata_providers
 from tests.onboarding_support import publish_personal_mix
-from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
     native_sql_calls, without_query_timing,
 )
-from yt_playlist.core import fao, schema_inspection
+from yt_playlist.core import fao, group_documents, schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceLedger
 from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE, StorageMaintenance
 from yt_playlist.core.store import Store
+from yt_playlist.library import choice_composition, group_composition, group_lifetimes
 from yt_playlist.rec import choice_evidence, choice_retention, group_root_backfill, group_roots, home_cards, home_cache, stored_home
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.rec.choice_context import checkpoint, CORRECTION_CONTRACT
@@ -134,12 +134,8 @@ def assert_maintenance_banner(response, *, visible=False):
             'Optimizing app storage; some recommendations are temporarily unavailable.')
 
 
-def historical_inventory(store, identity):
-    """A predecessor file plus a prepared comparison not yet in root inventory.
-
-    Choices no longer own musical-group history (#688). Prepared comparisons
-    still do, so use that real owner to exercise historical context expansion.
-    """
+def pending_inventory(store, identity):
+    """Retained choice files alongside a current comparison with live roots."""
     captured = {'at': 10, 'group_generation': 'first', 'musical_groups': [
         {'group_id': 'stable-parent', 'version': 'first-parent'},
         {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]}
@@ -148,14 +144,22 @@ def historical_inventory(store, identity):
     ledger.put('opportunity', identity, {'id': identity, 'schema': 1, 'format': 'mixes',
         'at': 10, 'observed_at': 10, 'context': artifact,
         'options': [{'id': 'one', 'score': 1}], 'prediction': ['one'], 'prediction_status': 'issued'})
-    surface = 'model_pair:' + identity + ':incumbent:mixes'
-    # Deliberately bypass live publication to represent pre-inventory storage.
+    run = int(hashlib.sha256(identity.encode()).hexdigest()[:14], 16)
+    surface = f'model_pair:{run}:incumbent:mixes'
+    store.rec_proposals.put_proposals(surface, {'run_id': run, 'data': {'context': {'artifact': artifact}}}, 10)
+    # Inventory still scans retained choice files. The native comparison must
+    # keep its already published roots while that scan is incomplete.
     with store.conn:
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,10)',
-                           (surface, json.dumps({'context': {'artifact': artifact}})))
         store.conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
     store._group_root_backfill = group_root_backfill.Backfill(store)
     return identity, surface
+
+
+def comparison_owner(store, surface):
+    run = int(surface.split(':')[1])
+    identity = store.conn.execute("SELECT publication_id FROM model_pair_heads WHERE run_id=? "
+                                  "AND arm='incumbent' AND format='mixes'", (run,)).fetchone()[0]
+    return f'comparison-output:{identity}:context'
 
 
 def seed_evidence_library(store):
@@ -175,24 +179,8 @@ def seed_evidence_library(store):
             {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]})
 
 
-@pytest.fixture(scope='module')
-def historical_evidence_template(_pristine_installed_schema, tmp_path_factory):
-    # Admit one genuine installed v94 source, retaining its physical owners and
-    # history. Consumers receive private SQL/files, not a relabelled new schema.
-    path = tmp_path_factory.mktemp('historical-evidence') / 'library.db'
-    with prepared_template(_pristine_installed_schema(94), seed_evidence_library,
-                           database=path) as template:
-        assert template.source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 94
-        yield template
-
-
 @pytest.fixture
 def library(request, tmp_path):
-    historical = getattr(request, 'param', None) == 94
-    if historical:
-        with request.getfixturevalue('historical_evidence_template').open(tmp_path / 'evidence.db') as store:
-            yield store
-        return
     # Recovery consumes one populated private library. Template isolation has
     # its own owner; ordinary consumers need no intermediate SQL/file copy.
     schema = request.getfixturevalue('_pristine_current_schema')
@@ -282,19 +270,30 @@ def test_mix_learning_does_not_recover_retired_legacy_ancestry(library, monkeypa
 
 
 def test_small_inventory_batches_advance_before_repeating_the_whole_ledger_scan(library, monkeypatch):
-    monkeypatch.setattr(group_root_backfill, 'BATCH_ROWS', 1)
-    monkeypatch.setattr(group_root_backfill, 'BATCH_BYTES', 1)
-    publish, calls = choice_evidence.compile_report, []
+    backfill = group_composition.backfill(library, batch_rows=1, batch_bytes=1)
+    library._group_root_backfill = backfill
+    turns = Mock(wraps=backfill.step)
+    monkeypatch.setattr(backfill, 'step', turns)
+    reports, calls = choice_composition.reports, []
 
-    def counted(*args, **kwargs):
-        assert library.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0]
-        calls.append(True)
-        return publish(*args, **kwargs)
+    def report_command(source):
+        command = reports(source)
+        publish = command.compile
 
-    monkeypatch.setattr(choice_evidence, 'compile_report', counted)
+        def counted(*args, **kwargs):
+            assert library.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0]
+            calls.append(True)
+            return publish(*args, **kwargs)
+
+        command.compile = counted
+        return command
+
+    monkeypatch.setattr(choice_composition, 'reports', report_command)
     result = choice_evidence.maintain_storage(library, 11)
     assert not result.get('deferred')
     assert calls == [True]
+    assert backfill.batch_rows == backfill.batch_bytes == 1
+    assert turns.call_count > 1 and backfill.stage == len(group_root_backfill.KINDS)
     assert not library.activity_paused
     offer, = library.rec_ledger.evidence().records('opportunity')
     assert checkpoint(library.rec_ledger.evidence(), offer['context'])
@@ -464,14 +463,14 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(p
 
 
 def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, monkeypatch):
-    from yt_playlist.core import policy_documents
+    from yt_playlist.core import group_documents, policy_documents
 
     jobs = []
     library.choice_capture = CaptureQueue(lambda job: jobs.append(job) or True)
     entered, release = threading.Event(), threading.Event()
     pending = group_roots.pending
-    admission = group_roots.admission
-    directory = group_roots.group_documents.directory(library.conn) / '.pending'
+    admission = group_lifetimes.admission
+    directory = group_documents.directory(library.conn) / '.pending'
 
     def late(store, captured, at):
         assert captured == {}, 'Listening choices must not restore group-history pins'
@@ -524,7 +523,7 @@ def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, mo
         assert release.wait(5)
         return admission(*args, **kwargs)
 
-    monkeypatch.setattr(group_roots, 'admission', late_admission)
+    monkeypatch.setattr(group_lifetimes, 'admission', late_admission)
     with ThreadPoolExecutor(1) as executor:
         future = executor.submit(pending, library, {'group_generation': 'first'}, 12)
         try:
@@ -556,7 +555,7 @@ def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, mo
             else:
                 if close is not None:
                     close()
-    monkeypatch.setattr(group_roots, 'admission', admission)
+    monkeypatch.setattr(group_lifetimes, 'admission', admission)
 
     # The same nonempty reader succeeds once the contended owner releases,
     # proving the negative did not merely exercise an absent generation.
@@ -592,7 +591,7 @@ def test_reader_close_during_maintenance_leaves_a_conservative_root_for_the_reap
         assert library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
     group_roots.reap_pending(library)
     assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
-    directory = group_roots.group_documents.directory(library.conn) / '.pending'
+    directory = group_documents.directory(library.conn) / '.pending'
     assert not list(directory.glob('*.lock'))
 
 

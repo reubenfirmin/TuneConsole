@@ -1,8 +1,8 @@
-"""Retained originals belong to their catalog, artist, album or workflow owner.
+"""Historical archive formats for explicit preparation and backup/restore.
 
-Payloads are exact historical text, including non-JSON signatures. Queryable
-ambiguity guards have a separate typed relation. Cold journals own explicit
-bounded diagnostic retention and durable user/paid/scope recovery exceptions.
+Normal runtime reconciliation no longer captures recovery originals. Payloads
+from earlier formats remain readable, including non-JSON signatures. Queryable
+ambiguity guards remain separate from historical file payloads.
 """
 import hashlib
 from . import fao
@@ -188,6 +188,11 @@ def mark_artist_ambiguity(conn, artist_id):
     if available(conn):
         conn.execute('INSERT OR IGNORE INTO artist_ambiguities(artist_id,reason) VALUES (?,?)',
                      (artist_id, 'contextual_release_credit'))
+    else:
+        # The oldest supported layout stores the guard key here. No recovery
+        # payload is needed to prevent a later global identity guess.
+        conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
+                     ('ambiguous_album_artist', str(artist_id), '{}', 'contextual_release_credit'))
 
 
 def _owners(conn):

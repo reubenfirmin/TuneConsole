@@ -1,7 +1,7 @@
 """Retained radio origins, including legacy provider IDs with unknown scope."""
 import json
 
-from . import collection_recovery, entity_names, playlist_scopes
+from . import collection_recovery, playlist_scopes
 
 KEYS = ('radio_session_playlist_ids','radio_playlist_ytm','radio_playlist_a_ytm','radio_playlist_b_ytm')
 
@@ -20,9 +20,8 @@ def ids(conn):
         values = dict(conn.execute('SELECT key,value FROM settings WHERE key IN (?,?,?,?)',KEYS))
         return list(dict.fromkeys([*json.loads(values.get(KEYS[0]) or '[]'),
                                   *(values[key] for key in KEYS[1:] if values.get(key))]))
-    scopes = entity_names.owner(conn, 'playlist_scopes')
-    return [row[0] for row in conn.execute(f'SELECT DISTINCT COALESCE(s.{scopes.column("provider_playlist_id")},o.unresolved_provider_id) '
-        f'FROM radio_playlist_origins o LEFT JOIN {scopes.table} s ON s.{scopes.column("id")}=o.playlist_scope_id ORDER BY 1')]
+    return [row[0] for row in conn.execute('SELECT DISTINCT COALESCE(s.provider_playlist_id,o.unresolved_provider_id) '
+        'FROM radio_playlist_origins o LEFT JOIN playlist_scopes s ON s.id=o.playlist_scope_id ORDER BY 1')]
 
 
 def remember(conn,provider_id,account_id=None):
@@ -38,16 +37,7 @@ def remember(conn,provider_id,account_id=None):
     if account_id is not None:
         scope = playlist_scopes.ensure(conn,provider_id,account_id)
     else:
-        scope_key,remote,_ = entity_names.scope_columns(conn)
-        matches = list(conn.execute(f'SELECT {scope_key} FROM playlist_scopes WHERE {remote}=?',(provider_id,)))
+        matches = list(conn.execute('SELECT id FROM playlist_scopes WHERE provider_playlist_id=?',(provider_id,)))
         scope = matches[0][0] if len(matches)==1 else None
     conn.execute('INSERT OR IGNORE INTO radio_playlist_origins(playlist_scope_id,unresolved_provider_id) VALUES (?,?)',
                  (scope,None if scope is not None else provider_id))
-
-
-def import_legacy(conn,values):
-    selected = json.loads(values.get(KEYS[0]) or '[]')
-    if not isinstance(selected,list):
-        raise ValueError('Legacy radio origins must be a list')
-    for value in [*selected,*(values[key] for key in KEYS[1:] if values.get(key))]:
-        remember(conn,value)

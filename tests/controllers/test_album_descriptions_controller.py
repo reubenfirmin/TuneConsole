@@ -42,11 +42,14 @@ def descriptions():
     repository.access_rows.return_value = []
     repository.access_state.return_value = None
     repository.reserve.return_value = 7
+    repository.reserve_result.side_effect = outside_transaction(257)
     repository.mark_sent.return_value = True
+    policies = Mock()
+    policies.publish.side_effect = outside_transaction(None)
     return AlbumDescriptions(repository,
         Mock(side_effect=outside_transaction(json.dumps(ready_record()))),
         Mock(side_effect=outside_transaction(('result-file', 'result-digest', 90))),
-        Mock(side_effect=outside_transaction(('policy-file', 'policy-digest', 40))))
+        policies)
 
 
 def ready_record():
@@ -83,14 +86,15 @@ def test_legacy_summary_composes_proposals_without_paid_request_sql(descriptions
     descriptions.repository.summary.assert_not_called()
 
 
-def test_reservation_counts_the_attempt_before_transport_and_supplies_policy_reference(descriptions):
+def test_reservation_counts_the_attempt_after_independent_policy_publication(descriptions):
     result = descriptions.claim(3, {'model': 'exact-model'}, 'credential', 20, 86401)
     assert result['status'] == 'reserved' and result['request_id'] == 7 and result['attempt'] == 1
     arguments = descriptions.repository.reserve.call_args
     assert arguments.args[3:6] == (None, 1, result['token'])
     assert arguments.args[6:] == ('credential', 86461, 1, 86401)
-    assert arguments.kwargs == {'initial_status': 'pending', 'claimed_status': 'claimed',
-                               'policy_reference': ('policy-file', 'policy-digest', 40)}
+    assert arguments.kwargs == {'initial_status': 'pending', 'claimed_status': 'claimed'}
+    descriptions.policies.publish.assert_called_once_with([
+        (descriptions.policy_version({'model': 'exact-model'}), json.dumps({'model': 'exact-model'}), 86401)])
 
 
 def test_saved_success_is_read_after_sql_commit_even_when_the_limit_is_zero(descriptions):
@@ -181,13 +185,16 @@ def test_completion_publishes_before_receipting_and_records_usage_once(descripti
     arguments = descriptions.repository.complete.call_args
     assert arguments.args == (7, 2, 'owner', {'status': 'ready', 'token': None, 'retry_at': 0, 'access': None},
         ('result-file', 'result-digest', 90), {'total_tokens': 10}, 0, 100)
-    assert arguments.kwargs == {'model': 'exact-model'}
+    assert arguments.kwargs == {'file_id': 257, 'model': 'exact-model'}
+    assert descriptions.publish_result.call_args.args[0] == 257
+    assert json.loads(descriptions.publish_result.call_args.args[1]) == ready_record()
     assert descriptions.repository.request.call_count == 2
 
 
 def test_stale_owner_cannot_publish_a_result(descriptions):
     descriptions.repository.request.return_value = request(claim_token='new-owner')
     assert not descriptions.finish(7, 'owner', ready_record(), 100)
+    descriptions.repository.reserve_result.assert_not_called()
     descriptions.publish_result.assert_not_called()
     descriptions.repository.complete.assert_not_called()
 

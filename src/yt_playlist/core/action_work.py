@@ -84,15 +84,12 @@ def _target(conn, action_id, role, position, *, account=None, remote=None, membe
             and prior['unresolved_membership_ref_id']==membership
             and prior['provider_playlist_id_snapshot']==remote):
         return prior['id']
-    from . import entity_names
-    scope_column,account_column = entity_names.membership_columns(conn)
-    retained = conn.execute(f'SELECT {scope_column} AS playlist_scope_id,{account_column} AS account_id FROM playlist_membership_refs WHERE id=?',
+    retained = conn.execute('SELECT playlist_scope_id,account_id FROM playlist_membership_refs WHERE id=?',
                             (membership,)).fetchone() if membership is not None else None
     scope = None
     reason = None
     if retained and retained['playlist_scope_id'] is not None:
-        scope_key,remote_column,_ = entity_names.scope_columns(conn)
-        owner = conn.execute(f'SELECT {remote_column} FROM playlist_scopes WHERE {scope_key}=?',(retained['playlist_scope_id'],)).fetchone()
+        owner = conn.execute('SELECT provider_playlist_id FROM playlist_scopes WHERE id=?',(retained['playlist_scope_id'],)).fetchone()
         if (account is not None and account!=retained['account_id']) or (remote is not None and remote!=owner[0]):
             if not legacy:
                 raise ValueError('Action target disagrees with its retained membership')
@@ -112,7 +109,7 @@ def _target(conn, action_id, role, position, *, account=None, remote=None, membe
         raise ValueError('Action target requires its captured remote identifier')
     if account is not None and type(account) is not int:
         raise ValueError('Action account requires an integer identity')
-    known = conn.execute(f'SELECT id FROM {entity_names.accounts(conn)} WHERE id=?',(account,)).fetchone() if account is not None else None
+    known = conn.execute('SELECT id FROM accounts WHERE id=?',(account,)).fetchone() if account is not None else None
     if not known:
         reason = reason or ('missing_account' if account is not None else 'unrecorded_account')
     elif scope is None and not remote.startswith('@unresolved-membership:'):

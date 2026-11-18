@@ -32,7 +32,7 @@ def search_versions(client, title, artist, exclude=None, limit=14):
     """Search unfiltered results first, then backfill missing durations from songs and videos."""
     base_title = _strip_parens(title) or title
     query = " ".join(part for part in (base_title, artist) if part).strip()
-    out, by_video, failure = [], {}, None
+    out, failure = [], None
     for kind in (None, "songs", "videos"):
         try:
             results = with_retry(lambda filter=kind: client.search(query, filter=filter)) or []
@@ -40,34 +40,42 @@ def search_versions(client, title, artist, exclude=None, limit=14):
             logger.warning("alternate-version search (%s) failed for %r", kind, query, exc_info=True)
             failure = exc
             results = []
-        for result in results:
-            video = result.get("videoId")
-            if not video or video == exclude:
-                continue
-            duration = result.get("duration_seconds") or parse_duration(result.get("duration"))
-            candidate = by_video.get(video)
-            if candidate is not None:
-                if candidate["duration"] is None and duration is not None:
-                    candidate["duration"] = duration
-                continue
-            if len(out) >= limit:
-                continue
-            album = result.get("album")
-            is_video = (kind == "videos" or result.get("resultType") == "video"
-                        or result.get("videoType") == "MUSIC_VIDEO_TYPE_UGC")
-            candidate = {
-                "videoId": video, "title": result.get("title", ""),
-                "artist": ", ".join(artist.get("name", "") for artist in (result.get("artists") or [])
-                                    if artist.get("name")),
-                "album": album.get("name") if isinstance(album, dict) else None,
-                "album_browse": album.get("id") if isinstance(album, dict) else None,
-                "duration": duration, "thumbnail": best_thumb(result.get("thumbnails")),
-                "kind": "video" if is_video else "song"}
-            by_video[video] = candidate
-            out.append(candidate)
+        out = version_candidates([*out], results, kind=kind, exclude=exclude, limit=limit)
         if len(out) >= limit and all(candidate["duration"] is not None for candidate in out):
             break
     if failure is not None and not out:
         # A failed read does not establish that no other versions exist.
         raise failure
+    return out
+
+
+def version_candidates(previous, results, *, kind, exclude, limit):
+    """Project one acquired search page; preserve upload order and duration backfill."""
+    out = [dict(candidate) for candidate in previous]
+    by_video = {candidate['videoId']: candidate for candidate in out}
+    for result in results:
+        video = result.get("videoId")
+        if not video or video == exclude:
+            continue
+        duration = result.get("duration_seconds") or parse_duration(result.get("duration"))
+        candidate = by_video.get(video)
+        if candidate is not None:
+            if candidate["duration"] is None and duration is not None:
+                candidate["duration"] = duration
+            continue
+        if len(out) >= limit:
+            continue
+        album = result.get("album")
+        is_video = (kind == "videos" or result.get("resultType") == "video"
+                    or result.get("videoType") == "MUSIC_VIDEO_TYPE_UGC")
+        candidate = {
+            "videoId": video, "title": result.get("title", ""),
+            "artist": ", ".join(artist.get("name", "") for artist in (result.get("artists") or [])
+                                if artist.get("name")),
+            "album": album.get("name") if isinstance(album, dict) else None,
+            "album_browse": album.get("id") if isinstance(album, dict) else None,
+            "duration": duration, "thumbnail": best_thumb(result.get("thumbnails")),
+            "kind": "video" if is_video else "song"}
+        by_video[video] = candidate
+        out.append(candidate)
     return out

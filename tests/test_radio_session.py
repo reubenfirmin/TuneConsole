@@ -8,7 +8,7 @@ import time
 import pytest
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from yt_playlist.core.bridge import Bridge
-from yt_playlist.library import playlist_generated
+from yt_playlist.library import generated_acquisition
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from tests.radio_session_support import (
@@ -77,6 +77,7 @@ def test_radio_session_titles_are_numbered_per_local_day(append_poc, prior_title
 def test_three_to_start_then_one_append_per_song_and_no_playback_queue_commands(append_poc):
     c, remote, frames, workers, _ = append_poc
     assert c.start()["ok"]
+    assert remote.creations == [("v1", "v2", "v3")]
     assert remote.ids == ["v1", "v2", "v3"]
     assert len(workers) == 1
     assert frames == [{"type": "navigate", "url":
@@ -386,14 +387,14 @@ def test_exhausted_catalog_does_not_repeat_songs(poc):
 
 def test_stop_during_start_prevents_navigation_and_monitor(poc, monkeypatch):
     c, remote, frames, workers, _ = poc
-    create = playlist_generated.create_generated_playlist
+    create = generated_acquisition.create_generated_playlist
 
-    def stop_during_create(*args):
-        result = create(*args)
+    def stop_during_create(*args, **kwargs):
+        result = create(*args, **kwargs)
         c.stop()
         return result
 
-    monkeypatch.setattr(playlist_generated, "create_generated_playlist", stop_during_create)
+    monkeypatch.setattr(generated_acquisition, "create_generated_playlist", stop_during_create)
     assert not c.start()["ok"]
     assert remote.ids == ["v1", "v2", "v3"]
     assert frames == workers == []
@@ -538,6 +539,53 @@ def test_append_readback_failure_still_warns_and_recovers_without_replay(
     remote.after_add = lambda: None
     if closing:
         c.work.open()
+    restored = PlaylistRadio(c.ctx)
+    try:
+        assert restored.join()['active']
+        play(restored, 'v4')
+        assert remote.ids == ['v1', 'v2', 'v3', 'v4', 'v5']
+        assert remote.adds == [['v4'], ['v5']]
+        assert not restored.persistence.load()['pending_sent']
+    finally:
+        restored.suspend()
+
+
+def test_incomplete_append_confirmation_stays_quiet_and_recovers_after_restart(
+        poc, monkeypatch, caplog):
+    from yt_playlist.core.album_snapshot import LibrarySnapshotError
+
+    c, remote, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v1')
+    c.ctx.bridge.now_playing['video_id'] = 'v3'
+    c.listening.observe(c.session)
+    read = remote.get_playlist
+
+    def incomplete_read(*args, **kwargs):
+        raise LibrarySnapshotError('playlist', 'unsupported or incomplete track page',
+                                   {'responseContext': {}, 'trackingParams': 'private'}, 2)
+
+    remote.after_add = lambda: monkeypatch.setattr(remote, 'get_playlist', incomplete_read)
+
+    class BoundedWake(threading.Event):
+        def wait(self, timeout=None):
+            if remote.adds:
+                c.session.stop.set()
+            return True
+
+    c.session.wake = BoundedWake()
+    with caplog.at_level(logging.WARNING, logger='yt_playlist.web.radio_session'):
+        c._monitor(c.session)
+    assert not [record for record in caplog.records
+                if record.name == 'yt_playlist.web.radio_session' and record.levelno >= logging.WARNING]
+    assert c.session.error is None
+    assert remote.ids == ['v1', 'v2', 'v3', 'v4'] and remote.adds == [['v4']]
+    saved = c.persistence.load()
+    assert saved['pending_sent'] and saved['pending']['video_id'] == 'v4'
+    assert not saved['stopped']
+
+    monkeypatch.setattr(remote, 'get_playlist', read)
+    remote.after_add = lambda: None
     restored = PlaylistRadio(c.ctx)
     try:
         assert restored.join()['active']

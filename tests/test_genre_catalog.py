@@ -220,7 +220,8 @@ def test_recording_tags_can_refine_musicbrainz_broad_genre():
 
 def test_provider_refinement_uses_identity_after_display_rename(store):
     store.genres.configure_catalog()
-    store.genres.rename_genre('psychedelic rock','Renamed specific style')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET name='Renamed specific style' WHERE key='psychedelic rock'")
     genres.configure(store,read_only=True)
     try:
         assert genres.pick_genre(['Rock','Psychedelic Rock'])=='Renamed specific style'

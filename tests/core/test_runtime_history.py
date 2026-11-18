@@ -6,7 +6,21 @@ import pytest
 
 from yt_playlist.core import artist_credits, artists, credit_retention, mode_retention
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.preparation import runtime_history
+from types import SimpleNamespace
+
+
+def retention_step(store, domain, now, *, activate=False):
+    with atomic_write(store):
+        return {'credits': credit_retention, 'modes': mode_retention}[domain].step(
+            store.conn, now=now, activate=activate)
+
+
+def retention_status(conn, domain):
+    return dict(conn.execute('SELECT * FROM ' + {'credits': 'artist_credit_retention',
+        'modes': 'taste_mode_retention'}[domain] + ' WHERE id=1').fetchone())
+
+
+runtime_history = SimpleNamespace(step=retention_step, status=retention_status)
 
 DAY = 86400
 

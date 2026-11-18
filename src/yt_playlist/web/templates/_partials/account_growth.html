@@ -2,7 +2,7 @@
   {% if growth_intro|default(false) %}
   <header class="festival-intro-copy">
     <h1 id="arrival-title">Welcome to TuneConsole</h1>
-    <p class="festival-intro-sub" x-show="(starterReady || choosingArtists) && connected" x-cloak x-text="choosingArtists ? 'Choose your artists' : starterPlayed ? 'Enjoy your first set while we find more music for you' : 'Your first set is ready'"></p>
+    <p class="festival-intro-sub" x-show="(starterReady || choosingArtists) && connected" x-cloak x-text="choosingArtists ? 'Choose your songs and artists' : starterPlayed ? 'Enjoy your first set while we find more music for you' : 'Your first set is ready'"></p>
     <div class="festival-entry-action" x-show="!connected && !imported && !running && !songs && !artists_required" x-cloak>
       <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
          target="_blank" rel="noopener">Get the extension {{ arrow_icon('external') }}</a>
@@ -13,7 +13,7 @@
       <span class="arrival-wave" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
       <span x-text="progressLabel">Bringing in your music</span>
     </div>
-    <button class="btn btn-primary festival-first-set" type="button" x-show="(starterReady || choosingArtists) && connected" x-cloak @click="showStarter()"><span x-text="choosingArtists ? 'Choose artists' : 'Go to my first set'">Go to my first set</span> {{ arrow_icon('right') }}</button>
+    <button class="btn btn-primary festival-first-set" type="button" x-show="(starterReady || choosingArtists) && connected" x-cloak @click="showStarter()"><span x-text="choosingArtists ? 'Choose music' : 'Go to my first set'">Go to my first set</span> {{ arrow_icon('right') }}</button>
   </header>
   {% else %}
   <div class="growth-map-tools">
@@ -57,7 +57,7 @@
          @click="openNode('{{ stop.id }}')" @keydown.enter.prevent="openNode('{{ stop.id }}')" @keydown.space.prevent="openNode('{{ stop.id }}')"
          @mouseenter="hovered = '{{ stop.id }}'" @mouseleave="hovered = null" @focus="hovered = '{{ stop.id }}'" @blur="hovered = null"
         {% elif growth_intro|default(false) %}role="button" tabindex="0" data-first-sounds aria-label="Go to my first set"
-         :aria-label="choosingArtists ? 'Choose your artists' : 'Go to my first set'"
+         :aria-label="choosingArtists ? 'Choose your songs and artists' : 'Go to my first set'"
          :aria-disabled="!(starterReady || choosingArtists) || !connected" @click="(starterReady || choosingArtists) && connected && showStarter()"
          @keydown.enter.prevent="(starterReady || choosingArtists) && connected && showStarter()" @keydown.space.prevent="(starterReady || choosingArtists) && connected && showStarter()"
         {% else %}role="img" aria-label="First sounds, your starting point"{% endif %}>

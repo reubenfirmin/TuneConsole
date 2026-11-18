@@ -13,6 +13,7 @@ from . import metadata_deliveries as deliveries, metadata_evidence as evidence, 
 from .activity import WorkBudgetExceeded
 from .evidence_ledger import canonical as encode
 from .metadata_contract import PROVIDER_FIELDS as FIELDS
+from . import provider_credit_fields as credit_fields
 
 FORMAT = 'enrichment-result-1'
 MAX_STATE_BYTES = 8 * 1024 * 1024
@@ -104,14 +105,14 @@ def _read_fields(conn, rows, max_bytes):
 
 
 def state_fields(conn, recording_id, provider, *, max_bytes=MAX_STATE_BYTES):
-    rows = conn.execute('SELECT f.field,f.delivery_id,d.raw_byte_size FROM provider_state_fields f '
+    rows = conn.execute('SELECT f.field,f.delivery_id,d.raw_byte_size FROM ' + credit_fields.state_source(conn) + ' f '
         'JOIN metadata_deliveries d ON d.id=f.delivery_id WHERE f.recording_id=? AND f.provider=? ORDER BY f.field',
         (recording_id, provider)).fetchall()
     return _read_fields(conn, rows, max_bytes)
 
 
 def attempt_fields(conn, attempt_id, *, max_bytes=MAX_STATE_BYTES):
-    rows = conn.execute('SELECT f.field,a.delivery_id,d.raw_byte_size FROM provider_attempt_fields f '
+    rows = conn.execute('SELECT f.field,a.delivery_id,d.raw_byte_size FROM ' + credit_fields.attempt_source(conn) + ' f '
         'JOIN provider_attempts a ON a.id=f.attempt_id JOIN metadata_deliveries d ON d.id=a.delivery_id '
         'WHERE f.attempt_id=? ORDER BY f.field', (attempt_id,)).fetchall()
     return _read_fields(conn, rows, max_bytes)
@@ -183,6 +184,8 @@ def record(conn, entry_id, provider, fields, *, cycle, retry=False, now=None, re
             + columns + ') VALUES (?,?,?,?,?,?' + placeholder + ')',
             (recording, video or '', provider, now, status, delivery_id)).lastrowid
         for field in fields:
+            if field == 'artist_credits':
+                continue
             conn.execute('INSERT INTO provider_attempt_fields(attempt_id,field,observation_id) VALUES (?,?,?)',
                          (attempt, field, observations.get(canonical(field))))
         previous = conn.execute('SELECT * FROM enrichment_provider_state WHERE recording_id=? AND provider=?',
@@ -192,6 +195,7 @@ def record(conn, entry_id, provider, fields, *, cycle, retry=False, now=None, re
         deadline = max(now + min(3600, 30 * 2 ** min(failures - 1, 7)), retry_after) if retry else 0
         if previous is not None and not same_cycle:
             conn.execute('DELETE FROM provider_state_fields WHERE recording_id=? AND provider=?', (recording, provider))
+            credit_fields.reset(conn, recording, provider)
         has_json = any(row[1] == 'fields_json' for row in conn.execute('PRAGMA table_info(enrichment_provider_state)'))
         columns, placeholder = (',fields_json', ",'{}'") if has_json else ('', '')
         conn.execute('INSERT INTO enrichment_provider_state(recording_id,provider,cycle,at,status,failures,retry_at,error'
@@ -199,6 +203,9 @@ def record(conn, entry_id, provider, fields, *, cycle, retry=False, now=None, re
             'cycle=excluded.cycle,at=excluded.at,status=excluded.status,failures=excluded.failures,'
             'retry_at=excluded.retry_at,error=excluded.error', (recording, provider, cycle, now, status, failures, deadline, error))
         for field in fields:
+            if field == 'artist_credits':
+                credit_fields.record(conn, attempt, recording, provider, delivery_id)
+                continue
             conn.execute('INSERT INTO provider_state_fields(recording_id,provider,field,delivery_id,observation_id) '
                 'VALUES (?,?,?,?,?) ON CONFLICT(recording_id,provider,field) DO UPDATE SET '
                 'delivery_id=excluded.delivery_id,observation_id=excluded.observation_id',

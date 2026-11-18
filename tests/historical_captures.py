@@ -18,21 +18,18 @@ def legacy_capture(conn, identity_id, captured_at, item_keys, *, source="unknown
 
 def retained_capture(conn, identity_id, captured_at, item_keys, *, source="unknown"):
     """Construct already-converted historical evidence for current repair/recovery tests."""
-    from yt_playlist.core import catalog, entity_names, listening_summaries
+    from yt_playlist.core import catalog
 
     with conn:
-        receipts = entity_names.owner(conn, 'listening_capture_receipts')
-        observations = entity_names.owner(conn, 'listening_observations')
-        capture_id = conn.execute(f'INSERT INTO {receipts.table}({receipts.column("account_id")},captured_at) VALUES (?,?)',
+        capture_id = conn.execute('INSERT INTO listening_capture_receipts(account_id,captured_at) VALUES (?,?)',
                                   (identity_id, captured_at)).lastrowid
         item_id = conn.execute('SELECT COALESCE(MAX(capture_item_id),0)+1 FROM listening_observations').fetchone()[0]
         for raw in item_keys:
             key = catalog.resolve_key(conn, raw) or raw
             recording = conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
-            subject_column = 'unresolved_subject_key' if listening_summaries.available(conn) else 'identity_key'
-            subject = None if recording and subject_column=='unresolved_subject_key' else key
+            subject = None if recording else key
             conn.execute(
-                f'INSERT INTO {observations.table}({observations.column("account_id")},raw_identity_key,{subject_column},recording_id,'
+                'INSERT INTO listening_observations(account_id,raw_identity_key,unresolved_subject_key,recording_id,'
                 'source_day,day,source,timezone,precision,first_observed_at,last_observed_at,capture_id,capture_item_id) '
                 "VALUES (?,?,?,?,date(?,'unixepoch'),date(?,'unixepoch'),?,NULL,'legacy_unknown',?,?,?,?)",
                 (identity_id, raw, subject, recording[0] if recording else None, captured_at, captured_at,

@@ -6,6 +6,7 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.group_publication import GroupPublication
+from yt_playlist.controllers.policies import Policies
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.group_documents import GroupFiles
@@ -19,6 +20,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def publication():
     repo = create_autospec(CompactTasteGroupsRepo, instance=True, spec_set=True)
     files = create_autospec(GroupFiles, instance=True, spec_set=True)
+    policies = create_autospec(Policies, instance=True, spec_set=True)
     active, events = [], []
 
     @contextmanager
@@ -30,17 +32,25 @@ def publication():
             active.pop()
 
     files.retained.side_effect = retained
-    files.write_policy.return_value = ('policy.json', 'policy-digest', 10, 0)
+    def describe(documents):
+        return [dict(kind=kind, value=value, digest='digest', size=10) for kind, value in documents]
 
-    def write(documents):
+    def reserve(records):
+        events.extend(('pending', record['kind']) for record in records)
+        return list(range(1, len(records) + 1))
+
+    def write(records):
         assert active
-        values = list(documents)
-        events.extend(('file', kind) for kind, _value in values)
-        return [(kind + '.json', 'digest', 10, 0) for kind, _value in values]
+        assert all(record['file_id'] > 0 for record in records)
+        events.extend(('file', record['kind']) for record in records)
+        return [(record['kind'] + '.json', 'digest', 10, 0) for record in records]
 
-    files.write.side_effect = write
+    files.describe.side_effect = describe
+    repo.reserve_files.side_effect = reserve
+    files.write_reserved.side_effect = write
     repo.recording_ids.return_value = {'one': 1}
     repo.claim_generation.return_value = 10, 11, 'owner', False
+    repo.generation_reference.return_value = None
     repo.definition_candidates.return_value = [(0, 12)]
     repo.group_state.return_value = {'version_id': 13, 'group_id': 12, 'sealed': False,
                                      'members': 0, 'representatives': 0}
@@ -65,12 +75,14 @@ def publication():
                 'groups': [{'group_id': 'group', 'version': 'alias', 'parent_version': None,
                             'payload': canonical(definition).decode(), 'members': [('one', .9, .8)]}],
                 'unknown': [], 'edges': [], 'lineage': []}
-    return GroupPublication(repo, files), prepared, events, active
+    return GroupPublication(repo, files, policies), prepared, events, active
 
 
 def test_files_are_published_before_their_sql_references_and_head_is_last(publication):
     service, prepared, events, active = publication
     service.publish(prepared)
+    assert events.index(('pending', 'generation')) < events.index(('file', 'generation'))
+    assert events.index(('pending', 'definition')) < events.index(('file', 'definition'))
     assert events.index(('file', 'definition')) < events.index(('sql', 'definition'))
     service.repository.install_members.assert_called_once_with(
         10, 'owner', 13, [('one', .9, .8)], {'one': 1}, {'one': 'a' * 64})
@@ -87,15 +99,17 @@ def test_invalid_graph_scores_never_claim_a_build_or_publish_files(publication, 
     with pytest.raises(ValueError, match='scores must be finite'):
         service.stage(prepared)
     service.repository.claim_generation.assert_not_called()
-    service.files.write.assert_not_called()
+    service.files.write_reserved.assert_not_called()
+    service.repository.reserve_files.assert_not_called()
 
 
 def test_failed_generation_file_does_not_create_a_sql_generation(publication):
     service, prepared, _events, active = publication
-    service.files.write.side_effect = OSError('disk full')
+    service.files.write_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         service.publish(prepared)
     service.repository.claim_generation.assert_not_called()
+    service.repository.reserve_files.assert_called_once()
     service.repository.finish_staged.assert_not_called()
     assert not active
 

@@ -3,7 +3,8 @@ from dataclasses import replace
 
 import pytest
 
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.legacy_recommendation_fixture_support import recommendations
+from tests.enrichment_support import seed_discovered_enrichment
 from tests.store_fixture_support import native_sql_calls
 from tests.repos.test_typed_recommendation_publication import publish, plan
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
@@ -29,7 +30,8 @@ def fresh(recommendations):
     items = [(f'fresh-upload-{index}', recording, key + ' title', f'artist-{index}', 'album')
              for index, (recording, key, _genre) in enumerate(records)]
     with store.conn:
-        store.conn.executemany('INSERT INTO recordings(id,identity_key,genre) VALUES (?,?,?)', records)
+        store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)',
+                               [(recording, key) for recording, key, _ in records])
         store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,album) '
                                'VALUES (?,?,?,?,?)', items)
         store.conn.executemany('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
@@ -37,6 +39,8 @@ def fresh(recommendations):
         store.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) '
                            'SELECT recording_id,id,1 FROM catalog_entries WHERE recording_id BETWEEN 3 AND 262 '
                            'ORDER BY recording_id')
+    for _recording, key, genre in records:
+        seed_discovered_enrichment(store, key, genre, None)
     candidates = [pools.Candidate(recording, 1 / (index + 1))
                   for index, (recording, _key, _genre) in enumerate(records)]
     original = plan(store)
@@ -77,7 +81,7 @@ def test_fresh_round_robin_preserves_requested_families(fresh, monkeypatch):
     store, _ = fresh
     forbid_legacy(monkeypatch)
     tracks = fresh_pool.pick(store, 10, include_genres=('rock-classic', 'jazz'), size=4)
-    assert [track['genre'] for track in tracks] == ['rock', 'jazz', 'rock', 'jazz']
+    assert [track['genre'] for track in tracks] == ['Rock', 'Jazz', 'Rock', 'Jazz']
     assert len({track['key'] for track in tracks}) == 4
     assert fresh_pool.pick(store, 10, include_genres=('rock-classic', 'ambient'), size=4) == []
 
@@ -103,7 +107,7 @@ def test_live_membership_and_availability_changes_do_not_hide_later_fresh_candid
         entry = store.conn.execute('SELECT entry_id FROM discovery_memberships WHERE recording_id=3').fetchone()[0]
         store.conn.execute("INSERT INTO library_memberships VALUES (?,'import',5)", (entry,))
         store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='fresh-upload-1'")
-        store.conn.execute("UPDATE recordings SET genre='jazz' WHERE id=5")
+    seed_discovered_enrichment(store, 'fresh-2', 'jazz', None)
     tracks = fresh_pool.pick(store, 10, include_genres=('rock-classic',), size=2, minimum=2)
     assert [track['key'] for track in tracks] == ['fresh-3', 'fresh-4']
 

@@ -14,7 +14,7 @@ def home_view(bootstrap):
     """
     fields = {'key', 'identity_key', 'video_id', 'title', 'artist', 'album', 'thumbnail',
               'duration', 'genre', 'year', 'album_browse', 'album_browse_id', 'saved',
-              'available', 'plays', 'liked', 'reason'}
+              'available', 'plays', 'liked', 'reason', 'artist_links'}
 
     def track(value):
         return {key: child for key, child in value.items() if key in fields}

@@ -1,5 +1,5 @@
 """Action decisions and file admission run over mocked SQL ownership."""
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from unittest.mock import create_autospec
 
@@ -8,7 +8,7 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.actions import Actions
 from yt_playlist.core.action_backup_files import ActionBackupFiles
-from yt_playlist.core.collection_recovery import RecoveryFiles
+from yt_playlist.core.collection_files import RecoveryFiles
 from yt_playlist.repos.actions import ActionRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -19,41 +19,64 @@ def actions():
     repo = create_autospec(ActionRepo, instance=True, spec_set=True)
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
     backups = create_autospec(ActionBackupFiles, instance=True, spec_set=True)
-    repo.transaction.side_effect = files.retained.side_effect = nullcontext
+    in_transaction = False
+
+    @contextmanager
+    def transaction():
+        nonlocal in_transaction
+        assert not in_transaction
+        in_transaction = True
+        try:
+            yield
+        finally:
+            in_transaction = False
+
+    def publish(*args, **kwargs):
+        assert not in_transaction, 'File publication must precede the SQL transaction'
+        return 'retained', 'digest', 100
+
+    repo.transaction.side_effect = transaction
+    files.retained.side_effect = nullcontext
     repo.has_durable_targets.return_value = True
     repo.next_action_id.return_value = 7
     repo.prior_intent.return_value = None
     repo.backups.return_value = []
     repo.step_input.return_value = (10, None)
     repo.header.return_value = {'id': 7, 'idempotency_key': 'action:7'}
-    files.publish.return_value = ('retained', 'digest', 100)
+    repo.reserve_file.return_value = 41
+    repo.publish_record.side_effect = lambda prepared: prepared['identity']
+    files.describe.return_value = ('digest', 100)
+    files.publish_reserved.side_effect = publish
     return Actions(repo, files, backups, '/library', nullcontext)
 
 
 def test_failed_recovery_publication_cannot_commit_an_action_reference(actions):
-    actions.files.publish.side_effect = OSError('full')
+    actions.files.publish_reserved.side_effect = OSError('full')
     with pytest.raises(OSError):
         actions.record_action('merge', '{}', '{}', 'planned', '{}', 1)
     actions.repository.insert_action.assert_not_called()
+    actions.repository.publish_record.assert_not_called()
+    actions.repository.reserve_file.assert_called_once_with('action', 7, ('digest', 100), new_owner=True)
 
 
 def test_idempotency_conflict_is_checked_before_file_publication(actions):
     actions.repository.prior_intent.return_value = {'id': 7, 'intent_digest': 'another-intent'}
     with pytest.raises(ValueError, match='another action intent'):
         actions.record_action('merge', '{}', '{}', 'planned', '{}', 1, idempotency_key='key')
-    actions.files.publish.assert_not_called()
+    actions.files.publish_reserved.assert_not_called()
+    actions.repository.reserve_file.assert_not_called()
     actions.repository.insert_action.assert_not_called()
 
 
 def test_matching_idempotent_intent_reuses_the_committed_action(actions):
     actions.record_action('merge', '{}', '{}', 'planned', '{}', 1, idempotency_key='key')
-    digest = actions.repository.insert_action.call_args.kwargs['intent_digest']
+    digest = actions.repository.publish_record.call_args.args[0]['intent_digest']
     actions.repository.prior_intent.return_value = {'id': 7, 'intent_digest': digest}
-    actions.files.publish.reset_mock()
-    actions.repository.insert_action.reset_mock()
+    actions.files.publish_reserved.reset_mock()
+    actions.repository.publish_record.reset_mock()
     assert actions.record_action('merge', '{}', '{}', 'planned', '{}', 2, idempotency_key='key') == 7
-    actions.files.publish.assert_not_called()
-    actions.repository.insert_action.assert_not_called()
+    actions.files.publish_reserved.assert_not_called()
+    actions.repository.publish_record.assert_not_called()
 
 
 def owned_action(status='executed'):
@@ -67,8 +90,83 @@ def test_stale_revision_cannot_publish_replacement_recovery(actions):
     with pytest.raises(ValueError, match='updated by another worker'):
         actions.update_action(7, 'executed', 3, expected_revision='old')
     actions.files.read.assert_not_called()
-    actions.files.publish.assert_not_called()
+    actions.files.publish_reserved.assert_not_called()
     actions.repository.update_action.assert_not_called()
+
+
+def test_record_commits_its_reservation_before_file_and_final_sql_publication(actions):
+    events = []
+    actions.repository.reserve_file.side_effect = lambda *args, **kwargs: events.append('reserve') or 41
+    actions.files.publish_reserved.side_effect = lambda *args, **kwargs: events.append('file') or ('retained', 'digest', 100)
+    actions.repository.publish_record.side_effect = lambda prepared: events.append('publish') or prepared['identity']
+    assert actions.record_action('merge', '{}', '{}', 'planned', '{}', 1) == 7
+    assert events == ['reserve', 'file', 'publish']
+    actions.repository.transaction.assert_not_called()
+
+
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_backup_reserves_its_own_id_before_copying_and_commits_with_the_action(actions, interrupted):
+    events = []
+    actions.backups.reference.return_value = (('original', 'digest', 100, 'verified'), {})
+    actions.repository.reserve_backup_file.side_effect = lambda *args: events.append('reserve') or 53
+
+    def retain(*args, **kwargs):
+        events.append('file')
+        if interrupted:
+            raise OSError('backup copy interrupted')
+        return 'retained', 'digest', 100
+
+    actions.backups.retain_reserved.side_effect = retain
+    if interrupted:
+        with pytest.raises(OSError, match='backup copy interrupted'):
+            actions.record_action('remove_track', '{}', '{}', 'executed', '{"backups":["original"]}', 1)
+        actions.repository.publish_record.assert_not_called()
+    else:
+        actions.record_action('remove_track', '{}', '{}', 'executed', '{"backups":["original"]}', 1)
+        progress = actions.repository.publish_record.call_args.args[0]['progress']
+        assert progress['backups'] == [(0, ('original', 'digest', 100, 'verified'),
+                                       (53, ('retained', 'digest', 100)))]
+    assert events == ['reserve', 'file']
+    actions.repository.reserve_backup_file.assert_called_once_with(7, 0, ('digest', 100))
+    actions.backups.retain_reserved.assert_called_once_with(53, 'original', expected=('digest', 100))
+    actions.repository.transaction.assert_not_called()
+
+
+def test_progress_file_failure_cannot_commit_an_action_update(actions):
+    actions.repository.get_action.return_value = owned_action()
+    actions.files.read.return_value = {'params': '{}', 'plan': '{}', 'undo': '{}'}
+    actions.files.publish_reserved.side_effect = OSError('full')
+    with pytest.raises(OSError, match='full'):
+        actions.update_action(7, 'executed', 3, undo_json='{}')
+    actions.repository.publish_update.assert_not_called()
+    actions.repository.transaction.assert_not_called()
+
+
+def test_undo_prepares_both_documents_before_its_single_sql_commit(actions):
+    actions.repository.get_action.return_value = owned_action('undoing')
+    actions.files.read.return_value = {'params': '{}', 'plan': '{}', 'undo': '{}'}
+    actions.repository.next_action_id.return_value = 8
+    events = []
+    actions.files.publish_reserved.side_effect = lambda *args, **kwargs: events.append(('file', args[2])) or ('retained', 'digest', 100)
+    actions.repository.finish_undo.side_effect = lambda *args: events.append(('finish', None))
+    actions.finish_undo(7, {}, 3, claim_token='claim')
+    assert events == [('file', 7), ('file', 8), ('finish', None)]
+    prepared, history, token = actions.repository.finish_undo.call_args.args
+    assert prepared['status'] == 'undone'
+    assert history['undo_of'] == 7
+    assert token == 'claim'
+    actions.repository.transaction.assert_not_called()
+
+
+def test_failed_undo_history_file_cannot_commit_undo_completion(actions):
+    actions.repository.get_action.return_value = owned_action('undoing')
+    actions.files.read.return_value = {'params': '{}', 'plan': '{}', 'undo': '{}'}
+    actions.repository.next_action_id.return_value = 8
+    actions.files.publish_reserved.side_effect = [('retained', 'digest', 100), OSError('full')]
+    with pytest.raises(OSError, match='full'):
+        actions.finish_undo(7, {}, 3, claim_token='claim')
+    actions.repository.finish_undo.assert_not_called()
+    actions.repository.clear_execution.assert_not_called()
 
 
 @pytest.mark.parametrize('status', ['pending', 'draft', 'undone', 'cancelled'])

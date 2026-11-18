@@ -8,8 +8,17 @@ from yt_playlist.repos.group_publication import _batches, _BuildBeingCleaned
 
 
 class GroupPublication:
-    def __init__(self, repository, files):
+    def __init__(self, repository, files, policies):
         self.repository, self.files = repository, files
+        self.policies = policies
+
+    def _write(self, documents):
+        records = self.files.describe(documents)
+        identities = self.repository.reserve_files(records)
+        if len(identities) != len(records):
+            raise ValueError('Musical group reservation count changed')
+        return self.files.write_reserved([record | {'file_id': identity}
+            for record, identity in zip(records, identities, strict=True)])
 
     def stage(self, prepared):
         self.repository.assert_idle()
@@ -17,12 +26,15 @@ class GroupPublication:
         inputs, plans, policy, metadata = group_plan.prepare(prepared, identities)
         self.repository.clear_build_conflicts(prepared, plans)
         with self.files.retained():
-            policy_reference = self.files.write_policy(policy)
-            metadata_reference, = self.files.write([('generation', metadata)])
+            version = group_storage.policy_version(prepared['policy'])
             while True:
                 try:
+                    metadata_reference = self.repository.generation_reference(prepared, version, inputs)
+                    if metadata_reference is None:
+                        self.policies.publish([(version, canonical(policy).decode(), prepared['at'])])
+                        metadata_reference, = self._write([('generation', metadata)])
                     generation, manifest, owner, ready = self.repository.claim_generation(prepared, inputs,
-                        group_storage.policy_version(prepared['policy']), policy_reference, metadata_reference)
+                        version, metadata_reference)
                     break
                 except _BuildBeingCleaned:
                     while self.repository.cleanup_builds(generation=prepared['generation']):
@@ -50,7 +62,7 @@ class GroupPublication:
         positions = {row[0]: row for row in plans}
         for batch in _batches((row[0], row[1]['group_id'], row[4], row[1]['payload']) for row in plans):
             pending = self.repository.definition_candidates(generation, owner, batch)
-            files = self.files.write(('definition', positions[position][2]) for position, _group_id in pending)
+            files = self._write(('definition', positions[position][2]) for position, _group_id in pending)
             self.repository.install_definitions(prepared, generation, owner,
                 [(positions[position], group_id, file) for (position, group_id), file in zip(pending, files, strict=True)])
             for position, _key, _digest, _raw in batch:
@@ -92,7 +104,7 @@ class GroupPublication:
             existing = self.repository.lineage_facts([(source, target) for source, target, _relation, _raw in batch])
             values = [(source, target, relation, group_plan.lineage(raw)) for source, target, relation, raw in batch]
             pending = [row for row in values if (row[0], row[1]) not in existing]
-            files = iter(self.files.write(('lineage', row[3]) for row in pending))
+            files = iter(self._write(('lineage', row[3]) for row in pending))
             rows = []
             for source, target, relation, value in values:
                 previous = existing.get((source, target))

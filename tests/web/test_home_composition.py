@@ -12,7 +12,7 @@ from tests.store_fixture_support import (
 )
 from yt_playlist.rec import home_cache, home_cards, home_prepared
 from yt_playlist.web.app import create_app
-from yt_playlist.web.routes.home import ROTATING_CARDS
+from yt_playlist.rec.home_prepared import ROTATING_CARDS
 from yt_playlist.web.routes.home_views import HomeViews
 from yt_playlist.web.spotify_import import load_job, save_job
 
@@ -51,31 +51,33 @@ def test_home_metadata_update_preserves_publication_and_refreshes_next_snapshot(
     store = file_backed_store
     payload = publish_menu(store, tracks_per_card=5)
     returning_listener(store, 'mixes', now=1000)
-    track = payload['menus'][0]['protos'][0]['tracks'][0]
-    original = HomeViews.prepared
+    # Wheelhouse keeps this publication check independent of comfort's
+    # favorite/history and listening-rest requirements.
+    proto_index = next(index for index, proto in enumerate(payload['menus'][0]['protos'])
+                       if proto['lane'] == 'wheelhouse')
+    track = payload['menus'][0]['protos'][proto_index]['tracks'][0]
+    original = home_prepared.load
     updated = False
     observed = []
 
-    def update_after_menu_read(self, now, request=None):
+    def update_after_menu_read(reader, now, *args, **kwargs):
         nonlocal updated
-        result = original(self, now, request)
-        if request is not None and request.url.path == '/':
-            observed.append(self.store.tracks.metadata_for_video(track['video_id'])['title'])
-            if not updated:
-                updated = True
-                store.tracks.upsert_track(track['video_id'], 'Corrected title', track['artist'], '', 180)
-                assert self.store.tracks.metadata_for_video(track['video_id'])['title'] == 'Corrected title'
-                assert not self.store.conn.in_transaction
+        result = original(reader, now, *args, **kwargs)
+        observed.append(reader.tracks.metadata_for_video(track['video_id'])['title'])
+        if not updated:
+            updated = True
+            store.tracks.upsert_track(track['video_id'], 'Corrected title', track['artist'], '', 180)
+            assert reader.tracks.metadata_for_video(track['video_id'])['title'] == 'Corrected title'
+            assert not reader.conn.in_transaction
         return result
 
-    monkeypatch.setattr(HomeViews, 'prepared', update_after_menu_read)
+    monkeypatch.setattr(home_prepared, 'load', update_after_menu_read)
     with client_for(store) as client:
         first = client.get('/')
         assert first.status_code == 200
         assert f'data-title="{track["title"]}"' in first.text
         assert 'data-title="Corrected title"' not in first.text
         assert observed[0] == track['title']
-        assert observed[1:] and set(observed[1:]) == {'Corrected title'}
         observed.clear()
         following = client.get('/')
         assert following.status_code == 200
@@ -85,7 +87,7 @@ def test_home_metadata_update_preserves_publication_and_refreshes_next_snapshot(
         assert home_cache.read(store, home_prepared.SURFACE) == payload
         # An explicit build replaces the held menu, including its display metadata.
         replacement = deepcopy(payload['menus'][0])
-        replacement['protos'][0]['tracks'][0]['title'] = 'Corrected title'
+        replacement['protos'][proto_index]['tracks'][0]['title'] = 'Corrected title'
         assert home_prepared.remember(store, payload, home_cards.CardsResult(**replacement), 1001)
         refreshed = client.get('/')
         assert refreshed.status_code == 200

@@ -474,7 +474,7 @@ def test_studio_and_live_rows_have_independent_lookups_and_import_markers(store)
 
 
 def test_failed_lookup_can_be_recovered_in_the_same_playlist(store, monkeypatch):
-    monkeypatch.setattr("yt_playlist.library.spotify_library.with_retry", lambda operation: operation())
+    monkeypatch.setattr("yt_playlist.controllers.spotify_library.with_retry", lambda operation: operation())
 
     class LookupFailure(SongClient):
         fail = True

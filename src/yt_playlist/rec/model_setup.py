@@ -12,7 +12,12 @@ def current_setup(store):
 
 
 def build(store, setup):
+    baskets = store.rec_evidence.rec_baskets()
+    counts = store.rec_query.play_counts() if store.settings.get_setting('rec_cooc_weighting') == '1' else None
+    return fit_from_inputs(baskets, setup, counts)
+
+
+def fit_from_inputs(baskets, setup, play_counts):
     return training.build_vectors_from_baskets(
-        store.rec_evidence.rec_baskets(), dim=setup["dim"], method=setup["method"],
-        weights=training.cooc_weights(store.rec_query.play_counts())
-        if store.settings.get_setting("rec_cooc_weighting") == "1" else None)
+        baskets, dim=setup["dim"], method=setup["method"],
+        weights=training.cooc_weights(play_counts) if play_counts is not None else None)

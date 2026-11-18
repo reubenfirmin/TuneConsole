@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from experiments.audio_lab_tools.studies import heldout_cohort as cohort
-from yt_playlist.rec.audio_vibe_external import _predict, validate
+from experiments.audio_lab_tools.legacy.audio_vibe_external import _predict, validate
 
 
 def test_checkpoint_replay_matches_serving_on_real_historical_embeddings():

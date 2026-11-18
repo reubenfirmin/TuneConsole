@@ -44,8 +44,7 @@ class RadioDirections:
 
     def _genres(self, history, *, current=None):
         theme = getattr(self.candidates, 'tuning', {}).get('theme', .5)
-        store = getattr(self.candidates, 'read_store', getattr(self.candidates, 'store', None))
-        return GenrePolicy(theme, history, current=current, store=store)
+        return GenrePolicy(theme, history, current=current, axes=getattr(self.candidates, 'axes', None))
 
     def continue_sequence(self, history, prefix, anchor, excluded):
         """Extend an unsent branch using the current candidate and feedback policy."""
@@ -56,7 +55,9 @@ class RadioDirections:
         destination = proposal[-1] if proposal and intensity_active else anchor
         while len(proposal) < DEPTH:
             pick = self.candidates.next_track(history + proposal, target=destination,
-                feedback=self.feedback, excluded=set(excluded) | self.blocked | self.retired, current=current)
+                feedback=self.feedback, excluded=set(excluded) | self.blocked | self.retired, current=current,
+                destination=[(t['key'], t['video_id']) for t in history + proposal],
+                recipe={'surface': 'radio', 'tuning': dict(getattr(self.candidates, 'tuning', {}))}, policy='upload')
             if pick is None:
                 break
             proposal.append(pick)
@@ -65,8 +66,7 @@ class RadioDirections:
         return proposal
 
     def _label(self, tracks, anchor):
-        store = getattr(self.candidates, 'read_store', getattr(self.candidates, 'store', None))
-        axes = store.genres.feature_axes([t.get('genre') for t in tracks]) if store else None
+        axes = getattr(self.candidates, 'axes', None)
         families = Counter(axes.get(t.get('genre'), (None, None))[0] if axes is not None
                            else genre_map.family(t.get('genre')) for t in tracks)
         families.pop(None, None)

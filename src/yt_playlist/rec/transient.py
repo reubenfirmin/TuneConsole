@@ -16,6 +16,7 @@ import json
 import numpy as np
 
 from yt_playlist.rec import embedding_vectors as vectors, rec_params
+from yt_playlist.rec.transient_math import decay_weight, facet_multiplier
 
 # Historical generated radio playlist IDs remain provenance after the deck controller's removal.
 _RADIO_SETTING_KEYS = ("radio_playlist_ytm", "radio_playlist_a_ytm", "radio_playlist_b_ytm")
@@ -64,16 +65,6 @@ def evidence_plays(store, limit):
             if k not in quarantined]
 
 
-def decay_weight(age_s, half_life_d) -> float:
-    """#85 Wall-clock event decay: 0.5 ** (age_days / half_life_days). A fresh (or clock-skewed
-    future) event weighs 1.0. This kernel is the whole lifecycle now: no rank decay, no separate
-    staleness relax; an event fades on the clock whether or not anything newer arrived. #88's
-    layered model instantiates this same kernel at several half-lives."""
-    if age_s <= 0:
-        return 1.0
-    return 0.5 ** (age_s / (half_life_d * 86400.0))
-
-
 def facets_for(store, keys) -> dict:
     """Map track identity_keys to the rec axes they carry:
     {'genre:<fam>': [keys...], 'era:<decade>': [keys...], 'artist:<name>': [keys...]}.
@@ -87,6 +78,11 @@ def facets_for(store, keys) -> dict:
     dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
     axes = store.genres.feature_axes(genres.values())
+    return facets_from_metadata(keys, genres, decades, artists, axes)
+
+
+def facets_from_metadata(keys, genres, decades, artists, axes):
+    """Resolve explicit metadata into axes, leaving unknown metadata absent."""
     families = {genre: axes.get(genre, ('', None))[0] for genre in set(genres.values())}
     subgenres = {genre: axes.get(genre, ('', None))[1] for genre in families}
     out: dict = {}
@@ -126,7 +122,30 @@ def facet_leans(store, now) -> dict:
     like_hl, dislike_hl = gp(store, "like_halflife_d"), gp(store, "dislike_halflife_d")
     skip_w, skip_hl = gp(store, "skip_transient_w"), gp(store, "skip_halflife_d")
     limit = gp(store, "recent_play_limit")
-    leans: dict = {}
+    events = store.rec_signals.recent_mood_events()
+    plays = evidence_plays(store, limit)
+    likes = store.rec_model.recent_liked_with_ts(limit=limit)
+    dislikes = store.rec_model.disliked_with_ts()
+    skips = store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400)
+    contributions = signed_contributions(now, events, plays, likes, dislikes, skips,
+        play_w=play_w, like_w=like_w, dislike_w=dislike_w, skip_w=skip_w,
+        play_hl=play_hl, mood_hl=mood_hl, like_hl=like_hl, dislike_hl=dislike_hl, skip_hl=skip_hl)
+    facets = facets_for(store, [key for keys, _, _ in contributions for key in keys])
+    from yt_playlist.rec import choice_learning
+    choices = []
+    for interest in choice_learning.contexts(store, now):
+        if interest['format'] != 'mixes' or interest.get('descriptor_id') is None:
+            continue
+        descriptor = store.rec_ledger.mix_descriptor(interest['descriptor_id'])
+        families = {value[0] for value in store.genres.feature_axes(descriptor['genres']).values()}
+        choices.append((families, interest['weight']))
+    return facet_leans_from_inputs(contributions, facets, choices)
+
+
+def signed_contributions(now, events, plays, likes, dislikes, skips, *,
+                         play_w, like_w, dislike_w, skip_w,
+                         play_hl, mood_hl, like_hl, dislike_hl, skip_hl):
+    """Decay detached event facts while preserving source polarity and artist suppression."""
     contributions = []
 
     def add(keys, signed, drop_artist=False):
@@ -134,32 +153,38 @@ def facet_leans(store, now) -> dict:
             return
         contributions.append((list(dict.fromkeys(keys)), signed, drop_artist))
 
-    for ts, direction, keys in store.rec_signals.recent_mood_events():
+    for ts, direction, keys in events:
         add(keys, direction * decay_weight(now - ts, mood_hl))
-    for k, ts in evidence_plays(store, limit):
+    for k, ts in plays:
         add([k], play_w * decay_weight(now - ts, play_hl))
     # Likes here are ACTION-provenance only (recent_liked_with_ts filters at the repo): a like
     # observed live has a real event time and belongs at the top of the model stack. A like the
     # library sync merely discovered has no reliable time (its created_at is first-sight), so it
     # never reaches the transient model; it shapes the permanent model only, via graduation.
-    for k, ts in store.rec_model.recent_liked_with_ts(limit=limit):
+    for k, ts in likes:
         add([k], like_w * decay_weight(now - ts, like_hl))
     # #54: a dislike is a verdict on THAT track, not the artist (the track itself is hard-suppressed
     # via suppressed_keys). Genre/era leans stay, but #85 they now FADE by age instead of pressing at
     # full strength forever.
-    for k, ts in store.rec_model.disliked_with_ts():
+    for k, ts in dislikes:
         add([k], -dislike_w * decay_weight(now - ts, dislike_hl), drop_artist=True)
     # #84: extends #54's rationale one step further. A skip is a verdict on THAT track in THAT
     # moment (could be mood, could be context, could just be an accident of the queue), even weaker
     # evidence against the artist than a dislike is, so the artist axis never sees it either
     # (drop_artist=True). Lookback is a generous 4 half-lives (mirrors the mood-prune rationale) so
     # the read only asks the store for skips that could still matter, not the whole history.
-    for k, ts in store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400):
+    for k, ts in skips:
         add([k], -skip_w * decay_weight(now - ts, skip_hl), drop_artist=True)
+    return contributions
+
+
+def facet_leans_from_inputs(contributions, facets, choices):
+    """Blend detached events and broad mix choices without catalog or history access."""
+    leans = {}
     # Capture metadata once for this snapshot, preserving each event's decay,
     # denominator, ordering and artist suppression during accumulation.
     by_key = {}
-    for facet, keys in facets_for(store, [key for keys, _, _ in contributions for key in keys]).items():
+    for facet, keys in facets.items():
         for key in keys:
             by_key.setdefault(key, []).append(facet)
     for keys, signed, drop_artist in contributions:
@@ -172,16 +197,11 @@ def facet_leans(store, now) -> dict:
             leans[facet] = leans.get(facet, 0.0) + signed * (count / len(keys))
     # Mix choices are broad raw-genre preferences, never synthetic plays or
     # centroids over whichever recordings happen to match today's catalog.
-    from yt_playlist.rec import choice_learning
     choice_genres = {}
-    for interest in choice_learning.contexts(store, now):
-        if interest['format'] != 'mixes' or interest.get('descriptor_id') is None:
-            continue
-        descriptor = store.rec_ledger.mix_descriptor(interest['descriptor_id'])
-        families = {value[0] for value in store.genres.feature_axes(descriptor['genres']).values()}
+    for families, weight in choices:
         for family in families - {None, ''}:
             axis = 'genre:' + family
-            choice_genres[axis] = max(choice_genres.get(axis, 0.), min(1., interest['weight']) / max(1, len(families)))
+            choice_genres[axis] = max(choice_genres.get(axis, 0.), min(1., weight) / max(1, len(families)))
     for axis, strength in choice_genres.items():
         leans[axis] = leans.get(axis, 0.) + strength
     return leans
@@ -201,23 +221,23 @@ def play_facet_leans(store, now) -> dict:
     play_w = gp(store, "play_transient_w")
     play_hl = gp(store, "play_halflife_d")
     limit = gp(store, "recent_play_limit")
-    leans: dict = {}
     plays = evidence_plays(store, limit)
+    facets = facets_for(store, [k for k, _ in plays])
+    return play_leans_from_inputs(plays, facets, now, weight=play_w, half_life_d=play_hl)
+
+
+def play_leans_from_inputs(plays, facets, now, *, weight, half_life_d):
+    leans = {}
     by_key = {}
     # Read metadata once for the window, retaining each event's decay and the
     # accumulation order used by the per-track calculation.
-    for facet, keys in facets_for(store, [k for k, _ in plays]).items():
+    for facet, keys in facets.items():
         for key in keys:
             by_key.setdefault(key, []).append(facet)
     for k, ts in plays:
         for f in by_key.get(k, ()):
-            leans[f] = leans.get(f, 0.0) + play_w * decay_weight(now - ts, play_hl)
+            leans[f] = leans.get(f, 0.0) + weight * decay_weight(now - ts, half_life_d)
     return leans
-
-
-def facet_multiplier(lean, gain, lo, hi) -> float:
-    """Map a signed facet lean to a positive ranking multiplier; 1.0 = neutral, clamped to [lo, hi]."""
-    return max(lo, min(hi, 1.0 + gain * lean))
 
 
 def centroid_tilt(store, now, V, idx):
@@ -243,6 +263,14 @@ def centroid_tilt(store, now, V, idx):
     mood_hl = gp(store, "mood_halflife_d")
     play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
     like_hl, like_w = gp(store, "like_halflife_d"), gp(store, "like_transient_w")
+    return tilt_from_inputs(now, V, idx, events, plays, likes, skips,
+        mood_hl=mood_hl, play_hl=play_hl, play_w=play_w, like_hl=like_hl,
+        like_w=like_w, skip_hl=skip_hl, skip_w=skip_w)
+
+
+def tilt_from_inputs(now, V, idx, events, plays, likes, skips, *,
+                     mood_hl, play_hl, play_w, like_hl, like_w, skip_hl, skip_w):
+    """Bounded tilt; its undecayed denominator preserves aging and cancellation."""
     tilt = np.zeros(V.shape[1], dtype=np.float64)
     weight = 0.0
     for ts, direction, keys in events:

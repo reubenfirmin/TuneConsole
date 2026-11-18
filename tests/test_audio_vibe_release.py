@@ -10,7 +10,8 @@ from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import catalog, features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
+from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
+from yt_playlist.rec import audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
@@ -44,13 +45,12 @@ def test_release_preserves_cruise_shared_classification_and_input(count, monkeyp
     rows = samples()[:count]
     original = deepcopy(rows)
     before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
-    assert {k: v for k, v in before.items() if k not in ('suitability', 'individual_models')} == {
-        k: v for k, v in after.items() if k not in ('suitability', 'individual_models')}
+    assert after['arc'] == before['arc']
     assert after['individual_models']['cruise'] == before['individual_models']['cruise']
     assert after['individual_models']['release']['sample_count'] == count
     assert after['individual_models']['release']['score_semantics'] == 'independent_uncalibrated_suitability'
-    assert after['suitability']['release'] != before['suitability']['release']
-    for vibe in shared.LABELS:
+    assert 'release' not in before['suitability']
+    for vibe in before['suitability']:
         if vibe != 'release':
             assert after['suitability'][vibe] == before['suitability'][vibe]
     assert cruise.apply(rows, after) == after  # Composition cannot erase Release.
@@ -114,14 +114,14 @@ def test_optional_failure_preserves_cruise_and_shared(failure, tmp_path, monkeyp
 def test_provenance_and_excerpt_bounds(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert predictor.predict(rows)['suitability'] == {}
     model = release.load(release.DEFAULT_PATH)
     for values in ([], [[.2] * 200] * 129, [[float('nan')] * 200], [[1e7] * 200], [[.2] * 199]):
         with pytest.raises(ValueError):
             release.score(model, values)
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
+    assert set(predictor.predict(rows)['suitability']) == {'release', 'cruise'}
 
 
 def test_default_active_local_rollback_and_identity(monkeypatch):
@@ -157,7 +157,7 @@ def test_high_release_does_not_replace_classification_or_explicit_intensity(stor
     monkeypatch.setenv(release.ENVIRONMENT_KEY, str(controlled(tmp_path, .99)))
     after = predictor.predict(rows)
     assert after['suitability']['release'] == .99
-    for name in ('ranking', 'vibe', 'vibes', 'selection_method', 'score_margin'):
+    for name in ('vibe', 'vibes', 'selection_method', 'score_margin'):
         assert after[name] == before[name]
     for now, row in enumerate(rows, 1):
         store.audio_vibes.save_sample(row, now)
@@ -206,8 +206,8 @@ def test_bounded_rollout_propagation_intensity_new_captures_and_rollback(special
         for vibe in shared.LABELS:
             if vibe != 'release':
                 assert after[vibe] == before[key][vibe]
-        assert musical_character.intensity_evidence({'musical': active[key]}) == musical_character.intensity_evidence(
-            {'musical': old_profiles[key]})
+        assert active[key]['vibes']['intensity_fits']['release']['score'] == after['release']['score']
+        assert musical_character.provenance({'musical': active[key]})['intensity_ensemble']['components']['release']['score'] == after['release']['score']
         assert home_vibe.affinity({'key': key}, 'release', active) == after['release']['score']
     active_stamp = vibe_preparation.version()
     controlled(tmp_path, .3)

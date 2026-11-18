@@ -1,5 +1,4 @@
 """Artist identities and ordered source credits. Names are evidence, never provider identities."""
-import json
 import time
 
 from yt_playlist.core.activity import check_cancellable_work
@@ -28,9 +27,6 @@ def _reconcile_feature_state(conn, previous, target, source):
     conn.execute('UPDATE rec_feedback SET artist_id=? WHERE artist_id=?', (target, previous))
     rows = [dict(row) for row in conn.execute(
         'SELECT * FROM rec_artist_similar WHERE artist_id IN (?,?)', (previous, target))]
-    for row in rows:
-        legacy_evidence.retain(conn, 'artist_reconcile:rec_artist_similar',
-            json.dumps([previous, target, row['artist']]), json.dumps(row), source)
     winner = latest(rows, 'fetched_at', target, legacy=True)
     if winner is not None:
         conn.execute('DELETE FROM rec_artist_similar WHERE artist_id IN (?,?)', (previous, target))
@@ -67,13 +63,8 @@ def reconcile_provisional(conn, previous, target, *, source, now=None):
     conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,?)',
                  (previous,target,source,time.time() if now is None else now))
     conn.execute('UPDATE artist_redirects SET artist_id=? WHERE artist_id=?',(target,previous))
-    if artist_credits.available(conn):
-        artist_credits.reconcile_current(conn, previous, target, source, time.time() if now is None else now)
-        tables = ('album_artists',)
-    else:
-        tables = (artist_credits.projection_table(conn), 'album_artists')
-    for table in tables:
-        conn.execute(f'UPDATE {table} SET artist_id=? WHERE artist_id=?',(target,previous))
+    artist_credits.reconcile_current(conn, previous, target, source, time.time() if now is None else now)
+    conn.execute('UPDATE album_artists SET artist_id=? WHERE artist_id=?',(target,previous))
     conn.execute('INSERT OR IGNORE INTO artist_aliases SELECT ?,alias,source FROM artist_aliases WHERE artist_id=?',
                  (target,previous))
     reconcile_discovery_artist(conn,previous,target,source=source)
@@ -121,7 +112,7 @@ def ensure(conn, name, *, provider=None, provider_id=None, previous=None):
 
 def observe(conn, entry_id, credit, credits=None, *, browse_id=None, source='youtube', now=None,
             delivery_key=None, metadata_delivery_id=None):
-    existing = conn.execute(f'SELECT * FROM {artist_credits.projection_table(conn)} WHERE entry_id=? ORDER BY position', (entry_id,)).fetchall()
+    existing = conn.execute('SELECT * FROM entry_artists WHERE entry_id=? ORDER BY position', (entry_id,)).fetchall()
     structured = [a for a in (credits or []) if isinstance(a,dict) and a.get('name')]
     if not structured and existing and (not browse_id or len(existing)!=1
                                        or credit_subject(conn,existing,credit) is None):
@@ -130,30 +121,21 @@ def observe(conn, entry_id, credit, credits=None, *, browse_id=None, source='you
         if not credit:
             return
         structured = [{'name':credit,'id':browse_id}]
-    typed = artist_credits.available(conn)
-    if typed:
-        # Validate the delivered structure before ensure() can change aliases or
-        # reconcile a provisional identity. The caller owns their transaction.
-        artist_credits.prepare(conn, credit or '', structured, source)
-    desired, artist_ids = [], []
-    for position, a in enumerate(structured):
+    # Validate the delivered structure before ensure() can change aliases or
+    # reconcile a provisional identity. The caller owns their transaction.
+    artist_credits.prepare(conn, credit or '', structured, source)
+    artist_ids = []
+    for a in structured:
         previous = credit_subject(conn,existing,a['name'])
         artist_id = ensure(conn,a['name'],provider=source,provider_id=a.get('id') or a.get('browseId'),
                            previous=previous)
         artist_ids.append(artist_id)
-        desired.append((position, artist_id, a['name'], source))
-    if typed:
-        value = artist_credits.prepare(conn, credit or '', structured, source, artist_ids=artist_ids)
-        version = artist_credits.intern(conn, value)
-        observation, select = artist_credits.capture(conn, entry_id, version, source,
-            time.time() if now is None else now, delivery_key=delivery_key, metadata_delivery_id=metadata_delivery_id)
-        if select:
-            artist_credits.select(conn, entry_id, observation)
-    else:
-        conn.execute('INSERT INTO artist_credit_observations(entry_id,credit,credits_json,source,observed_at) '
-                     'VALUES (?,?,?,?,?)', (entry_id,credit or '',json.dumps(structured),source,
-                                            time.time() if now is None else now))
-        artist_credits.update_projection(conn, entry_id, desired)
+    value = artist_credits.prepare(conn, credit or '', structured, source, artist_ids=artist_ids)
+    version = artist_credits.intern(conn, value)
+    observation, select = artist_credits.capture(conn, entry_id, version, source,
+        time.time() if now is None else now, delivery_key=delivery_key, metadata_delivery_id=metadata_delivery_id)
+    if select:
+        artist_credits.select(conn, entry_id, observation)
 
 
 def state_id(conn, value):

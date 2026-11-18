@@ -476,13 +476,13 @@ def test_python_returns_token_references_not_colours():
 
 
 def test_python_genre_tokens_all_exist_in_the_token_layer():
-    """theme.py builds token names by string interpolation, so a family with no matching token
-    would silently render as an empty colour."""
-    from yt_playlist.web import theme
+    """genre_theme.py builds token names by string interpolation, so a family with no matching
+    token would silently render as an empty colour."""
+    from yt_playlist.util import genre_theme
 
     defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", TOKENS.read_text()))
-    for fam in theme._BAND_FAMILIES:
+    for fam in genre_theme._BAND_FAMILIES:
         assert f"--fam-{fam}" in defined, f"--fam-{fam} missing from tokens.css"
-    for fam in theme._TINT_FAMILIES:
+    for fam in genre_theme._TINT_FAMILIES:
         assert f"--genre-{fam}" in defined, f"--genre-{fam} missing from tokens.css"
     assert "--fam-other" in defined and "--genre-default" in defined

@@ -22,8 +22,11 @@ SURFACE = 'model_pair:2:incumbent:mixes'
 def outputs():
     repository = create_autospec(ComparisonOutputsRepo, instance=True, spec_set=True)
     repository.native.return_value = True
+    repository.reserve_file.return_value = 41
     files = create_autospec(RecommendationFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
+    files.describe.side_effect = lambda raw: (hashlib.sha256(raw).hexdigest(), len(raw))
+    files.publish_reserved.side_effect = lambda identity, raw, **kwargs: ('output', *kwargs['expected'])
     groups = create_autospec(GroupEvidence, instance=True, spec_set=True)
     publications = create_autospec(RecommendationPublications, instance=True, spec_set=True)
     return ComparisonOutputs(repository, files, groups, lambda: publications)
@@ -38,19 +41,20 @@ def document(raw, **changes):
 def test_files_and_roots_are_prepared_before_sql_head(outputs):
     events = []
     outputs.groups.prepare_references.side_effect = lambda *args: events.append('roots') or ('prepared',)
-    outputs.files.publish.side_effect = lambda part: events.append('file') or ('output', 'digest', len(part))
-    outputs.repository.publish.side_effect = lambda *args: events.append('sql')
+    outputs.files.publish_reserved.side_effect = lambda identity, part, **kwargs: events.append('file') or ('output', 'digest', len(part))
+    outputs.repository.publish.side_effect = lambda *args, **kwargs: events.append('sql')
     outputs.put(SURFACE, json.dumps({'run_id': 2, 'data': {'tuning': 'original'}}), 100)
     assert events == ['roots', 'file', 'sql']
     prepared, durable, generation, roots = outputs.repository.publish.call_args.args
     assert prepared.value == {'tuning': 'original'}
     assert durable == [('output', 'digest', len(prepared.parts[0]))]
     assert generation is None and roots == ('prepared',)
+    assert outputs.repository.publish.call_args.kwargs == {'file_ids': [41]}
     outputs.publications().claim.assert_not_called()
 
 
 def test_file_failure_preserves_sql_head_and_does_not_publish_ranked_generation(outputs):
-    outputs.files.publish.side_effect = OSError('disk full')
+    outputs.files.publish_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         outputs.put(SURFACE, json.dumps({'run_id': 2, 'data': {'tuning': 'new'}}), 100)
     outputs.repository.publish.assert_not_called()
@@ -67,14 +71,14 @@ def test_installed_format_prepares_roots_before_its_sql_write(outputs):
     assert events == ['roots', 'sql']
     outputs.groups.prepare_references.assert_called_once_with(SURFACE, json.loads(raw), 100)
     outputs.repository.publish_legacy.assert_called_once_with(SURFACE, raw, 100, ('prepared',))
-    outputs.files.publish.assert_not_called()
+    outputs.files.publish_reserved.assert_not_called()
     outputs.repository.publish.assert_not_called()
 
 
 def test_invalid_owner_is_rejected_before_files_or_sql(outputs):
     with pytest.raises(ValueError, match='does not match'):
         outputs.put(SURFACE, json.dumps({'run_id': 3, 'data': {}}), 100)
-    outputs.files.publish.assert_not_called()
+    outputs.files.publish_reserved.assert_not_called()
     outputs.repository.publish.assert_not_called()
 
 
@@ -85,7 +89,7 @@ def test_radio_generation_is_published_before_comparison_reference(outputs):
     publications.claim.return_value = Mock(generation_id=7)
     publications.stage.side_effect = lambda *args: events.append('stage')
     publications.publish.side_effect = lambda *args: events.append('ranked')
-    outputs.repository.publish.side_effect = lambda *args: events.append('comparison')
+    outputs.repository.publish.side_effect = lambda *args, **kwargs: events.append('comparison')
     value = {'policy_version': 'original', 'bundles': {'all': {'fresh': []}}}
     outputs.put('model_pair:2:incumbent:radio', json.dumps({'run_id': 2, 'data': value}), 100, input_revision=4)
     assert events == ['stage', 'ranked', 'comparison']

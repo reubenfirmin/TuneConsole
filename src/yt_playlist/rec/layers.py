@@ -30,18 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from yt_playlist.rec import embedding_vectors as vectors, rec_params, taste_modes, transient
-
-# All four layers preserve the same generated-playback boundary. Deliberate choices are
-# incorporated separately; automatic track continuation cannot reinforce its own taste context.
-_radio_list_ids = transient.radio_list_ids
-
-
-def _plays(store, since):
-    quarantined = store.rec_eligibility.generated_only_keys()
-    return [row for row in store.history.play_events_since(
-        since, exclude_list_ids=_radio_list_ids(store), taste_only=True)
-        if row["identity_key"] not in quarantined]
+from yt_playlist.rec.transient import decay_weight
 
 
 @dataclass
@@ -55,29 +44,14 @@ class RecentEvidence:
         return {key: ts for key, ts in self.latest.items() if ts >= timestamp}
 
 
-def recent_evidence(store, now, *, window_h=24):
-    """Read recent evidence first, then decode only its distinct content keys.
-
-    A combined NOW/Session view shares this one generation and decoded matrix.
-    Empty windows still read the encoding identity for mode validity, with no
-    vector rows requested. Lifetime listening never expands this work.
-    """
-    latest = {r['identity_key']: r['played_at']
-              for r in _plays(store, now - window_h * 3600)}
-    snapshot = store.rec_model.content_generation(keys=list(latest))
-    modes = taste_modes.live_modes(store, snapshot=snapshot)
-    _keys, CV, cidx = vectors.load_content_vectors(store, snapshot=snapshot)
-    return RecentEvidence(latest, modes, CV, cidx if CV is not None else {})
-
-
-def _classified_mode_plays(store, evidence, since):
+def _classified_mode_plays(evidence, since, min_events):
     """Nearest active mode and latest timestamp per usable key, or None below the gate."""
     modes, CV, cidx = evidence.modes, evidence.vectors, evidence.index
     if not modes or CV is None:
         return None
     latest = evidence.since(since)
     played_keys = [key for key in latest if key in cidx]
-    if len(played_keys) < int(rec_params.get_param(store, "now_min_events")):
+    if len(played_keys) < min_events:
         return None
 
     mode_ids = [mode["mode_id"] for mode in modes]
@@ -90,7 +64,7 @@ def _classified_mode_plays(store, evidence, since):
             for key in played_keys]
 
 
-def now_mode_mix(store, now, *, evidence=None):
+def now_mode_mix(evidence, now, *, window_h, min_events):
     """Shared internals for `now_mode_posterior` and the taste_viz NOW ribbon: the {mode_id: share}
     posterior, `n` (the count of distinct played keys that fed it), and the active mode list used to
     build it (so a caller wanting mode labels doesn't have to re-fetch them).
@@ -98,10 +72,8 @@ def now_mode_mix(store, now, *, evidence=None):
     gate isn't cleared. Public (not `_`-prefixed): taste_viz needs the full mix, not just the reduced
     readings the other two callers take from it.
     """
-    window_h = rec_params.get_param(store, "now_window_h")
-    evidence = evidence if evidence is not None else recent_evidence(store, now, window_h=window_h)
     modes = evidence.modes
-    classified = _classified_mode_plays(store, evidence, now - window_h * 3600.0)
+    classified = _classified_mode_plays(evidence, now - window_h * 3600.0, min_events)
     if classified is None:
         return None, 0, modes
 
@@ -113,9 +85,9 @@ def now_mode_mix(store, now, *, evidence=None):
     return {mid: c / total for mid, c in counts.items()}, total, modes
 
 
-def now_mode_posterior(store, now) -> dict | None:
+def now_mode_posterior(evidence, now, *, window_h, min_events) -> dict | None:
     """{mode_id: share} over the user's active taste modes, read from the last `now_window_h` hours of
-    real plays (`store.play_events_since`), or None below the confidence gate.
+    captured real plays, or None below the confidence gate.
 
     Plays are deduped per identity_key (each key's latest timestamp in the window wins, though the
     timestamp itself doesn't otherwise matter here: this layer classifies WHAT was played, not WHEN).
@@ -130,18 +102,16 @@ def now_mode_posterior(store, now) -> dict | None:
     noon-bucket history row happening to fall inside the window carries no real-time information and
     must not count toward "right now".
     """
-    posterior, _n, _modes = now_mode_mix(store, now)
+    posterior, _n, _modes = now_mode_mix(evidence, now, window_h=window_h, min_events=min_events)
     return posterior
 
 
-def evidence_coverage(store, now, *, evidence=None) -> dict:
+def evidence_coverage(evidence, now, *, window_h) -> dict:
     """Coverage/confidence facts for the UI, computed from the exact NOW/Session play source.
 
     `total` is distinct eligible real-time plays after radio provenance exclusion; `mapped` is the
     subset with a content vector and therefore able to vote in the mode posterior.
     """
-    window_h = rec_params.get_param(store, "now_window_h")
-    evidence = evidence if evidence is not None else recent_evidence(store, now, window_h=max(24, window_h))
     cidx = evidence.index
 
     def one(window_h):
@@ -156,7 +126,7 @@ def evidence_coverage(store, now, *, evidence=None) -> dict:
             "session": one(24)}
 
 
-def session_tilt(store, now, V, idx) -> np.ndarray | None:
+def session_tilt(latest, now, V, idx, *, min_events, halflife_h) -> np.ndarray | None:
     """Bounded embedding tilt from plays in the current listening session: plays from the last
     24 hours (the kernel does the shaping), each wall-clock decayed by `session_halflife_h` (hours).
     Same transient-model sibling as centroid_tilt: accumulates wall-clock-decayed unit vectors,
@@ -169,18 +139,7 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
     accumulation. Decay is per-event and internal; callers apply no external freshness factor,
     mirroring centroid_tilt.
     """
-    min_events = int(rec_params.get_param(store, "now_min_events"))
-    session_hl_h = rec_params.get_param(store, "session_halflife_h")
-    since = now - 24 * 3600.0
-    rows = _plays(store, since)
-
-    # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
-    # overwrite lands on the latest occurrence of each key).
-    latest: dict = {}
-    for r in rows:
-        latest[r["identity_key"]] = r["played_at"]
-
-    played_keys = [k for k in latest if k in idx]
+    played_keys = [k for k, at in latest.items() if k in idx and at >= now - 24 * 3600]
     if len(played_keys) < min_events:
         return None
 
@@ -195,7 +154,7 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
         if nrm == 0:
             continue
         # session_halflife_h is in hours; decay_weight expects half_life_d in days.
-        tilt = tilt + transient.decay_weight(now - ts, session_hl_h / 24.0) * (v / nrm)
+        tilt = tilt + decay_weight(now - ts, halflife_h / 24.0) * (v / nrm)
         contributing += 1
 
     if contributing < min_events or not np.any(tilt):
@@ -203,7 +162,7 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
     return tilt / contributing
 
 
-def session_mode_mix(store, now, *, evidence=None):
+def session_mode_mix(evidence, now, *, min_events, halflife_h):
     """The SESSION layer's legible companion to `session_tilt`. `session_tilt` blends recent plays
     into a single bounded tilt in the collaborative embedding space - real signal, but not something
     that can be honestly labeled (a blend of two unrelated corners of taste is a "free vector" that
@@ -222,16 +181,14 @@ def session_mode_mix(store, now, *, evidence=None):
     contributed (unweighted, matching `now_mode_mix`'s `n`); `modes` is the active mode list. Below the
     gate this returns None, never a weak guess, mirroring every other layer in this module.
     """
-    evidence = evidence if evidence is not None else recent_evidence(store, now)
     modes = evidence.modes
-    classified = _classified_mode_plays(store, evidence, now - 24 * 3600.0)
+    classified = _classified_mode_plays(evidence, now - 24 * 3600.0, min_events)
     if classified is None:
         return None, 0, modes
-    session_hl_h = rec_params.get_param(store, "session_halflife_h")
 
     weights: dict = {}
     for mid, timestamp in classified:
-        weights[mid] = weights.get(mid, 0.0) + transient.decay_weight(now - timestamp, session_hl_h / 24.0)
+        weights[mid] = weights.get(mid, 0.0) + decay_weight(now - timestamp, halflife_h / 24.0)
 
     total = sum(weights.values())
     n = len(classified)

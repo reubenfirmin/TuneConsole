@@ -30,36 +30,6 @@ def test_acknowledgement_input_keeps_empty_demand_and_real_guards(acknowledgemen
     assert not acknowledgement_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.fixture
-def predecessor(tmp_path, _pristine_installed_schema):
-    store = Store(tmp_path / 'notes.db')
-    with closing(store.conn):
-        _pristine_installed_schema(83).backup(store.conn)
-        store._bind_repositories()
-        yield store
-
-
-def seed(store, value):
-    with store.conn:
-        albums.observe(store.conn, ALBUM['browse_id'], title=ALBUM['title'], artist=ALBUM['artist'])
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)',
-                           ('album_note_requests', json.dumps(value), 1234.5))
-
-
-@pytest.mark.parametrize('value', [None, [], {'wrong': ALBUM},
-    {'release-one': {**ALBUM, 'extra': 'preserve unknown source'}},
-    {'release-one': {**ALBUM, 'year': True}},
-    {'release-one': {**ALBUM, 'requested_until': float('inf')}},
-    {'release-one': {**ALBUM, 'artist': None}},
-    {str(i): {**ALBUM, 'browse_id': str(i)} for i in range(25)}])
-def test_preflight_failure_keeps_original_and_adds_no_owner(predecessor, value):
-    seed(predecessor, value)
-    before = list(predecessor.conn.iterdump())
-    with pytest.raises(MigrationError, match='original retained'):
-        migrate(predecessor.conn, registry=registry.MIGRATIONS)
-    assert list(predecessor.conn.iterdump()) == before
-
-
 def test_newer_visible_request_survives_old_worker_and_re_admission(store):
     store.album_notes.request([ALBUM], 100)
     album, first = store.album_notes.next_request()
@@ -82,9 +52,9 @@ def test_note_publication_file_failure_does_not_acknowledge_request_or_erase_las
     store.album_notes.publish(ALBUM['browse_id'], {'label': 'Last good'}, 100)
     store.album_notes.request([ALBUM], 101)
     _, token = store.album_notes.next_request()
-    def disk_failure(*args):
+    def disk_failure(*args, **kwargs):
         raise OSError('Interrupted durable output write')
-    monkeypatch.setattr(outputs, 'publish', disk_failure)
+    monkeypatch.setattr(store.album_notes.files, 'publish_reserved', disk_failure)
     with pytest.raises(OSError, match='Interrupted'):
         store.album_notes.publish(ALBUM['browse_id'], {'label': 'Replacement'}, 102,
                                                expected_request=token)
@@ -102,30 +72,20 @@ def test_note_cache_eviction_keeps_visible_demand_and_reader_files(store):
         assert ALBUM['browse_id'] not in store.rec_proposals.get_proposals('album_notes')
         assert outputs.collect_orphans(store.conn) == 0
         assert reader.rec_proposals.get_proposals('album_notes') == {ALBUM['browse_id']: {'label': 'Original'}}
-    assert outputs.collect_orphans(store.conn) == 1
+    # The record-owned file remains available to existing readers until idle
+    # retention reclaims its abandoned receipt.
+    assert store.rec_proposals.get_proposals('album_notes').get(ALBUM['browse_id']) is None
     assert ALBUM['browse_id'] in store.rec_proposals.get_proposals('album_note_requests')
 
 
-@pytest.mark.parametrize('notes', [None, [], {'release-one': 'unclassified'}, {'release-one': {'bad': float('inf')}},
-                                {str(i): {} for i in range(129)}])
-def test_invalid_note_output_preserves_original_legacy_and_queue(predecessor, notes):
-    seed(predecessor, {ALBUM['browse_id']: ALBUM})
-    with predecessor.conn:
-        predecessor.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('album_notes', json.dumps(notes), 123))
-    before = list(predecessor.conn.iterdump())
-    with pytest.raises(MigrationError, match='original retained'):
-        migrate(predecessor.conn, registry=registry.MIGRATIONS)
-    assert list(predecessor.conn.iterdump()) == before
-
-
-def test_unchanged_demand_keeps_its_completion_fence_and_joins_rollback(store):
+def test_unchanged_demand_keeps_its_fence_when_an_outer_transaction_is_rejected(store):
     store.album_notes.request([ALBUM], 100)
     _, token = store.album_notes.next_request()
     store.album_notes.request([ALBUM], 101)
     assert store.album_notes.next_request()[1] == token
-    store.conn.execute('BEGIN IMMEDIATE')
-    store.album_notes.publish(ALBUM['browse_id'], {'fresh': True}, 102, expected_request=token)
-    store.conn.rollback()
+    with pytest.raises(RuntimeError, match='requires an idle connection'):
+        with store.conn.atomic():
+            store.album_notes.publish(ALBUM['browse_id'], {'fresh': True}, 102, expected_request=token)
     assert store.album_notes.next_request()[1] == token
     assert store.rec_proposals.get_proposals('album_notes') is None
 

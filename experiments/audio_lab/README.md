@@ -118,3 +118,12 @@ checks retained retrieval losses. A sealed 30-recording comparison was mixed,
 with no Uplift positives and no precision evidence; numerical fit alone did not
 establish adoption. Evidence: `../../build/test-reports/implementation819-within-model-selection-20261106/`
 and `../../build/test-reports/implementation819-product-human-campaign-20261106/`.
+
+**Shared classifier retirement.** Production now runs the six specialists
+independently and reports their separate suitability scores without a six-way
+winner. Intensity retains the strongest activation/force rule using Energize and
+Release, with component lineage and explicit correction precedence. Shared-model
+gating and fallback were removed; unavailable specialists leave measurements
+absent. Historical shared coefficients and replay code remain under
+`audio_lab_tools/legacy/`, outside the shipped application. Frozen source archives
+remain the authority for reproducing earlier comparisons.

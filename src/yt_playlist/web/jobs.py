@@ -1,85 +1,30 @@
 """In-memory registry of background sync jobs, streamed to the browser over SSE."""
 import itertools
-import logging
 import threading
 import time
 from collections import OrderedDict, deque
 
-from yt_playlist.providers import enrichment, waterfall
+from yt_playlist.providers import waterfall
 from yt_playlist.core.activity import activity_for
 
 
 def run_library_sync(ctx, job, *, automatic=False, retry_now=False, max_age_s=86400):
     """Run with the caller's sync lock held; publish terminal state only after error handling."""
-    from yt_playlist.library import sync
-    from yt_playlist.library.sync_outcomes import begin_attempt, finish_attempt, resource
-    from yt_playlist.util.retry import error_summary
-
-    now = ctx.now_fn()
-    try:
-        begin_attempt(ctx.store, now)
-        clients = ctx.client_provider() or {}
-        job.result = sync.sync_all(ctx.store, clients, now, on_progress=job.events.append,
-                                   on_auth_expired=ctx.flag_auth_expired,
-                                   on_auth_ok=ctx.clear_auth_expired, automatic=automatic,
-                                   retry_now=retry_now, max_age_s=max_age_s)
-        job.outcome = job.result["status"]
-        if job.outcome != "complete":
-            job.error = f"Sync {job.outcome}; some library resources could not be refreshed."
-    except Exception as e:  # the provider and unexpected failures follow the same SSE contract
-        detail = error_summary(e)
-        job.error = detail
-        job.outcome = "failed"
-        job.events.append({"type": "err", "text": f"sync failed: {detail}"})
-        accounts = {str(i.id): {"label": i.label, "status": "failed", "resources": {
-            name: resource("failed", detail)
-            for name in ("playlist_listing", "playlists", "ratings", "history", "saved_albums")}}
-            for i in ctx.store.accounts.get_accounts()}
-        job.result = finish_attempt(ctx.store, {"status": "failed", "accounts": accounts,
-            "resources": {name: resource("failed", detail)
-                          for name in ("saved_album_mirror", "album_tracks")}}, now)
-    finally:
-        for worker in (ctx.rec_worker, ctx.enrich_worker) if activity_for(ctx).accepting else ():
-            if worker:
-                try:
-                    worker.trigger()
-                except Exception:  # rebuilding must not hide the sync's terminal result
-                    logging.getLogger(__name__).warning("post-sync worker trigger failed", exc_info=True)
-        job.done = True
+    from yt_playlist.library.sync_composition import commands
+    return commands(ctx).run(job, automatic=automatic, retry_now=retry_now, max_age_s=max_age_s)
 
 
-def record_enrichment_progress(ctx, job, event):
-    job.events.append(event)
-    if event.get("warning") or event.get("deferred") or event.get("type") == "err":
-        ctx.logger.warning("Enrichment job %s: %s", job.id, event.get("text"))
+def start_library_sync(ctx):
+    """Start a manual library sync job on a background thread, under the shared sync lock
+    (never overlapping the automatic background sync). Shared by the manual /sync route."""
+    from yt_playlist.library.sync_composition import commands
+    return commands(ctx).start()
 
 
 def start_playlist_enrichment(ctx, playlist_id):
     """Start or rejoin a playlist waterfall, shared by creation and the manual enrich action."""
-    job, created = ctx.jobs.create_or_rejoin_playlist(playlist_id)
-    if not created:
-        return job
-
-    def run():
-        try:
-            waterfall.run_waterfall(ctx.store, ctx.store.tracks.tracks_for_waterfall(playlist_id),
-                                    enrichment.load_config(ctx.store),
-                                    on_progress=lambda event: record_enrichment_progress(ctx, job, event))
-        except Exception as e:  # noqa: BLE001
-            ctx.logger.exception("Playlist enrichment job %s failed", job.id)
-            detail = str(e) or type(e).__name__
-            job.error = detail
-            job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
-        finally:
-            job.done = True
-
-    try:
-        activity_for(ctx).start_thread(run)
-    except BaseException as exc:
-        job.error = str(exc) or type(exc).__name__
-        job.done = True
-        raise
-    return job
+    return waterfall.start_or_rejoin_enrichment(ctx.jobs, ctx.store, ctx.logger,
+        activity_for(ctx).start_thread, playlist_id=playlist_id)
 
 
 def start_fresh_pool(ctx, parameters):
@@ -89,25 +34,14 @@ def start_fresh_pool(ctx, parameters):
         return job
 
     def run():
-        from yt_playlist.rec import fresh_pool
-        from yt_playlist.core.action_errors import ActionInputError
+        from yt_playlist.library.pool_composition import builds
         try:
-            fresh_pool.populate(ctx, **parameters,
-                                on_progress=lambda text: job.events.append({"text": text}))
-            job.events.append({"text": "Preparing your fresh mix…"})
-            head = ctx.store.recommendations.head('fresh')
-            job.result = {'generation': head['id'] if head else None, 'requested_at': ctx.now_fn()}
-            # Imported candidates join the next preparation round. Repeated
-            # clicks must not bypass its cadence or restart an active run.
-            if fresh_pool.prepare(ctx.store, ctx.now_fn()) is None:
-                job.outcome = 'waiting'
-                job.events.append({"text": "Your fresh mix is queued for the next music update."})
-                ctx.rec_worker.trigger_candidate_refresh()
-            ctx.rec_worker.trigger_home_refresh(force=True)
+            result = builds(ctx).fresh(parameters, lambda text: job.events.append({'text': text}))
+            job.result, job.outcome = result.result, result.outcome
+            job.error, job.validation_code = result.error, result.validation_code
         except Exception as e:  # noqa: BLE001
-            ctx.logger.warning("Fresh pool build failed", exc_info=True)
+            ctx.logger.warning('Fresh pool dispatch failed', exc_info=True)
             job.error = str(e) or type(e).__name__
-            job.validation_code = e.code if isinstance(e, ActionInputError) else None
             job.outcome = 'failed'
         finally:
             job.done = job.outcome != 'waiting'
@@ -130,11 +64,11 @@ def start_library_pool(ctx, parameters, exclude_keys):
     job.exclude_keys = exclude_keys
 
     def run():
-        from yt_playlist.rec import library_pool
+        from yt_playlist.library.pool_composition import builds
         try:
-            job.events.append({"text": "Finding matching songs in your library…"})
-            library_pool.prepare(ctx.store, ctx.now_fn(), parameters)
-            ctx.rec_worker.trigger_home_refresh(force=True)
+            result = builds(ctx).library(parameters, lambda text: job.events.append({'text': text}))
+            job.result, job.outcome = result.result, result.outcome
+            job.error, job.validation_code = result.error, result.validation_code
         except Exception:  # noqa: BLE001
             ctx.logger.warning("Library pool build failed", exc_info=True)
             job.error = "Couldn't prepare this mix just now. Try again."

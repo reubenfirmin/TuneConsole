@@ -5,6 +5,7 @@ from tests.test_saved_album_snapshot import _production_client
 from yt_playlist.core.history_snapshot import HistorySnapshotError
 from yt_playlist.core import sync_state
 from yt_playlist.library import sync
+from yt_playlist.controllers import library_synchronization as acquisition
 
 
 def response(sections):
@@ -174,7 +175,7 @@ def test_unsupported_history_preserves_prior_plays_and_success_freshness(store, 
 
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = Client()
-    monkeypatch.setattr(sync, 'with_retry', lambda fn, **_kw: fn())
+    monkeypatch.setattr(acquisition, 'with_retry', lambda fn, **_kw: fn())
     sync.sync_all(store, {iid: client}, 100)
     tid = store.tracks.upsert_track('kept', 'Kept', 'Artist', '', 200)
     key = store.tracks.catalog_subject(tid)['identity_key']
@@ -197,7 +198,7 @@ def test_verified_empty_history_advances_freshness_without_removing_retained_lis
 
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = Client()
-    monkeypatch.setattr(sync, 'with_retry', lambda fn, **_kw: fn())
+    monkeypatch.setattr(acquisition, 'with_retry', lambda fn, **_kw: fn())
     sync.sync_all(store, {iid: client}, 100)
     tid = store.tracks.upsert_track('kept', 'Kept', 'Artist', '', 200)
     key = store.tracks.catalog_subject(tid)['identity_key']

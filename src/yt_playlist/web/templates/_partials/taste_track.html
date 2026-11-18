@@ -8,7 +8,7 @@
   <div class="taste-track-info">
     {% if item.video_id %}<a class="ptitle" href="{{ track_url(item) }}">{{ item.title }}</a>
     {% else %}<strong>{{ item.title }}</strong>{% endif %}
-    <a class="alink" href="/artist?name={{ item.artist|urlencode }}">{{ item.artist }}</a>
+    {% from '_partials/artist_links.html' import artist_credit with context %}{{ artist_credit(item) }}
     {% if item.album %}<span class="taste-track-album">{{ item.album }}</span>{% endif %}
     {% if not item.video_id %}<span class="taste-track-album">Playback unavailable</span>{% endif %}
   </div>

@@ -1,26 +1,13 @@
-import json
 import sqlite3
 
 import pytest
 
-from yt_playlist.core import catalog, legacy_evidence
+from yt_playlist.core import catalog
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.core.migrations import v028_discovery_representatives as upgrade
 from yt_playlist.core.store import Store
 from yt_playlist.core.catalog_query import playable_tracks_sql
 from yt_playlist.rec.onboarding import library_sample
-
-
-REGISTRY = (*MIGRATIONS[:27],Migration(28,'discovery_representatives',upgrade.apply))
-
-
-@pytest.fixture
-def store(store):
-    # Workflow cases call current repositories. The explicit migration cases
-    # below retain their independent v027/v028 databases and registry.
-    yield store
-    upgrade.validate(store.conn)
 
 
 def subject(s,entry):
@@ -35,13 +22,6 @@ def move(s,video,entry,now=10):
 def discover(s,video,source,now):
     return s.discovery.upsert_discovered_track(video+'|artist',video,video,'Artist',None,None,
                                                None,None,source,now)
-
-
-def retained_source(s, video, original):
-    association = s.conn.execute('SELECT id FROM item_recording_associations '
-        'WHERE video_id=? ORDER BY id DESC LIMIT 1', (video,)).fetchone()[0]
-    return json.loads(legacy_evidence.original(s.conn, 'discovery', 'discovery_reassociation',
-                                              json.dumps([association, original['id']])))
 
 
 @pytest.mark.parametrize('representative_moves',[True,False])
@@ -79,7 +59,7 @@ def test_partial_move_preserves_counters_and_independent_sources_through_expiry(
     assert subject(s,b)['recording_id']==old
 
 
-def test_complete_move_merges_counts_and_preserves_source_collision_evidence(store):
+def test_complete_move_merges_counts_and_preserves_source_contributions(store):
     s = store
     a = s.tracks.upsert_track('a','a','Artist',None,200)
     target = s.tracks.upsert_track('target','target','Artist',None,200)
@@ -87,20 +67,16 @@ def test_complete_move_merges_counts_and_preserves_source_collision_evidence(sto
     newkey = discover(s,'target','radio:same',2)
     s.discovery.mark_offered('track',[oldkey],3)
     s.discovery.mark_offered('track',[newkey],4)
-    original = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
     move(s,'a',target,5)
     row = s.discovery.get_discovered_tracks()[0]
     assert (row['offered_count'],row['first_shown'],row['last_shown'])==(2,3,4)
     sources = s.discovery.discovery_sources_for_track(newkey)
     assert {(r['input_video_id'],r['found_at'],r['last_found_at']) for r in sources}=={('a',1,1),('target',2,2)}
-    archived = [retained_source(s, 'a', original)]
-    assert archived == [original]
-    assert {r['input_video_id'] for r in archived}=={'a'}
     assert s.discovery.gc_discovery_pool(31*86400,30,set())['tracks']==1
     assert not s.conn.execute('SELECT * FROM discovery_memberships').fetchall()
 
 
-def test_same_timestamp_moves_retain_each_original_source_input(store):
+def test_same_timestamp_moves_preserve_each_source_input(store):
     s = store
     a = s.tracks.upsert_track('a','a','Artist',None,200)
     s.tracks.upsert_track('b','b','Artist',None,200)
@@ -110,17 +86,11 @@ def test_same_timestamp_moves_retain_each_original_source_input(store):
     newkey = discover(s,'target','radio:same',2)
     s.discovery.mark_offered('track',[oldkey],3)
     s.discovery.mark_offered('track',[newkey],4)
-    original_a = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
     move(s,'a',target,10)
-    archived = [retained_source(s, 'a', original_a)]
     discover(s,'b','radio:same',5)
-    original_b = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='b'").fetchone())
     move(s,'b',target,10)
-    archived.append(retained_source(s, 'b', original_b))
-    assert archived == [original_a, original_b]
-    assert retained_source(s, 'a', original_a) == original_a
-    assert {row['input_video_id'] for row in archived}=={'a','b'}
-    assert len(archived)==2
+    assert {(row['input_video_id'], row['found_at'], row['last_found_at'])
+            for row in s.discovery.discovery_sources_for_track(newkey)} == {('a', 1, 1), ('b', 5, 5), ('target', 2, 2)}
     assert len(s.discovery.get_discovered_tracks())==1
     assert s.discovery.get_discovered_tracks()[0]['offered_count']==2
 
@@ -148,7 +118,6 @@ def test_partial_move_keeps_completed_owners_when_final_invalidation_fails(store
     discover(store,'a','radio:seed',1)
     previous = subject(store, a)['recording_id']
     recording = subject(store, target)['recording_id']
-    original = dict(store.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
     def fail():
         assert not store.conn.in_transaction
         raise RuntimeError('interrupted association')
@@ -160,7 +129,7 @@ def test_partial_move_keeps_completed_owners_when_final_invalidation_fails(store
     assert subject(store, b)['recording_id'] == previous
     memberships = {row['recording_id']: row['entry_id'] for row in store.conn.execute('SELECT * FROM discovery_memberships')}
     assert memberships == {previous: b, recording: a}
-    assert retained_source(store, 'a', original) == original
+    assert store.conn.execute("SELECT recording_id FROM discovery_sources WHERE input_video_id='a'").fetchone()[0] == recording
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -191,7 +160,7 @@ def test_playback_consumers_take_metadata_from_one_available_upload(store):
     move(s,'b',a)
     key = subject(s,a)['identity_key']
     s.history.record_history_plays(iid,86400,[key])
-    for query,kind in [('Z title','songs'),('Artist','tracks_by')]:
+    for query,kind in [('Z title','songs'),('Artist','songs')]:
         section = next(r for r in s.search.omni_search(query)['sections'] if r['kind']==kind)
         assert [(r['label'],r['href'],r['thumbnail']) for r in section['rows']]==[
             ('Z title','/track/b','z-cover')]
@@ -210,7 +179,7 @@ def test_scoped_representative_filters_artist_release_and_account_before_selecti
     b = s.tracks.upsert_track('b','Second tune','Second artist','Second release',200,True,album_browse_id='second')
     move(s,'b',a)
     assert s.charts.artist_songs('Second artist')[0]['video_id']=='b'
-    for query,kind in [('Second artist','tracks_by'),('Second tune','songs')]:
+    for query,kind in [('Second artist','songs'),('Second tune','songs')]:
         sections = s.search.omni_search(query)['sections']
         rows = next(section['rows'] for section in sections if section['kind']==kind)
         assert [(r['label'],r['href'],r['thumbnail']) for r in rows]==[
@@ -228,77 +197,3 @@ def test_scoped_representative_filters_artist_release_and_account_before_selecti
                               'WHERE pt.track_id=t.id AND p.account_id=?)')
     assert [r['video_id'] for r in s.conn.execute(sql,(other,))]==['b']
     assert [r['video_id'] for r in s.conn.execute(sql,(iid,))]==['a']
-
-
-def seed_installed_mismatch(s):
-    """Independent SQL fixture of the installed v27 shape and its partial-move bug."""
-    s.conn.executescript("""
-        INSERT INTO recordings(id,identity_key) VALUES (1,'old'),(2,'new'),(3,'retired');
-        INSERT INTO youtube_items(video_id,recording_id) VALUES ('a',2),('b',1),('c',2);
-        INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (1,2,'a'),(2,1,'b'),(3,2,'c');
-        INSERT INTO discovery_memberships VALUES (1,1,1,3,4,5),(2,3,2,4,5,7),(3,3,0,1,2,11);
-        INSERT INTO discovery_sources VALUES
-            (1,'radio:a','a',1,'radio','a',3),
-            (1,'genre:b','b',2,'genre','b',4),
-            (2,'radio:a','c',2,'radio','a',5),
-            (3,'radio:unknown',NULL,0,'radio','unknown',2);
-    """)
-
-
-def test_populated_upgrade_repairs_partial_and_complete_moves_and_reopens(tmp_path):
-    path = tmp_path/'state.db'
-    s = Store(path)
-    migrate(s.conn,registry=MIGRATIONS[:27])
-    seed_installed_mismatch(s)
-    before = {name:[tuple(r) for r in s.conn.execute(f'SELECT * FROM {name}')] for name in
-              ('recordings','youtube_items','catalog_entries')}
-    migrate(s.conn,registry=REGISTRY)
-    upgrade.validate(s.conn)
-    members = {r['recording_id']:dict(r) for r in s.conn.execute('SELECT * FROM discovery_memberships')}
-    assert members[1]['entry_id']==2 and members[1]['offered_count']==5
-    assert members[2]['entry_id']==3 and members[2]['offered_count']==18
-    assert (members[2]['found_at'],members[2]['first_shown'],members[2]['last_shown'])==(0,1,5)
-    assert [(r['recording_id'],r['source_token'],r['found_at'],r['last_found_at'])
-            for r in s.conn.execute('SELECT * FROM discovery_sources ORDER BY recording_id,source_token')]==[
-                (1,'genre:b',2,4),(2,'radio:a',1,5),(2,'radio:unknown',0,2)]
-    for name,rows in before.items():
-        assert [tuple(r) for r in s.conn.execute(f'SELECT * FROM {name}')]==rows
-    assert s.conn.execute("SELECT COUNT(*) FROM identity_state_archive WHERE kind='discovery_repair_v28'").fetchone()[0]==6
-    state = list(s.conn.iterdump())
-    s.conn.close()
-    s = Store(path)
-    migrate(s.conn,registry=REGISTRY)
-    upgrade.validate(s.conn)
-    assert list(s.conn.iterdump())==state
-    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    s.conn.close()
-    assert not (tmp_path/'backups').exists()
-
-
-def test_failed_upgrade_restores_installed_schema_and_rows(tmp_path):
-    s = Store(tmp_path/'state.db')
-    migrate(s.conn,registry=MIGRATIONS[:27])
-    seed_installed_mismatch(s)
-    before = list(s.conn.iterdump())
-    def fail(conn,context):
-        upgrade.apply(conn,context)
-        raise RuntimeError('interrupted representative upgrade')
-    with pytest.raises(MigrationError,match='interrupted representative'):
-        migrate(s.conn,registry=(*MIGRATIONS[:27],Migration(28,'discovery_representatives',fail)))
-    assert list(s.conn.iterdump())==before
-    s.conn.close()
-
-
-def test_upgrade_retains_crossed_source_inputs_before_merging_keys(tmp_path):
-    s = Store(tmp_path/'state.db')
-    migrate(s.conn,registry=MIGRATIONS[:27])
-    seed_installed_mismatch(s)
-    s.conn.execute("DELETE FROM discovery_sources")
-    s.conn.execute("INSERT INTO discovery_sources VALUES (1,'radio:same','a',1,'radio','same',3)")
-    s.conn.execute("INSERT INTO discovery_sources VALUES (2,'radio:same','b',2,'radio','same',4)")
-    s.conn.commit()
-    migrate(s.conn,registry=REGISTRY)
-    assert [tuple(r) for r in s.conn.execute('SELECT recording_id,input_video_id,found_at,last_found_at '
-                                            'FROM discovery_sources ORDER BY recording_id')]==[(1,'b',2,4),(2,'a',1,3)]
-    upgrade.validate(s.conn)
-    s.conn.close()

@@ -6,12 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed, measurement,
-                             model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes)
+                             model_refresh, mode_inputs, mode_surfaces, rec_params, rec_worker, taste_modes)
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls, without_query_timing,
 )
 from yt_playlist.core import schema_inspection
+from yt_playlist.library import mode_composition
 from yt_playlist.core.store import Store
 
 
@@ -127,7 +128,7 @@ def test_content_update_refreshes_original_models_and_places_track(store, librar
     existing = [{'key': key, **track} for key, track in
                 store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
     with monkeypatch.context() as initial:
-        initial.setattr(mode_surfaces, '_calculate_bundles', lambda reader, now, policies:
+        initial.setattr(mode_inputs, '_calculate_bundles', lambda reader, now, policies:
             ({'all': {'temporal': policies.stamp(existing, 'temporal')}}, []))
         mode_surfaces.prepare_bundles(store, 1000.0)
     space = embed.content_space_id(store)
@@ -142,7 +143,7 @@ def test_content_update_refreshes_original_models_and_places_track(store, librar
     # membership, nearest-mode assignment and typed publication remain actual.
     ranked = [SimpleNamespace(key=key, **track) for key, track in
               store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
-    monkeypatch.setattr(mode_surfaces, '_rank_pools', lambda *args:
+    monkeypatch.setattr(mode_inputs, '_rank_pools', lambda *args:
                         {'wheelhouse': ranked, 'explore': ranked, 'comfort': ranked, 'fresh': []})
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert embed.content_space_id(store) == space
@@ -162,7 +163,7 @@ def test_current_groups_are_not_recomputed_at_every_startup(store, library, monk
               'title': f'Techno {i}', 'artist': 'Artist'} for i in range(4)]
     def ranked(reader, now, policies):
         return {'all': {'temporal': policies.stamp(items, 'temporal')}}, []
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', ranked)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', ranked)
     saved = None
     if prepared:
         mode_surfaces.prepare_bundles(store, 1000.0)
@@ -193,7 +194,7 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
     # The initial publication supplies completed input for the startup repair.
     # Discovery encoding and the subsequent worker's ranking remain real.
     with monkeypatch.context() as initial:
-        initial.setattr(mode_surfaces, '_calculate_bundles', lambda *args: ({}, []))
+        initial.setattr(mode_inputs, '_calculate_bundles', lambda *args: ({}, []))
         initial.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
                         ('startup-input', {'schema': 4, 'algorithm': 'startup-input'}))
         mode_surfaces.prepare_bundles(store, 1000)
@@ -327,8 +328,11 @@ def test_stale_projection_retry_does_not_refit_models_or_repeat_other_stages(sch
         calls.append(projection)
         return next(outcomes)
 
-    monkeypatch.setattr(trend_rollups if projection == "trends" else mode_surfaces,
-                        "build" if projection == "trends" else "prepare_bundles", build)
+    if projection == "trends":
+        monkeypatch.setattr(trend_rollups, "build", build)
+    else:
+        monkeypatch.setattr(mode_composition, "preparation", lambda owner:
+            SimpleNamespace(prepare=lambda now: build(owner, now)))
     refresh = worker._refresh_trends if projection == "trends" else worker._refresh_bundles
     monkeypatch.setattr(worker, "_do_rebuild", lambda: (calls.append("full"), refresh()))
     worker.trigger()
@@ -355,7 +359,7 @@ def test_stale_projection_retry_does_not_refit_models_or_repeat_other_stages(sch
 def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, library, monkeypatch, caplog, failure):
     from yt_playlist.rec import candidate_refresh
     worker = _worker(store)
-    prepare = mode_surfaces.prepare_bundles
+    prepare = mode_composition.preparation
     attempts = []
     clock = [100.0]
     wall = [2000.0]
@@ -378,12 +382,13 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
             with store.conn:
                 invalidate_derived(store.conn)
             return None
-        return prepare(reader, now)
+        return prepare(reader).prepare(now)
 
     def forbidden(*args, **kwargs):
         pytest.fail("Recovering prepared pools must not fit the collaborative model")
 
-    monkeypatch.setattr(mode_surfaces, "prepare_bundles", invalidate_once)
+    monkeypatch.setattr(mode_composition, "preparation", lambda owner:
+        SimpleNamespace(prepare=lambda now: invalidate_once(owner, now)))
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
     _settle(store)
     with monkeypatch.context() as request_guard:

@@ -6,10 +6,11 @@
 .setup-banner-step { min-width: 0; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setup-banner button { flex: none; margin-left: auto; padding: .2rem .1rem; background: none; border: 0;
   color: var(--accent-2); font: inherit; text-decoration: underline; text-underline-offset: .2em; cursor: pointer; }
-.setup-banner::after { content: ''; position: absolute; bottom: 0; left: 0; height: 2px; width: 20%;
-  background: var(--teal); opacity: 0; }
-.setup-banner.is-working::after { opacity: .75; animation: setup-working 4s ease-in-out infinite; }
-@keyframes setup-working { from { transform: translateX(-100%); } to { transform: translateX(500%); } }
+.setup-batch-progress { position: absolute; bottom: 0; left: 0; width: 100%; height: 3px;
+  appearance: none; border: 0; background: transparent; }
+.setup-batch-progress::-webkit-progress-bar { background: transparent; }
+.setup-batch-progress::-webkit-progress-value { background: var(--teal); transition: width .4s ease; }
+.setup-batch-progress::-moz-progress-bar { background: var(--teal); }
 .setup-status { overflow: clip visible; }
 .setup-details { width: min(42rem, calc(100% - 2rem)); max-height: 85dvh; padding: 1.5rem;
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-card); color: var(--text); }

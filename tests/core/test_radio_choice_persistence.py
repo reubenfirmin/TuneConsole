@@ -3,14 +3,28 @@ import json
 
 import pytest
 
-from tests.core.test_append_operation_preparation import seed
-from tests.core.test_append_publication import stage
 from tests.store_fixture_support import numbered_store
-from yt_playlist.core import collection_recovery, radio_storage
-from yt_playlist.core.migrations import registry, runner
-from yt_playlist.core.preparation import append_operations, append_publication
+from yt_playlist.core import radio_storage
 from yt_playlist.core.store import Store
 from yt_playlist.web.radio_persistence import RadioPersistence
+
+
+def seed(store, version, *, append=False):
+    assert version == 107
+    account = store.accounts.upsert_account('Radio', 'radio.json', None, True)
+    state = {'version': 2, 'episode_id': 'episode', 'identity': account,
+        'phase': 'appending' if append else 'replacing', 'playlist': 'RADIO',
+        'tracks': [], 'position': 0, 'pending': {'video_id': 'next'} if append else None,
+        'pending_sent': append, 'pending_started_at': 0 if append else None,
+        'pending_result': {'status': 'UNKNOWN', 'videoId': 'next', 'setVideoId': 'handle'} if append else None,
+        'replacement': None if append else {'allowed': [[], ['same', 'same'], []],
+            'confirmed': ['same', 'same'], 'waiting': [], 'waiting_at': 0,
+            'receipt': {'status': 'UNKNOWN', 'videoId': 'next', 'setVideoId': 'handle'},
+            'adding': {'video_id': 'next'}, 'proposed': [{'video_id': 'next'}],
+            'play_prefix': None, 'slot': 0, 'choice_id': 'choice', 'excluded': ['excluded']}}
+    with store.conn:
+        radio_storage.save(store.conn, state, expected=None, now=3)
+    return ('tv_native', 'radio_native'), ('TV', 'episode'), {}, state
 
 
 @pytest.fixture(autouse=True)
@@ -53,35 +67,19 @@ def test_append_receipt_retains_provider_fields_after_restart(file_backed_store)
 
 def publish_choice(store, version, choice, seeded):
     """Publish an actual captured checkpoint below its restart/upgrade consumer."""
-    names, sources, _, state = seeded
-    name, source = names[1], sources[1]
+    assert version == 107
+    _, _, _, state = seeded
     state['replacement']['choice_id'] = choice
-    if version < 94:
-        original = json.dumps(state, ensure_ascii=False, indent=2)
-        store.settings.set_setting(radio_storage.SESSION_KEY, original)
-    else:
-        token = radio_storage.load_published(store.conn)[1]
-        with store.conn:
-            radio_storage.save(store.conn, state, expected=token, now=4)
-
-    if version < 98:
-        owner = append_publication.OWNERS[name]
-        identity = stage(owner, store.conn)
-        owner.publish(store.conn, stage=identity)
-        row = append_operations.head(store.conn, name, source)
-        assert owner.selected(store.conn) == identity
-        if version < 94:
-            assert owner.value(store.conn, identity, source) == original
-        assert collection_recovery.read(row['recovery_filename'], row['recovery_digest'], row['recovery_bytes'],
-            kind='radio-session', owner=source) == state
-    else:
-        row = store.conn.execute('SELECT * FROM radio_operations').fetchone()
-        assert radio_storage.load_published(store.conn)[0] == state
+    token = radio_storage.load_published(store.conn)[1]
+    with store.conn:
+        radio_storage.save(store.conn, state, expected=token, now=4)
+    row = store.conn.execute('SELECT * FROM radio_operations').fetchone()
+    assert radio_storage.load_published(store.conn)[0] == state
 
     return state, row
 
 
-@pytest.mark.parametrize('numbered_store', [79, 93, 97, 107], indirect=True)
+@pytest.mark.parametrize('numbered_store', [107], indirect=True)
 def test_choice_and_menu_survive_checkpoint_publication_and_restart(numbered_store, tmp_path):
     store, version = numbered_store
     seeded = seed(store, version)
@@ -97,15 +95,3 @@ def test_choice_and_menu_survive_checkpoint_publication_and_restart(numbered_sto
             assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
         finally:
             reopened.conn.close()
-
-        if isinstance(choice, dict) and version < 98:
-            upgraded = Store(tmp_path / 'upgraded.db')
-            try:
-                store.conn.backup(upgraded.conn)
-                runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-                assert upgraded.conn.execute('SELECT choice_id FROM radio_operations').fetchone()[0] == branch
-                assert radio_storage.load(upgraded.conn)[0] == state
-                assert radio_storage.load_published(upgraded.conn)[0] == state
-                assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-            finally:
-                upgraded.conn.close()

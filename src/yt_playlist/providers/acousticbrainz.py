@@ -12,9 +12,8 @@ import logging
 import math
 import urllib.error
 
-from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.integrations.acousticbrainz import AcousticBrainzIAO, API
-from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.base import AccessState, IntegrationUnavailable
 from yt_playlist.util import net
 from yt_playlist.providers import musicbrainz
 from yt_playlist.providers.base import EnrichmentResult, MetadataObservation
@@ -26,7 +25,7 @@ _iao = AcousticBrainzIAO()
 
 
 def access(store=None):
-    return _iao.context(store)
+    return _iao.context(AccessState.for_store(store))
 
 
 def available(store=None) -> bool:
@@ -49,6 +48,12 @@ def probe(track, store=None, enrich_fn=None, mbid_fn=None) -> EnrichmentResult:
         feat = _features(low, high)
     else:
         feat, low, high = enrich_fn(mbid), {}, {}
+    return project(track, mbid, low, high, features=feat)
+
+
+def project(track, mbid, low, high, *, features=None):
+    """Detached feature and observation projection, retaining source/model units."""
+    feat = _features(low, high) if features is None else features
     fields = {"mb_recording_id": mbid}
     fields.update({k: v for k, v in feat.items()
                    if v is not None and k not in {'mood_party', 'mood_aggressive'}})
@@ -152,24 +157,8 @@ def _num(d, key):
 
 def _read(mbid):
     """Read endpoints independently so partial failures retain the successful half."""
-    low, high = {}, {}
-    if not mbid:
-        return low, high
-    try:
-        low = _read_endpoint(mbid, 'low-level')
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as e:  # noqa: BLE001 - sparse frozen dataset: misses are routine
-        _record_failure(e)
-        logger.debug("AcousticBrainz low-level miss for %s: %s", mbid, e)
-    try:
-        high = _read_endpoint(mbid, 'high-level')
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as e:  # noqa: BLE001 - sparse frozen dataset: misses are routine
-        _record_failure(e)
-        logger.debug("AcousticBrainz high-level miss for %s: %s", mbid, e)
-    return low, high
+    from yt_playlist.controllers.provider_acquisition import acousticbrainz_read
+    return acousticbrainz_read(mbid, _read_endpoint, _record_failure, logger)
 
 
 def _record_failure(error):

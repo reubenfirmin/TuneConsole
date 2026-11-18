@@ -8,7 +8,7 @@ from yt_playlist.core import sync_state
 from yt_playlist.library import sync_outcomes
 
 
-@pytest.mark.parametrize('installed', [79, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('operation', ['begin', 'finish'])
 def test_sync_progress_serializes_all_sql_with_other_workers(installed, operation, monkeypatch):
     store, _ = installed
@@ -55,5 +55,5 @@ def test_sync_progress_serializes_all_sql_with_other_workers(installed, operatio
     assert statements and all(held for _, held in statements)
     assert float(store.settings.get_setting('last_sync_attempt_at')) == (200 if operation == 'begin' else 100)
     if operation == 'finish':
-        assert sync_state.state(store) == result
+        assert sync_state.state(store) == {**result, 'last_attempt_at': 200}
         assert float(store.settings.get_setting('last_sync_at')) == 200

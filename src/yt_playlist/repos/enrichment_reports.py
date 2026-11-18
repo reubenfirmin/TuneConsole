@@ -2,9 +2,9 @@
 import json
 
 from yt_playlist.core import catalog, metadata, metadata_runtime
-from yt_playlist.core.preparation import conflict_publication, metadata_publication
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
 from yt_playlist.repos.enrichment_sql import TRACKS_CTE, pending_coverage
+from yt_playlist.repos import metadata_file_writes
 
 
 class EnrichmentReportsRepo(Repo):
@@ -12,7 +12,7 @@ class EnrichmentReportsRepo(Repo):
     def _conflict_table(self):
         if metadata_runtime.active(self.conn):
             return 'enrichment_conflict'
-        return conflict_publication.table(self.conn)
+        return 'enrichment_conflict'
 
     @synchronized
     def genre_provenance_facts(self, track_id):
@@ -23,7 +23,7 @@ class EnrichmentReportsRepo(Repo):
         if track is None:
             return None
         rows = self.conn.execute(
-            f"WITH relevant AS (SELECT * FROM {metadata_publication.read_table(self.conn,'enrichment_log')} WHERE field='genre' AND "
+            "WITH relevant AS (SELECT * FROM enrichment_log WHERE field='genre' AND "
             "((field_scope='recording' AND (recording_id=? OR input_video_id IN "
             "(SELECT video_id FROM youtube_items WHERE recording_id=?))) OR "
             "(field_scope='legacy_item' AND (input_video_id=? OR track_id=?)))) "
@@ -37,6 +37,9 @@ class EnrichmentReportsRepo(Repo):
             'SELECT s.recording_id,s.provider,p.id provider_id,s.at FROM enrichment_provider_state s '
             'JOIN metadata_runtime_providers p ON p.name=s.provider WHERE s.recording_id=?',
             (track['recording_id'],))] if runtime else []
+        for reference in references:
+            reference['file'] = metadata_file_writes.reference(self.conn, 'alternatives',
+                (reference['recording_id'], reference['provider_id']), float(reference['at']))
         conflict = self.conn.execute(
             f"SELECT candidates FROM {self._conflict_table} WHERE track_id=? AND field='genre'", (track_id,)
         ).fetchone()
@@ -47,7 +50,8 @@ class EnrichmentReportsRepo(Repo):
     def _candidate_evidence(self, track_id, field, encoded):
         if metadata_runtime.active(self.conn):
             row = metadata_runtime.conflict(self.conn, track_id, field)
-            return {'reference': (row['id'], row['revision']), 'updated_at': row['updated_at']} if row else None
+            return {'reference': (row['id'], row['revision']), 'updated_at': row['updated_at'],
+                'file': metadata_file_writes.reference(self.conn, 'conflicts', (row['id'],), row['revision'])} if row else None
         return {'candidates': json.loads(encoded)}
 
     @synchronized
@@ -173,9 +177,9 @@ class EnrichmentReportsRepo(Repo):
             conflict['selected_source'] = (metadata.selected_source(self.conn, conflict['track_id'], column or conflict['field'])
                                            if metadata_runtime.active(self.conn) and current not in (None, '') else None)
             conflict['findings'] = [dict(finding) for finding in self.conn.execute(
-                f"SELECT provider,value FROM {metadata_publication.read_table(self.conn,'enrichment_log')} "
+                "SELECT provider,value FROM enrichment_log "
                 'WHERE track_id=? AND field=? ORDER BY id', (conflict['track_id'], conflict['field']))]
-            override = self.conn.execute('SELECT 1 FROM '+metadata_publication.read_table(self.conn,'entry_field_choices')+' WHERE entry_id=? AND field=?',
+            override = self.conn.execute('SELECT 1 FROM entry_field_choices WHERE entry_id=? AND field=?',
                                          (conflict['track_id'], column or conflict['field'])).fetchone()
             conflict['overridden'] = override is not None
         return result

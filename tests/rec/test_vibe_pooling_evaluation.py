@@ -19,7 +19,7 @@ from yt_playlist.core import catalog, db_handles, file_collection, profile_files
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.providers.base import MetadataObservation
-from yt_playlist.rec import home_vibe, musical_preparation, musical_profiles, vibe_joint_preparation
+from yt_playlist.rec import home_vibe, musical_preparation, musical_profiles, vibe_joint_state
 from yt_playlist.rec import vibe_prediction, vibe_preparation
 from yt_playlist.rec import vibe_evaluation
 
@@ -122,9 +122,9 @@ def runtime_comparison(rows, profiles, recording, artist, monkeypatch):
             groups=lambda keys: deepcopy({group: cohorts[group] for group in keys if group in cohorts}),
             retained_joint_fits=lambda _keys: {},
             joint_albums=lambda _keys: {}))
-    musical = musical_preparation.recordings(reader, page, inputs=source_inputs)
-    monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
-    monkeypatch.setattr(vibe_joint_preparation, 'posterior', lambda *_args: None)
+    musical = musical_preparation.recordings(page, inputs=source_inputs)
+    monkeypatch.setattr(vibe_joint_state, 'QUALIFICATIONS', {})
+    monkeypatch.setattr(vibe_joint_state, 'posterior', lambda *_args: None)
     incumbent, _ = vibe_preparation.recordings(reader, page, musical, source_inputs=source_inputs)
     old = json.loads(incumbent[0][1])['vibes']['fits']
     posteriors = {}
@@ -133,9 +133,9 @@ def runtime_comparison(rows, profiles, recording, artist, monkeypatch):
             evaluation.masked_profile(profiles[str(row['recording'])]), vibe)}
             for row in originals if row['recording'] != recording]
         posteriors[vibe] = evaluation.joint.Posterior(evaluation.joint.fit(training, vibe))
-    monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS',
-                        {vibe_joint_preparation.config_identity(): 'controlled-evaluation-fixture'})
-    monkeypatch.setattr(vibe_joint_preparation, 'posterior', lambda _reader, vibe:
+    monkeypatch.setattr(vibe_joint_state, 'QUALIFICATIONS',
+                        {vibe_joint_state.config_identity(): 'controlled-evaluation-fixture'})
+    monkeypatch.setattr(vibe_joint_state, 'posterior', lambda _reader, vibe:
                         ('controlled-generation', posteriors[vibe]) if vibe in posteriors else None)
     candidate, _ = vibe_preparation.recordings(reader, page, musical, source_inputs=source_inputs)
     return old, json.loads(candidate[0][1])['vibes']['fits']
@@ -167,6 +167,13 @@ def test_frozen_masked_comparison_matches_runtime_and_ignores_target_observation
         evaluation.freeze('controlled-snapshot.db', path)
         plan = evaluation.load_plan(path)
         plans.append(plan)
+        assert {
+            'src/yt_playlist/rec/vibe_joint_state.py',
+            'src/yt_playlist/rec/vibe_recording_rules.py',
+            'src/yt_playlist/controllers/vibe_joint_preparation.py',
+            'src/yt_playlist/controllers/vibe_recording_preparation.py',
+            'src/yt_playlist/library/vibe_composition.py',
+        } <= plan['code'].keys()
         assert plan['assignments'][str(recording)][stratum] == fold
         actual = {}
         for vibe in home_vibe.PRESETS:

@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_metadata_evidence_migration import additive_catalog, catalog
+from tests.metadata_catalog_support import catalog
 from yt_playlist.core import metadata_native
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.metadata_observations import MetadataObservation
@@ -62,7 +62,7 @@ def test_native_source_scopes_remain_distinct_and_repeated_field_observations_pa
     assert [row['value'] for row in first[5:] + second] == [.1, .3, .5]
     assert store.enrichment_state.metadata_observations('song|artist', after_id=second[-1]['id']) == []
     assert store.conn.execute('SELECT count(*) FROM rec_musical_sources').fetchone()[0] == 4
-    assert store.conn.execute('SELECT genre FROM recordings').fetchone()[0] is None
+    assert store.conn.execute('SELECT genre_key FROM recordings').fetchone()[0] is None
     assert store.conn.execute('SELECT mood_happy FROM recordings').fetchone()[0] is None
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 

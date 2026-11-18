@@ -1,17 +1,8 @@
-"""Explicit naming boundary for installed pre-v103 storage.
-
-Current owners have one physical name. Explicit writer identifiers and read
-projections keep installed predecessors authoritative during preparation.
-"""
-from dataclasses import dataclass
-from functools import lru_cache
-import re
-
-from .schema_contract import TOKEN
+"""Historical account documents and retained predecessor read projections."""
 
 
-# Runtime compatibility owns this finite vocabulary independently of frozen DDL
-# history. Remove it with predecessor storage/writer retirement in #626.
+# Read projections retain their own vocabulary independently of frozen DDL.
+# Their separate admission-floor cleanup is tracked in #620.
 PREDECESSOR_NAMES = {
     'identities': 'accounts', 'identity_id': 'account_id', 'scope_ref': 'playlist_scope_id',
     'ytm_playlist_id': 'provider_playlist_id', 'playlist_ref': 'playlist_scope_id',
@@ -39,84 +30,6 @@ PREDECESSOR_COLUMNS = {
     'overlap_kept': {'a': 'first_playlist_scope_id', 'b': 'second_playlist_scope_id'},
     'rec_mode_picks': {'playlist_id': 'membership_ref_id'},
 }
-
-_RENAMED_DEFINITION = re.compile(r'\b(?:' + '|'.join(PREDECESSOR_NAMES) +
-    r'|playlist_scopes|cleanup_ignored|quarantined_playlists|suppressed_overlaps|overlap_kept|rec_mode_picks)\b', re.I)
-
-
-@lru_cache(maxsize=2048)
-def predecessor_definition(sql):
-    """Name retained schema definitions for validation, preserving literals.
-
-    This is used only for known DDL contracts, never application statements,
-    provider input or recovery documents. Frozen upgrades keep their own copy.
-    """
-    # Most definitions have no account or playlist naming to change. Avoid
-    # tokenizing those whole definitions twice; matches still take the literal-
-    # preserving path below, including names appearing only in comments.
-    if not _RENAMED_DEFINITION.search(sql):
-        return sql
-    identifiers = {match.group().strip('"`[]').lower() for match in TOKEN.finditer(sql)
-                   if not match.group().startswith(("'", '--', '/*'))}
-    names = dict(PREDECESSOR_NAMES)
-    if 'playlist_scopes' in identifiers:
-        names.update(ref='id', provider_id='provider_playlist_id')
-    if identifiers & {'cleanup_ignored', 'quarantined_playlists'}:
-        names['ytm'] = 'playlist_scope_id'
-    if identifiers & {'suppressed_overlaps', 'overlap_kept'}:
-        names.update(a='first_playlist_scope_id', b='second_playlist_scope_id')
-    if 'rec_mode_picks' in identifiers:
-        names['playlist_id'] = 'membership_ref_id'
-
-    def replace(match):
-        token = match.group()
-        if token.startswith(("'", '--', '/*')):
-            return token
-        quoted = token.startswith(('"', '`', '['))
-        key = token[1:-1] if quoted else token
-        value = names.get(key.lower())
-        return token if value is None else token[0]+value+token[-1] if quoted else value
-
-    return TOKEN.sub(replace, sql)
-
-
-@dataclass(frozen=True)
-class Owner:
-    table: str
-    columns: dict
-
-    def column(self, name):
-        return self.columns.get(name, name)
-
-
-def owner(conn, name):
-    """Name a physical writer explicitly, bypassing predecessor TEMP read views.
-
-    Only SQL identifiers come from this finite historical vocabulary. Values,
-    recovery documents and SQL statements are never rewritten. Callers retain
-    their own transactions, UPSERTs, row counts and inserted row identities.
-    #626 tracks removal after retained layouts and their writers are retired.
-    """
-    if name not in PREDECESSOR_COLUMNS and name != 'accounts':
-        raise ValueError('Unsupported account naming owner: ' + name)
-    modern = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='accounts'").fetchone()
-    physical = 'identities' if name == 'accounts' and not modern else name
-    columns = {} if modern else {new: old for old, new in PREDECESSOR_COLUMNS.get(name, {}).items()}
-    return Owner('main.' + physical, columns)
-
-
-def accounts(conn):
-    return 'accounts' if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='accounts' UNION ALL "
-                                    "SELECT 1 FROM sqlite_temp_schema WHERE name='accounts'").fetchone() else 'identities'
-
-
-def scope_columns(conn):
-    return ('id','provider_playlist_id','account_id') if accounts(conn)=='accounts' else ('ref','provider_id','identity_id')
-
-
-def membership_columns(conn):
-    return ('playlist_scope_id','account_id') if accounts(conn)=='accounts' else ('scope_ref','identity_id')
-
 
 def account_document(value):
     """Decode a historical account field without rewriting its retained document."""
@@ -162,10 +75,9 @@ def predecessor_reads(conn):
         if not conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?',(target,)).fetchone():
             project(table,target,PREDECESSOR_COLUMNS[table])
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='recording_listening_artists'").fetchone():
-        from .artist_credits import projection_table
         conn.execute('CREATE TEMP VIEW IF NOT EXISTS recording_listening_artists AS '
             'SELECT DISTINCT e.recording_id,coalesce(r.artist_id,c.artist_id) artist_id '
-            'FROM main.catalog_entries e JOIN main.'+projection_table(conn)+' c ON c.entry_id=e.id '
+            'FROM main.catalog_entries e JOIN main.track_artists c ON c.entry_id=e.id '
             'LEFT JOIN main.artist_redirects r ON r.retired_id=c.artist_id')
         installed.append('recording_listening_artists')
     conn._entity_read_views = installed

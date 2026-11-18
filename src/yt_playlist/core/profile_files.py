@@ -3,71 +3,22 @@ from yt_playlist.core import file_collection, file_paths
 import hashlib
 import json
 from collections import OrderedDict
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from threading import RLock
 
-from . import fao
+from . import fao, file_pack
 from .evidence_ledger import canonical
 from .activity import WorkBudgetExceeded
+from .profile_paths import record_id, record_path
+from yt_playlist.repos.profile_file_writes import head_definitions
+from yt_playlist.repos.profile_file_references import KINDS, identity as _identity, install_references
 
-MAX_ROWS = 128
-MAX_BYTES = 8 * 1024 * 1024
-KINDS = {'recording': ('rec_musical_profiles', 'identity_key', 'recording_profile_files', 'recording_id'),
-         'source': ('rec_musical_source_profiles', 'source_key', 'source_profile_files', 'source_key')}
-_COLLECTIONS = OrderedDict()
-_COLLECTION_LOCK = RLock()
+MAX_ROWS = file_pack.MAX_ROWS
+MAX_BYTES = file_pack.MAX_BYTES
 _CHUNK_BYTES = 16 * 1024 * 1024
 _CHUNKS = OrderedDict()
 _CHUNK_LOCK = RLock()
-
-
-class _Collection:
-    """One flat hash shard at a time, without buffering its directory entries."""
-    def __init__(self, root, kinds):
-        self.root, self.kinds = root, tuple(sorted(kinds))
-        self.cursor = root / '.collection.json'
-        saved = json.loads(fao.read(self.cursor).bytes) if self.cursor.exists() else {}
-        self.shard = saved.get('shard', 0)
-        if type(self.shard) is not int or not 0 <= self.shard < len(self.kinds)*256:
-            raise ValueError('Invalid publication collection cursor')
-        self.paths = None
-
-    def next(self):
-        if self.paths is None:
-            kind, shard = divmod(self.shard, 256)
-            self.paths = file_collection.walk_entries(self.root/self.kinds[kind]/f'{shard:02x}', max_depth=0)
-        try:
-            return next(self.paths)
-        except StopIteration:
-            self.paths.close()
-            self.paths = None
-            self.shard = (self.shard+1) % (len(self.kinds)*256)
-            return None
-
-    def close(self):
-        if self.paths is not None:
-            self.paths.close()
-            self.paths = None
-
-
-def _collection(conn, root, kinds):
-    # The application connection closes its iterators at shutdown. Also bound
-    # standalone SQLite callers: eviction/restart safely repeats one hash shard.
-    key = conn, root, tuple(sorted(kinds))
-    work = _COLLECTIONS.pop(key, None)
-    if work is None:
-        work = _Collection(root, kinds)
-        if len(_COLLECTIONS) == 8:
-            _COLLECTIONS.popitem(last=False)[1].close()
-        if hasattr(conn, '_close_callbacks'):
-            def release():
-                with _COLLECTION_LOCK:
-                    if _COLLECTIONS.get(key) is work:
-                        del _COLLECTIONS[key]
-                    work.close()
-            conn._close_callbacks.append(release)
-    _COLLECTIONS[key] = work
-    return work
 
 
 class Cache(dict):
@@ -85,32 +36,92 @@ class ProfileFiles:
         from .policy_documents import retained_reader
         return retained_reader(self.root)
 
-    def write(self, kind, values):
-        """Publish bounded chunks for supplied exact owner IDs, without SQLite."""
-        values = list(values)
-        offset, references = 0, []
-        while offset < len(values):
-            batch, records, used = [], {}, 256
-            for key, identity, raw, version, digest in values[offset:offset + MAX_ROWS]:
+    def cursor(self, kind):
+        path = self.root / ('.prepare-' + kind + '.json')
+        return json.loads(fao.read(path).bytes)['after'] if path.exists() else ''
+
+    def advance(self, kind, after):
+        fao.write(self.root / ('.prepare-' + kind + '.json'), canonical({'after': after}))
+
+    def write_legacy(self, records):
+        """Explicit offline conversion; runtime writes use write_reserved."""
+        references = []
+        for record in records:
+            fao.write(self.root / relative(record['kind'], record['digest']), record['raw'])
+            references.extend((key, owner, record['digest'], size, version, digest)
+                              for key, owner, size, version, digest in record['rows'])
+        return references
+
+    def originals(self, kind, references):
+        cache = {}
+        return [self._original(kind, reference, cache) for reference in references]
+
+    def _original(self, kind, reference, cache):
+        _, identity, publication, size, version, digest = reference[:6]
+        value = _chunk_at(self.root, kind, publication, cache).get(str(identity))
+        if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
+                or not isinstance(value['body'], str) or (value['version'], value['digest']) != (version, digest)
+                or len(value['body'].encode()) != size
+                or hashlib.sha256(value['body'].encode()).hexdigest() != digest):
+            raise fao.CorruptFile('Musical profile differs from its exact head')
+        return value['body']
+
+    @staticmethod
+    def describe(kind, values):
+        """Encode bounded exact profile packs before SQL reservation."""
+        if kind not in KINDS:
+            raise ValueError('Invalid profile kind')
+        def entries():
+            for key, identity, raw, version, digest in values:
                 if not isinstance(raw, str) or hashlib.sha256(raw.encode()).hexdigest() != digest:
                     raise ValueError('Musical-profile body differs from its digest')
                 json.loads(raw)
                 record = {'body': raw, 'version': version, 'digest': digest}
-                size = len(canonical({str(identity): record})) + 1
-                if used + size > MAX_BYTES:
-                    if not batch:
-                        raise fao.FileBudgetExceeded('Musical profile exceeds the chunk byte budget')
-                    break
+                # One comma per entry, with the spare comma removed from overhead.
+                size = len(canonical({str(identity): record})) - 1
+                yield (key, identity, raw, version, digest), record, size
+
+        overhead = len(canonical({'format': 'musical-profile-1', 'kind': kind, 'profiles': {}})) - 1
+        packs = []
+        for entries_batch in file_pack.batches(entries(), size=lambda entry: entry[2],
+                max_rows=MAX_ROWS, max_bytes=MAX_BYTES, overhead=overhead):
+            batch, records, originals = [], {}, []
+            for original, record, _size in entries_batch:
+                key, identity, raw, version, digest = original
+                if str(identity) in records:
+                    raise ValueError('Duplicate profile owner')
                 records[str(identity)] = record
                 batch.append((key, identity, len(raw.encode()), version, digest))
-                used += size
+                originals.append(original)
             encoded = canonical({'format': 'musical-profile-1', 'kind': kind, 'profiles': records})
+            file_pack.validate(encoded, len(batch), max_bytes=MAX_BYTES, max_rows=MAX_ROWS)
             publication = hashlib.sha256(encoded).digest()
-            fao.write(self.root / relative(kind, publication), encoded)
-            references.extend((key, identity, publication, size, version, digest)
-                              for key, identity, size, version, digest in batch)
-            offset += len(batch)
+            packs.append({'kind': kind, 'raw': encoded, 'digest': publication, 'size': len(encoded),
+                          'values': tuple(originals), 'rows': tuple(batch)})
+        return packs
+
+    def write_reserved(self, records):
+        references = []
+        with self.retained(), ExitStack() as leases:
+            for record in records:
+                expected = self.describe(record['kind'], record['values'])
+                if len(expected) != 1 or any(record[name] != expected[0][name]
+                                            for name in ('raw', 'digest', 'size', 'rows')):
+                    raise ValueError('Profile pack changed after reservation')
+                path = self.root / record_path(record['kind'], record['file_id'])
+                pending = leases.enter_context(fao.prepare(path, fao.Content(record['raw'], max_bytes=MAX_BYTES)))
+                pending.publish()
+                references.extend((key, owner, record['digest'], size, version, digest,
+                                   record['file_id'], record['size'])
+                                  for key, owner, size, version, digest in record['rows'])
         return references
+
+    def garbage(self, before, *, limit=16):
+        return _garbage(self, before, limit=limit)
+
+    @staticmethod
+    def remove(path, info):
+        return fao.delete(path, expected=info.identity, missing_ok=True)
 
     def read_page(self, kind, rows, *, max_bytes=MAX_BYTES):
         """Decode detached exact heads, bounded by logical and chunk work bytes."""
@@ -126,7 +137,8 @@ class ProfileFiles:
         # Corpus order interleaves profiles from many publications. Decode each
         # chunk once per page while retaining the same two-chunk/byte bounds.
         for key, raw, version, digest, identity, publication, byte_size in sorted(
-                rows, key=lambda row: row[5] or b''):
+                rows, key=lambda row: ((row[5][0], row[5][1]) if isinstance(row[5], tuple)
+                                       else (row[5] or b'', 0))):
             if not raw:
                 value = _chunk_at(self.root, kind, publication, cache).get(str(identity))
                 if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
@@ -140,12 +152,7 @@ class ProfileFiles:
 
 
 def definitions():
-    yield ('recording_profile_files', 'CREATE TABLE recording_profile_files ('
-        'recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,'
-        'publication BLOB NOT NULL CHECK(length(publication)=32),byte_size INTEGER NOT NULL CHECK(byte_size>0))')
-    yield ('source_profile_files', 'CREATE TABLE source_profile_files ('
-        'source_key TEXT PRIMARY KEY NOT NULL REFERENCES rec_musical_source_profiles(source_key) ON DELETE CASCADE,'
-        'publication BLOB NOT NULL CHECK(length(publication)=32),byte_size INTEGER NOT NULL CHECK(byte_size>0)) WITHOUT ROWID')
+    yield from head_definitions()
     yield ('recording_profile_file_delete', 'CREATE TRIGGER recording_profile_file_delete AFTER DELETE ON rec_musical_profiles '
         'BEGIN DELETE FROM recording_profile_files WHERE recording_id=(SELECT id FROM recordings WHERE identity_key=OLD.identity_key); END')
     for kind, (table, key, marker, column) in KINDS.items():
@@ -170,6 +177,9 @@ def validate(conn):
     expected = tuple(definitions())
     actual = read_definitions(conn, (name for name, _ in expected))
     for name, sql in expected:
+        if name in ('recording_profile_files', 'source_profile_files') and 'file_id' in _tokens(actual.get(name) or ''):
+            from yt_playlist.repos.profile_file_writes import native_definition
+            sql = native_definition(sql)
         if actual.get(name) is None or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible musical-profile file owner: ' + name)
 
@@ -179,19 +189,12 @@ def directory(conn):
 
 
 def relative(kind, publication):
+    if isinstance(publication, tuple) and len(publication) == 2:
+        return record_path(kind, publication[1])
     if kind not in KINDS or not isinstance(publication, bytes) or len(publication) != 32:
         raise ValueError('Invalid profile publication identity')
     digest = publication.hex()
     return Path(kind, digest[:2], digest + '.json')
-
-
-def _identity(conn, kind, key):
-    if kind == 'source':
-        return key
-    row = conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
-    if row is None:
-        raise ValueError('Unknown recording profile owner')
-    return row[0]
 
 
 def _physical_identity(path):
@@ -221,7 +224,8 @@ def _chunk_at(root, kind, publication, cache):
             raise WorkBudgetExceeded('Musical-profile page exceeds decompression work budget')
     if encoded is None:
         encoded = fao.read(path, max_bytes=MAX_BYTES).bytes
-        if hashlib.sha256(encoded).digest() != publication:
+        digest = publication[0] if isinstance(publication, tuple) else publication
+        if hashlib.sha256(encoded).digest() != digest:
             raise fao.CorruptFile('Musical-profile chunk differs from its publication')
         # Retain only immutable verified bytes, never decoded mutable profiles.
         # A changed/missing file is checked again even when its SQL head stayed
@@ -240,6 +244,7 @@ def _chunk_at(root, kind, publication, cache):
             or value['format'] != 'musical-profile-1' or value['kind'] != kind
             or not isinstance(value['profiles'], dict) or not 0 < len(value['profiles']) <= MAX_ROWS):
         raise fao.CorruptFile('Invalid musical-profile chunk')
+    file_pack.validate(encoded, len(value['profiles']), max_bytes=MAX_BYTES, max_rows=MAX_ROWS)
     if cache is not None:
         while len(cache) >= 2:
             del cache[next(iter(cache))]
@@ -270,12 +275,15 @@ def read(conn, kind, key, *, cache=None, max_bytes=MAX_BYTES):
             raise fao.FileBudgetExceeded('Musical profile exceeds its logical byte budget')
         return row[0]
     identity = _identity(conn, kind, key)
-    head = conn.execute(f'SELECT publication,byte_size FROM {marker} WHERE {subject}=?', (identity,)).fetchone()
+    from yt_playlist.repos.profile_file_writes import native
+    file_id = 'file_id' if native(conn) else 'NULL'
+    head = conn.execute(f'SELECT publication,byte_size,{file_id} FROM {marker} WHERE {subject}=?', (identity,)).fetchone()
     if head is None:
         raise fao.CorruptFile('Required musical-profile file head is missing')
     if head[1] > max_bytes:
         raise fao.FileBudgetExceeded('Musical profile exceeds its logical byte budget')
-    value = _chunk(conn, kind, head[0], cache).get(str(identity))
+    publication = (head[0], head[2]) if head[2] is not None else head[0]
+    value = _chunk(conn, kind, publication, cache).get(str(identity))
     if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
             or not isinstance(value['body'], str) or (value['version'], value['digest']) != tuple(row[1:])
             or len(value['body'].encode()) != head[1]
@@ -304,12 +312,15 @@ def reference_rows(conn, kind, keys):
     table, column, marker, subject = KINDS[kind]
     marks = ','.join('?' for _ in keys)
     if available(conn):
+        from yt_playlist.repos.profile_file_writes import native
+        file_id = 'h.file_id' if native(conn) else 'NULL'
         owner = 'r.id' if kind == 'recording' else 'p.source_key'
         join = 'JOIN recordings r ON r.identity_key=p.identity_key ' if kind == 'recording' else ''
         rows = conn.execute(f'SELECT p.{column},p.payload,p.version,p.digest,{owner},'
-            f'h.publication,h.byte_size FROM {table} p {join}'
+            f'h.publication,h.byte_size,{file_id} FROM {table} p {join}'
             f'LEFT JOIN {marker} h ON h.{subject}={owner} WHERE p.{column} IN ({marks}) '
             'ORDER BY h.publication', keys).fetchall()
+        return [tuple(row[:5]) + ((row[5], row[7]) if row[7] is not None else row[5], row[6]) for row in rows]
     else:
         rows = conn.execute(f'SELECT {column},payload,version,digest,NULL,NULL,NULL '
             f'FROM {table} WHERE {column} IN ({marks})', keys).fetchall()
@@ -321,52 +332,30 @@ def publish(conn, kind, values):
     if not conn.in_transaction:
         raise RuntimeError('Profile publication requires the writer reservation')
     values = list(values)
-    references = ProfileFiles(directory(conn)).write(kind,
-        [(key, _identity(conn, kind, key), raw, version, digest) for key, raw, version, digest in values])
+    # Explicit offline conversion retains the installed hash format. Runtime
+    # controllers use committed record IDs before touching the file port.
+    references = []
+    for record in ProfileFiles.describe(kind,
+            [(key, _identity(conn, kind, key), raw, version, digest) for key, raw, version, digest in values]):
+        fao.write(directory(conn) / relative(kind, record['digest']), record['raw'])
+        references.extend((key, owner, record['digest'], size, version, digest)
+                          for key, owner, size, version, digest in record['rows'])
     install_references(conn, kind, references)
 
 
-def install_references(conn, kind, references):
-    """Install already-published file heads only when their SQL content still agrees."""
-    table, key_column, marker, subject = KINDS[kind]
-    for key, identity, publication, size, version, digest in references:
-        head = conn.execute(f'SELECT version,digest FROM {table} WHERE {key_column}=?', (key,)).fetchone()
-        if head is None or tuple(head) != (version, digest):
-            raise ValueError('Stale musical-profile publication')
-        if _identity(conn, kind, key) != identity:
-            raise ValueError('Musical-profile owner changed')
-        conn.execute(f'INSERT INTO {marker} VALUES (?,?,?) ON CONFLICT({subject}) DO UPDATE '
-            'SET publication=excluded.publication,byte_size=excluded.byte_size', (identity, publication, size))
-        conn.execute(f"UPDATE {table} SET payload='' WHERE {key_column}=?", (key,))
-
-
 def prepare_batch(conn, kind, limit=MAX_ROWS):
-    if type(limit) is not int or not 1 <= limit <= MAX_ROWS:
-        raise ValueError('Profile preparation batch must be 1 to 128')
-    table, key, marker, subject = KINDS[kind]
-    # A file cursor avoids rescanning the converted prefix. It is only a hint:
-    # legacy writers behind it are picked up on the next complete pass.
-    cursor = directory(conn) / ('.prepare-' + kind + '.json')
-    after = json.loads(fao.read(cursor).bytes)['after'] if cursor.exists() else ''
-    rows = conn.execute(f"SELECT {key},payload,version,digest FROM {table} WHERE {key}>? "
-        f"AND payload<>'' ORDER BY {key} LIMIT ?", (after, limit)).fetchall()
-    publish(conn, kind, rows)
-    cache = {}
-    for key, raw, version, digest in rows:
-        if read(conn, kind, key, cache=cache) != raw:
-            raise fao.CorruptFile('Profile preparation changed original bytes')
-    # Advancing before commit is safe: a rollback leaves nonempty bodies behind
-    # the hint and the next wrap will retry them. Completion always checks them.
-    fao.write(cursor, canonical({'after': rows[-1][0] if len(rows) == limit else ''}))
-    if not rows and after:
-        return prepare_batch(conn, kind, limit)
-    return len(rows)
+    from yt_playlist.controllers.profile_preparation import ProfilePreparation
+    from yt_playlist.repos.profile_file_references import ProfileSources
+    return ProfilePreparation(ProfileSources(conn), ProfileFiles(directory(conn))).prepare(kind, limit)
 
 
 def references(conn):
     if available(conn):
+        from yt_playlist.repos.profile_file_writes import native
+        column = 'file_id' if native(conn) else 'NULL'
         for kind, (_, _, marker, _) in KINDS.items():
-            for (publication,) in conn.execute(f'SELECT DISTINCT publication FROM {marker}'):
+            for digest, file_id in conn.execute(f'SELECT DISTINCT publication,{column} FROM {marker}'):
+                publication = (digest, file_id) if file_id is not None else digest
                 yield directory(conn) / relative(kind, publication)
 
 
@@ -376,44 +365,40 @@ def recording_size_sql(alias='m'):
             f'WHERE pr.identity_key={alias}.identity_key) END')
 
 
-def collect(conn, now, limit=16):
-    """Bounded round-robin orphan maintenance; pinned heads never expire."""
-    return collect_unreferenced(conn, directory(conn),
-        {kind: values[2] for kind, values in KINDS.items()}, now, limit, '*/*/*.json')
-
-
-def collect_unreferenced(conn, root, markers, now, limit, pattern):
-    """Shared immutable-publication collector; owner tables remain explicit."""
-    if conn.in_transaction:
-        raise RuntimeError('Profile collection requires committed publication')
+@contextmanager
+def _garbage(files, before, *, limit):
     if type(limit) is not int or not 1 <= limit <= 256:
-        raise ValueError('Publication collection budget must be 1 to 256')
-    root = Path(root)
-    with _COLLECTION_LOCK, file_collection.collector(root) as admitted:
+        raise ValueError('Profile collection budget must be 1 to 256')
+    def shard(name):
+        return len(name) == 2 and all(c in '0123456789abcdef' for c in name)
+    # The installed cursor stores a numeric kind/shard index. The new traversal
+    # covers both layouts and starts its own cursor rather than reinterpreting it.
+    with file_collection.collection(files, files.root, name='.collection-v2.json', valid_shard=shard,
+            prefixes=('recording', 'source', 'recording/by-id', 'source/by-id')) as work, \
+            file_collection.collector(files.root) as admitted:
         if not admitted:
-            return 0
-        # Serialize the owner recheck and deletion with every SQL publisher.
-        conn.execute('BEGIN IMMEDIATE')
-        try:
-            work = _collection(conn, root, markers)
-            removed = 0
+            yield iter(())
+            return
+        def candidates():
             for _ in range(limit):
                 path = work.next()
-                if path is None or not path.relative_to(root).match(pattern):
+                if path is None:
                     continue
-                kind = path.relative_to(root).parts[0]
-                if len(path.stem) != 64 or any(char not in '0123456789abcdef' for char in path.stem):
+                identity = record_id(path)
+                parts = path.relative_to(files.root).parts
+                if identity is not None:
+                    reference = identity
+                elif (len(parts) == 3 and path.suffix == '.json' and len(path.stem) == 64
+                        and shard(path.parent.name) and path.stem[:2] == path.parent.name
+                        and all(c in '0123456789abcdef' for c in path.stem)):
+                    reference = bytes.fromhex(path.stem)
+                else:
                     continue
-                publication = bytes.fromhex(path.stem)
-                marker = markers[kind]
                 try:
-                    info = fao.read(path).info
-                    if (not conn.execute(f'SELECT 1 FROM {marker} WHERE publication=? LIMIT 1', (publication,)).fetchone()
-                            and (info.ctime_ns / 1e9 <= now - 30*86400)):
-                        removed += fao.delete(path, expected=info.identity, missing_ok=True)
+                    info = fao.read(path, max_bytes=MAX_BYTES).info
+                    if info.ctime_ns / 1e9 <= before:
+                        yield parts[0], reference, path, info
                 except (FileNotFoundError, fao.FileChanged):
                     continue
-            fao.write(work.cursor, canonical({'shard': work.shard}))
-            return removed
-        finally:
-            conn.rollback()
+        yield candidates()
+        work.save()

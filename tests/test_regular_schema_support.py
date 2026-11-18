@@ -19,21 +19,16 @@ def disable_periodic_library_sync():
 def test_pending_consumer_ddl_preserves_the_completed_prefix_and_validates_live_sql(monkeypatch, completed):
     bound_catalog(monkeypatch, entries=(('jazz', 'Jazz'),))
     with closing(sqlite3.connect(':memory:')) as conn:
-        install_numbered_input(conn, 93)
         production = tuple(regular.CHANGES)
-        if completed:
-            with conn:
-                install_regular_input(conn, production)
-        history = list(map(tuple, conn.execute('SELECT * FROM schema_changes ORDER BY version'))) if completed else []
+        prefix = len(production) if completed else 37
+        install_numbered_input(conn, 107, regular_owners=production[:prefix])
+        history = list(map(tuple, conn.execute('SELECT * FROM schema_changes ORDER BY version')))
         numbered = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
-        assert bool(history) == completed
+        assert len(history) == prefix
         change = register_independent_ddl(monkeypatch, conn)
-        if completed:
-            assert list(map(tuple, conn.execute('SELECT * FROM schema_changes ORDER BY version'))) == history
-        else:
-            assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone()
+        assert list(map(tuple, conn.execute('SELECT * FROM schema_changes ORDER BY version'))) == history
         regular.migrate(conn, clock=lambda: 123.)
-        expected = history if completed else [(entry.version, entry.name, 123.) for entry in production]
+        expected = [*history, *((entry.version, entry.name, 123.) for entry in production[prefix:])]
         assert list(map(tuple, conn.execute('SELECT * FROM schema_changes ORDER BY version'))) == [
             *expected, (len(production) + 1, 'independent_preparation_ddl', 123.)]
         assert regular.validate(conn) == change.version

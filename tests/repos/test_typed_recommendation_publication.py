@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from tests.recommendation_support import seed_compact_group_history
+from tests.file_custody_support import expire_file
 from tests.repos.test_group_retention import drain, enable
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls,
@@ -295,10 +296,10 @@ def test_changed_inputs_during_output_files_stop_staging_and_keep_last_good_head
         outputs.encode('home', f'part-{i}', {'part': i}))
         for i in range(publication.OUTPUT_BATCH_ROWS * 2 + 2))
     prepared = replace(plan(store, 'obsolete-output-build'), outputs=documents)
-    original_publish, changed = outputs.publish, []
+    original_publish, changed = store.recommendations.files.publish_reserved, []
 
-    def publish_file(root, encoded):
-        result = original_publish(root, encoded)
+    def publish_file(*args, **kwargs):
+        result = original_publish(*args, **kwargs)
         if not changed:
             # A real strict input changes while durable files are still private.
             # This runs outside the manifest writer transaction.
@@ -311,7 +312,7 @@ def test_changed_inputs_during_output_files_stop_staging_and_keep_last_good_head
         snapshot.release_reader()
         build = store.recommendations.claim(prepared)
         with monkeypatch.context() as boundary:
-            boundary.setattr(outputs, 'publish', publish_file)
+            boundary.setattr(store.recommendations.files, 'publish_reserved', publish_file)
             assert store.recommendations.stage(
                 prepared, build, still_current=snapshot.is_current) is False
         assert changed == [True]
@@ -433,6 +434,8 @@ def test_prepared_context_can_retain_recommendations_without_group_roots(recomme
 def test_output_files_survive_old_reader_and_backup_relocates_exact_owners(recommendations, tmp_path):
     store = recommendations
     first = publish(store, plan(store))
+    old_filename = store.conn.execute('SELECT filename FROM prepared_outputs WHERE generation_id=?',
+                                      (first.generation_id,)).fetchone()[0]
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
         assert reader.recommendations.output('home', 'framing') == {'title': 'one'}
@@ -440,6 +443,8 @@ def test_output_files_survive_old_reader_and_backup_relocates_exact_owners(recom
         collect(store)
         assert outputs.collect_orphans(store.conn) == 0
         assert reader.recommendations.output('home', 'framing', generation=first.generation_id) == {'title': 'one'}
+    assert outputs.collect_orphans(store.conn) == 0
+    expire_file(old_filename)
     assert outputs.collect_orphans(store.conn) == 1
     with store.read_snapshot() as snapshot:
         reader = snapshot.store

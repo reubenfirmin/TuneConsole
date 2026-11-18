@@ -60,7 +60,7 @@ class RadioPolicy:
     @staticmethod
     def genre_mismatch(view: CandidateView, history: PlaybackHistory, track):
         return not GenrePolicy(view.candidates.tuning["theme"], [], current=history.current,
-                               store=view.candidates.store).allows(track)
+                               axes=getattr(view.candidates, 'axes', None)).allows(track)
 
     def pick(self, view: CandidateView):
         view.candidates.refresh_exclusions(self.now_fn())
@@ -71,7 +71,9 @@ class RadioPolicy:
                          and t['key'] not in view.candidates.blocked
                          and (t.get('artist') or '').casefold() not in view.candidates.muted), None)
         else:
-            pick = view.candidates.next_track(list(view.selected), excluded=view.rejected)
+            pick = view.candidates.next_track(list(view.selected), excluded=view.rejected,
+                destination=[(t['key'], t['video_id']) for t in view.selected],
+                recipe={'surface': 'radio', 'tuning': dict(view.candidates.tuning)}, policy='upload')
         return pick
 
     @staticmethod
@@ -108,30 +110,38 @@ class RadioPolicy:
         return frozenset(rejected)
 
     def feedback(self, view: CandidateView, context: FeedbackContext) -> FeedbackUpdate:
-        store, now = self.store, self.now_fn()
+        from yt_playlist.controllers.radio_inputs import inputs_for
+        now = self.now_fn()
+        facts = inputs_for(self.store).feedback(context.started_at, now)
+        view.candidates.eligibility_at = max(view.candidates.eligibility_at, now)
+        view.candidates.blocked, view.candidates.muted = facts['blocked'], facts['muted']
+        return self.feedback_update(view, context, facts)
+
+
+    @staticmethod
+    def feedback_update(view: CandidateView, context: FeedbackContext, facts) -> FeedbackUpdate:
         directions = view.directions
         seen, strengths = set(context.seen), dict(directions.feedback)
         changed = False
-        view.candidates.refresh_exclusions(now)
         blocked = view.rejected | view.metadata_rejected | {t["video_id"] for t in view.candidates.by_video.values()
             if t["key"] in view.candidates.blocked
             or (t.get("artist") or "").casefold() in view.candidates.muted}
         if directions.blocked != blocked:
             changed = True
-        ratings = [(key, at, .45, "like") for key, at in store.rec_model.recent_liked_with_ts(limit=200)]
-        ratings += [(key, at, -.7, "dislike") for key, at in store.rec_model.disliked_with_ts()]
+        ratings = [(key, at, .45, "like") for key, at in facts['likes']]
+        ratings += [(key, at, -.7, "dislike") for key, at in facts['dislikes']]
         for key, at, strength, kind in ratings:
             token = (kind, key, at)
             if at >= context.started_at and key in view.candidates.by_key and token not in seen:
                 seen.add(token)
                 strengths[key] = strength
                 changed = True
-        for event in store.player_events.player_events_since(max(context.started_at, now - 45), kind="track_exit"):
+        for event in facts['exits']:
             video, at = event["video_id"], event["at"]
             token = ("exit", video, at, event["position"], event["duration"])
             if (event["playlist_ytm_id"] != context.playlist or event["account_id"] != context.identity
                     or video not in context.starts or at < context.starts[video] or video == context.observed_video
-                    or token in seen):
+                    or token in seen or video not in view.candidates.by_video):
                 continue
             seen.add(token)
             if any(start <= at <= end for start, end in context.mutation_windows):
@@ -142,6 +152,7 @@ class RadioPolicy:
             strengths[key] = max(-.6, strengths.get(key, 0) - .18)
             changed = True
         return FeedbackUpdate(frozenset(blocked), frozenset(seen), strengths, changed)
+
 
     @staticmethod
     def invalid(view: CandidateView, history: PlaybackHistory, track):

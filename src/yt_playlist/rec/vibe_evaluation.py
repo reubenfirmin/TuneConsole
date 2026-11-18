@@ -24,7 +24,7 @@ def _evaluation(conn):
     sources = MusicalProfiles(MusicalProfilesRepo(reader), profile_files.ProfileFiles(profile_files.directory(conn)),
                               None, None, None)
     return VibeEvaluation(VibeEvaluationRepo(reader), sources,
-        PreparedContent(PreparedContentRepo(reader), discovery, None), Genres(GenreRepo(reader), discovery))
+        PreparedContent(PreparedContentRepo(reader), discovery, None), Genres(GenreRepo(reader)))
 
 
 def annotation_snapshot(conn, historical_videos=(), **options):

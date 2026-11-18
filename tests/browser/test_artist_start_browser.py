@@ -76,10 +76,10 @@ def artist_app(store):
     identity = store.accounts.upsert_account('main', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '999')
     class SearchableCatalog(Catalog):
-        def search(self, query, filter='songs', limit=8):
-            return [{'artist': row['name'], 'browseId': browse_id}
+        def search(self, query, filter='songs', limit=8, ignore_spelling=False):
+            return [{'resultType': 'artist', 'artist': row['name'], 'browseId': browse_id}
                     for browse_id, row in self._artists.items()
-                    if query.casefold() in row['name'].casefold()][:limit]
+                    if filter in (None, 'artists') and query.casefold() in row['name'].casefold()][:limit]
 
     fake = SearchableCatalog()
     for index in range(8):
@@ -140,27 +140,31 @@ def test_required_picker_suggestions_spotify_draft_and_first_listen(
     page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(artist_app)
-    expect(page.get_by_role('heading', name='Pick 3 artists you love.')).to_be_visible()
+    from tests.browser.welcome_support import dismiss_welcome
+    dismiss_welcome(page)
+    expect(page.get_by_role('heading', name='Start with songs or artists you love.')).to_be_visible()
     expect(page.get_by_role('tab', name='On air', exact=True)).to_have_count(0)
     expect(page.get_by_role('region', name='Festival roadmap', exact=True)).to_be_visible()
-    expect(page.locator('.festival-intro-sub')).to_have_text('Choose your artists')
+    expect(page.locator('.festival-intro-sub')).to_have_text('Choose your songs and artists')
     expect(page.locator('.arrival-progress')).to_be_hidden()
     expect(page.locator('.artist-start .artist-start-primary:visible')).to_have_count(0)
     assert page.locator('.setup-listening > [data-onboarding-artists]').count() == 1
     assert page.locator('.artist-start').evaluate('el => el.getBoundingClientRect().top >= document.querySelector(".festival-intro").getBoundingClientRect().bottom')
     page.screenshot(path=tmp_path / f'artist-in-festival-{catalog_state}-{width}.png', full_page=True)
     page.locator('button.festival-first-set').click()
-    search = page.get_by_role('searchbox', name='Search YouTube Music artists')
+    page.locator('#artist-start-search').click()
+    search = page.get_by_role('searchbox', name='Search music')
     expect(search).to_be_focused()
     search.fill('artist')
     page.get_by_role('button', name='Choose Artist 0', exact=True).click()
     page.get_by_role('button', name='Choose Artist 1', exact=True).click()
+    page.get_by_role('button', name='Back to my picks', exact=True).click()
     page.get_by_role('button', name='Coming from Spotify?').click()
     expect(page.get_by_role('heading', name='Your old favorites can come too.')).to_be_visible()
     page.screenshot(path=f'/tmp/tuneconsole-791-spotify-{catalog_state}-{width}.png', full_page=True)
     page.get_by_role('button', name='How to request my files').click()
     expect(page.get_by_text('Extended streaming history:', exact=False)).to_be_visible()
-    page.get_by_role('button', name='Back to my artists').click()
+    page.get_by_role('button', name='Back to my picks').click()
     page.reload()
     expect(page.get_by_role('button', name='Remove Artist 0', exact=True)).to_be_visible()
     expect(page.get_by_role('button', name='Remove Artist 1', exact=True)).to_be_visible()
@@ -194,7 +198,7 @@ def test_required_picker_suggestions_spotify_draft_and_first_listen(
     map_target = page.locator('.festival-destination[aria-label="Go to my first set"]')
     expect(map_target).to_have_count(1)
     expect(map_target).to_be_visible()
-    expect(page.get_by_role('heading', name='Pick 3 artists you love.', exact=True)).to_have_count(0)
+    expect(page.get_by_role('heading', name='Start with songs or artists you love.', exact=True)).to_have_count(0)
     expect(page.locator('#gen-onboard_library')).to_be_visible()
     expect(page.locator('#gen-onboard_library .starter-track')).to_have_count(12)
     assert page.evaluate('artistDocument === document && artistMap === document.querySelector(".festival-map") && artistPlayer === document.querySelector(".global-now-playing")')

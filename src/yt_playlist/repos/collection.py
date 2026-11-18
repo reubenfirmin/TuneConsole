@@ -144,11 +144,6 @@ class CollectionRepo(Repo):
             return {'layout': 'occurrences', 'title': title[0], 'items': [dict(row) for row in rows]}
         if not self.is_album_tracklist_complete(browse_id):
             return {'layout': 'missing'}
-        from yt_playlist.core.preparation.album_share_publication import OWNER, selected_share
-        selected = OWNER.selected(self.conn)
-        if selected is not None:
-            share = selected_share(self.conn, selected, browse_id)
-            return {'layout': 'frozen', 'title': share['title'], 'videos': share['video_ids']} if share else {'layout': 'missing'}
         row = self.conn.execute("SELECT title,video_ids_json FROM album_share_snapshots WHERE browse_id=?",
                                 (browse_id,)).fetchone()
         if row is None:
@@ -160,8 +155,7 @@ class CollectionRepo(Repo):
 
     @synchronized
     def cached_album_tracklist_ids(self):
-        from yt_playlist.core.preparation.album_publication import relation as album_relation
-        relation = 'album_tracklist_keys' if album_tracklists.available(self.conn) else album_relation(self.conn, 'album_tracklists')
+        relation = 'album_tracklist_keys' if album_tracklists.available(self.conn) else 'album_tracklists'
         return {r[0] for r in self.conn.execute('SELECT browse_id FROM '+relation)}
 
     @synchronized
@@ -184,12 +178,7 @@ class CollectionRepo(Repo):
     def has_published_album_tracklist(self, browse_id):
         """Provider completeness does not require saving every source to the library."""
         if not album_tracklists.available(self.conn):
-            from yt_playlist.core.preparation.album_publication import selected, table
-            if selected(self.conn) is None:
-                return self.is_album_tracklist_complete(browse_id)
-            return self.conn.execute('SELECT 1 FROM '+table('groups')+' g JOIN '+table('head')+
-                " h ON h.revision=g.stage JOIN album_provider_ids p ON p.album_id=g.album_id AND p.provider='youtube' "
-                "WHERE h.active=1 AND g.status='complete' AND p.provider_id=?", (browse_id,)).fetchone() is not None
+            return self.is_album_tracklist_complete(browse_id)
         return self.conn.execute(_PUBLISHED_OCCURRENCE_TRACKLISTS + " AND p.provider_id=?",
                                  (browse_id,)).fetchone() is not None
 

@@ -5,7 +5,7 @@ from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import discovery_sources
 
 
-pytestmark = pytest.mark.parametrize('installed', [79, 99, 107], indirect=True)
+pytestmark = pytest.mark.parametrize('installed', [107], indirect=True)
 
 
 def test_starter_selection_scan_candidates_and_distinct_impressions(installed):

@@ -4,7 +4,7 @@ import math
 
 from yt_playlist.rec import rec_params
 
-SETTING = 'album_menu_tuning'
+from yt_playlist.core.taste_settings import ALBUM_MENU as SETTING
 DURATION_S = 4 * 3600
 AXES = (
     {'key': 'novelty', 'low': 'Comfort', 'high': 'Novelty', 'color': 'var(--radio-queue-2)'},
@@ -16,9 +16,12 @@ def defaults(store):
 
 
 def state(store, now):
-    values = defaults(store)
+    return state_values(defaults(store), store.settings.get_setting(SETTING), now)
+
+
+def state_values(values, raw, now):
     try:
-        saved = json.loads(store.settings.get_setting(SETTING) or '{}')
+        saved = json.loads(raw or '{}')
         remaining = max(0, min(DURATION_S, saved.get('until', 0) - now))
         overrides = saved.get('values', {})
         # Keep active genre choices while retiring the old overlapping sliders.
@@ -37,14 +40,17 @@ def state(store, now):
 
 
 def apply(store, now, values, genres):
+    store.settings.set_setting(SETTING, encode(now, values, genres))
+
+
+def encode(now, values, genres):
     if set(values) != {axis['key'] for axis in AXES} or any(
             type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
             for value in values.values()):
         raise ValueError('Invalid album controls')
     if len(genres) > 100 or any(not isinstance(genre, str) or not genre or len(genre) > 100 for genre in genres):
         raise ValueError('Invalid album genres')
-    store.settings.set_setting(SETTING, json.dumps({'until': now + DURATION_S,
-        'values': values, 'genres': sorted(set(genres))}))
+    return json.dumps({'until': now + DURATION_S, 'values': values, 'genres': sorted(set(genres))})
 
 
 def reset(store):

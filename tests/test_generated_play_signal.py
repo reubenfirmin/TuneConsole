@@ -7,7 +7,8 @@ The app's own suggestions must not come back to it as evidence of taste, or it t
 what drives the Home "You're into X recently" card.
 """
 from tests.derived_rating_support import seed_like
-from yt_playlist.rec import layers, rec_params, transient
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import rec_params, transient
 from yt_playlist.util import genre_map
 from yt_playlist.repos.base import GENERATED_GROUP
 

@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from tests.conftest import seed_catalog_track
-from yt_playlist.rec import embedding_vectors, layers, rec_params, taste_viz
+from yt_playlist.library import listening_composition as layers
+from yt_playlist.rec import embedding_vectors, rec_params, taste_viz
 
 
 @pytest.mark.parametrize('consumer,window_h', [

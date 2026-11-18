@@ -9,6 +9,7 @@ import pytest
 from tests.prepared_fixture_support import capture_template, prepared_template, roots
 from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import collection_recovery as recovery
+from yt_playlist.controllers.collection_retention import CollectionCollector
 
 
 @pytest.fixture(autouse=True)
@@ -139,7 +140,7 @@ def test_recipe_capacity_clones_keep_file_corruption_and_sql_mutations_private(r
 def recipe_collection(recipe_documents, tmp_path_factory):
     with recipe_documents.open(tmp_path_factory.mktemp('recipe-capacity-collection') / 'collection.db') as store:
         with closing(sqlite3.connect(store._db_path, timeout=0)) as other, pytest.MonkeyPatch.context() as patch:
-            patch.setattr(recovery.OrphanCollector, 'LIMIT', 8)
+            patch.setattr(CollectionCollector, 'LIMIT', 8)
             held = {Path(row[3]) for row in recovery.references(store.conn)}
             orphaned = {Path(recovery.publish(store.conn, 'playlist-recipe', f'orphan-{index}', {'value': index})[0])
                         for index in range(45)}
@@ -149,7 +150,7 @@ def recipe_collection(recipe_documents, tmp_path_factory):
                 yield state
             finally:
                 store.conn.set_trace_callback(None)
-                recovery.close(store)
+                store.retention.collections.close()
 
 
 def test_recipe_capacity_collection_input_keeps_all_owners_and_45_orphans(recipe_collection):
@@ -174,7 +175,7 @@ def recipe_collected(recipe_collection):
             other.execute("INSERT INTO settings VALUES ('gc-probe','usable') "
                           'ON CONFLICT(key) DO UPDATE SET value=excluded.value')
         if tick == 3:
-            recovery.close(store)  # Lose only the disposable cursor and resume.
+            store.retention.collections.close()  # Lose only the disposable cursor and resume.
             continue
         if not store.retention.collection_recovery_pending():
             break

@@ -1,7 +1,7 @@
 """Track-ordering primitives: arrange a chosen set of tracks into a pleasing sequence.
 
-A leaf of the rec/ layer: depends only on genre_map (genre segue distances), the library DAO (to
-fill genres), and util.matching. Journeys depend on ordering; ordering does not depend on journeys
+A leaf of the rec/ layer: depends only on genre_map (genre segue distances) and util.matching.
+Journeys depend on ordering; ordering does not depend on journeys
 or on recommendation assembly.
 """
 import random
@@ -10,6 +10,7 @@ from functools import lru_cache
 
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
+from yt_playlist.rec.artist_variety import members
 
 
 def _field(item, name):
@@ -17,7 +18,12 @@ def _field(item, name):
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
 
-def attach_genres(store, items, *, genres=None):
+def genre_keys(items):
+    return [_field(item, 'key') or identity_key(_field(item, 'title') or '',
+                                              _field(item, 'artist') or '') for item in items]
+
+
+def attach_genres(items, *, genres):
     """Fill each item's genre from the library (by identity_key) so dj_order can do genre segues.
 
     Works for both ForYouItem objects (preview) and plain track dicts (DOM/save); mutates in place
@@ -29,13 +35,8 @@ def attach_genres(store, items, *, genres=None):
     Fresh card's proposals) know their own genre and can never be looked up here, so overwriting
     would throw that away.
     """
-    key_of = {id(it): (_field(it, "key")
-                       or identity_key(_field(it, "title") or "", _field(it, "artist") or ""))
-              for it in items}
-    if genres is None:
-        genres = store.rec_query.track_genres([k for k in key_of.values() if k])
-    for it in items:
-        g = genres.get(key_of[id(it)]) or (_field(it, "genre") or "")
+    for it, key in zip(items, genre_keys(items)):
+        g = genres.get(key) or (_field(it, "genre") or "")
         if isinstance(it, dict):
             it["genre"] = g
         else:
@@ -43,14 +44,14 @@ def attach_genres(store, items, *, genres=None):
     return items
 
 
-def dj_order(tracks, stickiness=0.0, seed=0, *, feat=None):
+def dj_order(tracks, stickiness=0.0, seed=0, *, feat=None, previous=frozenset()):
     """Order a chosen track set like a DJ. Start from a seeded shuffle, then greedily pick each next
     track by a lexicographic key: (a) never follow a track with the same artist unless every remaining
     track is that artist; (b) among the rest, place the artist with the MOST tracks left first: this
     schedules the heavy hitters early so they can't pile up at the end (the cause of same-artist
     clustering); (c) break ties by a `stickiness`-scaled genre segue (0 ≈ shuffle, 1 = careful genre
     transitions via the genre map). The first song also comes from a most-remaining artist, with
-    ties decided by the seeded shuffle. Guarantees no back-to-back same artist whenever feasible.
+    ties decided by the seeded shuffle. All credited performers participate in spacing.
     Pure; returns a new list that is a permutation of `tracks`. Items may be track dicts or ForYouItem
     objects; both expose 'artist' and 'genre' (run attach_genres first so 'genre' is populated).
     A feature accessor also supports opaque track keys. Features are read once, counts are updated
@@ -58,37 +59,40 @@ def dj_order(tracks, stickiness=0.0, seed=0, *, feat=None):
     O(n²) time and O(n) space, with a bounded cache for genre-family distances.
     """
     items = list(tracks)
-    if len(items) <= 2:
+    if not items or len(items) <= 2 and not previous:
         return items
     rows = []
     for item in items:
         if feat:
             features = feat(item)
-            artist, genre = features.get("artist"), features.get("genre")
+            artist, genre = members(features), features.get("genre")
             family = features.get('family',genre_map.family(genre))
         else:
-            artist, genre = _field(item, "artist"), _field(item, "genre")
+            identities = item.get('artist_ids') if isinstance(item, dict) else getattr(item, 'artist_ids', None)
+            artist = members({'artist': _field(item, 'artist'), 'artist_ids': identities})
+            genre = _field(item, "genre")
             family = _field(item,'family') or genre_map.family(genre)
         rows.append((item, artist, family))
     rng = random.Random(seed)
     rng.shuffle(rows)
-    remaining = Counter(row[1] for row in rows)
-    first = max(range(len(rows)), key=lambda i: remaining[rows[i][1]])
+    remaining = Counter(artist for row in rows for artist in row[1])
+    weight = lambda artists: max((remaining[artist] for artist in artists), default=0)
+    first = min(range(len(rows)), key=lambda i: (bool(rows[i][1] & previous), -weight(rows[i][1])))
     out = [rows.pop(first)]
-    remaining[out[-1][1]] -= 1
+    remaining.subtract(out[-1][1])
     distance = lru_cache(maxsize=256)(genre_map.family_distance)
     while rows:
         _, last_artist, last_genre = out[-1]
 
         def score(c):
             _, artist, genre = c
-            same = bool(artist) and artist == last_artist
+            same = bool(artist & last_artist)
             gd = distance(last_genre, genre) if (last_genre and genre) else 0.0
             seg = stickiness * gd + (1.0 - stickiness) * rng.random()
             # same-artist last (hard), then most-remaining-artist first (anti-pileup), then segue.
-            return (same, -remaining[artist], seg)
+            return (same, -weight(artist), seg)
 
         best = min(range(len(rows)), key=lambda i: score(rows[i]))
         out.append(rows.pop(best))
-        remaining[out[-1][1]] -= 1
+        remaining.subtract(out[-1][1])
     return [row[0] for row in out]

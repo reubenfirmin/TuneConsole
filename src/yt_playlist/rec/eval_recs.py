@@ -19,7 +19,11 @@ def best_holdout(store, cap_days=30) -> int:
 
     A holdout bigger than a third of the span starves the context side of sufficient history
     to learn from, so we size the window proportionally to how much history exists."""
-    lo, hi = store.rec_evidence.evaluation_history_bounds()
+    return holdout_window(store.rec_evidence.evaluation_history_bounds(), cap_days)
+
+
+def holdout_window(bounds, cap_days=30):
+    lo, hi = bounds
     if lo is None or hi is None:
         return 1
     span_s = hi - lo
@@ -33,14 +37,22 @@ def best_holdout(store, cap_days=30) -> int:
 def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
     """Leave-one-out recall@k over playlists, plus the random baseline for comparison."""
     keys, V, idx = vector_reads.load_vectors(store)
+    memberships = ([store.playlists.get_playlist_track_keys(playlist.id)
+                    for playlist in store.playlists.get_playlists()] if V is not None else [])
+    return recall_from_inputs((keys, V, idx), memberships, k=k, min_size=min_size, seed=seed)
+
+
+def recall_from_inputs(reference, memberships, *, k=20, min_size=5, seed=0):
+    """Leave-one-out scoring over detached vectors and playlist membership facts."""
+    keys, V, idx = reference
     if V is None:
         return {"recall_at_k": None, "trials": 0, "reason": "no vectors built"}
     rng = np.random.default_rng(seed)
     hits = trials = 0
     n = len(keys)
-    for p in store.playlists.get_playlists():
+    for playlist in memberships:
         check_cancellable_work()
-        members = [m for m in store.playlists.get_playlist_track_keys(p.id) if m in idx]
+        members = [m for m in playlist if m in idx]
         if len(members) < min_size:
             continue
         held = members[int(rng.integers(len(members)))]
@@ -75,6 +87,19 @@ def _causal_window(store, cutoff, end, k, dim, method, memory_bytes=None) -> dic
     if store.settings.get_setting("rec_cooc_weighting") == "1":
         weights = {key: 1.0 + math.log1p(count)
                    for key, count in store.history.play_counts_before(cutoff).items() if count}
+    return causal_recall(baskets=baskets, coverage=coverage, weights=weights,
+        before=store.history.history_keys_before(cutoff), after=store.history.history_keys_between(cutoff, end),
+        generated=store.rec_evidence.generated_only_keys_between(cutoff, end),
+        cutoff=cutoff, end=end, k=k, dim=dim, method=method, memory_bytes=memory_bytes)
+
+
+def causal_recall(*, baskets, coverage, weights, before, after, generated,
+                  cutoff, end, k, dim, method, memory_bytes=None):
+    """Fit and evaluate one causal window using only captured historical facts."""
+    check_cancellable_work()
+    if memory_bytes is not None:
+        from yt_playlist.rec.model_refresh import _check_fit_memory
+        _check_fit_memory(baskets, dim, memory_bytes)
     keys, V = training.build_vectors_from_baskets(
         baskets, dim=dim, method=method, weights=weights)
     check_cancellable_work()
@@ -84,10 +109,8 @@ def _causal_window(store, cutoff, end, k, dim, method, memory_bytes=None) -> dic
         return {**base, "recall": None, "trials": 0, "generated_excluded": 0,
                 "reason": "no reconstructable as-of vectors"}
     idx = {key: i for i, key in enumerate(keys)}
-    before = store.history.history_keys_before(cutoff)
-    after = store.history.history_keys_between(cutoff, end)
     context = [key for key in before if key in idx]
-    gen_only = store.rec_evidence.generated_only_keys_between(cutoff, end)
+    gen_only = generated
     held = [key for key in after | gen_only if key in idx and key not in before]
     generated_excluded = sum(key in gen_only for key in held)
     held = [key for key in held if key not in gen_only]
@@ -134,6 +157,11 @@ def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None,
         end = hi - i * span + 1e-6       # include a snapshot exactly at the newest known timestamp
         cutoff = end - span
         rows.append(_causal_window(store, cutoff, end, k, int(dim), method, memory_bytes=memory_bytes))
+    return temporal_report(rows, holdout_days=holdout_days, k=k, windows=windows, dim=dim, method=method)
+
+
+def temporal_report(rows, *, holdout_days, k, windows, dim, method):
+    """Aggregate captured window results without replacing insufficient windows."""
     viable = [row for row in rows if row["recall"] is not None]
     trials = sum(row["trials"] for row in viable)
     hits = sum(row.get("hits", 0) for row in viable)
@@ -173,12 +201,17 @@ def projection_recall(store, k=20, *, inputs=None, max_targets=None) -> dict:
     evaluates metadata projection generalization, not a fully held-out collaborative model or
     unseen-artist performance. Unscorable targets and insufficient training folds remain explicit.
     """
-    from yt_playlist.rec.discover import ContentProjection
     if inputs is None:
         with store.read_snapshot() as snapshot:
             reader = snapshot.store
             inputs = (vector_reads.load_vectors(reader), reader.rec_query.track_content(),
                       reader.rec_query.track_audio_features())
+    return projection_from_inputs(inputs, k=k, max_targets=max_targets)
+
+
+def projection_from_inputs(inputs, *, k=20, max_targets=None):
+    """Cross-validated projection over detached reference/content/audio inputs."""
+    from yt_playlist.rec.discover import ContentProjection
     reference, content, audio = inputs
     keys, V, idx = reference
     empty_bd = {"by_family": {}, "by_era": {}, "by_coverage": {}}

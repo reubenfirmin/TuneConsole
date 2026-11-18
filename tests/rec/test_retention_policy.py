@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded
+from yt_playlist.library import group_lifetimes
 from yt_playlist.rec import choice_evidence, group_roots, recommendation_roots
 from yt_playlist.rec.retention_maintenance import Retention
 from yt_playlist.repos import compact_group_publication, group_retention, recommendation_publication
@@ -36,7 +37,7 @@ def test_maintenance_dispatch_uses_repositories_and_keeps_independent_retries(no
     store = NoDatabase()
     methods = ('maintain_managed_files', 'maintain_prediction_provenance',
                'collect_musical_profiles', 'collect_embeddings',
-               'expire_legacy_diagnostics', 'maintain_runtime_history')
+               'maintain_runtime_history')
     store.retention = Mock(spec=methods)
     for method in methods[:-1]:
         getattr(store.retention, method).return_value = 0
@@ -49,7 +50,7 @@ def test_maintenance_dispatch_uses_repositories_and_keeps_independent_retries(no
         dispatched.append(name)
         if name in ('derived history retirement', 'unused recommendation policies'):
             # These distinct policy services have their own repository-double
-            # owners below; execute all six maintenance callbacks here.
+            # owners below; execute all five maintenance callbacks here.
             return {'pending': False}
         return target(*args, **kwargs)
 
@@ -60,15 +61,15 @@ def test_maintenance_dispatch_uses_repositories_and_keeps_independent_retries(no
     runtime = retention.progress['runtime history retirement']
     assert files.failures == 1 and files.pending
     assert runtime.pending and not runtime.failures
-    assert len(dispatched) == 8
+    assert len(dispatched) == 7
     for method in methods:
         getattr(store.retention, method).assert_called_once_with(123)
 
     clock[0] = 104
-    assert retention.run() == 105 and len(dispatched) == 8
+    assert retention.run() == 105 and len(dispatched) == 7
     clock[0] = 105
     assert retention.run() == 400
-    assert dispatched[8:] == ['managed file lifecycle', 'runtime history retirement']
+    assert dispatched[7:] == ['managed file lifecycle', 'runtime history retirement']
     assert files.result == 2 and not files.failures and not files.pending
     assert not runtime.pending and not runtime.failures
     assert files.retry_at == runtime.retry_at == 405
@@ -135,7 +136,7 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
         files=0, byte_size=0, checked=1, blocked=False, pending=False)
     events = []
     clock = [0.0]
-    monkeypatch.setattr(group_roots, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(group_lifetimes, 'time', SimpleNamespace(monotonic=Mock(side_effect=lambda: clock[0])))
 
     def generation_turn(*, checkpoint):
         assert checkpoint is False
@@ -156,7 +157,8 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     def reap(value):
         clock[0] += 1
 
-    monkeypatch.setattr(group_roots, 'reap_pending', reap)
+    reaper = Mock(side_effect=reap)
+    monkeypatch.setattr(group_lifetimes, 'reap_pending', reaper)
     store.taste_groups.cleanup_builds.side_effect = [True, False]
 
     result = group_roots.maintain_retention(store)
@@ -169,6 +171,8 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     assert store.recommendations.checkpoint_retirement.call_count == 2
     assert not store._retention_lock.locked()
     assert not store._db_path.exists()
+    reaper.assert_called_once_with(store)
+    assert group_lifetimes.time.monotonic.called
 
 
 def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sqlite, monkeypatch):

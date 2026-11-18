@@ -19,6 +19,12 @@ def is_placeholder_art(url) -> bool:
     return any(m in url for m in _PLACEHOLDER_MARKERS) if url else False
 
 
+def needs_art(track) -> bool:
+    """Missing and placeholder thumbnails both permit a useful cover replacement."""
+    thumb = track.get('thumbnail')
+    return not thumb or is_placeholder_art(thumb)
+
+
 def best_thumb(thumbnails):
     if not thumbnails:
         return None

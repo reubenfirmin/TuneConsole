@@ -11,16 +11,18 @@ from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_genres import GenrePolicy
 from yt_playlist.rec.radio_policy import RadioPolicy
+from yt_playlist.controllers.radio_inputs import inputs_for
 from yt_playlist.web.radio_persistence import RadioPersistence
 from yt_playlist.web.radio_state import Phase, Session
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('consumer', ['policy', 'directions', 'fallback', 'mismatch'])
 def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monkeypatch, consumer):
     store, _ = installed
-    store.genres.rename_genre('synth pop', 'Renamed Synth')
-    store.genres.set_genre_family('synth pop', 'jazz')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET name='Renamed Synth',family_key='jazz',"
+                           "family_source='custom' WHERE key='synth pop'")
     original = genre_identity.axis_match_rows
     reads = []
     locked, release = threading.Event(), threading.Event()
@@ -54,12 +56,12 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
                 genre_identity.axis_matches(store.conn, ['Renamed Synth'])
             assert not reads
             if consumer == 'policy':
-                policy = GenrePolicy(1, [track], store=store)
+                policy = GenrePolicy(1, [track], axes=inputs_for(store).taxonomy([track['genre'], other['genre']]))
                 assert policy.allows(other)
                 assert policy.bonus(other) == 1
                 assert policy.recent[0][:2] == ('synth pop', 'jazz')
             elif consumer == 'directions':
-                candidates = SimpleNamespace(store=store, tuning={'theme': 1})
+                candidates = SimpleNamespace(axes=inputs_for(store).taxonomy([track['genre'], other['genre']]), tuning={'theme': 1})
                 directions = RadioDirections(candidates, track)
                 assert directions._genres([track]).allows(other)
                 assert directions._label([track, other], track)[0] == 'jazz'
@@ -70,11 +72,13 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
                 candidates.pools = {'one': [], 'two': []}
                 candidates.modes = {'one': {'families': [('jazz', 2)]}, 'two': {'families': [('rock', 2)]}}
                 candidates.affinities = {}
+                candidates.axes = inputs_for(store).taxonomy([track['genre'], other['genre']])
                 candidates._read_vectors = lambda keys: None
                 assert candidates.cluster_for(track) == 'one'
                 assert candidates.similarity(track, other) == 1
             else:
-                view = SimpleNamespace(candidates=SimpleNamespace(store=store, tuning={'theme': 1}))
+                view = SimpleNamespace(candidates=SimpleNamespace(
+                    axes=inputs_for(store).taxonomy([track['genre'], other['genre']]), tuning={'theme': 1}))
                 assert not RadioPolicy.genre_mismatch(view, SimpleNamespace(current=track), other)
         finally:
             release.set()
@@ -83,7 +87,7 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
     assert store.settings.get_setting('radio-sync') == 'pending'
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_radio_checkpoint_schema_probes_own_the_connection(installed, monkeypatch):
     from yt_playlist.core import radio_storage
 
@@ -109,7 +113,7 @@ def test_radio_checkpoint_schema_probes_own_the_connection(installed, monkeypatc
     assert len(probes) >= 3
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_home_album_readiness_owns_genre_reads(installed, monkeypatch):
     from yt_playlist.rec import album_choices
 

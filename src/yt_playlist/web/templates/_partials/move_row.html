@@ -5,7 +5,7 @@
              :disabled="busy" @click.stop="rowCheck({{ p.id }}, $event)">
     </td>
     <td class="move-title">
-      <a href="/playlist/{{ p.id }}" title="YouTube playlist ID: {{ p.provider_playlist_id }}">{{ p.title }}</a>
+      <a href="{{ playlist_url(p.id) }}" title="YouTube playlist ID: {{ p.provider_playlist_id }}">{{ p.title }}</a>
       {% if message %}<span class="muted">{{ message }}</span>{% endif %}
       {% if error %}<span class="err">{{ error }}</span>{% endif %}
     </td>

@@ -13,7 +13,7 @@ from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema
 from tests.rec.test_candidate_refresh import candidate, no_fit
 from yt_playlist.core.store import Store
-from yt_playlist.rec import candidate_refresh, embedding_training as embed, mode_surfaces
+from yt_playlist.rec import candidate_refresh, embedding_training as embed, mode_inputs, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -60,7 +60,7 @@ def expiry_rankers():
         defaults = {spec.name: int(spec.default) if spec.integer else spec.default
                     for spec in rec_params.PARAMS}
         patch.setattr(rec_params, 'get_param', lambda store, name: defaults[name])
-        calculate = mode_surfaces._calculate_bundles
+        calculate = mode_inputs._calculate_bundles
 
         def wheelhouse(reader, now, policies):
             payload, _ = calculate(reader, now, policies)
@@ -70,7 +70,7 @@ def expiry_rankers():
             return {'all': {'wheelhouse': payload['all']['wheelhouse']},
                     '_meta': payload['_meta']}, None
 
-        patch.setattr(mode_surfaces, '_calculate_bundles', wheelhouse)
+        patch.setattr(mode_inputs, '_calculate_bundles', wheelhouse)
         yield
 
 

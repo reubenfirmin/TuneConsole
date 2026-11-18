@@ -7,7 +7,7 @@ import pytest
 from tests.test_spotify_album_import import AlbumClient, album_zip
 from tests.web.test_spotify_data_route import _prepare_library, _select_library, _wait_for_library_job
 from yt_playlist.web.app import create_app
-from yt_playlist.web.routes import setup
+from yt_playlist.library.spotify_transfer_composition import commands
 from yt_playlist.web.spotify_import import current_job
 
 
@@ -30,9 +30,9 @@ def test_failed_start_releases_import_for_recovery_and_retry(store, monkeypatch,
 
     with monkeypatch.context() as broken:
         if failure == 'persistence':
-            broken.setattr(setup, 'save_job', fail)
+            broken.setattr(commands(ctx).reports, 'save', fail)
         elif failure == 'provider':
-            broken.setattr(setup, 'prepare_spotify_library' if phase == 'prepare' else 'import_spotify_library', fail)
+            broken.setattr(commands(ctx), 'prepare_input' if phase == 'prepare' else 'transfer', fail)
         elif failure == 'thread-create':
             construct = threading.Thread
             def failed_constructor(*args, **kwargs):

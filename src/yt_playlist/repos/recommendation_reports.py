@@ -2,9 +2,15 @@
 from yt_playlist.core import recommendation_reports as reports
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
+from . import recommendation_file_writes
 
 
 class RecommendationReportsRepo(Repo):
+    @synchronized
+    def reserve_file(self, surface, chunk_key, integrity):
+        with self.conn.atomic():
+            return recommendation_file_writes.reserve(self.conn, 'recommendation_report_files', surface, chunk_key, integrity)
+
     @lookup_read
     def native(self):
         return self._store._recommendation_reports
@@ -41,6 +47,10 @@ class RecommendationReportsRepo(Repo):
             return owned, reports.choice_usage(self.conn) if owned else None
 
     @synchronized
-    def publish(self, prepared, durable):
+    def publish(self, prepared, durable, *, file_ids):
         with self.conn.atomic(join=True):
+            if len(file_ids) != len(durable):
+                raise ValueError('Report files require their pending SQL identities')
+            for identity, (surface, key, *reference) in zip(file_ids, durable):
+                recommendation_file_writes.complete(self.conn, identity, 'recommendation_report_files', surface, key, reference)
             return reports.register(self.conn, prepared, durable)

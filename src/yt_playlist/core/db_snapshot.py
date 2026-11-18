@@ -262,6 +262,10 @@ def read_snapshot(source, make_reader, *, dependencies=None, memo=None, wait_for
             serial=changes, unchanged=unchanged,
             reads=reader._snapshot_reads, tables=source._snapshot_revisions.tables,
             views=source._snapshot_revisions.views)
+        # SQLite 3.40 reports schema writes while first declaring these read-only
+        # modules. Prepare them before installing the write-denying authorizer.
+        # Qualifying with temp keeps real tables in main from shadowing them.
+        reader.conn.execute("SELECT 1 FROM temp.json_each('[]'), temp.json_tree('[]') LIMIT 0").fetchall()
         reader.conn.set_authorizer(reader._snapshot_reads.authorize)
         yield ReadSnapshot(source, reader, changes, version, schema, revision_scope)
     finally:

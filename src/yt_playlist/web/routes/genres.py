@@ -65,15 +65,13 @@ def build(ctx) -> APIRouter:
         name = (form.get("name") or "").strip()
         if not genre_catalog.normalize(name):
             return _toast(request, "enter a genre name")
-        store.genres.add_genre(name)
-        genre_lib.configure(store, read_only=True)
+        genre_lib.add(store, name)
         return _list(request, form.get("q") or "")
 
     @router.post("/genres/remove")
     async def genres_remove(request: Request):
         form = await request.form()
-        store.genres.remove_genre(form.get("name") or "")
-        genre_lib.configure(store, read_only=True)
+        genre_lib.remove(store, form.get("name") or "")
         return _list(request, form.get("q") or "")
 
     @router.post("/genres/reset")

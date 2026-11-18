@@ -9,7 +9,7 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.group_support import publish as publish_groups, recordings
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.legacy_recommendation_fixture_support import recommendations
 from tests.repos.test_typed_recommendation_publication import (
     plan,
 )
@@ -112,14 +112,9 @@ def test_real_adaptive_preview_and_choice_preserve_complete_legacy_membership_an
     if preset:
         store.settings.set_setting(home_vibe.SETTING, preset)
     assert home_vibe.current(store, 1200) == preset
-    store._recommendation_files = False
-    try:
-        store.rec_proposals.put_proposals('mode_bundles', value, 1050)
-        expected_preview = group_serving.calculate(store, head, 1100)
-        store.rec_proposals.put_proposals(group_serving.SURFACE, expected_preview, 1100)
-        expected = group_home.assemble(store, 1200, 0, group_home.inputs(store, 1200))
-    finally:
-        store._recommendation_files = True
+    expected_preview = group_serving.calculate(store, head, 1100)
+    store.rec_proposals.put_proposals(group_serving.SURFACE, expected_preview, 1100)
+    expected = group_home.assemble(store, 1200, 0, group_home.inputs(store, 1200))
     forbid_bundle(monkeypatch)
     page = RecommendationPublications.candidate_page
     reads, remaining = [], [1]
@@ -300,7 +295,8 @@ def test_real_adaptive_preview_and_choice_preserve_complete_legacy_membership_an
     assert group_serving.due(store, 1302)
     assert group_serving.view(store)['generation'] == before['generation']
     learned_head = store.taste_groups.head(members=False)
-    stable_learning = group_learning.compile(store, {}, [], 1302, learned_head)
+    from yt_playlist.library.choice_composition import learning
+    stable_learning = learning(store).groups({}, [], 1302, learned_head)
     store.rec_proposals.put_proposals('group_choice_bandit', stable_learning, 1302)
     assert group_serving.prepare(store, 1302)['generation'] == hidden['generation']
     assert not group_serving.due(store, 1302)
@@ -316,7 +312,7 @@ def test_real_adaptive_preview_and_choice_preserve_complete_legacy_membership_an
     assert not group_serving.due(store, 1303)
     # The allocation itself must still follow genuine learned changes, even
     # when a caller repeats the same state-version identity.
-    learned = group_learning.compile(store, {}, [], 1304, learned_head)
+    learned = learning(store).groups({}, [], 1304, learned_head)
     assert learned['state_version'] == stable_learning['state_version']
     selected = next(group['group_id'] for group in learned_head['groups'] if group.get('leaf') and not group.get('legacy'))
     learned['rows'] = [{**row, 'estimate': .9 if row['group_id'] == selected else .5}
@@ -404,3 +400,34 @@ def test_failed_group_selection_releases_its_publication_root(recommendations):
         with stored_groups.selection(store, generation, 10):
             raise RuntimeError('controlled selection failure')
     assert not store.conn.execute("SELECT 1 FROM recommendation_generation_refs WHERE kind='pending'").fetchone()
+
+
+def test_preview_restarts_durable_pages_from_an_older_selection_policy(fresh, monkeypatch):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    store, _ = fresh
+    with store.conn:
+        store.conn.execute("INSERT INTO library_memberships SELECT entry_id,'import',5 FROM discovery_memberships")
+        store.conn.execute("UPDATE youtube_items SET album='' ")
+    records = [replace(record, key=f'fresh-{index}')
+               for index, record in enumerate(recordings([('Jazz', 160, .4)]))]
+    publish_groups(store, records)
+    publish_bundle(store, {'all': {'explore': candidates(store)}, '_meta': {'full_pools': True}})
+    original, reads = RecommendationPublications.candidate_page, []
+
+    def bounded(owner, *args, **kwargs):
+        if reads:
+            raise WorkBudgetExceeded('Controlled page admission boundary')
+        reads.append((kwargs['group_version'], args[2], kwargs['after']))
+        return original(owner, *args, **kwargs)
+
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', bounded)
+    assert group_serving.prepare(store, 1100) is None
+    assert store.rec_proposals.preview_work()['pages']
+    with store.conn:
+        store.conn.execute("UPDATE group_preview_work SET token='older-policy-token' WHERE singleton=1")
+    del store._group_preview_preparation
+    first_page = reads[0]
+    reads.clear()
+    assert group_serving.prepare(store, 1101) is None
+    assert reads == [first_page], 'Resumed artist counts computed under the old selection policy'
+    assert store.rec_proposals.preview_work()['token'].startswith(group_serving.WORK_PREFIX)

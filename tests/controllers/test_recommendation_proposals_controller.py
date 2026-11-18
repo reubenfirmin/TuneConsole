@@ -2,6 +2,7 @@
 from contextlib import nullcontext
 import hashlib
 import json
+from itertools import count
 from unittest.mock import create_autospec
 
 import pytest
@@ -27,8 +28,12 @@ def proposals():
     reports = create_autospec(RecommendationReportsRepo, instance=True, spec_set=True)
     files = create_autospec(RecommendationFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
+    files.describe.side_effect = lambda raw: (hashlib.sha256(raw).hexdigest(), len(raw))
+    reports.reserve_file.side_effect = count(1)
     publications = create_autospec(RecommendationPublications, instance=True, spec_set=True)
-    return RecommendationProposals(repository, reports, create_autospec(AlbumNotesRepo, instance=True, spec_set=True), files,
+    notes = create_autospec(AlbumNotesRepo, instance=True, spec_set=True)
+    notes.reserve_file.side_effect = count(1)
+    return RecommendationProposals(repository, reports, notes, files,
                                    create_autospec(ListeningAnalytics, instance=True, spec_set=True),
                                    create_autospec(HomeOutputs, instance=True, spec_set=True), lambda: publications,
                                    create_autospec(ComparisonOutputs, instance=True, spec_set=True))
@@ -57,17 +62,18 @@ def test_native_clicked_pool_bypasses_repository_dispatcher(proposals):
 def test_report_files_are_durable_before_sql_publication(proposals):
     calls = []
     proposals.report_repository.native.return_value = True
-    proposals.files.publish.side_effect = lambda encoded: (calls.append('file') or ('report', 'digest', len(encoded)))
-    proposals.report_repository.publish.side_effect = lambda *args: calls.append('sql')
+    proposals.files.publish_reserved.side_effect = lambda identity, encoded, **kwargs: (calls.append('file') or ('report', *kwargs['expected']))
+    proposals.report_repository.publish.side_effect = lambda *args, **kwargs: calls.append('sql')
     proposals.put_proposals('listening_choices', {'at': 10, 'detail': 'é' * 70000}, 11)
     assert len(calls) > 2
     assert calls[-1] == 'sql' and set(calls[:-1]) == {'file'}
+    assert proposals.report_repository.publish.call_args.kwargs['file_ids'] == list(range(1, len(calls)))
     proposals.repository.put_encoded.assert_not_called()
 
 
 def test_failed_report_file_never_changes_sql_head(proposals):
     proposals.report_repository.native.return_value = True
-    proposals.files.publish.side_effect = OSError('disk full')
+    proposals.files.publish_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError):
         proposals.put_proposals('model_health', {'version': 1}, 10)
     proposals.report_repository.publish.assert_not_called()
@@ -77,7 +83,7 @@ def test_invalid_report_is_rejected_before_file_publication(proposals):
     proposals.report_repository.native.return_value = True
     with pytest.raises(ValueError):
         proposals.put_proposals('listening_choices', {'home_format': {'scores': {'invalid': 5}}}, 10)
-    proposals.files.publish.assert_not_called()
+    proposals.files.publish_reserved.assert_not_called()
     proposals.report_repository.publish.assert_not_called()
 
 
@@ -85,7 +91,7 @@ def test_supported_legacy_report_keeps_its_installed_writer(proposals):
     proposals.report_repository.native.return_value = False
     proposals.put_encoded('model_health', '{ "version": 1 }', 10)
     proposals.repository.put_encoded.assert_called_once_with('model_health', '{ "version": 1 }', 10)
-    proposals.files.publish.assert_not_called()
+    proposals.files.publish_reserved.assert_not_called()
 
 
 def test_report_read_captures_references_before_file_access(proposals):
@@ -227,12 +233,12 @@ def test_home_documents_use_the_home_workflow(proposals):
 def test_album_notes_are_written_before_replacing_sql_references(proposals):
     order = []
     proposals.note_repository.native_outputs.return_value = True
-    proposals.files.publish.side_effect = lambda *args: (order.append('file') or ('note', 'digest', 123))
+    proposals.files.publish_reserved.side_effect = lambda *args, **kwargs: (order.append('file') or ('note', 'digest', 123))
     proposals.note_repository.replace_outputs.side_effect = lambda *args: order.append('sql')
     proposals.put_proposals('album_notes', {'release': {'title': 'Ready'}, 'second': {'title': 'Later'}}, 10)
     assert order == ['file', 'file', 'sql']
     proposals.note_repository.replace_outputs.assert_called_once_with(
-        [('release', ('note', 'digest', 123)), ('second', ('note', 'digest', 123))], 10)
+        [('release', 1, ('note', 'digest', 123)), ('second', 2, ('note', 'digest', 123))], 10)
     proposals.repository.put_encoded.assert_not_called()
 
 
@@ -241,13 +247,13 @@ def test_invalid_album_note_map_is_rejected_before_any_files(proposals, value):
     proposals.note_repository.native_outputs.return_value = True
     with pytest.raises(ValueError):
         proposals.put_proposals('album_notes', value, 10)
-    proposals.files.publish.assert_not_called()
+    proposals.files.publish_reserved.assert_not_called()
     proposals.note_repository.replace_outputs.assert_not_called()
 
 
 def test_album_note_file_failure_preserves_previous_sql_references(proposals):
     proposals.note_repository.native_outputs.return_value = True
-    proposals.files.publish.side_effect = OSError('volume unavailable')
+    proposals.files.publish_reserved.side_effect = OSError('volume unavailable')
     with pytest.raises(OSError):
         proposals.put_proposals('album_notes', {'release': {'title': 'Ready'}}, 10)
     proposals.note_repository.replace_outputs.assert_not_called()

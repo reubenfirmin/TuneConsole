@@ -138,7 +138,8 @@ document.addEventListener('click', function (e) {
   // bare origin (the "sign in" link) is left to open normally so you can actually see the sign-in page.
   if (u.pathname === '/' || u.pathname === '') return;
   e.preventDefault();
-  tcPlay(u.href);
+  if (a.dataset.albumListening) playAlbumLink(a);
+  else tcPlay(u.href);
 }, true);
 }
 

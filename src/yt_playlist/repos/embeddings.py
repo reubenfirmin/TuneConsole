@@ -2,6 +2,7 @@
 from yt_playlist.core import artists, embedding_files, embeddings
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.repos.base import Repo, synchronized, lookup_read
+from yt_playlist.repos import embedding_file_writes
 
 
 class EmbeddingRepo(Repo):
@@ -79,6 +80,30 @@ class EmbeddingRepo(Repo):
         with self.conn.atomic():
             for publication in publications:
                 embeddings.publish_prepared(self.conn, publication)
+
+    @synchronized
+    def reserve_files(self, records):
+        if not records:
+            return []
+        with self.conn.atomic():
+            return embedding_file_writes.reserve(self.conn, records)
+
+    @synchronized
+    def file_required(self, kind, reference):
+        if kind not in ('recording', 'artist'):
+            raise ValueError('Invalid embedding owner')
+        if not embedding_files.available(self.conn):
+            return False
+        if type(reference) is int:
+            if not embedding_file_writes.native(self.conn):
+                return False
+            clause = 'file_id=?'
+        else:
+            clause = 'publication=?'
+            if embedding_file_writes.native(self.conn):
+                clause += ' AND file_id IS NULL'
+        return self.conn.execute(f'SELECT 1 FROM {kind}_embedding_files WHERE {clause} LIMIT 1',
+                                 (reference,)).fetchone() is not None
 
     @lookup_read
     def assert_reader(self):

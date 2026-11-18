@@ -7,6 +7,7 @@ from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.album_fetch import fetch_album, shareable_album_tracks
 from yt_playlist.library.executor import add_tracks_to_playlist
 from yt_playlist.library.playlist_metadata import content_hash
+from yt_playlist.library.playlist_policy import copy_memberships
 from yt_playlist.library.playlist_writes import (
     AdditionOutcome, PlaylistAddUncertain, account_additions, add_items as _add_items,
     retain_addition_snapshot)
@@ -24,13 +25,10 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     pls = [p for p in (store.playlists.get_playlist(i) for i in playlist_ids) if p is not None]
     if not pls:
         raise ValueError("no playlists to copy")
-    vids, keys, seen = [], {}, set()
-    for pl in pls:
-        for (k, v, t, a, d, av) in store.playlists.get_playlist_tracks_with_meta(pl.id):
-            if v and v not in seen:
-                seen.add(v)
-                vids.append(v)
-                keys[v] = k
+    planned = copy_memberships([
+        [(row[0], row[1]) for row in store.playlists.get_playlist_tracks_with_meta(pl.id)]
+        for pl in pls], destination=[], policy='upload')
+    vids, keys = [video for _, video in planned], {video: key for key, video in planned}
     title = (new_name or "").strip() or (f"{pls[0].title} (copy)" if len(pls) == 1 else "Combined playlist")
     identity = pls[0].account_id
     new_pid = client.create_playlist(title, "Copied by TuneConsole")
@@ -169,14 +167,11 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
     # ids silently 400 and land in `skipped`, leaving the destination short. Require one account.
     if any(p.account_id != target.account_id for p in sources):
         raise ActionInputError('playlist_copy_account_mismatch')
-    have = set(store.playlists.get_playlist_track_keys(target_id))   # songs already in the target
-    vids, seen = [], set()
-    for pl in sources:
-        for (k, v, t, a, d, av) in store.playlists.get_playlist_tracks_with_meta(pl.id):
-            if v and v not in seen and k not in have:
-                seen.add(v)
-                have.add(k)                                # also de-dupe across sources by song
-                vids.append(v)
+    planned = copy_memberships([
+        [(row[0], row[1]) for row in store.playlists.get_playlist_tracks_with_meta(pl.id)]
+        for pl in sources], destination=[(key, None) for key in
+            store.playlists.get_playlist_track_keys(target_id)], policy='recording')
+    vids = [video for _, video in planned]
     addition = account_additions(_add_items, client, target.provider_playlist_id, vids)
     added, skipped = addition.added, addition.skipped
     added_vids = list(addition.confirmed)

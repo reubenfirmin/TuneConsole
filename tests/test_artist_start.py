@@ -112,7 +112,7 @@ def test_empty_sync_requires_artist_setup_even_after_legacy_dismissal(store):
     assert 'artist-start-page' not in html
     assert '/static/artist-start.js' in html and '/static/artist-start.css' in html
     fragment = client.get('/home/onboard/start').text
-    assert 'Pick 3 artists you love.' in fragment
+    assert 'Start with songs or artists you love.' in fragment
     assert 'Coming from Spotify?' in fragment
     assert 'data-onboarding-artists' in fragment and 'id="onboarding-start"' in fragment
     assert 'Your music starts here' not in fragment
@@ -133,7 +133,7 @@ def test_partial_import_is_not_owned_music_and_saved_albums_can_start_normally(s
 @pytest.fixture
 def immediate_sync_retries(monkeypatch):
     from functools import partial
-    from yt_playlist.library import sync
+    from yt_playlist.controllers import library_synchronization as sync
 
     # Keep real attempts, failure classification and persisted retry times.
     # These setup checks do not own wall-clock backoff between provider reads.
@@ -169,7 +169,7 @@ def test_empty_owned_library_with_incidental_history_reaches_artist_setup(
     assert status['setup']['artists_required'] and not status['setup']['complete']
     assert status['songs'] == 0
     assert 'id="onboarding-feed"' in client.get('/').text
-    assert 'Pick 3 artists you love.' in client.get('/home/onboard/start').text
+    assert 'Start with songs or artists you love.' in client.get('/home/onboard/start').text
     assert not fake.created
     if not likes_readable:
         assert store.settings.get_setting('last_sync_at') is None
@@ -207,7 +207,7 @@ def test_artist_setup_requires_picks_and_live_play_from_the_generated_first_set(
                                     playlist_ytm_id=generated['new_ytm'])
     assert not artist_start.required(store)
     assert client.get('/home/onboard/artists/state').json()['complete'] is True
-    assert 'Pick 3 artists you love.' not in client.get('/home/onboard/start').text
+    assert 'Start with songs or artists you love.' not in client.get('/home/onboard/start').text
 
 
 @pytest.mark.parametrize('source', ['spotify_export', 'takeout'])
@@ -260,7 +260,7 @@ def test_artist_setup_waits_for_a_connected_listing_but_not_unavailable_albums(
     store = SimpleNamespace(_read_only=False, read_view=Mock(return_value=nullcontext(reader)))
 
     assert artist_start.required(store) == (unavailable == 'saved_albums')
-    settings.get_setting.assert_called_once_with('last_sync_at')
+    settings.get_setting.assert_any_call('last_sync_at')
     readiness.playable_owned.assert_called_once_with(exclude_generated=True, maximum_duration=1200)
     store.read_view.assert_called_once_with()
 

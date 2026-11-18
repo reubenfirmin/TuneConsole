@@ -1,12 +1,12 @@
 """Optional source artwork for import reports; SpotifyIAO owns vendor access."""
-from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.base import AccessState, IntegrationUnavailable
 from yt_playlist.integrations.spotify import SpotifyIAO
 
 _iao = SpotifyIAO()
 
 
 def access(store=None):
-    return _iao.context(store.enrichment_state if store is not None else None)
+    return _iao.context(AccessState.for_store(store))
 
 
 def thumbnail(album_url):

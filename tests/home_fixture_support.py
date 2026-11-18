@@ -3,7 +3,7 @@ import logging
 
 import pytest
 
-from tests.recommendation_support import seed_publication_subjects
+from tests.recommendation_support import seed_library_favorites, seed_publication_subjects
 from tests.store_fixture_support import initialize_consumer
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
@@ -171,6 +171,9 @@ def seed_menu_cards(store, now=1000, *, prefix='prepared', count=4, tracks_per_c
             elif modeled:
                 proto['mode_id'] = None
             protos.append(proto)
+    for proto in protos:
+        if proto['lane'] == 'comfort':
+            seed_library_favorites(store, proto['tracks'], now=now - 1)
     return protos
 
 

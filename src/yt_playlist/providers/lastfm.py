@@ -11,7 +11,8 @@ import logging
 import re
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core import provider_queries
-from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.base import CredentialedAccessState, IntegrationUnavailable
+from yt_playlist.controllers.access_configuration import AccessConfiguration, resolve
 from yt_playlist.integrations.lastfm import LastFmIAO, TIMEOUT_S
 from yt_playlist.providers import descriptive_tags, genres
 from yt_playlist.util.matching import is_remix, normalize, recording_title
@@ -26,13 +27,16 @@ _iao = LastFmIAO()
 
 
 def access(store=None):
-    return _iao.context(store)
+    source = AccessConfiguration(getattr(store, 'settings', None)).credential_source('LASTFM_API_KEY', 'lastfm_api_key')
+    return _iao.context(CredentialedAccessState.for_store(store, source))
 
 
 def api_key(store=None, config_path=None):
     """Resolve the Last.fm API key: $LASTFM_API_KEY, then the value saved via the UI (settings
     table), then `lastfm_api_key` in config.toml. Returns None if none is set."""
-    return _iao.api_key(store, config_path=config_path)
+    if store is None and config_path is None and _iao._scope.get() is not None:
+        return _iao.api_key()
+    return resolve(env_name='LASTFM_API_KEY', setting_name='lastfm_api_key', store=store, config_path=config_path)
 
 
 def available(store=None) -> bool:
@@ -43,7 +47,7 @@ def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
 
 
-def probe(track, store=None, key=None) -> EnrichmentResult:
+def probe(track, store=None, key=None, *, matcher=None) -> EnrichmentResult:
     """Read-only lookup: genre (and a year-ish tag/page year). Empty if no API key."""
     reason = provider_queries.deferred_reason(name, track)
     if reason:
@@ -51,10 +55,15 @@ def probe(track, store=None, key=None) -> EnrichmentResult:
     key = key or api_key(store)
     if not key:
         return EnrichmentResult("lastfm", {})
+    if matcher is None and store is not None:
+        matcher = genres.snapshot(store)
     observations = []
+    credits = []
     with access(store):
-        genre, year = enrich(track["title"], track["artist"], key, observations=observations)
+        genre, year = enrich(track["title"], track["artist"], key, observations=observations, matcher=matcher, credits=credits)
     fields = {}
+    if credits:
+        fields['artist_credits'] = credits
     if genre:
         fields["genre"] = genre
     if year:
@@ -107,38 +116,35 @@ def _year_from_tags(names):
     return None
 
 
-def artist_genre(artist, key):
+def artist_genre(artist, key, *, matcher=None):
     """Best whitelisted genre from an artist's Last.fm top tags, or None. For #18: tagging a new
     (unowned) discovered artist so the facet overlay can steer it. Best-effort: None on any failure."""
-    if not key or not artist:
-        return None
-    common = {"api_key": key, "format": "json", "autocorrect": "1"}
-    try:
-        return genres.pick_genre(_tag_names(
-            _get({"method": "artist.gettoptags", "artist": artist, **common})))
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as e:  # noqa: BLE001 - network/parse all degrade to no genre
-        _record_failure(e)
-        logger.warning("Last.fm artist top tags failed for %r: %s", artist, e)
-        return None
+    from yt_playlist.controllers.provider_acquisition import lastfm_artist_genre
+    from types import SimpleNamespace
+    policy = SimpleNamespace(_record_failure=_record_failure, logger=logger, genres=genres,
+                             _tag_names=_tag_names)
+    return lastfm_artist_genre(policy, _get, artist, key, matcher=matcher)
 
 
-def enrich(title, artist, key, *, observations=None):
+def enrich(title, artist, key, *, observations=None, matcher=None, credits=None):
     """Return (genre, year) from Last.fm. One track.getInfo gives the tags (genre, via the whitelist)
     and the canonical page URL; the release year is read off that page's metadata (Last.fm exposes it
     as primary metadata, not in the API). Genre falls back to artist tags; year to a year-like tag."""
-    if not provider_queries.lastfm_ready(title, artist):
-        return (None, None)
-    common = {"api_key": key, "format": "json", "autocorrect": "1"}
-    try:
-        info = _get({"method": "track.getinfo", "artist": artist, "track": title, **common})
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as e:  # noqa: BLE001
-        _record_failure(e)
-        logger.warning("Last.fm getInfo failed for %r / %r: %s", title, artist, e)
-        return (None, None)
+    from types import SimpleNamespace
+    from yt_playlist.controllers.provider_acquisition import lastfm_enrich
+    def project_with_credit(*args, **kwargs):
+        result = project(*args, **kwargs)
+        if credits is not None and result['match']['title_artist_match']:
+            from yt_playlist.providers.artist_credits import entities
+            credits.extend(entities([result['credit']], 'musicbrainz', identity='mbid'))
+        return result
+    policy = SimpleNamespace(_record_failure=_record_failure, logger=logger, project=project_with_credit,
+                             project_artist=project_artist, _page_release_year=_page_release_year)
+    return lastfm_enrich(policy, _get, _fetch_text, title, artist, key, observations=observations, matcher=matcher)
+
+
+def project(info, title, artist, *, observations=None, matcher=None):
+    """Project supplied track information and attributable matching evidence."""
     track = (info or {}).get("track") or {}
     credit = track.get('artist') or {}
     credit = credit if isinstance(credit, dict) else {'name': credit}
@@ -151,33 +157,16 @@ def enrich(title, artist, key, *, observations=None):
         entity_id=track.get('mbid') or track.get('url'), tags=_tags(track),
         source_path='track.getinfo:track.toptags', match_evidence=match)
     track_tags = _tag_names(track)   # _tag_names guards the single-tag-as-dict case the API returns
-    genre = genres.pick_genre(track_tags)
-    if not genre and artist and not is_remix(title):
-        try:
-            artist_tags = _get({"method": "artist.gettoptags", "artist": artist, **common})
-            genre = genres.pick_genre(_tag_names(artist_tags))
-            if match['title_artist_match']:
-                descriptive_tags.retain(observations, scope='artist',
-                    entity_id=credit.get('mbid') or credit.get('url'), tags=_tags(artist_tags),
-                    source_path='artist.gettoptags:toptags', match_evidence=match)
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception as e:  # noqa: BLE001
-            _record_failure(e)
-            logger.warning("Last.fm artist tags failed for %r: %s", artist, e)
-    # Cheapest source first: the tags are already in hand, so a year tag costs nothing. Only when
-    # they don't carry one is the album page worth a request (it holds the real Release Date).
-    year = _year_from_tags(track_tags)
-    album_url = (track.get("album") or {}).get("url")
-    if not year and album_url:
-        try:
-            year = _page_release_year(_fetch_text(album_url))
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception as e:  # noqa: BLE001 - preserve useful genre while the year is pending
-            _record_failure(e)
-            logger.debug("Last.fm album page unavailable for %s: %s", album_url, e)
-    return (genre, year)
+    return {'genre': genres.pick_genre(track_tags, matcher), 'year': _year_from_tags(track_tags),
+            'album_url': (track.get('album') or {}).get('url'), 'match': match, 'credit': credit}
+
+
+def project_artist(tags, track, *, observations=None, matcher=None):
+    if track['match']['title_artist_match']:
+        descriptive_tags.retain(observations, scope='artist',
+            entity_id=track['credit'].get('mbid') or track['credit'].get('url'), tags=_tags(tags),
+            source_path='artist.gettoptags:toptags', match_evidence=track['match'])
+    return genres.pick_genre(_tag_names(tags), matcher)
 
 
 def tag_top_artists(tag, key, limit=25):

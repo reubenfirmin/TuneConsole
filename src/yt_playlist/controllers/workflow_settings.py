@@ -68,7 +68,10 @@ class WorkflowSettings:
             reference = None
             if record != 'delete' and (record != 'gc' or prepared['value'] is not None):
                 kind = 'playlist-gc' if record == 'gc' else 'spotify-transfer'
-                reference = self.files.publish(kind, prepared['identity'], prepared['value'])
+                integrity = self.files.describe(kind, prepared['identity'], prepared['value'])
+                prepared['file_id'] = self.repository.reserve_file(kind, prepared['identity'], integrity)
+                reference = self.files.publish_reserved(prepared['file_id'], kind, prepared['identity'], prepared['value'],
+                                                        expected=integrity)
             result.append((record, prepared, reference))
         return result
 

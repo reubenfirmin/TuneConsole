@@ -2,7 +2,7 @@
 from copy import copy
 from collections import Counter, defaultdict
 
-from yt_playlist.rec.ordering import _field, attach_genres
+from yt_playlist.rec.ordering import _field, attach_genres, genre_keys
 
 
 def matching_genres(store, items, *, include=(), avoid=()):
@@ -18,6 +18,10 @@ def matching_genres(store, items, *, include=(), avoid=()):
     # filter those same genres on copies instead of changing the cached candidates.
     items = resolved_genres(store, items)
     axes = store.genres.feature_axes({_field(item, 'genre') for item in items})
+    return matching_values(items, axes, include=include, avoid=avoid)
+
+
+def matching_values(items, axes, *, include=(), avoid=()):
     return [item for item in items if _field(item, "genre")
             and axes[_field(item, 'genre')][0] not in avoid
             and (not include or axes[_field(item, 'genre')][0] in include)]
@@ -25,7 +29,8 @@ def matching_genres(store, items, *, include=(), avoid=()):
 
 def resolved_genres(store, items):
     """Copy candidates and attach the same current/fallback genres used in descriptions."""
-    items = attach_genres(store, [copy(item) for item in items])
+    items = [copy(item) for item in items]
+    attach_genres(items, genres=store.rec_query.track_genres(genre_keys(items)))
     by_artist = None
     for item in items:
         genre = (_field(item, "genre") or "").strip()
@@ -60,7 +65,8 @@ def genre_options(store, *, genre_plays=None, bundles=None):
             for item in items:
                 if item.get("key"):
                     tracks.setdefault(item["key"], item)
-    items = attach_genres(store, [copy(item) for item in tracks.values()])
+    items = [copy(item) for item in tracks.values()]
+    attach_genres(items, genres=store.rec_query.track_genres(genre_keys(items)))
     by_artist = (store.rec_query.artist_genre_years_for([item.get('artist', '') for item in items if not item.get('genre')])
                  if items else store.rec_query.artist_genre_years())
     if not items:
@@ -80,8 +86,12 @@ def genre_options(store, *, genre_plays=None, bundles=None):
 def _genre_options(store, families, genre_plays):
     dist = store.rec_query.genre_play_distribution() if genre_plays is None else genre_plays
     plays = {g.lower(): count for g, count in dist.items()}
-    family_plays = Counter()
     axes = store.genres.feature_axes(plays)
+    return genre_option_values(families, plays, axes)
+
+
+def genre_option_values(families, plays, axes):
+    family_plays = Counter()
     for genre, count in plays.items():
         family_plays[axes.get(genre, ('', None))[0]] += count
     # Put the user's most-listened-to families first, with their familiar subgenre as the label.

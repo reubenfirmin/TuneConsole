@@ -86,16 +86,19 @@ listeners.runtime({type: "resync-now"}, {}, () => {});
 assert.equal(messages.at(-1).type, "now-heartbeat");
 messages.length = 0;
 video.paused = true;
-const main = (paused, playlist = "PL1") => listeners.message({
+const main = (paused, playlist = "PL1", queueItem = nativeItem) => listeners.message({
   source: window,
   data: { __tcSensorVersion: 4, __tcSensorRevision: 8,
-    __tcNow: { title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist, paused,
+    __tcNow: { title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist, paused, queueItem,
       position: video.currentTime, duration: video.duration,
       brandKnown: true, brandId: "brand-A", metadataVerified: true } },
 });
-main(true);
+const nativeItem = {videoId: 'planned', playlist: 'PL1', index: 6};
+main(true, 'PL1', nativeItem);
+assert.equal(messages.at(-1).queueItem, nativeItem, 'presence carries the native queue correspondence');
 now = 6000;
 intervals[0]();  // DOM fallback after the main sensor was throttled
+assert.equal(messages.at(-1).queueItem, nativeItem, 'a matching fresh fallback keeps the planned slot');
 main(true);
 assert.deepEqual(messages.map(m => m.type), ["now-heartbeat", "now-heartbeat", "now-heartbeat"]);
 assert(messages.every(m => m.paused));
@@ -105,7 +108,8 @@ assert.equal(messages[1].position, null, 'DOM fallback cannot use the media stre
 assert.equal(messages[1].duration, null);
 assert(messages.every(m => m.playlist === "PL1" && m.albumBrowseId === "MPRE_album"));
 video.paused = false;
-main(false);
+main(false, 'PL1', nativeItem);
+assert.equal(messages.at(-1).queueItem, nativeItem, 'plays carry the same queue correspondence');
 assert.equal(messages.at(-1).timeZone, "America/Costa_Rica");
 assert.equal(messages.at(-1).position, 12);
 assert.equal(messages.at(-1).duration, 200);
@@ -359,6 +363,7 @@ const messages = [], handlers = new Map(), timers = new Map();
 let serial = 0, now = 30000, available = true, playlist = 'PL_playing';
 let data = {video_id: 'playing', title: 'Song', author: 'Artist'};
 let playerResponse = null;
+let queueState = null;
 let config = {LOGGED_IN: true, DELEGATED_SESSION_ID: 'brand-A'};
 let bar = null;
 let nextControl = null;
@@ -384,6 +389,8 @@ const context = {
   document: {querySelector(selector) {
     if (selector === 'video') return video;
     if (selector === '#movie_player' && available) return player;
+    if (selector === 'ytmusic-player-queue') return {queue: {store: {store: {
+      getState: () => ({queue: queueState})}}}};
     if (selector === 'ytmusic-player-bar .next-button') return nextControl;
     if (selector === 'ytmusic-player-bar') return bar;
     if (selector === '.title.ytmusic-player-bar' && bar) return {textContent: bar.title};
@@ -431,6 +438,30 @@ tick();
 assert.equal(latest().videoId, 'playing');
 assert.equal(latest().playlist, 'PL_playing');
 assert.equal(latest().position, 12);
+queueState = {selectedItemIndex: 0, items: [{playlistPanelVideoWrapperRenderer: {
+  primaryRenderer: {playlistPanelVideoRenderer: {videoId: 'planned',
+    navigationEndpoint: {watchEndpoint: {videoId: 'planned', playlistId: 'PL_playing', index: 6}}}},
+  counterpart: [{counterpartRenderer: {playlistPanelVideoRenderer: {videoId: 'playing'}}}]
+}}]};
+tick();
+assert.equal(latest().queueItem.videoId, 'planned');
+assert.equal(latest().queueItem.playlist, 'PL_playing');
+assert.equal(latest().queueItem.index, 6);
+queueState.selectedItemIndex = 1;
+tick();
+assert.equal(latest().queueItem, undefined, 'an invalid selected item cannot borrow a neighboring slot');
+queueState.selectedItemIndex = 0;
+queueState.items[0].playlistPanelVideoWrapperRenderer.counterpart[0]
+  .counterpartRenderer.playlistPanelVideoRenderer.videoId = 'unrelated';
+tick();
+assert.equal(latest().queueItem, undefined, 'an unrelated recording cannot claim the planned row');
+queueState.items[0].playlistPanelVideoWrapperRenderer.counterpart[0]
+  .counterpartRenderer.playlistPanelVideoRenderer.videoId = 'playing';
+queueState.items[0].playlistPanelVideoWrapperRenderer.primaryRenderer
+  .playlistPanelVideoRenderer.navigationEndpoint.watchEndpoint.playlistId = 'PL_other';
+tick();
+assert.equal(latest().queueItem, undefined, 'a stale queue cannot supply another playlist position');
+queueState = null;
 assert.equal(latest().duration, undefined, 'missing full-song metadata must leave length unknown');
 location.href = 'https://music.youtube.com/browse/VLPL_other';
 video.currentTime = 30;

@@ -1,7 +1,7 @@
 """Discovery provenance and lifecycle evidence. Callers own transactions and the Store lock."""
 import json
 
-from . import discovery_provenance as typed, legacy_evidence
+from . import discovery_provenance as typed
 
 
 def retain_artist(conn, artist_id, source, score, account_id=None, *, import_key=None):
@@ -34,7 +34,7 @@ def reconcile_artist_sources(conn, previous, target):
 
 
 def reconcile_artist(conn, previous, target, *, source):
-    """Fold scan/candidate lifecycles, retaining pre-merge evidence and distinct visible offers."""
+    """Fold scan/candidate lifecycles and preserve distinct visible offers."""
     if typed.available(conn):
         return typed.reconcile_artist(conn,previous,target,source=source)
     reconcile_artist_sources(conn,previous,target)
@@ -48,9 +48,6 @@ def reconcile_artist(conn, previous, target, *, source):
                                              (previous,target))]
         if not rows:
             continue
-        for row in rows:
-            legacy_evidence.retain(conn, 'artist_reconcile:'+table,
-                json.dumps([previous,target,row['artist']]),json.dumps(row),source)
         winner = max(rows,key=lambda r:(r[clock] if r[clock] is not None else float('-inf'),
                                        r['artist_id']==target,json.dumps(r,sort_keys=True)))
         if table=='discovered_artists':
@@ -175,14 +172,6 @@ def finish_reassociation(conn, video_id, previous, target, member, remaining, no
         conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) '
                      'ON CONFLICT(recording_id) DO NOTHING', (target,entry,min(found) if found else now))
     for row in sources:
-        # Collision aggregation retains the original inputs, including which upload
-        # supplied each source. This evidence must survive subsequent pool expiry.
-        for original in [row,conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? AND source_token=?',
-                                         (target,row['source_token'])).fetchone()]:
-            if original is not None:
-                legacy_evidence.retain(conn,
-                             'discovery_reassociation',json.dumps([association_id,original['recording_id'],original['source_token']]),
-                              json.dumps(dict(original)),'exact upload reassociation; retained pre-merge evidence')
         retain(conn,target,row['source_token'],row['input_video_id'],row['last_found_at'],
                first_found_at=row['found_at'])
         conn.execute('DELETE FROM discovery_sources WHERE recording_id=? AND source_token=?',

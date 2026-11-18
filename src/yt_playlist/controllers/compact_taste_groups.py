@@ -8,11 +8,11 @@ from yt_playlist.controllers.group_publication import GroupPublication
 
 
 class CompactTasteGroups(TasteGroups):
-    def __init__(self, repository, files, profiles, retention):
+    def __init__(self, repository, files, profiles, retention, policies=None):
         super().__init__(repository, profiles)
         self.files = files
         self.retention = retention
-        self.publication = GroupPublication(repository, files)
+        self.publication = GroupPublication(repository, files, policies)
 
     def head(self, *, members=False):
         with self.files.retained():

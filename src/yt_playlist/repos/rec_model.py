@@ -1,9 +1,15 @@
 """SQL records for taste weights, feedback, standing controls and checkpoints."""
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 from yt_playlist.core import artists, catalog, genre_identity, taste_axes, taste_control_state
+from yt_playlist.repos import collection_file_writes
 
 
 class RecModelRepo(Repo):
+    @synchronized
+    def reserve_checkpoint_file(self, integrity):
+        with self.conn.atomic():
+            return collection_file_writes.reserve(self.conn, 'taste-checkpoint', 1, integrity)
+
     @lookup_read
     def feedback_expiry(self, now):
         row = self.conn.execute('SELECT min(until) FROM rec_feedback WHERE until>? '
@@ -51,8 +57,9 @@ class RecModelRepo(Repo):
                                       + ','.join('?' for _ in keys) + ')', keys))
 
     @synchronized
-    def publish_checkpoint(self, revision, saved_at, weights, reference):
+    def publish_checkpoint(self, revision, saved_at, weights, reference, *, file_id):
         with self.conn.atomic():
+            collection_file_writes.complete(self.conn, file_id, 'taste-checkpoint', 1, reference)
             rows = [(1, position, taste_axes.identity(self.conn, row['axis'], create=True),
                      row['axis'], row['weight'], row['updated_at']) for position, row in enumerate(weights)]
             self.conn.execute('DELETE FROM taste_settings_checkpoints')

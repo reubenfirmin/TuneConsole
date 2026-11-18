@@ -1,14 +1,12 @@
 """Reconcile verified provider releases through their independent owners."""
-import json
-
 from yt_playlist.core import album_aliases as policy
 from yt_playlist.core.metadata_contract import clock
 
 
 class AlbumAliases:
-    def __init__(self, repository, albums, originals, discovery, merge_feedback, guard):
+    def __init__(self, repository, albums, discovery, merge_feedback, guard):
         self.repository, self.albums = repository, albums
-        self.originals, self.discovery = originals, discovery
+        self.discovery = discovery
         self.merge_feedback, self.guard = merge_feedback, guard
 
     def observe(self, browse, album, *, now=None):
@@ -29,9 +27,6 @@ class AlbumAliases:
                 inputs = self.repository.merge_inputs(target, retired)
                 if inputs['conflict'] or not all(policy.compatible(inputs[key], videos) for key in ('target', 'retired')):
                     continue
-                self.originals.retain('album', 'album_alias_reconciliation', str(retired),
-                    json.dumps(inputs['original']),
-                    f'complete ordered provider responses matched {digest}; canonical album {target}')
                 self.discovery.merge_albums(retired, target)
                 self.merge_feedback(target, retired, at)
                 # Publish identity last. Earlier owners drain the retired rows atomically,

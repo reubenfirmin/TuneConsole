@@ -13,7 +13,7 @@ import pytest
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.integrations import discogs as access
-from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.base import CredentialedAccessState, IntegrationUnavailable
 from yt_playlist.providers import discogs, enrichment, musicbrainz, release_notes
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.waterfall import run_waterfall
@@ -39,7 +39,8 @@ def http(code, headers=None):
 @pytest.fixture
 def boundary(monkeypatch, tmp_path):
     monkeypatch.delenv('DISCOGS_TOKEN', raising=False)
-    monkeypatch.setattr(access.credentials.paths, 'config_path', lambda: tmp_path / 'missing.toml')
+    from yt_playlist.core import paths
+    monkeypatch.setattr(paths, 'config_path', lambda: tmp_path / 'missing.toml')
 
     def install(fetch):
         clock, calls, responses, paces = [1000.0], [], [], []
@@ -143,7 +144,7 @@ def test_retry_after_is_shared_and_survives_restart(boundary, store, header, exp
     recreated = access.DiscogsIAO(now_fn=lambda: b.clock[0],
         open_fn=lambda *args, **kwargs: pytest.fail('Persisted cooldown was bypassed'),
         pacer=SimpleNamespace(wait=lambda *args: pytest.fail('Deferred work should not pace')))
-    with recreated.context(store), pytest.raises(IntegrationUnavailable) as deferred:
+    with recreated.context(CredentialedAccessState.for_store(store, lambda: discogs.token(store))), pytest.raises(IntegrationUnavailable) as deferred:
         recreated.master(321)
     assert deferred.value.retry_at == expected
 

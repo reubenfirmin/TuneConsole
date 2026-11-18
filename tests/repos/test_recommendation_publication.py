@@ -2,10 +2,11 @@
 from dataclasses import replace
 import sqlite3
 import struct
+from unittest.mock import Mock
 
 import pytest
 
-from yt_playlist.rec import embed, embedding_vectors as vectors, model_refresh
+from yt_playlist.rec import embed, embedding_vectors as vectors, model_calculations, model_refresh
 from yt_playlist.core.rec_model_policy import VectorChanges
 
 
@@ -48,7 +49,8 @@ def test_late_mode_failure_keeps_published_progress_and_pending_queue_for_retry(
     revision = store.rec_refresh.revision()
     prepared = {'vectors': {'rec_vectors': [('song', new)]}, 'settings': {'generation': 'new'},
                 'modes': ([(3, 'Mode', '[]', new, 1, '["song"]', 1, 1, 'space')], []), 'tracks': 1}
-    monkeypatch.setattr(model_refresh, 'prepare', lambda *args, **kwargs: prepared)
+    calculate = Mock(return_value=prepared)
+    monkeypatch.setattr(model_calculations, 'calculate', calculate)
     with store.conn:
         store.conn.execute("CREATE TRIGGER fail_mode BEFORE INSERT ON taste_modes "
                            "BEGIN SELECT RAISE(ABORT,'late publication failure'); END")
@@ -64,6 +66,7 @@ def test_late_mode_failure_keeps_published_progress_and_pending_queue_for_retry(
     assert store.rec_model.get_rec_vectors() == [('song', new)]
     assert len(store.modes.list_modes()) == 1
     assert store.rec_refresh.revision() is None
+    assert [call.args[1] for call in calculate.call_args_list] == [10, 10]
 
 
 @pytest.mark.parametrize('space', ['settings', 'arbitrary_sql'])

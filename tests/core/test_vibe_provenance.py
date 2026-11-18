@@ -1,5 +1,6 @@
 """File-owned lineage preserves exact original evidence and transaction boundaries."""
 from tests.file_custody_support import export_owner, restore_owner
+from tests.store_fixture_support import file_consumer_store
 import shutil
 import sqlite3
 import json
@@ -10,10 +11,21 @@ import pytest
 from yt_playlist.core import fao, vibe_history, vibe_provenance as owner, vibe_versions
 from yt_playlist.core import vibe_models as vibe_model_files
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.preparation import vibe_provenance as preparation
+from tests.file_preparation_support import provenance as preparation
 from yt_playlist.core.store import Store
 
 DAY = 86400
+
+
+def test_rescoring_provenance_roundtrips_across_decimal_id_boundaries(tmp_path):
+    files = owner.ProvenanceFiles(tmp_path)
+    records, _originals = files.describe([(9, [1], [1]), (10, [2], [1])])
+    staged, markers = files.stage_reserved([{**record, 'file_id': 1} for record in records])
+    try:
+        assert {marker[0] for marker in markers} == {9, 10}
+    finally:
+        for publication in staged:
+            publication.close()
 
 
 def evidence(store):
@@ -48,6 +60,82 @@ def shared_receipt(store, mids, artist, *, conditioning=None):
         if staged:
             staged.close()
     return vibe_model_files.receipt(generation, [artist], .01, .05, conditioning=conditioning), value
+
+
+@pytest.mark.parametrize('boundary', ['file', 'status'])
+def test_native_model_interruption_keeps_the_old_head_and_pending_record(file_consumer_store, monkeypatch, boundary):
+    from yt_playlist.repos import vibe_model_file_writes
+    store = file_consumer_store
+    _pid, mids, artist, _rid = evidence(store)
+    receipt, previous = shared_receipt(store, mids, artist)
+    head = vibe_model_files.HEAD_PREFIX + 'relax'
+    store.settings.publish_values({head: receipt['generation']})
+    value = {**previous, 'diagnostics': {**previous['diagnostics'], 'replacement': True}}
+    generation, staged = store.vibe_models.stage(value)
+    with closing(sqlite3.connect(store._db_path)) as observer:
+        assert observer.execute('SELECT id,file_status FROM vibe_model_file_writes').fetchone() == (staged.file_id, 'pending')
+    assert store.vibe_models.repository.file_reference(generation) is None
+    complete = vibe_model_file_writes.complete
+
+    def interrupted_status(conn, *args):
+        complete(conn, *args)
+        raise OSError('status interrupted')
+
+    try:
+        with monkeypatch.context() as patch:
+            if boundary == 'file':
+                patch.setattr(staged, 'publish', lambda: (_ for _ in ()).throw(OSError('file interrupted')))
+            else:
+                patch.setattr(vibe_model_file_writes, 'complete', interrupted_status)
+            with pytest.raises(OSError, match='interrupted'):
+                store.vibe_predictions.publish_joint_model('relax', generation, {'outcome': 'ready'}, mids, staged, False)
+    finally:
+        staged.close()
+    assert store.settings.get_setting(head) == receipt['generation']
+    assert store.vibe_models.read(receipt['generation']) == previous
+    assert store.conn.execute('SELECT file_status FROM vibe_model_file_writes').fetchone()[0] == 'pending'
+    with store.read_snapshot() as snapshot:
+        generation, retry = snapshot.store.vibe_models.stage(value)
+        try:
+            assert snapshot.publish_ordered(lambda: store.vibe_predictions.publish_joint_model(
+                'relax', generation, {'outcome': 'ready'}, mids, retry, False))
+        finally:
+            retry.close()
+    assert store.settings.get_setting(head) == generation
+    assert store.vibe_models.read(generation) == value
+
+
+def test_native_model_same_digest_replacement_keeps_pinned_ids_and_exact_backup(file_consumer_store, tmp_path):
+    store = file_consumer_store
+    _pid, mids, artist, _rid = evidence(store)
+    receipt, value = shared_receipt(store, mids, artist)
+    generation, first = store.vibe_models.stage(value)
+    try:
+        store.vibe_predictions.publish_joint_model('relax', generation, {'outcome': 'ready'}, mids, first, False)
+    finally:
+        first.close()
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
+        old_id = reader.vibe_models.repository.file_reference(generation)
+        assert old_id == first.file_id
+        generation, second = store.vibe_models.stage(value)
+        try:
+            store.vibe_predictions.publish_joint_model('relax', generation, {'outcome': 'ready'}, mids, second, False)
+        finally:
+            second.close()
+        assert second.file_id != first.file_id
+        assert reader.vibe_models.repository.file_reference(generation) == old_id
+        assert reader.vibe_models.read(generation) == value
+        assert store.vibe_models.collect(10**10, limit=128) == 0
+    expected = {path: (fao.read(path).bytes, fao.read(path).info.ctime_ns)
+                for path in vibe_model_files.references(store.conn)}
+    assert list(expected) == [vibe_model_files.directory(store.conn) / vibe_model_files.relative(second.file_id)]
+    manifest = export_owner(store.conn, vibe_model_files, tmp_path / 'native-model-backup')
+    shutil.rmtree(vibe_model_files.directory(store.conn))
+    restore_owner(store.conn, 'vibe-models', vibe_model_files, manifest)
+    assert {path: (fao.read(path).bytes, fao.read(path).info.ctime_ns)
+            for path in vibe_model_files.references(store.conn)} == expected
+    assert store.vibe_models.read(generation) == value
 
 
 def test_partial_conversion_exact_reuse_and_failed_publication(store, monkeypatch):
@@ -177,7 +265,8 @@ def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_p
             assert vibe_model_files.collect(store.conn, collection_at) == 0
             assert model_path.exists()  # The SQL snapshot pins its old ready ref.
     assert owner.read(store.conn, pid) is None
-    owner.collect(store.conn, 40 * DAY)
+    for _ in range(4):
+        store.vibe_predictions.collect_provenance(40 * DAY)
     assert not (owner.directory(store.conn) / owner.relative(pid)).exists()
     assert vibe_history.maintain(store, 200 * DAY) == 1
     assert owner.read(store.conn, pid) is None

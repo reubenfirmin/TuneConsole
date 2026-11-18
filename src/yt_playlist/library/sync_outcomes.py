@@ -6,11 +6,11 @@ RETRY_BASE_S = 300
 RETRY_MAX_S = 3600
 
 
-class SyncSchedule:
+class Schedule:
     """Use persisted resource outcomes without treating a retry as a full refresh."""
 
-    def __init__(self, store, now, *, automatic=False, retry_now=False, max_age_s=MAX_AGE_S):
-        self.state = store.sync.state()
+    def __init__(self, state, now, *, automatic=False, retry_now=False, max_age_s=MAX_AGE_S):
+        self.state = state
         self.now, self.automatic, self.retry_now = now, automatic, retry_now
         self.max_age_s = max_age_s
 
@@ -28,6 +28,12 @@ class SyncSchedule:
 
     def resource_due(self, account_id, name):
         return self.due(self.previous(account_id, name))
+
+
+class SyncSchedule(Schedule):
+    """Compatibility capture; the schedule policy itself takes supplied state."""
+    def __init__(self, store, now, **options):
+        super().__init__(store.sync.state(), now, **options)
 
 
 def retained(item):
@@ -95,9 +101,15 @@ def stamp_result(result, previous, now):
 
 
 def sync_due(store, now, max_age_s, *, retry_now=False):
-    schedule = SyncSchedule(store, now, automatic=True, retry_now=retry_now, max_age_s=max_age_s)
-    state = schedule.state
+    state = store.sync.state()
     configured = {str(i.id) for i in store.accounts.get_accounts()}
+    attempted = store.settings.get_setting('last_sync_attempt_at')
+    last = store.settings.get_setting('last_sync_at') if not state else None
+    return due_facts(state, configured, attempted, last, now, max_age_s, retry_now=retry_now)
+
+
+def due_facts(state, configured, attempted, last, now, max_age_s, *, retry_now=False):
+    schedule = Schedule(state, now, automatic=True, retry_now=retry_now, max_age_s=max_age_s)
     if state:
         if set(state.get("accounts", {})) != configured:
             return True
@@ -105,7 +117,7 @@ def sync_due(store, now, max_age_s, *, retry_now=False):
             resources = account.get("resources", {})
             # Ratings require trustworthy playlist evidence; the album mirror is
             # derived from account snapshots. Neither schedules a redundant scan.
-            for name in ("playlist_listing", "history", "saved_albums"):
+            for name in ("playlist_listing", "history", "saved_songs", "saved_albums"):
                 if schedule.due(resources.get(name, {})):
                     return True
             # Without a complete listing, child retries cannot run. Wait for
@@ -122,12 +134,9 @@ def sync_due(store, now, max_age_s, *, retry_now=False):
             return True
         # A process stopped between beginning and publishing an attempt. Retry
         # once after a bounded delay, rather than spinning on every poll.
-        attempted = store.settings.get_setting("last_sync_attempt_at")
         if attempted and float(attempted) > state.get("last_attempt_at", 0):
             return retry_now or now >= float(attempted) + RETRY_BASE_S
         return False
-    last = store.settings.get_setting("last_sync_at")
-    attempted = store.settings.get_setting("last_sync_attempt_at")
     if attempted and (last is None or float(attempted) > float(last)):
         return retry_now or now >= float(attempted) + RETRY_BASE_S
     return last is None or now - float(last) >= max_age_s

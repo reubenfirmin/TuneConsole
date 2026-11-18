@@ -7,7 +7,7 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.legacy_recommendation_fixture_support import recommendations
 from tests.repos.test_typed_recommendation_publication import publish, plan, collect
 from tests.rec.test_stored_fresh import fresh
 from tests.store_fixture_support import (

@@ -112,12 +112,10 @@ class Tracks:
             fields = {**values, **originals, 'thumbnail': thumbnail.strip() if isinstance(thumbnail, str) else thumbnail}
             delivery, evidence = self.metadata_choices.capture_fields(entry, 'youtube', fields,
                 purpose='catalog-input', body={'format': 'youtube-catalog-input-1', 'fields': fields, 'credits': credits}, now=now)
-        for field, value in values.items():
-            if value is not None and inputs['sources'][field] in (None, 'youtube', 'legacy_unknown'):
-                self.metadata_choices.select(entry, field, value, 'youtube', now=now, observation_id=evidence.get(field))
-        for field, value in originals.items():
-            if inputs['sources'][field] is None:
-                self.metadata_choices.select(entry, field, value, 'youtube', now=now, observation_id=evidence.get(field))
+        selected = {field: value for field, value in values.items()
+                    if value is not None and inputs['sources'][field] in (None, 'youtube', 'legacy_unknown')}
+        selected.update((field, value) for field, value in originals.items() if inputs['sources'][field] is None)
+        self.metadata_choices.select_fields(entry, selected, 'youtube', now=now, observations=evidence)
         self.artists.observe(entry, artist, credits, browse_id=artist_browse_id, now=now, metadata_delivery_id=delivery)
         self.set_track_art(entry, thumbnail, source='youtube', now=now, observation_id=evidence.get('thumbnail'))
         if library:
@@ -132,6 +130,12 @@ class Tracks:
 
     def library_identity_key_for_video(self, video_id):
         return self.repository.library_identity_key_for_video(video_id)
+
+    def remove_song_library_membership(self, video_id):
+        return self.repository.remove_song_library_membership(video_id)
+
+    def song_library_membership(self, video_id):
+        return self.repository.song_library_membership(video_id)
 
     def identity_keys_for_videos(self, video_ids):
         return self.repository.identity_keys_for_videos(video_ids)

@@ -118,7 +118,7 @@ def test_frozen_affine_calibration_reconciles_actual_results_and_abstention(tmp_
         for relative, expected in plan['code'].items():
             read(DIRECTORY / 'source' / relative, expected)
             product = {'product/audio_embedding.py': 'src/yt_playlist/core/audio_embedding.py',
-                       'product/audio_vibe_external.py': 'src/yt_playlist/rec/audio_vibe_external.py',
+                       'product/audio_vibe_external.py': 'experiments/audio_lab_tools/legacy/audio_vibe_external.py',
                        'product/build_runtime.py': 'scripts/audio_model/build_runtime.py'}
             current = EXPERIMENTS.parent / product[relative] if relative in product else EXPERIMENTS / relative
             if relative.startswith('audio_lab_tools/'):

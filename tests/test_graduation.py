@@ -7,6 +7,16 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
+def test_graduation_factor_is_none_below_threshold():
+    assert graduation.graduation_factor(0.5, 1.2, up_factor=1.1, down_factor=0.9) is None
+    assert graduation.graduation_factor(-0.5, 1.2, up_factor=1.1, down_factor=0.9) is None
+
+
+def test_graduation_factor_picks_up_or_down_by_sign():
+    assert graduation.graduation_factor(1.3, 1.2, up_factor=1.1, down_factor=0.9) == 1.1
+    assert graduation.graduation_factor(-1.3, 1.2, up_factor=1.1, down_factor=0.9) == 0.9
+
+
 def test_graduation_crosses_threshold_and_resets(store):
     tid = store.tracks.upsert_track("v1", "S", "Coltrane", None, None, 1)
     store.tracks.set_track_genre(tid, "jazz")

@@ -18,7 +18,7 @@ def _modes():
 
 
 def test_select_returns_n_distinct():
-    got = ms.select_modes(None, _modes(), leans={}, epoch=0, n=4)
+    got = ms.select_modes(_modes(), leans={}, epoch=0, n=4)
     assert len(got) == 4 and len(set(got)) == 4
 
 
@@ -27,15 +27,15 @@ def test_dominant_responds_to_leans():
     # epoch. A strong techno lean should make the techno mode (id 2) the most frequent dominant
     # across epochs, and far more frequent than with no lean.
     from collections import Counter
-    strong = Counter(ms.select_modes(None, _modes(), leans={"genre:techno": 5.0}, epoch=e, n=4)[0]
+    strong = Counter(ms.select_modes(_modes(), leans={"genre:techno": 5.0}, epoch=e, n=4)[0]
                      for e in range(200))
-    none = Counter(ms.select_modes(None, _modes(), leans={}, epoch=e, n=4)[0]
+    none = Counter(ms.select_modes(_modes(), leans={}, epoch=e, n=4)[0]
                    for e in range(200))
     assert strong.most_common(1)[0][0] == 2          # techno mode dominates the menu most often
     assert strong[2] > none[2]                        # the lean clearly lifts it vs no lean
 
 
 def test_deterministic_for_fixed_inputs():
-    a = ms.select_modes(None, _modes(), leans={}, epoch=7, n=4)
-    b = ms.select_modes(None, _modes(), leans={}, epoch=7, n=4)
+    a = ms.select_modes(_modes(), leans={}, epoch=7, n=4)
+    b = ms.select_modes(_modes(), leans={}, epoch=7, n=4)
     assert a == b

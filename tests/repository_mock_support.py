@@ -38,6 +38,7 @@ def transient_repository_store(*, values=None, **repositories):
         player_events={'recent_skips_with_ts': []},
         rec_eligibility={'generated_only_keys': set()},
         playlists={'radio_playlist_ids': []},
+        artists={'track_keys': {}},
         rec_query={'track_genres': {}, 'track_decades': {}, 'track_artists': {},
                    'track_popularity': {}},
         genres={'feature_axes': {'techno': ('techno', None), 'jazz': ('jazz', None)}},

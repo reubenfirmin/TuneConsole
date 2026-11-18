@@ -1,5 +1,5 @@
 """Real retained-format feedback survives evidence contention and publication interruption."""
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, ExitStack
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import sqlite3
@@ -23,7 +23,7 @@ from yt_playlist.rec import album_feedback, group_roots
 from yt_playlist.rec.rec_worker import RecWorker
 
 
-pytestmark = pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+pytestmark = pytest.mark.parametrize('installed', [107], indirect=True)
 
 
 @pytest.fixture(autouse=True)
@@ -161,12 +161,32 @@ def test_publish_before_acknowledgement_failure_is_deduplicated_after_reopen(pai
         assert responses(reopened) == [response]
 
 
-def test_sql_writer_contention_after_publication_retains_intent_for_deduplicated_ack(pair):
+def test_sql_writer_contention_before_publication_retains_intent(pair):
     store, other = pair
     with group_roots.admission(store):
         album_feedback.set_feedback(other, 'first-release', 'more', 3, 'first-release')
     retained = pending(other)
     with atomic_write(store):
+        assert album_feedback.try_drain(other) == 0
+        assert pending(other) == retained
+        assert not responses(other)
+    assert album_feedback.drain(other) == 1
+    response, = responses(other)
+    assert not pending(other) and response['id'] == retained[0]['action_id']
+
+
+def test_sql_writer_contention_after_publication_retains_intent_for_deduplicated_ack(pair, monkeypatch):
+    store, other = pair
+    with group_roots.admission(store):
+        album_feedback.set_feedback(other, 'first-release', 'more', 3, 'first-release')
+    retained = pending(other)
+    acknowledge = other.album_feedback.acknowledge_response
+    with ExitStack() as writer, monkeypatch.context() as blocked:
+        def hold_writer(action_id):
+            assert responses(other)[0]['id'] == action_id
+            writer.enter_context(atomic_write(store))
+            return acknowledge(action_id)
+        blocked.setattr(other.album_feedback, 'acknowledge_response', hold_writer)
         assert album_feedback.try_drain(other) == 0
         assert pending(other) == retained
         response, = responses(other)
@@ -409,7 +429,7 @@ def test_serving_lock_retains_capture_without_inline_publication(pair):
 
 @pytest.mark.parametrize('boundary', ['response', 'acknowledgement'])
 def test_replay_does_not_wait_for_serving_lock_taken_after_snapshot(pair, monkeypatch, boundary):
-    from yt_playlist.rec import choice_evidence
+    from yt_playlist.controllers.choice_responses import ChoiceResponses
     store, other = pair
     with group_roots.admission(store):
         album_feedback.set_feedback(other, 'first-release', 'more', 3, 'first-release')
@@ -423,14 +443,14 @@ def test_replay_does_not_wait_for_serving_lock_taken_after_snapshot(pair, monkey
 
     with ThreadPoolExecutor(max_workers=2) as workers, monkeypatch.context() as controlled:
         if boundary == 'response':
-            operation = choice_evidence.respond
+            operation = ChoiceResponses.respond
 
             def respond(*args, **kwargs):
                 workers.submit(hold_serving_lock)
                 assert held.wait(2)
                 return operation(*args, **kwargs)
 
-            controlled.setattr(choice_evidence, 'respond', respond)
+            controlled.setattr(ChoiceResponses, 'respond', respond)
         else:
             from yt_playlist.repos import album_feedback as feedback_repo
             operation = feedback_repo.atomic_write
@@ -470,18 +490,36 @@ def test_replay_defers_late_serving_ownership_inside_actual_evidence_reads(pair,
             assert release.wait(5), 'Replay waited for a late evidence-read owner'
 
     with ThreadPoolExecutor(2) as workers, monkeypatch.context() as controlled:
-        name = 'mix_projection_facts' if boundary == 'projection' else 'evidence'
-        owner = other.rec_ledger.repository if boundary == 'projection' else other.rec_ledger
-        operation = getattr(owner, name)
-
-        def read(*args, **kwargs):
+        def held_read(operation, *args, **kwargs):
             calls.append(True)
-            if len(calls) == (2 if boundary == 'readback' else 1):
+            if len(calls) == 1:
                 owners.append(workers.submit(hold_serving_lock))
                 assert held.wait(2)
             return operation(*args, **kwargs)
 
-        controlled.setattr(owner, name, read)
+        if boundary == 'readback':
+            compose = album_feedback.feedback
+
+            def feedback(source):
+                command = compose(source)
+                operation = command.evidence
+
+                def readback(*args, **kwargs):
+                    # Hold at the actual acknowledgement read, after the
+                    # response file is durably visible, regardless of how many
+                    # evidence capabilities response construction acquires.
+                    assert len(responses(source)) == 1
+                    return held_read(operation, *args, **kwargs)
+
+                command.evidence = readback
+                return command
+
+            controlled.setattr(album_feedback, 'feedback', feedback)
+        else:
+            name = 'mix_projection_facts' if boundary == 'projection' else 'evidence'
+            owner = other.rec_ledger.repository if boundary == 'projection' else other.rec_ledger
+            operation = getattr(owner, name)
+            controlled.setattr(owner, name, lambda *args, **kwargs: held_read(operation, *args, **kwargs))
         replay = workers.submit(album_feedback.try_drain, other)
         try:
             assert held.wait(2)

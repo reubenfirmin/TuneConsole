@@ -1,5 +1,4 @@
-"""Installed settings fallbacks retain exact ranking dependencies during playback."""
-import json
+"""Installed ranking snapshots track their current normalized input owners."""
 from contextlib import ExitStack
 
 import pytest
@@ -10,7 +9,7 @@ from tests.prepared_fixture_support import assert_upgrade_phase, historical_temp
 from tests.rec.test_ranking_playback_publication import _seed_ranker_inputs, completed_policy
 from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core import genre_identity, radio_provenance
-from yt_playlist.rec import album_feedback_state, candidate_refresh, measurement, mode_surfaces, vibe_pools
+from yt_playlist.rec import album_feedback_state, candidate_refresh, measurement, mode_inputs, mode_surfaces, vibe_pools
 
 
 @pytest.fixture(autouse=True)
@@ -47,13 +46,13 @@ def installed_ranking_inputs(_bounded_installed_schema, tmp_path_factory):
         yield get
 
 
-@pytest.mark.parametrize('version', [93, 107])
+@pytest.mark.parametrize('version', [107])
 def test_installed_ranking_schema_input_keeps_history_and_private_snapshot_guards(
         _bounded_installed_schema, version):
     assert_upgrade_phase(_bounded_installed_schema(version), version)
 
 
-@pytest.mark.parametrize('version', [93, 107])
+@pytest.mark.parametrize('version', [107])
 def test_installed_ranking_input_keeps_admitted_models_membership_and_discovery(
         installed_ranking_inputs, version):
     from yt_playlist.rec import taste_modes
@@ -76,7 +75,7 @@ def installed_ranker(request, installed_ranking_inputs, tmp_path, monkeypatch):
             yield store, request.param
 
 
-@pytest.mark.parametrize('installed_ranker', [93, 107], indirect=True, ids=['93', '107'])
+@pytest.mark.parametrize('installed_ranker', [107], indirect=True)
 def test_real_installed_rankings_publish_after_listening_index_invalidation(installed_ranker, monkeypatch):
     store, version = installed_ranker
     # Completed models are lower inputs. Actual ranking, concurrent listening,
@@ -92,7 +91,7 @@ def test_real_installed_rankings_publish_after_listening_index_invalidation(inst
     # misses the settings deletion performed by the public listening write.
     store.settings.set_setting('trend_first_play_source', 'canonical_listening')
     store.settings.set_setting('trend_first_play_watermark', 'captured')
-    calculate = mode_surfaces._calculate_bundles
+    calculate = mode_inputs._calculate_bundles
     ranked = []
 
     def during_playback(reader, now, policies):
@@ -106,7 +105,7 @@ def test_real_installed_rankings_publish_after_listening_index_invalidation(inst
         ranked.append(result[0])
         return result
 
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', during_playback)
+    monkeypatch.setattr(mode_inputs, '_calculate_bundles', during_playback)
     result = mode_surfaces.prepare_bundles(store, 2000)
     assert result is ranked[0]
     assert result['all']['wheelhouse']
@@ -122,35 +121,35 @@ def read_setting_owner(store, key):
     return store.playlists.radio_playlist_ids()
 
 
-def setting_value(key, suffix):
+def change_owner(store, key, change, now):
     if key == 'album_feedback':
-        return json.dumps({'release-' + suffix: {'kind': 'more', 'at': 1000}})
-    if key == radio_provenance.KEYS[0]:
-        return json.dumps(['radio-' + suffix])
-    return 'radio-' + suffix
+        store.album_feedback.replace('release', 'clear' if change == 'delete' else
+                                     'known' if change == 'update' else 'more', now)
+    else:
+        with store.conn:
+            if change != 'insert':
+                store.conn.execute('DELETE FROM radio_playlist_origins')
+            if change != 'delete':
+                radio_provenance.remember(store.conn, 'radio-' + str(now))
 
 
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-@pytest.mark.parametrize('key', ['album_feedback', *radio_provenance.KEYS])
+@pytest.mark.parametrize('installed', [107], indirect=True)
+@pytest.mark.parametrize('key', ['album_feedback', 'radio_origins'])
 @pytest.mark.parametrize('change', ['insert', 'update', 'delete'])
-def test_installed_feedback_and_radio_fallbacks_reject_changed_inputs(installed, key, change):
+def test_installed_feedback_and_radio_owners_reject_changed_inputs(installed, key, change):
     store, _ = installed
     store.accounts.upsert_account('Main', 'main.json', None, True)
     if change != 'insert':
-        store.settings.set_setting(key, setting_value(key, 'before'))
+        change_owner(store, key, 'insert', 1000)
     with store.read_snapshot() as snapshot:
         read_setting_owner(snapshot.store, key)
-        if change == 'delete':
-            with store.conn:
-                store.conn.execute('DELETE FROM settings WHERE key=?', (key,))
-        else:
-            store.settings.set_setting(key, setting_value(key, 'after'))
+        change_owner(store, key, change, 1001)
         assert not snapshot.publish(lambda: pytest.fail('Published changed feedback or Radio origins'))
 
 
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-@pytest.mark.parametrize('key', ['album_feedback', radio_provenance.KEYS[0]])
-def test_installed_fallback_readers_ignore_unrelated_index_settings(installed, key):
+@pytest.mark.parametrize('installed', [107], indirect=True)
+@pytest.mark.parametrize('key', ['album_feedback', 'radio_origins'])
+def test_installed_owner_readers_ignore_unrelated_index_settings(installed, key):
     store, _ = installed
     store.accounts.upsert_account('Main', 'main.json', None, True)
     store.settings.set_setting('trend_first_play_source', 'canonical_listening')

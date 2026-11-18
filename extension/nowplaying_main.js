@@ -5,7 +5,7 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 14; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 15; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
   if (previous && previous.version === SENSOR_VERSION && Number.isSafeInteger(previous.revision) &&
       previous.revision >= SENSOR_REVISION && !previous.stopped &&
@@ -70,6 +70,29 @@
             }
           }
         }
+      }
+    } catch (e) {}
+    // Native queue wrappers retain the planned upload while their counterpart
+    // plays. Correlate the selected item with this exact player, never the page
+    // URL or a guessed title, and keep playlist positions from its endpoint.
+    try {
+      var queueHost = document.querySelector('ytmusic-player-queue');
+      var queue = queueHost && (queueHost.queue || queueHost.polymerController?.queue);
+      var state = queue?.store?.store?.getState?.()?.queue;
+      var index = state?.selectedItemIndex;
+      var entry = Number.isSafeInteger(index) && index >= 0 ? state?.items?.[index] : null;
+      var wrapper = entry?.playlistPanelVideoWrapperRenderer;
+      var primary = entry?.playlistPanelVideoRenderer || wrapper?.primaryRenderer?.playlistPanelVideoRenderer;
+      var counterparts = wrapper?.counterpart || [];
+      var correlated = primary?.videoId === info.videoId || counterparts.some(function (item) {
+        return item?.counterpartRenderer?.playlistPanelVideoRenderer?.videoId === info.videoId;
+      });
+      var endpoint = primary?.navigationEndpoint?.watchEndpoint;
+      var current = player && player.getVideoData && player.getVideoData();
+      if (info.videoId && info.playlist && correlated && endpoint?.playlistId === info.playlist &&
+          current?.video_id === info.videoId && player.getPlaylistId() === info.playlist) {
+        info.queueItem = {videoId: primary.videoId, playlist: info.playlist};
+        if (Number.isSafeInteger(endpoint.index) && endpoint.index >= 0) info.queueItem.index = endpoint.index;
       }
     } catch (e) {}
     return info;
@@ -301,7 +324,7 @@
                            __tcNow: { title: meta.title, artist: meta.artist, thumbnail: meta.thumbnail,
                                       metadataVerified: meta.verified,
                                       videoVerified: !!info.videoId,
-                                      videoId: info.videoId, playlist: info.playlist,
+                                      videoId: info.videoId, playlist: info.playlist, queueItem: info.queueItem,
                                       // Each presence heartbeat anchors the app's local progress clock.
                                       position: info.position, duration: info.duration,
                                       playerBar: bar,

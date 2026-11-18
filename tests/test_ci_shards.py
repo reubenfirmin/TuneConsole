@@ -81,6 +81,19 @@ def test_invalid_source_identity_is_rejected(source):
         partition(['one.py::test_case'], {'one.py': {'seconds': 1, 'cases': 1, 'source_shard': source}})
 
 
+def test_large_file_gets_room_in_the_total_shard_load():
+    timings = {'large.py': {'seconds': 6, 'cases': 1, 'source_shard': 1},
+               'small.py': {'seconds': 2, 'cases': 1, 'source_shard': 1}}
+    timings.update({f'other-{i}.py': {'seconds': 4, 'cases': 1, 'source_shard': 2} for i in range(4)})
+    nodes = [f'{name}::test_case' for name in timings]
+
+    owners, loads = partition(nodes, timings, 2)
+
+    assert loads == [12, 12]
+    assert set(owners) == set(timings)
+    assert (owners, loads) == partition(list(reversed(nodes)), timings, 2)
+
+
 def test_source_balance_keeps_new_files_and_legacy_measurements(tmp_path, monkeypatch):
     timings = {'a.py': {'seconds': 8, 'cases': 2, 'source_shard': 1},
                'b.py': {'seconds': 4, 'cases': 2, 'source_shard': 2},
@@ -246,25 +259,27 @@ def test_baseline_refresh_retains_eight_unit_and_four_browser_receipts():
 
 
 @pytest.mark.parametrize("total", [1, 2, 4])
-def test_browser_budget_counts_all_runners_and_is_independent_of_case_count(total):
+def test_passing_browser_shards_retain_timings_for_long_runs(total):
     rows = reports(total, [f"file-{n}.py::test_case" for n in range(8)])
+    elapsed = 1440 / total
     for row in rows:
-        row.update(suite="browser", elapsed_seconds=1200 / total)
-    assert verify(rows, "browser", total)["test_runner_minutes"] == 20
-    rows[-1]["elapsed_seconds"] += .001
-    with pytest.raises(ValueError, match="aggregate.*1200s total budget"):
-        verify(rows, "browser", total)
-    for row in rows:
-        row["suite"] = "unit"
-    assert verify(rows, "unit", total)["test_runner_minutes"] > 20
+        row.update(suite="browser", elapsed_seconds=elapsed)
+    result = verify(rows, "browser", total)
+    assert result["cases"] == 8
+    assert result["shard_seconds"] == [elapsed] * total
+    assert result["test_runner_minutes"] == 24
+    assert result["files"]["file-0.py"] == {"seconds": pytest.approx(.3), "cases": 1}
 
 
+@pytest.mark.parametrize("suite", ["unit", "browser"])
 @pytest.mark.parametrize("elapsed", [None, "300", float("nan"), float("inf"), -1])
-def test_invalid_process_timings_cannot_establish_the_budget(elapsed):
+def test_invalid_process_timings_reject_coverage(elapsed, suite):
     rows = reports()
+    for row in rows:
+        row["suite"] = suite
     rows[0]["elapsed_seconds"] = elapsed
     with pytest.raises(ValueError, match="invalid elapsed time"):
-        verify(rows, "unit")
+        verify(rows, suite)
 
 
 def test_serial_control_requires_explicit_total_and_has_identical_case_coverage():
@@ -281,9 +296,12 @@ def test_serial_control_requires_explicit_total_and_has_identical_case_coverage(
     assert result["case_digest"] == verify(rows, "unit")["case_digest"]
 
 
+@pytest.mark.parametrize("suite", ["unit", "browser"])
 @pytest.mark.parametrize("fault", ["missing", "duplicate", "repeated-case", "repeated-phase", "revision", "collection", "interrupted", "failed-phase", "missing-call", "failed", "absent-shard"])
-def test_missing_duplicate_or_incomplete_work_cannot_pass(fault):
+def test_missing_duplicate_or_incomplete_work_cannot_pass(fault, suite):
     rows = deepcopy(reports())
+    for row in rows:
+        row["suite"] = suite
     if fault == "missing":
         rows[0]["tests"].pop(next(iter(rows[0]["tests"])))
     elif fault == "duplicate":
@@ -308,7 +326,7 @@ def test_missing_duplicate_or_incomplete_work_cannot_pass(fault):
     else:
         rows.pop()
     with pytest.raises(ValueError):
-        verify(rows, "unit")
+        verify(rows, suite)
 
 
 def test_intentional_setup_skips_are_retained_as_completed_cases():
@@ -328,7 +346,7 @@ def diagnostic_reports():
     return rows + browser
 
 
-def test_failed_complete_receipts_refresh_estimates_without_accepting_coverage_or_browser_budget():
+def test_failed_complete_receipts_refresh_estimates_without_accepting_failed_coverage():
     rows = diagnostic_reports()
     node = rows[0]['executions'][0]
     rows[0]['tests'][node]['call']['outcome'] = 'failed'
@@ -340,8 +358,7 @@ def test_failed_complete_receipts_refresh_estimates_without_accepting_coverage_o
     assert result['measurements']['unit']['case_digest'] == verify(reports(), 'unit')['case_digest']
     with pytest.raises(ValueError, match='did not pass'):
         verify(rows[:2], 'unit')
-    with pytest.raises(ValueError, match='1200s total budget'):
-        verify(rows[2:], 'browser')
+    assert verify(rows[2:], 'browser')['shard_seconds'] == [700, 700]
 
 
 @pytest.mark.parametrize('fault', ['missing', 'duplicate', 'repeated-phase', 'active', 'journal',
@@ -514,7 +531,7 @@ def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypat
             verify([pending], 'unit', total=1)
         shard.pytest_sessionfinish(None, 0)
         # Losing the process during remaining pytest cleanup must not certify
-        # the pre-cleanup finish record as complete elapsed/budget evidence.
+        # the pre-cleanup finish record as complete timing evidence.
         unfinished = load_report(shard.path)
         assert unfinished['journal_incomplete'] and 'exitstatus' not in unfinished
         with pytest.raises(ValueError, match='did not pass'):
@@ -592,7 +609,7 @@ def test_failed_terminal_sync_cannot_certify_a_passing_shard(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize('terminal_cost', ['sync', 'report', 'source', 'cleanup'])
-def test_terminal_work_is_in_recovered_elapsed_time_and_can_exceed_browser_budget(tmp_path, terminal_cost):
+def test_terminal_work_is_in_recovered_browser_elapsed_time(tmp_path, terminal_cost):
     # Run the actual pytest lifecycle with real journal I/O. Only the clock is
     # controlled: each selected terminal operation accounts for twenty seconds.
     (tmp_path / 'pytest.ini').write_text('[pytest]\n')
@@ -636,15 +653,10 @@ def test_clock():
     assert result.returncode == 0, result.stdout + result.stderr
     recovered = load_report(report)
     assert recovered['elapsed_seconds'] == 1210
-    # CPU timing is diagnostic only: it cannot replace charged wall time or
-    # turn an over-budget browser run into a passing receipt.
     assert recovered['process_cpu_seconds'] > 0
     assert recovered['runtime']['python'] == '.'.join(map(str, sys.version_info[:3]))
     assert recovered['runtime']['cpu_count'] == os.cpu_count()
-    with pytest.raises(ValueError, match='aggregate.*1200s total budget'):
-        verify([recovered], 'browser', total=1)
-    recovered['suite'] = 'unit'
-    measured = verify([recovered], 'unit', total=1)
+    measured = verify([recovered], 'browser', total=1)
     assert measured['shard_seconds'] == [1210]
     assert measured['test_runner_minutes'] == pytest.approx(1210 / 60)
 

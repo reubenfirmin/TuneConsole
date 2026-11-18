@@ -5,10 +5,11 @@ import os
 from pathlib import Path
 import tempfile
 from itertools import zip_longest
+from urllib.parse import quote
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
-from . import fao
+from . import fao, file_collection
 
 MAX_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -33,26 +34,56 @@ class SampleFiles:
     def __init__(self, root):
         self.root = root
 
+    def retained(self):
+        return file_collection.retained_reader(self.root)
+
     def read(self, reference):
         return read(reference['filename'], expected={name: reference[name]
-                    for name in ('id', 'run_id', 'point', 'video_id')})
+                    for name in ('id', 'run_id', 'point', 'video_id')},
+                    digest=reference.get('content_digest'))
 
-    def matches(self, filename, sample):
-        return Path(filename).stem == hashlib.sha256(canonical(sample)).hexdigest()
+    def reference(self, sample):
+        encoded = _capture_bytes(sample)
+        return dict(filename=str(_record_path(self.root, sample['id'])),
+                    content_digest=hashlib.sha256(encoded).hexdigest())
 
-    def write(self, sample):
-        return publish(self.root, sample)
+    def matches_reference(self, reference, sample):
+        digest = reference.get('content_digest') or Path(reference['filename']).stem
+        return digest == hashlib.sha256(_capture_bytes(sample)).hexdigest()
 
-    def repair(self, filename, sample):
-        return publish(Path(filename).parent.parent, sample)
-
+    def publish_reserved(self, reference, sample):
+        encoded = _capture_bytes(sample)
+        if not self.matches_reference(reference, sample):
+            raise ValueError('Sample file does not match its reserved content')
+        fao.write(reference['filename'], fao.Content(encoded, max_bytes=MAX_BYTES))
 
 def publish(root, sample):
-    """Fsync before returning a filename; retries cannot replace existing evidence."""
+    """Retain the historical conversion writer and portable backup format."""
+    encoded = _capture_bytes(sample)
+    return _publish(root, encoded)
+
+
+def _capture_bytes(sample):
     encoded = canonical(sample)
     if len(encoded) > MAX_BYTES:
         raise ValueError('Sample file exceeds the input byte budget')
-    return _publish(root, encoded)
+    return encoded
+
+
+def _record_path(root, sample_id):
+    if not isinstance(sample_id, str):
+        raise ValueError('Invalid sample file identity')
+    identity = quote(sample_id, safe='').replace('.', '%2E')
+    if not identity or len(identity) > 240:
+        raise ValueError('Invalid sample file identity')
+    shard = sample_id.encode('utf-8')[:1].hex()
+    return Path(root) / 'by-id' / shard / (identity + '.json')
+
+
+def _publish_record(root, sample_id, encoded, *, age=None):
+    path = _record_path(root, sample_id)
+    fao.write(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
+    return str(path)
 
 
 def _publish(root, encoded, *, age=None):
@@ -64,15 +95,16 @@ def _publish(root, encoded, *, age=None):
     return str(path)
 
 
-def _encoded(filename, *, max_bytes=MAX_BYTES, with_age=False):
-    """Bound external input and verify the immutable content address on every read."""
+def _encoded(filename, *, max_bytes=MAX_BYTES, with_age=False, digest=None):
+    """Verify bounded bytes and retained checksums, including old hash names."""
     path = Path(filename)
     with fao.read(path) as stream:
         encoded = stream.read(max_bytes + 1)
         age = stream.info
     if len(encoded) > max_bytes:
         raise ValueError('Sample file exceeds the input byte budget')
-    if path.stem != hashlib.sha256(encoded).hexdigest():
+    required = digest or (path.stem if 'by-id' not in path.parts else None)
+    if required is not None and required != hashlib.sha256(encoded).hexdigest():
         raise ValueError('Sample file does not match its content hash')
     return (encoded, age) if with_age else encoded
 
@@ -84,9 +116,14 @@ def _sample(encoded, expected):
     return sample
 
 
-def read(filename, *, expected=None, max_bytes=MAX_BYTES):
+def read(filename, *, expected=None, max_bytes=MAX_BYTES, digest=None):
     """Bound external input and verify bytes and collection identity on every read."""
-    return _sample(_encoded(filename, max_bytes=max_bytes), expected)
+    sample = _sample(_encoded(filename, max_bytes=max_bytes, digest=digest), expected)
+    path = Path(filename)
+    if 'by-id' in path.parts and (not isinstance(sample.get('id'), str)
+                                 or quote(sample['id'], safe='').replace('.', '%2E') != path.stem):
+        raise ValueError('Sample file does not match its collection identity')
+    return sample
 
 
 def _identity(row):
@@ -98,6 +135,15 @@ def _manifest(root, document):
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise ValueError('Sample backup manifest exceeds the input byte budget')
     return _publish(root, encoded)
+
+
+def _references(conn):
+    columns = {row[1] for row in conn.execute('PRAGMA main.table_info(sample_attributes)')}
+    native = 'file_status' in columns
+    extra = ',content_digest,file_status' if native else ",NULL,'ready'"
+    query = REFERENCES.replace(' FROM sample_attributes', extra + ' FROM sample_attributes')
+    for row in conn.execute(query):
+        yield tuple(row[:7]), row[7], row[8]
 
 
 def export(conn, root):
@@ -115,12 +161,21 @@ def export(conn, root):
         if len(chunks) * 67 > MAX_MANIFEST_BYTES - 128:
             raise ValueError('Sample backup manifest exceeds the input byte budget')
         entries.clear()
-    for row in conn.execute(REFERENCES):
+    for row, digest, status in _references(conn):
         check_cancellable_work()
-        encoded, age = _encoded(row[-1], with_age=True)
-        _sample(encoded, _identity(row))
-        filename = _publish(root, encoded, age=age)
-        entries.append({'identity': list(row[:-1]), 'digest': Path(filename).stem})
+        present = True
+        try:
+            encoded, age = _encoded(row[-1], digest=digest, with_age=True)
+        except FileNotFoundError:
+            if status != 'pending':
+                raise
+            present = False
+        if present:
+            _sample(encoded, _identity(row))
+            filename = _publish(root, encoded, age=age)
+            digest = Path(filename).stem
+        entries.append({'identity': list(row[:-1]), 'digest': digest,
+                        'file_status': status, 'present': present})
         if len(entries) == 256:
             flush()
     if entries:
@@ -161,19 +216,34 @@ def restore(conn, manifest, *, memory_key=None):
     conn.execute('BEGIN IMMEDIATE')
     try:
         with coordinate_updates(conn, ['sample_attributes']):
-            for row, entry in zip_longest(conn.execute(REFERENCES), _entries(manifest)):
+            native = 'file_status' in {row[1] for row in conn.execute('PRAGMA main.table_info(sample_attributes)')}
+            for reference, entry in zip_longest(_references(conn), _entries(manifest)):
                 check_cancellable_work()
+                row, original_digest, status = reference if reference is not None else (None, None, None)
                 if row is None or not isinstance(entry, dict) or entry.get('identity') != list(row[:-1]):
                     raise ValueError('Sample backup does not match the restored database')
                 digest = entry.get('digest')
                 if (not isinstance(digest, str) or len(digest) != 64
                         or any(c not in '0123456789abcdef' for c in digest)
-                        or digest != Path(row[-1]).stem):
+                        or digest != (original_digest or Path(row[-1]).stem)
+                        or entry.get('file_status', 'ready') != status
+                        or type(entry.get('present', True)) is not bool):
                     raise ValueError('Sample backup identity mismatch')
+                if not entry.get('present', True):
+                    if status != 'pending':
+                        raise ValueError('Sample backup lacks completed evidence')
+                    filename = str(_record_path(destination, row[0]))
+                    conn.execute('UPDATE sample_attributes SET filename=? WHERE id=?', (filename, row[0]))
+                    continue
                 encoded, age = _encoded(root / digest[:2] / (digest + '.json'), with_age=True)
                 _sample(encoded, _identity(row))
-                filename = _publish(destination, encoded, age=age)
-                conn.execute('UPDATE sample_attributes SET filename=? WHERE id=?', (filename, row[0]))
+                filename = (_publish_record(destination, row[0], encoded, age=age) if native else
+                            _publish(destination, encoded, age=age))
+                if native:
+                    conn.execute('UPDATE sample_attributes SET filename=?,content_digest=? WHERE id=?',
+                                 (filename, digest, row[0]))
+                else:
+                    conn.execute('UPDATE sample_attributes SET filename=? WHERE id=?', (filename, row[0]))
         conn.commit()
     except BaseException:
         conn.rollback()

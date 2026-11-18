@@ -2,20 +2,20 @@
 import asyncio
 import threading
 
-from yt_playlist.core.activity import activity_for, cancellable_work, check_stopping
+from yt_playlist.core.activity import cancellable_work, check_stopping
 from yt_playlist.core.numerics import limit_native_threads
 
 
 class ClusterScans:
-    def __init__(self, ctx):
-        self.ctx = ctx
+    def __init__(self, work, snapshot):
+        self.work, self.snapshot = work, snapshot
         self.gate = asyncio.Semaphore(1)
 
     async def run(self, calculate, body, publish=None):
         # Wait without occupying executor threads or allocating another matrix.
         await self.gate.acquire()
         cancelled = threading.Event()
-        task = asyncio.create_task(activity_for(self.ctx).to_thread(
+        task = asyncio.create_task(self.work.to_thread(
             self._calculate, calculate, body, publish, cancelled))
         try:
             return await asyncio.shield(task)
@@ -34,7 +34,7 @@ class ClusterScans:
     def _calculate(self, calculate, body, publish, cancelled):
         limit_native_threads()
         with cancellable_work(cancelled.is_set):
-            with self.ctx.store.read_snapshot() as snapshot:
+            with self.snapshot() as snapshot:
                 payload, details = calculate(snapshot.store, body)
                 check_stopping()
             if publish is not None:

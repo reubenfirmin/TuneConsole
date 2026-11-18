@@ -194,7 +194,12 @@ def expand_spaces(collab: VectorSpace, content: VectorSpace, pos_keys, neg_keys=
 
 def connection_geometry(store, key, path_keys, exclude=()):
     """Child/path cosine and the modeled track bridging both ends of a cluster edge."""
-    keys, V, idx = vectors.load_vectors(store)
+    return geometry(vectors.load_vectors(store), key, path_keys, exclude)
+
+
+def geometry(space: VectorSpace, key, path_keys, exclude=()):
+    """Child/path cosine and bridge from one captured vector generation."""
+    keys, V, idx = space
     if V is None or key not in idx:
         return {"score": None, "bridge": None}
     pi = [idx[k] for k in path_keys if k in idx and k != key]

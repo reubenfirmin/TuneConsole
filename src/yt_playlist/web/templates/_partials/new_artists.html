@@ -10,8 +10,9 @@
 <p class="section-note">Artists connected to the music you save, play, and revisit.</p>
 <div class="tile-grid" id="new-artist-grid">
   {% for a in artists %}
+  {% set links = artist_links(a) %}
   {{ tile('artist', a.thumbnail, a.artist, none,
-          "/artist?name=" ~ a.artist|urlencode ~ ("&artist_id=" ~ a.artist_id if a.artist_id else ""),
+          links[0].href if links else none,
           discovery_id=('@artist:' ~ a.artist_id) if a.artist_id else a.artist, badge=false) }}
   {% endfor %}
 </div>

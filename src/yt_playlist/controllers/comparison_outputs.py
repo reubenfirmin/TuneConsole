@@ -22,7 +22,12 @@ class ComparisonOutputs:
         prepared, inputs = model_projections.prepare_output(surface, json.loads(raw), at, input_revision=input_revision)
         with self.files.retained():
             roots = self.groups.prepare_references(surface, prepared.value, at)
-            durable = [self.files.publish(part) for part in prepared.parts]
+            durable, file_ids = [], []
+            for position, part in enumerate(prepared.parts):
+                integrity = self.files.describe(part)
+                identity = self.repository.reserve_file(surface, str(position), integrity)
+                durable.append(self.files.publish_reserved(identity, part, expected=integrity))
+                file_ids.append(identity)
             generation = None
             if inputs is not None:
                 bundle, options = inputs
@@ -32,7 +37,7 @@ class ComparisonOutputs:
                 publications.stage(plan, build)
                 publications.publish(build, plan.created_at)
                 generation = build.generation_id
-            return self.repository.publish(prepared, durable, generation, roots)
+            return self.repository.publish(prepared, durable, generation, roots, file_ids=file_ids)
 
     def present(self, surface):
         return self.repository.present(*model_projections.address(surface))

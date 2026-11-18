@@ -9,14 +9,14 @@ Search requires a personal token via $DISCOGS_TOKEN or `discogs_token` in config
 Linked master/release facts remain publicly readable without a token.
 """
 import logging
-import re
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
-from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.integrations.base import CredentialedAccessState, IntegrationUnavailable
+from yt_playlist.controllers.access_configuration import AccessConfiguration, resolve
 from yt_playlist.integrations.discogs import DiscogsIAO, TIMEOUT_S
 from yt_playlist.providers import descriptive_tags, genres
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.util import net
-from yt_playlist.util.matching import normalize, recording_title
+from yt_playlist.util.matching import artist_key, recording_title
 
 name = "discogs"
 
@@ -26,12 +26,15 @@ _iao = DiscogsIAO()
 
 
 def access(store=None):
-    return _iao.context(store)
+    source = AccessConfiguration(getattr(store, 'settings', None)).credential_source('DISCOGS_TOKEN', 'discogs_token')
+    return _iao.context(CredentialedAccessState.for_store(store, source))
 
 
 def token(store=None, config_path=None):
     """Optional Discogs token: $DISCOGS_TOKEN, then the settings table, then config.toml."""
-    return _iao.token(store, config_path=config_path)
+    if store is None and config_path is None and _iao._scope.get() is not None:
+        return _iao.token()
+    return resolve(env_name='DISCOGS_TOKEN', setting_name='discogs_token', store=store, config_path=config_path)
 
 
 def available(store=None) -> bool:
@@ -43,13 +46,18 @@ def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
 
 
-def probe(track, store=None, tok=None) -> EnrichmentResult:
+def probe(track, store=None, tok=None, *, matcher=None) -> EnrichmentResult:
     """Read-only lookup: genre & year from Discogs releases."""
     tok = tok or token(store)
+    if matcher is None and store is not None and tok:
+        matcher = genres.snapshot(store)
     observations = []
+    credits = []
     with access(store):
-        genre, year = enrich(track["title"], track["artist"], tok, observations=observations)
+        genre, year = enrich(track["title"], track["artist"], tok, observations=observations, matcher=matcher, credits=credits)
     fields = {}
+    if credits:
+        fields['artist_credits'] = credits
     if genre:
         fields["genre"] = genre
     if year:
@@ -93,60 +101,53 @@ def _record_failure(exc):
         net.record_probe_failure(exc)
 
 
-def _artist_key(artist):
-    # Discogs disambiguates artists as e.g. "Automatic (4)"; the suffix is not part of their name.
-    return normalize(re.sub(r"\s+\(\d+\)", "", artist or ""))
-
-
-def _matches_release(result, title, artist, tok):
+def _matches_release(result, title, artist, *, release=None):
     """Discogs searches all release text, so even highly ranked hits can be unrelated records."""
     result_artist, separator, result_title = (result.get("title") or "").partition(" - ")
-    wanted_artist = _artist_key(artist)
+    wanted_artist = artist_key(artist)
     wanted_title = recording_title(title)
     if not separator or not wanted_artist or not wanted_title:
         return False
-    same_artist = _artist_key(result_artist) == wanted_artist
+    same_artist = artist_key(result_artist) == wanted_artist
     if same_artist and recording_title(result_title) == wanted_title:
         return True
     # Album search hits can be legitimate, but must actually contain this artist's track.
     # Only inspect plausible albums/compilations; an unrelated artist's record needs no lookup.
-    release_id = result.get("id")
-    if not release_id or not (same_artist or _artist_key(result_artist) == "various"):
-        return False
-    try:
-        release = release_details(int(release_id), tok=tok) or {}
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as e:  # noqa: BLE001
-        _record_failure(e)
-        logger.debug("Discogs release lookup failed for %s: %s", release_id, e)
+    if not release or not needs_tracklist(result, title, artist):
         return False
     return _has_track(release.get("tracklist") or [], release.get("artists") or [],
                       wanted_title, wanted_artist)
+
+
+def needs_tracklist(result, title, artist):
+    result_artist, separator, _ = (result.get('title') or '').partition(' - ')
+    return bool(separator and result.get('id') and artist_key(artist) and recording_title(title)
+                and artist_key(result_artist) in (artist_key(artist), 'various'))
 
 
 def _has_track(tracklist, artists, wanted_title, wanted_artist):
     for track in tracklist:
         credits = track.get("artists") or artists
         if (track.get("type_") != "heading" and recording_title(track.get("title")) == wanted_title
-                and any(_artist_key(a.get("name")) == wanted_artist for a in credits)):
+                and wanted_artist in {*(artist_key(a.get('name')) for a in credits),
+                    artist_key(''.join((a.get('anv') or a.get('name') or '') + (a.get('join') or '') for a in credits))}):
             return True
         if _has_track(track.get("sub_tracks") or [], credits, wanted_title, wanted_artist):
             return True
     return False
 
 
-def enrich(title, artist, tok=None, *, observations=None):
+def enrich(title, artist, tok=None, *, observations=None, matcher=None, credits=None):
     """Return (genre, year) from Discogs, or (None, None). Either may be None."""
-    query = " ".join(x for x in (artist, title) if x).strip()
-    try:
-        results = [r for r in _search(query, tok) if _matches_release(r, title, artist, tok)]
-    except (WorkClosing, WorkBudgetExceeded):
-        raise
-    except Exception as e:  # noqa: BLE001
-        _record_failure(e)
-        logger.warning("Discogs search failed for %r / %r: %s", title, artist, e)
-        return (None, None)
+    from yt_playlist.controllers.provider_acquisition import discogs_enrich
+    from types import SimpleNamespace
+    policy = SimpleNamespace(_matches_release=_matches_release, needs_tracklist=needs_tracklist,
+        _record_failure=_record_failure, project=project, logger=logger)
+    return discogs_enrich(policy, _search, release_details, title, artist, tok,
+                          observations=observations, matcher=matcher, credits=credits)
+
+
+def project(results, title, artist, *, observations=None, matcher=None):
     genre = None
     for result in results:
         tags = [{'name': value, 'kind': field} for field in ('style', 'genre')
@@ -156,7 +157,7 @@ def enrich(title, artist, tok=None, *, observations=None):
             match_evidence={'method': 'matched_release_or_tracklist',
                             'input_title': title, 'input_artist': artist, 'release_title': result.get('title')})
     for r in results:                          # first match whose style/genre is a known genre
-        genre = genres.pick_genre((r.get("style") or []) + (r.get("genre") or []))
+        genre = genres.pick_genre((r.get("style") or []) + (r.get("genre") or []), matcher)
         if genre:
             break
     years = [int(str(r.get("year"))) for r in results

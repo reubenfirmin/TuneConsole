@@ -79,7 +79,7 @@ class RecommendationImport:
             self.repository.attach_pool(build.generation_id, slot, installed[prepared.content_digest])
         for output in plan.outputs:
             check_cancellable_work()
-            file = self.files.publish(output.encoded)
+            file = self.files.publish_original(output.encoded)
             self.repository.record_output(plan, build.generation_id, output, file)
         self.repository.ready(plan, build.generation_id)
         if before_publish is not None:

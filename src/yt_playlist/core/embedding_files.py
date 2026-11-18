@@ -2,9 +2,13 @@
 from yt_playlist.core import file_paths
 import hashlib
 import struct
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from . import fao, file_collection
+from .embedding_paths import record_path, record_id
+from yt_playlist.repos.embedding_file_writes import head_definition
+from yt_playlist.repos.embedding_file_references import legacy_relation, publish_prepared
 
 MAX_ROWS = 128
 MAX_BYTES = 8 * 1024 * 1024
@@ -22,19 +26,45 @@ class EmbeddingFiles:
     def read_many(self, kind, rows):
         return _load_many(self.root, kind, rows)
 
-    def write(self, kind, dimensions, rows):
+    def write_legacy(self, kind, dimensions, rows):
         return _prepare(self.root, kind, dimensions, rows)
+
+    def describe(self, kind, dimensions, rows):
+        if kind not in ('recording', 'artist'):
+            raise ValueError('Invalid embedding file kind')
+        return [dict(kind=kind, dimensions=dimensions, digest=hashlib.sha256(raw).digest(),
+                     size=len(raw), raw=raw, rows=batch)
+                for batch, raw in _encoded(dimensions, rows)]
+
+    def write_reserved(self, records):
+        result = []
+        with self.retained(), ExitStack() as retained:
+            for record in records:
+                encoded = list(_encoded(record['dimensions'], record['rows']))
+                if (len(encoded) != 1 or encoded[0][1] != record['raw']
+                        or len(record['raw']) != record['size']
+                        or hashlib.sha256(record['raw']).digest() != record['digest']):
+                    raise ValueError('Embedding bytes changed after reservation')
+                path = self.root / record_path(record['kind'], record['file_id'])
+                pending = retained.enter_context(fao.prepare(path, fao.Content(record['raw'], max_bytes=MAX_BYTES)))
+                pending.publish()
+                for position, (subject, vector, built, order) in enumerate(record['rows']):
+                    result.append((subject, record['dimensions'], record['digest'], position, order, built,
+                                   record['file_id']))
+        return tuple(result)
+
+    def garbage(self, before, *, limit=16):
+        return _garbage(self, before, limit=limit)
+
+    @staticmethod
+    def remove(path, info):
+        return fao.delete(path, expected=info.identity, missing_ok=True)
 
 
 def definitions():
-    for kind, spaces in (('recording', "'collaborative','content_library','content_discovery'"),
-                         ('artist', "'collaborative','content'")):
+    for kind in ('recording', 'artist'):
         table = kind + '_embedding_files'
-        yield table, (f'CREATE TABLE {table} ({kind}_id INTEGER NOT NULL REFERENCES {kind}s(id),'
-            f'space TEXT NOT NULL CHECK(space IN ({spaces})),model_version TEXT NOT NULL CHECK(length(model_version)>0),'
-            "dimensions INTEGER NOT NULL CHECK(typeof(dimensions)='integer' AND dimensions>0),publication BLOB NOT NULL CHECK(length(publication)=32),"
-            'position INTEGER NOT NULL CHECK(position>=0 AND position<128),insertion_order INTEGER NOT NULL CHECK(insertion_order>0),'
-            f"built_at REAL CHECK(built_at IS NULL OR (typeof(built_at) IN ('real','integer') AND abs(built_at)<=1.7976931348623157e308)),PRIMARY KEY({kind}_id,space,model_version))")
+        yield table, head_definition(kind)
         yield 'ix_' + table + '_space', f'CREATE INDEX ix_{table}_space ON {table}(space,model_version,{kind}_id)'
         for operation in ('insert', 'update'):
             name = kind+'_embedding_plain_'+operation
@@ -80,6 +110,9 @@ def validate(conn):
     actual = read_definitions(conn, (name for name, _ in expected))
     for name, sql in expected:
         sql = replacements.get(name,sql)
+        if name in ('recording_embedding_files', 'artist_embedding_files') and 'file_id' in _tokens(actual.get(name) or ''):
+            from yt_playlist.repos.embedding_file_writes import native_definition
+            sql = native_definition(sql)
         if actual.get(name) is None or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible embedding file owner: ' + name)
 
@@ -188,27 +221,26 @@ def directory(conn):
 
 def relative(kind, publication):
     from pathlib import Path
+    if isinstance(publication, tuple) and len(publication) == 2:
+        digest, identity = publication
+        if not isinstance(digest, bytes) or len(digest) != 32:
+            raise ValueError('Invalid embedding integrity digest')
+        return record_path(kind, identity)
     if kind not in ('recording', 'artist') or not isinstance(publication, bytes) or len(publication) != 32:
         raise ValueError('Invalid embedding publication')
     digest = publication.hex()
     return Path(kind, digest[:2], digest + '.bin')
 
 
-def legacy_relation(conn, kind):
-    table = kind+'_embeddings'
-    if ordered_legacy(conn):
-        return (f'(SELECT e.*,coalesce(o.insertion_order,e.rowid) AS insertion_order FROM {table} e '
-                f'LEFT JOIN {kind}_embedding_legacy_order o ON o.row_id=e.rowid)')
-    return f'(SELECT *,rowid AS insertion_order FROM {table})'
-
-
 def relation(conn, kind):
     """Metadata-only logical owner; never reads files to count or join subjects."""
     table = legacy_relation(conn,kind)
     if not available(conn):
-        return f'(SELECT *,NULL AS publication,NULL AS position FROM {table})'
-    return (f'(SELECT *,NULL AS publication,NULL AS position FROM {table} UNION ALL '
-        f'SELECT {kind}_id,space,model_version,dimensions,NULL AS vector,built_at,insertion_order,publication,position '
+        return f'(SELECT *,NULL AS publication,NULL AS position,NULL AS file_id FROM {table})'
+    from yt_playlist.repos.embedding_file_writes import native
+    identity = 'file_id' if native(conn) else 'NULL AS file_id'
+    return (f'(SELECT *,NULL AS publication,NULL AS position,NULL AS file_id FROM {table} UNION ALL '
+        f'SELECT {kind}_id,space,model_version,dimensions,NULL AS vector,built_at,insertion_order,publication,position,{identity} '
         f'FROM {kind}_embedding_files)')
 
 
@@ -225,8 +257,9 @@ def _load_many(root, kind, rows):
             chunks.setdefault(publication, []).append((len(result)-1, dimensions, position))
     for publication, positions in chunks.items():
         path = root / relative(kind, publication)
+        digest = publication[0] if isinstance(publication, tuple) else publication
         raw = fao.read(path, max_bytes=MAX_BYTES).bytes
-        if hashlib.sha256(raw).digest() != publication or len(raw) < HEADER.size:
+        if hashlib.sha256(raw).digest() != digest or len(raw) < HEADER.size:
             raise fao.CorruptFile('Embedding chunk differs from its publication')
         magic, count, dimensions = HEADER.unpack(raw[:HEADER.size])
         if magic != MAGIC or not 0 < count <= MAX_ROWS or len(raw) != HEADER.size + count * dimensions * 4:
@@ -243,39 +276,28 @@ def prepare(conn, kind, dimensions, rows):
     return _prepare(directory(conn), kind, dimensions, rows)
 
 
-def _prepare(root, kind, dimensions, rows):
-    """Write immutable chunks while the caller holds its retained-reader fence.
-
-    Return SQL metadata only. A rejected snapshot leaves collectible orphan
-    chunks and never changes the previous serving references.
-    """
+def _encoded(dimensions, rows):
     rows = list(rows)
     if type(dimensions) is not int or not 0 < dimensions <= (MAX_BYTES-HEADER.size)//4:
         raise ValueError('Embedding dimensions exceed the chunk byte budget')
     batch_rows = min(MAX_ROWS,(MAX_BYTES-HEADER.size)//(dimensions*4))
-    result = []
     for offset in range(0, len(rows), batch_rows):
-        batch = rows[offset:offset + batch_rows]
+        batch = tuple(rows[offset:offset + batch_rows])
         if any(not isinstance(vector, bytes) or len(vector) != dimensions * 4 for _, vector, _, _ in batch):
             raise ValueError('Embedding bytes differ from the declared dimensions')
         raw = HEADER.pack(MAGIC, len(batch), dimensions) + b''.join(row[1] for row in batch)
+        yield batch, raw
+
+
+def _prepare(root, kind, dimensions, rows):
+    """Installed-format conversion for the explicit offline builder only."""
+    result = []
+    for batch, raw in _encoded(dimensions, rows):
         publication = hashlib.sha256(raw).digest()
         fao.write(root / relative(kind, publication), raw)
         for position, (subject, vector, built, order) in enumerate(batch):
             result.append((subject, dimensions, publication, position, order, built))
     return tuple(result)
-
-
-def publish_prepared(conn, kind, space, version, rows):
-    if not conn.in_transaction:
-        raise RuntimeError('Embedding file publication requires a writer reservation')
-    conn.executemany(f'DELETE FROM {kind}_embeddings WHERE {kind}_id=? AND space=?',
-                     [(row[0], space) for row in rows])
-    conn.executemany(f'INSERT INTO {kind}_embedding_files VALUES (?,?,?,?,?,?,?,?) '
-        f'ON CONFLICT({kind}_id,space,model_version) DO UPDATE SET publication=excluded.publication,'
-        'position=excluded.position,built_at=excluded.built_at',
-        [(subject, space, version, dimensions, publication, position, order, built)
-         for subject, dimensions, publication, position, order, built in rows])
 
 
 def publish(conn, kind, space, version, dimensions, rows):
@@ -286,35 +308,49 @@ def publish(conn, kind, space, version, dimensions, rows):
 
 
 def prepare_batch(conn, kind, limit=MAX_ROWS):
-    if type(limit) is not int or not 1 <= limit <= MAX_ROWS:
-        raise ValueError('Embedding batch must be 1 to 128')
-    rows = conn.execute(f'SELECT insertion_order,{kind}_id,space,model_version,dimensions,vector,built_at '
-                        f'FROM {legacy_relation(conn,kind)} ORDER BY insertion_order LIMIT ?', (limit,)).fetchall()
-    groups = {}
-    for row in rows:
-        order, subject, space, version, dimensions, vector, built = tuple(row)
-        groups.setdefault((space, version, dimensions), []).append((subject, vector, built, order))
-    for (space, version, dimensions), values in groups.items():
-        publish(conn, kind, space, version, dimensions, values)
-        heads = []
-        for subject, vector, built, order in values:
-            head = conn.execute(f'SELECT {kind}_id,NULL,dimensions,publication,position FROM {kind}_embedding_files '
-                f'WHERE {kind}_id=? AND space=? AND model_version=?', (subject, space, version)).fetchone()
-            heads.append(head)
-        if [vector for _, vector in load_many(conn, kind, heads)] != [row[1] for row in values]:
-            raise fao.CorruptFile('Embedding conversion changed float32 bytes')
-    return len(rows)
+    from yt_playlist.controllers.embedding_preparation import EmbeddingPreparation
+    from yt_playlist.repos.embedding_file_references import EmbeddingSources
+    return EmbeddingPreparation(EmbeddingSources(conn), EmbeddingFiles(directory(conn))).prepare(kind, limit)
 
 
 def references(conn):
     if available(conn):
+        from yt_playlist.repos.embedding_file_writes import native
+        identity = 'file_id' if native(conn) else 'NULL'
         for kind in ('recording', 'artist'):
-            for (publication,) in conn.execute(f'SELECT DISTINCT publication FROM {kind}_embedding_files'):
-                yield directory(conn) / relative(kind, publication)
+            for publication, file_id in conn.execute(f'SELECT DISTINCT publication,{identity} FROM {kind}_embedding_files'):
+                yield directory(conn) / relative(kind, (publication, file_id) if file_id is not None else publication)
 
 
-def collect(conn, now, limit=16):
-    # The same immutable chunk/reference contract as musical profiles.
-    from . import profile_files
-    return profile_files.collect_unreferenced(conn, directory(conn),
-        {'recording': 'recording_embedding_files', 'artist': 'artist_embedding_files'}, now, limit, '*/*/*.bin')
+@contextmanager
+def _garbage(files, before, *, limit):
+    if type(limit) is not int or not 1 <= limit <= 256:
+        raise ValueError('Embedding collection budget must be 1 to 256')
+    def shard(name):
+        return len(name) == 2 and all(c in '0123456789abcdef' for c in name)
+    with file_collection.collection(files, files.root, name='.collect.json', valid_shard=shard,
+            prefixes=('recording', 'artist', 'recording/by-id', 'artist/by-id')) as work, \
+            file_collection.collector(files.root) as admitted:
+        if not admitted:
+            yield iter(())
+            return
+        def candidates():
+            for _ in range(limit):
+                path = work.next()
+                if path is None:
+                    continue
+                identity = record_id(path)
+                parts = path.relative_to(files.root).parts
+                if identity is not None:
+                    reference = identity
+                elif (len(parts) == 3 and path.suffix == '.bin' and len(path.stem) == 64
+                        and shard(path.parent.name) and path.stem[:2] == path.parent.name
+                        and all(c in '0123456789abcdef' for c in path.stem)):
+                    reference = bytes.fromhex(path.stem)
+                else:
+                    continue
+                info = fao.read(path, max_bytes=MAX_BYTES).info
+                if info.ctime_ns / 1e9 <= before:
+                    yield parts[0], reference, path, info
+        yield candidates()
+        work.save()

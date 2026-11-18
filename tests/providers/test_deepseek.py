@@ -92,3 +92,33 @@ def test_transport_refuses_redirects_without_forwarding_credentials(monkeypatch)
     with pytest.raises(deepseek.DescriptionUnavailable, match='unavailable'):
         DeepSeekIAO()._request({'model': deepseek.MODEL}, 'secret')
     assert reached == [deepseek.ENDPOINT]
+
+
+def test_attempt_is_the_iaos_entire_admission_role_no_store_anywhere():
+    """attempt() is callable with no Store/reader at all: pace, then reauthorize
+    immediately before the one dispatch -- everything else is the Description
+    controller's job (rec/album_descriptions.py)."""
+    from types import SimpleNamespace
+    events = []
+    iao = DeepSeekIAO(pacer=SimpleNamespace(wait=lambda: events.append('pace')))
+
+    def request(payload, key, *, now_fn=None):
+        events.append('request')
+        return {'ok': True}
+    iao._request = request
+
+    def reauthorize():
+        events.append('reauthorize')
+    assert iao.attempt('KEY', {'p': 1}, now_fn=lambda: 1000, reauthorize=reauthorize) == {'ok': True}
+    assert events == ['pace', 'reauthorize', 'request']
+
+
+def test_attempt_aborts_before_dispatch_when_reauthorize_refuses():
+    from types import SimpleNamespace
+    iao = DeepSeekIAO(pacer=SimpleNamespace(wait=lambda: None))
+    iao._request = lambda *a, **k: pytest.fail('must not dispatch once reauthorize refuses')
+
+    def reauthorize():
+        raise RuntimeError('admission changed')
+    with pytest.raises(RuntimeError, match='admission changed'):
+        iao.attempt('KEY', {}, now_fn=lambda: 1000, reauthorize=reauthorize)

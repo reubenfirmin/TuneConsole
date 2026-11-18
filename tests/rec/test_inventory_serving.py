@@ -9,13 +9,11 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.file_content_support import patch_byte_reads, read_bytes
-from tests.file_content_support import read_bytes as original_bytes
 from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import returning_listener, without_metadata_providers
 from tests.prepared_fixture_support import capture_template, prepared_template
 from tests.rec.test_evidence_responsiveness import (
-    assert_maintenance_banner, historical_inventory, publish_serving_inputs,
+    assert_maintenance_banner, comparison_owner, pending_inventory, publish_serving_inputs,
     install_serving_routes, seed_evidence_library, serving_bytecode, serving_routes)
 from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core.migrations import regular, runner
@@ -29,14 +27,14 @@ def inventory_numbered_input():
     with closing(sqlite3.connect(':memory:')) as schema:
         with pytest.MonkeyPatch.context() as patch:
             bound_catalog(patch, entries=(('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz')))
-            install_numbered_input(schema, 94)
+            install_numbered_input(schema, 107)
         schema.execute('PRAGMA query_only=ON')
         yield schema
 
 
-def test_inventory_predecessor_retains_the_real_v94_numbered_contract(inventory_numbered_input):
-    runner.validate_version(inventory_numbered_input, 94)
-    assert inventory_numbered_input.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 94
+def test_inventory_retains_the_current_numbered_contract(inventory_numbered_input):
+    runner.validate_version(inventory_numbered_input, 107)
+    assert inventory_numbered_input.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
     assert inventory_numbered_input.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 0
 
 
@@ -55,7 +53,7 @@ def test_inventory_admission_keeps_history_and_installs_real_regular_guards(inve
     source = inventory_admitted_input.source
     with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
         reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, 94)
+        runner.validate_version(reader, 107)
         regular.validate(reader)
     assert source.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
     assert inventory_admitted_input.revision_guards
@@ -147,35 +145,36 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(
     observed = {'home_timed_out': False, 'cleanup_errors': []}
     try:
         # The preceding live-app check warmed Home before this gated file existed.
-        identity, surface = historical_inventory(library, 'inventory-serving-check')
+        identity, surface = pending_inventory(library, 'inventory-serving-check')
         ledger = library.rec_ledger.evidence()
         path = ledger._path('opportunity', identity)
         raw = path.read_bytes()
         assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' "
                                         'AND external_key=?', (identity,)).fetchone()
         owners = {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_owners')}
-        # This disposable fixture represents an upgrade with a legacy file not
+        # This disposable fixture represents retained choice files not
         # yet inventoried. Do not leave retention open over that missing owner.
         with group_roots.writer(library) as conn:
             conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
         backfill = group_root_backfill.Backfill(library)
         library._group_root_backfill = backfill
-        read_bytes = original_bytes
+        record_reader = type(ledger)
+        read_record = record_reader.read
 
-        def held_read(candidate, **kwargs):
+        def held_read(reader, candidate):
             if candidate == path and threading.get_ident() == maintenance_thread[0] and not entered.is_set():
                 # The exact cursor proves this is inventory preparation, rather
                 # than a later acknowledgement or an unrelated Home file read.
                 assert backfill.pending_path == path
                 entered.set()
                 assert release.wait(10), 'Inventory test did not release its controlled file read'
-            return read_bytes(candidate, **kwargs)
+            return read_record(reader, candidate)
 
         def maintain():
             maintenance_thread[0] = threading.get_ident()
             return choice_evidence.maintain_storage(library, 1000)
 
-        patch_byte_reads(monkeypatch, held_read)
+        monkeypatch.setattr(record_reader, 'read', held_read)
         request = None
         with ThreadPoolExecutor(2) as executor:
             maintenance = executor.submit(maintain)
@@ -204,7 +203,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(
                             future.result(timeout=10)
                         except Exception as error:
                             observed['cleanup_errors'].append(f'{name}: {type(error).__name__}: {error}')
-        patch_byte_reads(monkeypatch, read_bytes)
+        monkeypatch.setattr(record_reader, 'read', read_record)
         cached_inventory_recovery.update(
             identity=identity, surface=surface, path=path, raw=raw, owners=owners, backfill=backfill)
         assert not observed['home_timed_out'], (
@@ -231,7 +230,7 @@ def test_cached_inventory_recovery_completes_its_cursor_without_rewriting_files_
     assert state['owners'] <= {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_owners')}
     assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind IN ('offer','checkpoint') "
                                     'AND external_key=?', (state['identity'],)).fetchone()
-    owner = 'proposal:' + state['surface'] + ':context'
+    owner = comparison_owner(library, state['surface'])
     assert [row[0] for row in library.conn.execute("SELECT external_version FROM group_evidence_versions "
         "WHERE kind='comparison' AND external_key=? ORDER BY external_version", (owner,))] == [
             'first-leaf', 'first-parent']
@@ -313,34 +312,28 @@ def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(inventory_se
             assert library.rec_proposals.get_proposals('home_choice')['experiments']
 
 
-@pytest.mark.parametrize('phase', ['file_read', 'context_expansion'])
 @pytest.mark.parametrize('endpoint', ['home', 'playlists', 'status', 'settings', 'assembly', 'radio', 'retry'])
 def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
-        inventory_serving_input, tmp_path, monkeypatch, phase, endpoint):
+        inventory_serving_input, tmp_path, monkeypatch, endpoint):
     with inventory_serving_input.open(tmp_path / 'inventory.db') as library:
-        oid, surface = historical_inventory(library, 'inventory-home')
+        oid, surface = pending_inventory(library, 'inventory-home')
         path = library.rec_ledger.evidence()._path('opportunity', oid)
         original = path.read_bytes()
         entered, release = threading.Event(), threading.Event()
-        context = group_roots.context
+        record_reader = type(library.rec_ledger.evidence())
+        read_record = record_reader.read
 
         def hold():
             if not entered.is_set():
                 entered.set()
                 assert release.wait(3), 'Foreground consumer waited for inventory preparation'
 
-        def held_read(candidate, **kwargs):
+        def held_read(reader, candidate):
             if candidate == path:
                 hold()
-            return read_bytes(candidate, **kwargs)
+            return read_record(reader, candidate)
 
-        def held_context(store, captured, **kwargs):
-            if captured.get('artifact') and threading.current_thread() is not threading.main_thread():
-                hold()
-            return context(store, captured, **kwargs)
-
-        patch_byte_reads(monkeypatch, held_read if phase == 'file_read' else read_bytes)
-        monkeypatch.setattr(group_roots, 'context', held_context if phase == 'context_expansion' else context)
+        monkeypatch.setattr(record_reader, 'read', held_read)
         app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
         worker = app.state.ctx.rec_worker
         monkeypatch.setattr(worker, '_start_loop', lambda: None)
@@ -389,8 +382,7 @@ def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
                 finally:
                     release.set()
                 result = future.result(5)
-            patch_byte_reads(monkeypatch, read_bytes)
-            monkeypatch.setattr(group_roots, 'context', context)
+            monkeypatch.setattr(record_reader, 'read', read_record)
             for _ in range(10):
                 if not result.get('deferred'):
                     break
@@ -398,7 +390,7 @@ def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
             assert not result.get('deferred')
             assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' AND external_key=?",
                                             (oid,)).fetchone()
-            owner = 'proposal:' + surface + ':context'
+            owner = comparison_owner(library, surface)
             assert [row[0] for row in library.conn.execute(
                 "SELECT external_version FROM group_evidence_versions WHERE kind='comparison' AND external_key=? ORDER BY external_version",
                 (owner,))] == ['first-leaf', 'first-parent']
@@ -414,7 +406,7 @@ def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
 def test_historical_recovery_resumes_new_choices_and_worker_measurement_flush(
         inventory_serving_input, tmp_path, monkeypatch):
     with inventory_serving_input.open(tmp_path / 'resumed-evidence.db') as library:
-        historical_inventory(library, 'resumed-prepared-home')
+        pending_inventory(library, 'resumed-prepared-home')
         app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
         worker = app.state.ctx.rec_worker
         monkeypatch.setattr(worker, '_start_loop', lambda: None)

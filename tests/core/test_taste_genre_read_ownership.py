@@ -98,7 +98,7 @@ def live_tuning_input(installed, monkeypatch, home_page_bytecode):
     return account
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('commit', [False, True], ids=['rollback', 'commit'])
 def test_live_home_tuning_calculates_privately_then_publishes(
         installed, live_tuning_input, monkeypatch, caplog, commit,
@@ -170,7 +170,7 @@ def test_live_home_tuning_calculates_privately_then_publishes(
     assert store.genres.feature_axes(['Owned Seed'])['Owned Seed'][0] == ('jazz' if commit else 'pop')
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('commit', [False, True], ids=['rollback', 'commit'])
 def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkeypatch, commit):
     store, _ = installed
@@ -237,7 +237,7 @@ def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkey
             assert 'owned-seed' in {row['name'] for row in seed_family['subgenres']}
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_taste_workflows_reuse_callers_uncommitted_view(installed):
     store, _ = installed
     _, playlist = _library(store)
@@ -257,7 +257,7 @@ def test_taste_workflows_reuse_callers_uncommitted_view(installed):
     assert store.genres.feature_axes(['Owned Seed'])['Owned Seed'][0] == 'pop'
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('commit', [False, True], ids=['rollback', 'commit'])
 def test_facets_pin_membership_before_loading_track_metadata(installed, monkeypatch, commit):
     store, _ = installed
@@ -307,7 +307,7 @@ def test_facets_pin_membership_before_loading_track_metadata(installed, monkeypa
     assert store.playlists.get_playlist_track_keys(playlist) == (set() if commit else {'anchor track|band'})
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('surface', ['suggestions', 'onboarding'])
 @pytest.mark.parametrize('commit', [False, True], ids=['rollback', 'commit'])
 def test_http_candidates_survive_concurrent_genre_edits(installed, monkeypatch, surface, commit):
@@ -378,7 +378,7 @@ def test_http_candidates_survive_concurrent_genre_edits(installed, monkeypatch, 
     assert observed == [('jazz' if commit else 'pop', False)]
 
 
-@pytest.mark.parametrize('installed', [93, 107], indirect=True)
+@pytest.mark.parametrize('installed', [107], indirect=True)
 def test_expiry_current_steering_and_provider_fallback_remain_live(installed, monkeypatch):
     store, _ = installed
     _library(store)

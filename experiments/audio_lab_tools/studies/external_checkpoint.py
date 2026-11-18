@@ -221,7 +221,7 @@ def fingerprint(step):
     if step == 'workflow':
         from ..replay.external_workflow import runtime_hashes
         paths.extend(ROOT / name for name in runtime_hashes())
-        paths.append(ROOT / 'src/yt_playlist/rec/data/emotify-vibes.json')
+        paths.append(ROOT / 'experiments/audio_lab_tools/legacy/data/emotify-vibes.json')
     if step == 'overlaps':
         paths.extend(OUT.glob('*.features.json'))
     if step == 'reference':

@@ -12,7 +12,7 @@ from tests.conftest import FakeClient
 from tests.genre_catalog_support import bound_shipped_catalog
 from tests.home_fixture_support import home_routes_only, install_home_routes
 from tests.prepared_fixture_support import capture_template, prepared_template
-from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.recommendation_support import publish_bundles, seed_library_favorites, seed_publication_subjects
 from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, native_sql_calls
 from yt_playlist.core import genre_identity
 from yt_playlist.rec import choice_evidence, home_cache, home_prepared, home_themes, measurement, mode_surfaces
@@ -86,6 +86,7 @@ def genre_control_candidates(genre_controls_schema):
         for track in tracks.values():
             track['video_id'] = track['key']
         seed_publication_subjects(source, tracks.values())
+        seed_library_favorites(source, bundles['all']['comfort'])
         publish_bundles(source, bundles, 1.0)
         return bundles
 
@@ -236,6 +237,7 @@ def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True, publish=T
         track['video_id'] = track['key']
     discoveries = {item['key'] for item in bundles['all'].get('fresh', ())}
     seed_publication_subjects(store, tracks.values(), discoveries=discoveries)
+    seed_library_favorites(store, bundles['all']['comfort'])
     if publish:
         publish_bundles(store, bundles, 1.0)
     return bundles

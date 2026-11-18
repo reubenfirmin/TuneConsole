@@ -1,6 +1,8 @@
 """Sample and annotation workflows use repository and file-object mocks."""
 from contextlib import contextmanager, nullcontext
-from unittest.mock import create_autospec
+from pathlib import Path
+from urllib.parse import quote
+from unittest.mock import Mock, create_autospec
 
 import pytest
 
@@ -30,16 +32,20 @@ def audio():
     repository.sample_owners.return_value = {'sample': 'run'}
     repository.annotation.return_value = None
     repository.taxonomy.return_value = True, {'cruise', 'relax'}
-    samples.write.return_value = 'sample-file'
-    samples.matches.return_value = True
+    samples.retained.side_effect = nullcontext
+    annotations.retained.side_effect = nullcontext
+    annotations.describe.return_value = ('digest', 20)
+    repository.reserve_annotation_file.return_value = 41
+    samples.reference.return_value = dict(filename='sample-file', content_digest='digest')
+    samples.matches_reference.return_value = True
     leased = False
 
     @contextmanager
-    def write(document):
+    def write(identity, document, *, expected):
         nonlocal leased
         leased = True
         try:
-            yield 'annotation-file', 'digest'
+            yield 'annotation-file', 'digest', 20
         finally:
             leased = False
 
@@ -47,7 +53,7 @@ def audio():
         assert leased
         return 7
 
-    annotations.write.side_effect = write
+    annotations.write_reserved.side_effect = write
     repository.publish_annotation.side_effect = publish
     return AudioVibes(repository, samples, annotations, prepared, metadata)
 
@@ -82,10 +88,43 @@ def test_native_playback_avoids_loading_sample_payloads(audio):
     audio.sample_files.read.assert_not_called()
 
 
-def test_sample_publication_passes_a_file_reference_to_sql(audio):
+def test_sample_record_commits_before_file_and_ready_status(audio):
+    calls = Mock()
+    calls.attach_mock(audio.repository.reserve_sample, 'reserve')
+    calls.attach_mock(audio.sample_files.publish_reserved, 'write')
+    calls.attach_mock(audio.repository.complete_sample, 'complete')
     audio.save_sample(sample(), 10)
-    audio.sample_files.write.assert_called_once_with(sample())
-    audio.repository.save_sample.assert_called_once_with(sample(), 'sample-file', 10, expected=[])
+    reference = dict(filename='sample-file', content_digest='digest')
+    audio.repository.reserve_sample.assert_called_once_with(sample(), reference, 10, expected=[])
+    audio.sample_files.publish_reserved.assert_called_once_with(reference, sample())
+    audio.repository.complete_sample.assert_called_once_with('sample', reference)
+    assert [call[0] for call in calls.mock_calls] == ['reserve', 'write', 'complete']
+
+
+@pytest.mark.parametrize('failure', ['reserve', 'file'])
+def test_sample_interruption_never_claims_ready(audio, failure):
+    operation = (audio.repository.reserve_sample if failure == 'reserve'
+                 else audio.sample_files.publish_reserved)
+    operation.side_effect = OSError('interrupted sample')
+    with pytest.raises(OSError, match='interrupted sample'):
+        audio.save_sample(sample(), 10)
+    audio.repository.complete_sample.assert_not_called()
+    if failure == 'reserve':
+        audio.sample_files.publish_reserved.assert_not_called()
+
+
+@pytest.mark.parametrize('identity', ['sample', '.', '..', '../sample', 'artist/song', 'café'])
+def test_sample_paths_encode_the_database_id_and_do_not_depend_on_payload_bytes(tmp_path, identity):
+    files = SampleFiles(tmp_path)
+    value = {**sample(), 'id': identity}
+    first = files.reference(value)
+    changed = files.reference({**value, 'title': 'Different bytes'})
+    path = Path(first['filename'])
+    assert path.resolve().is_relative_to(tmp_path)
+    assert path.stem == quote(identity, safe='').replace('.', '%2E')
+    assert first['filename'] == changed['filename']
+    assert first['content_digest'] != changed['content_digest']
+    assert not list(tmp_path.rglob('*.json'))
 
 
 @pytest.mark.parametrize('operation', ['playback', 'sample'])
@@ -96,9 +135,9 @@ def test_an_existing_run_cannot_be_reassigned_to_another_video(audio, operation)
             audio.save_sample(value, 10)
         else:
             audio.save_playback('run', 'another-video', 'Song', 'Artist', 10)
-    audio.repository.save_sample.assert_not_called()
+    audio.repository.reserve_sample.assert_not_called()
     audio.repository.save_playback.assert_not_called()
-    audio.sample_files.write.assert_not_called()
+    audio.sample_files.publish_reserved.assert_not_called()
 
 
 @pytest.mark.parametrize('changed', [{'id': 'different'}, {'run_id': 'another-run'}, {'video_id': 'another-video'}])
@@ -106,16 +145,15 @@ def test_sampling_point_and_sample_id_bindings_are_immutable(audio, changed):
     audio.repository.sample_conflicts.return_value = [{**sample(), 'recording_id': 3, 'filename': 'sample-file', **changed}]
     with pytest.raises(ValueError, match='already been saved|different song'):
         audio.save_sample(sample(), 10)
-    audio.sample_files.write.assert_not_called()
-    audio.sample_files.repair.assert_not_called()
+    audio.sample_files.publish_reserved.assert_not_called()
 
 
 def test_same_identity_with_changed_sample_bytes_is_rejected(audio):
     audio.repository.sample_conflicts.return_value = [{**sample(), 'recording_id': 3, 'filename': 'sample-file'}]
-    audio.sample_files.matches.return_value = False
+    audio.sample_files.matches_reference.return_value = False
     with pytest.raises(ValueError, match='already been saved'):
         audio.save_sample(sample(), 10)
-    audio.sample_files.repair.assert_not_called()
+    audio.sample_files.publish_reserved.assert_not_called()
 
 
 def test_identical_retry_repairs_evidence_and_retries_a_failed_queue_notification(audio):
@@ -124,9 +162,10 @@ def test_identical_retry_repairs_evidence_and_retries_a_failed_queue_notificatio
     with pytest.raises(RuntimeError, match='queue interrupted'):
         audio.save_sample(sample(), 10)
     audio.save_sample(sample(), 10)
-    assert audio.sample_files.repair.call_count == 2
+    assert audio.sample_files.publish_reserved.call_count == 2
+    assert audio.repository.complete_sample.call_count == 2
     assert audio.prepared_content.requeue_recording.call_count == 2
-    audio.repository.save_sample.assert_not_called()
+    audio.repository.reserve_sample.assert_not_called()
 
 
 @pytest.mark.parametrize('old_state,labels,state', [(None, [], 'empty'), (None, ['cruise'], 'labeled'),
@@ -142,7 +181,8 @@ def test_annotation_state_preserves_empty_and_withdrawn_meanings(audio, old_stat
     assert kwargs['state'] == state
     assert kwargs['expected'] == (7 if old_state is not None else None)
     assert kwargs['revision'] == (3 if old_state is not None else 1)
-    assert kwargs['reference'] == ('annotation-file', 'digest')
+    assert kwargs['reference'] == ('annotation-file', 'digest', 20)
+    assert kwargs['file_id'] == 41
 
 
 @pytest.mark.parametrize('state,labels', [('labeled', ['cruise']), ('withdrawn', []), ('empty', [])])
@@ -152,7 +192,8 @@ def test_an_identical_annotation_retry_does_not_create_a_revision(audio, state, 
     audio.repository.annotation.return_value = value
     audio.annotation_files.read.return_value = {'prediction': None}
     audio.save_feedback('run', ['sample'], labels, TAXONOMY_VERSION, None, 20)
-    audio.annotation_files.write.assert_not_called()
+    audio.annotation_files.write_reserved.assert_not_called()
+    audio.repository.reserve_annotation_file.assert_not_called()
     audio.repository.publish_annotation.assert_not_called()
 
 
@@ -168,8 +209,33 @@ def test_invalid_annotation_membership_is_rejected_before_file_publication(audio
         audio.repository.sample_owners.return_value = {'sample': 'another-run'}
     with pytest.raises(ValueError):
         audio.save_feedback('run', ['sample'], ['cruise'], TAXONOMY_VERSION, None, 20)
-    audio.annotation_files.write.assert_not_called()
+    audio.annotation_files.write_reserved.assert_not_called()
+    audio.repository.reserve_annotation_file.assert_not_called()
     audio.repository.publish_annotation.assert_not_called()
+
+
+def test_annotation_reservation_precedes_file_and_sealed_judgment(audio):
+    calls = Mock()
+    calls.attach_mock(audio.repository.reserve_annotation_file, 'reserve')
+    calls.attach_mock(audio.annotation_files.write_reserved, 'write')
+    calls.attach_mock(audio.repository.publish_annotation, 'complete')
+    audio.save_feedback('run', ['sample'], ['cruise'], TAXONOMY_VERSION, None, 20)
+    assert [call[0] for call in calls.mock_calls] == ['reserve', 'write', 'complete']
+    audio.repository.reserve_annotation_file.assert_called_once_with('run', TAXONOMY_VERSION, 1, ('digest', 20))
+    args, kwargs = audio.annotation_files.write_reserved.call_args
+    assert args[0] == 41 and kwargs['expected'] == ('digest', 20)
+
+
+@pytest.mark.parametrize('failure', ['reserve', 'file'])
+def test_annotation_interruption_does_not_publish_a_judgment(audio, failure):
+    operation = (audio.repository.reserve_annotation_file if failure == 'reserve'
+                 else audio.annotation_files.write_reserved)
+    operation.side_effect = OSError('interrupted annotation')
+    with pytest.raises(OSError, match='interrupted annotation'):
+        audio.save_feedback('run', ['sample'], ['cruise'], TAXONOMY_VERSION, None, 20)
+    audio.repository.publish_annotation.assert_not_called()
+    if failure == 'reserve':
+        audio.annotation_files.write_reserved.assert_not_called()
 
 
 def test_feedback_displays_preserved_legacy_sample_ids_without_admitting_memberships(audio):

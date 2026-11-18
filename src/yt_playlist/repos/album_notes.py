@@ -4,9 +4,15 @@ from contextlib import contextmanager
 from yt_playlist.core import album_note_outputs, album_note_requests
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
+from . import recommendation_file_writes
 
 
 class AlbumNotesRepo(Repo):
+    @synchronized
+    def reserve_file(self, browse, integrity):
+        with self.conn.atomic():
+            return recommendation_file_writes.reserve(self.conn, 'album_note_outputs', 'album_notes', browse, integrity)
+
     @lookup_read
     def native_outputs(self):
         return self._store._album_note_demand
@@ -17,12 +23,6 @@ class AlbumNotesRepo(Repo):
             if self._store._album_note_demand:
                 return None, [dict(row) for row in self.conn.execute(
                     'SELECT browse_id,filename,content_digest,byte_size FROM album_note_outputs ORDER BY id')]
-            from yt_playlist.core.preparation import album_note_publication
-            revision = album_note_publication.selected(self.conn)
-            if revision is not None:
-                return None, [dict(row) for row in self.conn.execute(
-                    'SELECT browse_id,filename,digest AS content_digest,byte_size FROM ' +
-                    album_note_publication.preparation.FILES + ' WHERE generation=? ORDER BY position', (revision,))]
             row = self.conn.execute("SELECT payload FROM rec_proposals WHERE surface='album_notes'").fetchone()
             return row[0] if row else None, None
 
@@ -31,11 +31,6 @@ class AlbumNotesRepo(Repo):
         with keyed_reads(self._store, 'rec_proposals', ('album_notes',)):
             if self._store._album_note_demand:
                 return self.conn.execute('SELECT 1 FROM album_note_outputs LIMIT 1').fetchone() is not None
-            from yt_playlist.core.preparation import album_note_publication
-            revision = album_note_publication.selected(self.conn)
-            if revision is not None:
-                return self.conn.execute('SELECT 1 FROM ' + album_note_publication.preparation.FILES +
-                    ' WHERE generation=? LIMIT 1', (revision,)).fetchone() is not None
             return self.conn.execute("SELECT 1 FROM rec_proposals WHERE surface='album_notes' "
                                      "AND payload NOT IN ('null','{}')").fetchone() is not None
 
@@ -43,8 +38,19 @@ class AlbumNotesRepo(Repo):
     def replace_outputs(self, durable, now):
         with self.conn.atomic(join=True):
             self.conn.execute('DELETE FROM album_note_outputs')
-            for browse, reference in durable:
+            for browse, identity, reference in durable:
+                recommendation_file_writes.complete(self.conn, identity, 'album_note_outputs', 'album_notes', browse, reference)
                 album_note_outputs._insert(self.conn, browse, *reference, now)
+
+    @synchronized
+    def publish_output(self, browse, identity, reference, now, limit, *, expected_request=None):
+        with self.conn.atomic():
+            if expected_request is not None and not album_note_requests.matches(self.conn, browse, expected_request):
+                return False
+            recommendation_file_writes.complete(self.conn, identity, 'album_note_outputs', 'album_notes', browse, reference)
+            self.replace_output(browse, reference, now, limit)
+            album_note_requests.complete(self.conn, browse, expected_request)
+            return True
 
     @contextmanager
     def transaction(self):

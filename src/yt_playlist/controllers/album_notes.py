@@ -79,13 +79,13 @@ class AlbumNotes:
             raise ValueError('Album note output requires a release ID and an object')
         if expected_request is not None and not self.repository.matches(browse, expected_request):
             return False
-        reference = self.files.publish(recommendation_outputs.encode('album_notes', browse, note))
-        with self.repository.transaction():
-            if expected_request is not None and not self.repository.matches(browse, expected_request):
-                return False
-            self.repository.replace_output(browse, reference, now, self.NOTE_LIMIT)
-            self.repository.remove_request(browse, expected_request)
-        return True
+        encoded = recommendation_outputs.encode('album_notes', browse, note)
+        with self.files.retained():
+            integrity = self.files.describe(encoded)
+            identity = self.repository.reserve_file(browse, integrity)
+            reference = self.files.publish_reserved(identity, encoded, expected=integrity)
+            return self.repository.publish_output(browse, identity, reference, now, self.NOTE_LIMIT,
+                                                  expected_request=expected_request)
 
     def next_request(self):
         if self.installed:

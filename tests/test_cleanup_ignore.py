@@ -65,7 +65,7 @@ def test_ignore_merge_round_trip(store, cleanup_client):
 
 @pytest.mark.parametrize("near", [False, True])
 def test_dismissed_duplicate_members_still_show_unrelated_overlaps(store, cleanup_client, near):
-    from yt_playlist.library.analysis import analyze_cleanup
+    from yt_playlist.library.analysis import analyze_cleanup, prepare_cleanup
     iid, c = cleanup_client
     tracks = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
     members = [tracks[:6], tracks[:5] + [tracks[6]], tracks[:2] + tracks[7:9]] if near else [
@@ -75,7 +75,7 @@ def test_dismissed_duplicate_members_still_show_unrelated_overlaps(store, cleanu
         store.playlists.set_playlist_tracks(pid, rows)
     response = c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB"})
     assert response.status_code == 200 and response.headers["hx-refresh"] == "true"
-    result = analyze_cleanup(store)
+    result = analyze_cleanup(prepare_cleanup(store))
     assert not result.groups and not result.near_pairs
     assert {frozenset((o.playlist_a.provider_playlist_id, o.playlist_b.provider_playlist_id))
             for o in result.overlaps} == {frozenset(("PLA", "PLC")), frozenset(("PLB", "PLC"))}

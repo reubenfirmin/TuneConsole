@@ -186,7 +186,8 @@ def consumer_adapter(original, library, metadata, observations):
 def paired(database, capture_seconds, publication_seconds):
     from tests.bench_svd_background import _backup_library
     from experiments.investigations.bench_musical_character import test_saved_catalog_musical_character_audit
-    from yt_playlist.rec import audio_vibe_model, musical_character
+    from experiments.audio_lab_tools.legacy import audio_vibe_model
+    from yt_playlist.rec import musical_character
     from yt_playlist.rec.radio_candidates import RadioCandidates
     from yt_playlist.util import genre_map
     library, samples = frozen_inputs()
@@ -438,7 +439,8 @@ def startup(database, seconds):
     from tests.library_image.fixtures import benchmark_library
     from yt_playlist.core.activity import cancellable_work
     from yt_playlist.core.store import Store
-    from yt_playlist.rec import audio_vibe_model, musical_preparation, progressive, vibe_preparation
+    from experiments.audio_lab_tools.legacy import audio_vibe_model
+    from yt_playlist.rec import musical_preparation, progressive, vibe_preparation
     before = runtime_hashes()
     target = WORK / ('startup-' + stamp().replace(':', '').replace('+', '_'))
     target.mkdir(parents=True)
@@ -503,7 +505,8 @@ def fresh(seconds):
     """Start with no prepared state, then admit real captured evidence in stages."""
     from yt_playlist.core.activity import cancellable_work
     from yt_playlist.core.store import Store
-    from yt_playlist.rec import audio_vibe_model, musical_character, musical_preparation, progressive, vibe_preparation
+    from experiments.audio_lab_tools.legacy import audio_vibe_model
+    from yt_playlist.rec import musical_character, musical_preparation, progressive, vibe_preparation
     library, samples = frozen_inputs()
     paths = frozen_models()
     checkpoint = json.loads(paths['checkpoint'].read_text())

@@ -10,6 +10,7 @@
 {% if error %}{% call banner('err') %}<strong>{{ error }}</strong>{% endcall %}{% endif %}
 
 <div x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }}, {{ saved_identities|tojson }}, {{ flash|tojson }}, {{ (error is not none)|tojson }})'
+     @hashchange.window="revealDestination()"
      @focus.window="refreshIdentityChecks()" @visibilitychange.document="if (!document.hidden) refreshIdentityChecks()">
   <div class="notice ok banner" role="status" x-show="identityMessage" x-cloak>
     <span class="banner-body" x-text="identityMessage"></span>
@@ -219,8 +220,8 @@
       {% endif %}
       </div>
     </div>
-    <div class="card">
-      <h2 class="section section-flush">Import YouTube history (Google Takeout)</h2>
+    <div class="card setup-destination" id="setup-takeout" tabindex="-1" role="region" aria-labelledby="setup-takeout-title">
+      <h2 class="section section-flush" id="setup-takeout-title">Import YouTube history (Google Takeout)</h2>
       {# On a successful import the route retargets the htmx swap at this whole block, replacing
          the instructions + form with the result card. Errors keep the narrower default target
          (#takeout-import-result) so the form survives for a retry. #}
@@ -423,8 +424,19 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
         }
       });
       if (this.tab === 'identities') this.$nextTick(() => this.checkIdentities());
+      if (!hasError) this.revealDestination();
     },
     destroy() { clearInterval(this._statusTimer); },
+    revealDestination() {
+      const tab = {'#setup-takeout': 'import', '#setup-lastfm': 'enrichment'}[location.hash];
+      if (!tab) return;
+      this.tab = tab;
+      this.$nextTick(() => {
+        const destination = document.getElementById(location.hash.slice(1));
+        destination?.focus({preventScroll: true});
+        destination?.scrollIntoView({behavior: 'smooth', block: 'start'});
+      });
+    },
     toggleIdentityGuide() {
       if (this.$refs.identityGuide.matches(':popover-open')) this.$refs.identityGuide.hidePopover();
       else this.showIdentityGuide();

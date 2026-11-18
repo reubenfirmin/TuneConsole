@@ -1,4 +1,4 @@
-"""Established bundle semantics survive conversion without copied catalog rows."""
+"""Established bundle semantics survive typed publication without copied catalog rows."""
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import replace
@@ -14,6 +14,7 @@ from tests.store_fixture_support import (
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import bundle_plan, policy_config, recommendation_plan, recommendation_revalidations as revalidations
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
+from yt_playlist.core import metadata
 from yt_playlist.rec import home_vibe, musical_character, vibe_pools
 from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import recommendation_publication as publication
@@ -31,9 +32,8 @@ def disable_periodic_library_sync():
 
 @pytest.fixture
 def recommendations(tmp_path, monkeypatch, native_sql_calls):
-    # Conversion consumes retained mode_bundles and the original genre labels.
-    # Supply completed SQL before those owners retire, with real groups/files.
-    with _numbered_input(79, tmp_path, monkeypatch, snapshot_guards=True) as (store, _):
+    # Publication consumes current catalog inputs, with real groups and files.
+    with _numbered_input(107, tmp_path, monkeypatch, snapshot_guards=True) as (store, _):
         # Keep real WAL commits and visibility. These disposable fixtures do
         # not need a checkpoint after every bounded publication write.
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
@@ -101,6 +101,7 @@ def test_pending_policy_preflight_is_bounded_without_sql_or_files(recommendation
 def test_complete_ranked_slots_share_content_and_leave_catalog_fields_with_owners(recommendations):
     store = recommendations
     value = bundle(store)
+    value['all']['wheelhouse'][0]['artist_ids'] = ['@artist:999999']
     before = store.conn.total_changes
     prepared = prepare(store, value, value['all']['fresh'])
     assert store.conn.total_changes == before
@@ -115,7 +116,7 @@ def test_complete_ranked_slots_share_content_and_leave_catalog_fields_with_owner
     assert [row.recording_id for row in selected['radio', 'small', 'ppr'].candidates] == [1, 2]
     assert len(selected['radio', 'all', 'scores'].candidates) == 2
     encoded = b''.join(output.encoded for output in prepared.outputs)
-    for copied in (b'obsolete', b'measurements', b'copied', b'history', b'year_cuts', b'intensity'):
+    for copied in (b'obsolete', b'measurements', b'copied', b'history', b'year_cuts', b'intensity', b'artist_ids'):
         assert copied not in encoded
     assert b'explanation one' in encoded
     assert b'ppr-3' in encoded
@@ -161,11 +162,11 @@ def test_sparse_explanations_use_actual_rank_ranges_and_read_only_covering_files
     assert displays[0].first_rank == 10
     assert displays[-1].last_rank == 26
     publish(store, prepared)
-    reads, original = [], outputs.read
+    reads, original = [], store.recommendations.files.read
     def read(*args, **kwargs):
         reads.append(args[0])
         return original(*args, **kwargs)
-    monkeypatch.setattr(outputs, 'read', read)
+    monkeypatch.setattr(store.recommendations.files, 'read', read)
     assert store.recommendations.display('home', 'all', 'wheelhouse', [0, 9]) == {}
     assert reads == []
     assert set(store.recommendations.display('home', 'all', 'wheelhouse', [11, 26])) == {11, 26}
@@ -232,13 +233,16 @@ def test_display_ownership_is_checked_against_the_exact_selected_ranked_pool(rec
         publication.validate(replace(prepared, outputs=tuple(values)))
 
 
-def test_atomic_import_preserves_source_until_caller_retires_it_and_reuses_complete_pools(recommendations):
+def test_atomic_import_preserves_current_head_until_publication_and_reuses_complete_pools(recommendations):
     store = recommendations
     prepared = prepare(store, bundle(store))
+    original = publish(store, replace(prepared, external_key='original-serving'))
+    def before_publish(generation):
+        assert generation != original.generation_id
+        assert store.recommendations.head('home')['id'] == original.generation_id
     with store.conn:
-        store.conn.execute("INSERT INTO rec_proposals VALUES ('mode_bundles','legacy-source',9)")
-        generation = recommendation_import.import_plan(store.conn, prepared, 11)
-        assert store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='mode_bundles'").fetchone()[0] == 'legacy-source'
+        store.conn.execute('BEGIN IMMEDIATE')
+        generation = recommendation_import.import_plan(store.conn, prepared, 11, before_publish=before_publish)
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
@@ -255,15 +259,11 @@ def test_revalidated_publication_reuses_published_or_staged_pools_with_original_
     store = recommendation_reads
     value = bundle(store)
     prepared = prepare(store, value, reuse_existing=True)
-    with store.conn:
-        store.conn.execute("INSERT INTO rec_proposals VALUES ('mode_bundles','legacy-source',9)")
     first = store.recommendations.claim(prepared)
     store.recommendations.stage(prepared, first)
     if published:
         store.recommendations.publish(first, 11)
     generation = first.generation_id
-    with store.conn:
-        assert store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='mode_bundles'").fetchone()[0] == 'legacy-source'
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
     store.rec_ledger.record_serving_policy('new-input-policy', {'algorithm': 'new-captured-inputs'}, 12)
     def stamp(value):
@@ -415,12 +415,13 @@ def test_import_preflight_checks_every_canonical_owner_before_publishing_files(r
     assert not store.conn.execute('SELECT 1 FROM recommendation_generations').fetchone()
 
 
-def test_late_import_failure_rolls_back_owners_and_heads_without_deleting_legacy_source(recommendations, monkeypatch):
+def test_late_import_failure_rolls_back_owners_and_heads_without_deleting_last_good(recommendations, monkeypatch):
     store = recommendations
     prepared = prepare(store, bundle(store))
     first = publish(store, prepared)
-    with store.conn:
-        store.conn.execute("INSERT INTO rec_proposals VALUES ('mode_bundles','original-evidence',9)")
+    output = prepared.outputs[0]
+    original_output = store.recommendations.output(output.surface, output.chunk_key)
+    assert original_output is not None
     counts = {table: store.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0]
               for table in ('recommendation_generations', 'recommendation_candidates', 'prepared_outputs')}
     original, calls = publication._output, 0
@@ -437,20 +438,21 @@ def test_late_import_failure_rolls_back_owners_and_heads_without_deleting_legacy
     assert store.recommendations.head('home')['id'] == first.generation_id
     for table, count in counts.items():
         assert store.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == count
-    assert store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='mode_bundles'").fetchone()[0] == 'original-evidence'
+    assert store.recommendations.output(output.surface, output.chunk_key) == original_output
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def catalog(store):
     with store.conn:
         for recording, key in [(1, 'one'), (2, 'two')]:
-            store.conn.execute('UPDATE recordings SET genre=? WHERE id=?', ('current genre', recording))
-            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,album,duration_s,mb_year) '
-                               'VALUES (?,?,?,?,?,?,?)', (key + '-current', recording, key + ' current title',
-                                                        'current artist', 'current album', 180, '2001'))
+            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,album,duration_s) '
+                               'VALUES (?,?,?,?,?,?)', (key + '-current', recording, key + ' current title',
+                                                      'current artist', 'current album', 180))
             entry = store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?) RETURNING id',
                                        (recording, key + '-current')).fetchone()[0]
             store.conn.execute("INSERT INTO library_memberships VALUES (?,'import',1)", (entry,))
+            metadata.select(store.conn, entry, 'genre', 'current genre', 'fixture')
+            metadata.select(store.conn, entry, 'mb_year', '2001', 'fixture')
 
 
 def test_serving_hydrates_only_a_rank_page_from_current_canonical_metadata(recommendations, monkeypatch):
@@ -506,7 +508,9 @@ def test_vibe_reader_reaches_selected_genre_pool_outside_main_head_without_legac
     store = recommendations
     catalog(store)
     with store.conn:
-        store.conn.execute("UPDATE recordings SET genre=CASE id WHEN 1 THEN 'rock' ELSE 'jazz' END")
+        for key, genre in [('one', 'rock'), ('two', 'jazz')]:
+            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (key + '-current',)).fetchone()[0]
+            metadata.select(store.conn, entry, 'genre', genre, 'fixture')
     value = bundle(store)
     one, two = value['all']['wheelhouse']
     value['_vibes'] = {'version': home_vibe.VERSION, 'profile_version': musical_character.VERSION,
@@ -518,5 +522,5 @@ def test_vibe_reader_reaches_selected_genre_pool_outside_main_head_without_legac
     monkeypatch.setattr(RecommendationProposals, '_proposal_json', forbidden)
     monkeypatch.setattr(musical_character, 'load', lambda store, keys: {})
     candidates = vibe_pools.candidates(store, 'relax', 'comfort', include_genres=('jazz',))
-    assert [(row['key'], row['genre'], row['video_id']) for row in candidates] == [('two', 'jazz', 'two-current')]
+    assert [(row['key'], row['genre'], row['video_id']) for row in candidates] == [('two', 'Jazz', 'two-current')]
     assert [row['key'] for row in vibe_pools.candidates(store, 'relax', 'comfort')] == ['one']

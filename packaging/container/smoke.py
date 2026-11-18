@@ -87,6 +87,23 @@ print(json.dumps({'version': importlib.metadata.version('yt-playlist'),
         if args.version:
             assert info["version"] == args.version, info
 
+        run("exec", name, "python", "-c", """
+from contextlib import closing
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from yt_playlist.core.store import Store
+
+with TemporaryDirectory(prefix='enrichment-smoke-') as directory:
+    store = Store(Path(directory) / 'library.db')
+    with closing(store.conn):
+        store.init_schema()
+        queue = store.enrichment_queue
+        assert queue.next_enrich_batch(5, providers=['musicbrainz']) == []
+        entry = store.tracks.upsert_track('smoke-track', 'Smoke Track', 'Smoke Artist', duration_s=180)
+        batch = queue.next_enrich_batch(5, providers=['musicbrainz'])
+        assert [row['id'] for row in batch] == [entry], batch
+""")
+
         key = base64.b64encode(uuid.uuid4().bytes).decode()
         headers = {"Connection": "Upgrade", "Upgrade": "websocket",
                    "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": key,
@@ -128,7 +145,7 @@ assert paths.app_log_path().is_file()
 """)
         stop()
         print(f"{args.engine}: {args.image} passed startup, pairing, origin guards, "
-              "non-root storage, persistence, and graceful shutdown checks")
+              "enrichment selection, non-root storage, persistence, and graceful shutdown checks")
     except BaseException:
         print(run("logs", name, check=False))
         raise

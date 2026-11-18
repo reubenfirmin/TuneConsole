@@ -78,9 +78,11 @@ class RadioCheckpoints:
             entries = self.repository.queue_entries([track['video_id'] for track, _ in queue])
             rows = [(position, *entries[track['video_id']], track['video_id'], status)
                     for position, (track, status) in enumerate(queue)]
-            reference = self.files.publish('radio-session', owner, state)
+            integrity = self.files.describe('radio-session', owner, state)
+            file_id = self.repository.reserve_file(owner, integrity)
+            reference = self.files.publish_reserved(file_id, 'radio-session', owner, state, expected=integrity)
             return self.repository.publish(state, phase, revision, reference, rows, operation, versions,
-                                           expected=expected, now=time.time())
+                                           file_id=file_id, expected=expected, now=time.time())
 
     def remember_playlists(self, playlists, account=None):
         playlists = list(playlists)

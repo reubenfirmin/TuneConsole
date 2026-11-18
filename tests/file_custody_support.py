@@ -4,6 +4,7 @@ No schema upgrade, retention policy, compaction or installation runs here.
 Production rebuilds keep installed file roots in place instead.
 """
 from contextlib import closing
+from dataclasses import replace
 import json
 from pathlib import Path
 import sqlite3
@@ -11,11 +12,18 @@ import tempfile
 
 from yt_playlist.core import (action_backup_files, album_description_files, audio_annotation_files,
     choice_evidence_files, collection_recovery, fao, file_map, file_owners, group_documents,
-    legacy_evidence, metadata_delivery_files, metadata_destination_files, metadata_runtime,
-    metadata_runtime_files, policy_documents, preparation_files, recommendation_outputs,
-    sample_files, saved_preparation_files, served_facts)
+    legacy_evidence, metadata_delivery_files, metadata_runtime,
+    metadata_runtime_files, policy_documents, recommendation_outputs,
+    sample_files, served_facts)
 from yt_playlist.core.db_rebuild import job
 from yt_playlist.core.db_rebuild.sqlite_checks import tables, verify
+
+
+def expire_file(path):
+    """Age real FAO bytes past the 30-day unowned-file grace period."""
+    with fao.read(path) as content:
+        encoded, age = content.read(), content.info
+    fao.write(path, fao.Content(encoded, metadata=replace(age, ctime_ns=age.ctime_ns - 31 * 86400 * 10**9)))
 
 
 class FileInventory:
@@ -204,14 +212,9 @@ def domains(conn):
         ('group_versions', 'groups', group_documents),
         ('prepared_outputs', 'recommendations', recommendation_outputs),
         ('metadata_deliveries', 'metadata', metadata_delivery_files),
-        ('published_metadata_destination_deliveries', 'metadata_preparation', metadata_destination_files),
     ):
         if table in schema:
             yield name, module
-    if saved_preparation_files.available(conn):
-        yield 'saved_preparation', saved_preparation_files
-    if preparation_files.available(conn):
-        yield 'preparation', preparation_files
     if 'legacy_catalog_evidence' in schema:
         yield 'archives', legacy_evidence
 

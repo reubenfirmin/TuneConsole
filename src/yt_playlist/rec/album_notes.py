@@ -4,18 +4,19 @@ Raw public provider evidence lives in immutable JSON artifacts. Release-owned
 files contain the bounded display projection; typed rows hold coalesced demand.
 """
 import logging
+from yt_playlist.core.editorial_catalog import EditorialCatalog
 
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.providers import release_notes, album_editorial, wikipedia
 from yt_playlist.rec import album_descriptions
-from yt_playlist.providers.discogs import _artist_key
 from yt_playlist.library.album_fetch import fetch_album
 from yt_playlist.library.album_catalog import remember_album
-from yt_playlist.util.matching import recording_title
+from yt_playlist.util.matching import artist_key, recording_title
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.util import net
 
 _LOG = logging.getLogger(__name__)
+_editorial = EditorialCatalog()
 
 
 def read(store, album):
@@ -48,16 +49,16 @@ def _release_only(note):
     return note
 
 
-def _artist_artwork(client, album):
+def _artist_artwork(client, album, catalog=None):
     """Artist-only search results; an album or song thumbnail is never a backdrop."""
     if client is None or album['artist'].casefold() in {'various', 'various artists'}:
         return None
-    entry = album_editorial.lookup(album) or {}
+    entry = album_editorial.lookup(album, (catalog or _editorial).entries()) or {}
     names = {album['artist'], entry.get('artist', ''), *entry.get('artist_aliases', [])} - {''}
-    keys = {_artist_key(name) for name in names}
+    keys = {artist_key(name) for name in names}
     check_cancellable_work()
     for row in (client.search(album['artist'], filter='artists') or [])[:5]:
-        if (_artist_key(row.get('artist') or '') not in keys
+        if (artist_key(row.get('artist') or '') not in keys
                 or row.get('resultType') not in (None, 'artist')):
             continue
         url = release_notes.public_url(best_thumb(row.get('thumbnails')))
@@ -68,16 +69,15 @@ def _artist_artwork(client, album):
     return None
 
 
-def _matching_credits(store, album, release):
+def _matching_credits(known, album, release):
     """Use ordered canonical credits where available; never split display names."""
     fetched = release.get('artists') or []
     if not fetched or any(not artist.get('name') for artist in fetched):
         return False
-    known = store.artists.album_credits(album['browse_id'])
-    display = _artist_key(', '.join(artist['name'] for artist in fetched))
+    display = artist_key(', '.join(artist['name'] for artist in fetched))
     if not known:
-        return _artist_key(album['artist']) in {display, _artist_key(fetched[0]['name'])}
-    if len(known) == 1 and not known[0]['browse_id'] and _artist_key(known[0]['credit']) == display:
+        return artist_key(album['artist']) in {display, artist_key(fetched[0]['name'])}
+    if len(known) == 1 and not known[0]['browse_id'] and artist_key(known[0]['credit']) == display:
         # Legacy rows may contain one unresolved combined display credit. The
         # exact fetched release can supply structured credits without parsing it.
         return True
@@ -88,7 +88,7 @@ def _matching_credits(store, album, release):
         if expected['browse_id'] and provider_id:
             if expected['browse_id'] != provider_id:
                 return False
-        elif _artist_key(expected['credit']) != _artist_key(actual['name']):
+        elif artist_key(expected['credit']) != artist_key(actual['name']):
             return False
     # A discovered primary credit may be enriched with additional collaborators.
     return True
@@ -101,7 +101,7 @@ def _catalog_metadata(client, album, store):
     check_cancellable_work()
     release = fetch_album(client, album['browse_id'])
     if (recording_title(release.get('title')) != recording_title(album['title'])
-            or not _matching_credits(store, album, release)):
+            or not _matching_credits(store.artists.album_credits(album['browse_id']), album, release)):
         return None
     tracks = release.get('tracks') or []
     if (not tracks or any(not track.get('title') for track in tracks)
@@ -120,50 +120,66 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
     """Keep menu publication ahead of optional network work, with bounded retries."""
     if getattr(store, 'activity_paused', False) or getattr(store, '_read_only', False):
         return False
+
+    def public_artwork(artist):
+        with wikipedia.access(store):
+            return wikipedia.fetch_artwork(artist)
+
+    return prepare_notes(store.album_notes, store.rec_proposals, store.collection,
+        store.rec_ledger.evidence(), _editorial, now, albums,
+        fetch_release=lambda album: release_notes.fetch(album, store),
+        get_description=lambda album: album_descriptions.get(store, album, now, now_fn=now_fn),
+        catalog_metadata=(lambda album: _catalog_metadata(client, album, store)) if client else None,
+        public_artwork=public_artwork, artist_artwork=lambda album: _artist_artwork(client, album))
+
+
+def prepare_notes(notes, proposals, collection, evidence, editorial_catalog, now, albums=(), *,
+                  fetch_release, get_description, catalog_metadata=None, public_artwork, artist_artwork):
+    """Complete bounded Notes command over demand, provider, catalog and publication ports."""
     # A refresh can leave the previous set queued. Reconcile against the
     # worker's current menu, preserving explicit album-page/held-menu demand.
-    store.album_notes.request(albums, now, current_only=True)
-    queued = store.rec_proposals.get_proposals('album_note_requests') or {}
+    notes.request(albums, now, current_only=True)
+    queued = proposals.get_proposals('album_note_requests') or {}
     if not queued:
         return False
-    album, expected_request = store.album_notes.next_request()
+    album, expected_request = notes.next_request()
     if album is None:
         return False
     browse = album['browse_id']
-    cached = _release_only((store.rec_proposals.get_proposals('album_notes') or {}).get(browse, {}))
+    cached = _release_only((proposals.get_proposals('album_notes') or {}).get(browse, {}))
     if cached.get('editorial_version') == 7 and cached.get('retry_at', 0) > now:
-        store.album_notes.publish(browse, cached, now, expected_request=expected_request)
+        notes.publish(browse, cached, now, expected_request=expected_request)
         return len(queued) > 1
-    result = release_notes.fetch(album, store)
-    description, generation = album_descriptions.get(store, album, now, now_fn=now_fn)
+    result = fetch_release(album)
+    description, generation = get_description(album)
     result['evidence'].append({'provider': 'deepseek', 'response': generation})
     if description:
         result['description'] = description
     elif cached.get('description'):
         result['description'] = cached['description']
     # Completion is useful for the listening indicator, independently of prose.
-    summary = store.collection.album_listening_summary([browse])[browse]
-    if client is not None and not summary['complete']:
+    summary = collection.album_listening_summary([browse])[browse]
+    if catalog_metadata is not None and not summary['complete']:
         try:
-            evidence = _catalog_metadata(client, album, store)
-            if evidence:
-                result['evidence'].append(evidence)
+            metadata = catalog_metadata(album)
+            if metadata:
+                result['evidence'].append(metadata)
         except (WorkClosing, WorkBudgetExceeded):
             raise
         except Exception:
             result['retry'] = True
             result['evidence'].append({'provider': 'youtube_album', 'status': 'unavailable'})
             _LOG.debug('Album metadata deferred for %s', browse, exc_info=True)
-    editorial = album_editorial.lookup(album)
+    editorial = album_editorial.lookup(album, editorial_catalog.entries())
     result['artwork'] = (editorial or {}).get('artwork') or cached.get('artwork')
     # Upgrade old search-result thumbnails as well as confirmed misses. Keep
     # the previous photograph if the public file lookup is unavailable.
     search_art = 'music.youtube.com/channel/' in (result['artwork'] or {}).get('source_url', '')
     if (not (editorial or {}).get('artwork') and (not result['artwork'] or search_art)
             and album['artist'].casefold() not in {'various', 'various artists'}):
-        with wikipedia.access(store), net.probe_errors() as errors:
+        with net.probe_errors() as errors:
             try:
-                result['artwork'] = wikipedia.fetch_artwork(album['artist']) or result['artwork']
+                result['artwork'] = public_artwork(album['artist']) or result['artwork']
             except (WorkClosing, WorkBudgetExceeded):
                 raise
             except Exception as exc:
@@ -178,7 +194,7 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
         # Independent attempts: a public-provider outage must not suppress a
         # catalogue photograph, and a search miss must not erase retained art.
         try:
-            result['artwork'] = _artist_artwork(client, album)
+            result['artwork'] = artist_artwork(album)
         except (WorkClosing, WorkBudgetExceeded):
             raise
         except Exception:
@@ -186,6 +202,20 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
             _LOG.debug('Album artwork deferred for %s', browse, exc_info=True)
     if result['artwork']:
         result['evidence'].append({'provider': 'album_artwork', 'response': result['artwork']})
+    note, raw, unchanged = publication(cached, result, description, generation, album, now)
+    if not unchanged:
+        try:
+            note['evidence'] = evidence.artifact(raw)
+        except (OSError, ValueError):
+            note['evidence'] = cached.get('evidence')
+            _LOG.warning('Album editorial evidence unavailable', exc_info=True)
+    notes.publish(browse, note, now, expected_request=expected_request)
+    return len(queued) > 1
+
+
+def publication(cached, result, description, generation, album, now):
+    """Detached precedence, retry and provenance decisions over acquired notes."""
+    result = dict(result)
     raw = {'kind': 'album_editorial', 'album': album, 'at': now,
            'sources': result.pop('evidence')}
     retry = result.pop('retry')
@@ -208,13 +238,6 @@ def prepare(store, now, albums=(), *, client=None, now_fn=None):
     # Unchanged facts reuse their provenance. Repeated outages must not create
     # an indefinitely retained chain of identical failure artifacts.
     unchanged = cached.get('evidence') and all(note.get(key) == cached.get(key) for key in fields)
-    if not unchanged:
-        if retained and cached.get('evidence'):
-            raw['previous'] = {'$artifact': cached['evidence']}
-        try:
-            note['evidence'] = store.rec_ledger.evidence().artifact(raw)
-        except (OSError, ValueError):
-            note['evidence'] = cached.get('evidence')
-            _LOG.warning('Album editorial evidence unavailable', exc_info=True)
-    store.album_notes.publish(browse, note, now, expected_request=expected_request)
-    return len(queued) > 1
+    if not unchanged and retained and cached.get('evidence'):
+        raw['previous'] = {'$artifact': cached['evidence']}
+    return note, raw, unchanged

@@ -1,4 +1,4 @@
-"""Current identity edits preserve classification, preferences and source evidence."""
+"""Historical genre identities preserve classification and source evidence."""
 import pytest
 
 from tests.genre_catalog_support import bound_shipped_catalog
@@ -25,7 +25,7 @@ def genre_schema():
 
 @pytest.fixture
 def store(genre_schema, monkeypatch, tmp_path):
-    # Keep the shipped aliases and families for the identities being edited.
+    # Keep the shipped aliases and families for the historical identities.
     # Full vocabulary curation is owned by test_genre_catalog.
     bound_shipped_catalog(monkeypatch, ('synth pop', 'drum bass', 'jazz'))
     database = Store(tmp_path / 'genre-lifecycle.db')
@@ -39,13 +39,14 @@ def store(genre_schema, monkeypatch, tmp_path):
         database.conn.close()
 
 
-def test_rename_family_filter_and_provider_aliases_follow_identity(store):
+def test_historical_display_name_family_filter_and_provider_aliases_follow_identity(store):
     store.genres.configure_catalog()
     entry = store.tracks.upsert_track('v','Song','Artist',None,None)
     store.tracks.set_track_genre(entry,'Synth Pop')
     key = store.rec_query.key_for_video('v')
     store.rec_model.set_lean('genre:synth pop',1.4,10)
-    store.genres.rename_genre('synth pop','New electronic label')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET name='New electronic label' WHERE key='synth pop'")
     assert store.rec_query.track_genres([key]) == {key:'New electronic label'}
     assert store.rec_query.keys_in_genre_selection(['Synth Pop']) == {key}
     family = store.conn.execute("SELECT family_key FROM genre_catalog WHERE key='synth pop'").fetchone()[0]
@@ -60,58 +61,52 @@ def test_rename_family_filter_and_provider_aliases_follow_identity(store):
         genres.set_active(None)
 
 
-def test_merge_keeps_disabled_choice_and_raw_evidence(store):
+def test_historical_merge_keeps_disabled_choice_on_catalog_refresh(store):
     store.genres.configure_catalog()
     store.genres.add_genre('Custom style')
     store.genres.remove_genre('Synth Pop')
-    entry = store.tracks.upsert_track('v','Song','Artist',None,None)
+    # Installed merge state includes archived preferences and a disabled survivor.
     with store.conn:
-        metadata.select(store.conn,entry,'genre','Custom style','provider',now=10)
-    store.rec_model.set_lean('genre:Custom style',1.4,10)
-    store.genres.merge_genres('custom style','synth pop',now=20)
-    assert store.conn.execute('SELECT genre_key FROM recordings').fetchone()[0] == 'synth pop'
+        store.conn.execute("INSERT INTO genre_redirects VALUES ('custom style','synth pop')")
+        store.conn.execute("INSERT INTO genre_merge_preferences(retired_key,genre_key,enabled,origin,merged_at) "
+                           "VALUES ('custom style','synth pop',1,'user',20),('synth pop','synth pop',0,'user',20)")
+        store.conn.execute("DELETE FROM genre_preferences WHERE genre_key='custom style'")
+    archived = [tuple(row) for row in store.conn.execute('SELECT * FROM genre_merge_preferences ORDER BY id')]
+    store.genres.configure_catalog()
     assert store.conn.execute("SELECT enabled FROM genre_preferences WHERE genre_key='synth pop'").fetchone()[0] == 0
-    assert store.rec_model.get_leans() == {'genre:synth pop':1.4}
     assert genre_identity.resolve(store.conn,'Custom style') == ('synth pop',None)
-    assert store.conn.execute("SELECT text_value,genre_key FROM metadata_observations WHERE field='genre'").fetchone()[:] == ('Custom style','custom style')
-    assert store.conn.execute('SELECT count(*) FROM genre_merge_preferences').fetchone()[0] == 2
-    store.genres.configure_catalog()
-    assert 'Synth Pop' not in store.genres.get_genre_whitelist()
-
-
-def test_conflicting_axes_abort_merge_without_discarding_values(store):
-    store.genres.configure_catalog()
-    store.rec_model.set_lean('genre:synth pop',1.3,10)
-    store.rec_model.set_lean('genre:drum bass',1.4,10)
-    with pytest.raises(ValueError,match='Conflicting current taste axes'):
-        store.genres.merge_genres('synth pop','drum bass')
-    assert store.rec_model.get_leans() == {'genre:synth pop':1.3,'genre:drum bass':1.4}
-    assert not store.conn.execute('SELECT 1 FROM genre_redirects').fetchone()
+    assert not {'Synth Pop', 'Custom style'} & set(store.genres.get_genre_whitelist())
+    assert [tuple(row) for row in store.conn.execute('SELECT * FROM genre_merge_preferences ORDER BY id')] == archived
 
 
 def test_alias_edit_does_not_change_existing_selected_key(store):
     store.genres.configure_catalog()
-    store.genres.set_genre_alias('A historical label','synth pop')
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_alias VALUES ('a historical label','A historical label','synth pop','custom')")
     entry = store.tracks.upsert_track('v','Song','Artist',None,None)
     with store.conn:
         metadata.select(store.conn,entry,'genre','A historical label','provider',now=10)
-    store.genres.set_genre_alias('A historical label','drum bass')
+    with store.conn:
+        store.conn.execute("UPDATE genre_alias SET genre_key='drum bass' WHERE label_key='a historical label'")
     assert genre_identity.resolve(store.conn,'A historical label') == ('drum bass',None)
     assert store.conn.execute('SELECT genre_key FROM recordings').fetchone()[0] == 'synth pop'
     assert store.conn.execute("SELECT text_value,genre_key FROM metadata_observations WHERE field='genre'").fetchone()[:] == ('A historical label','synth pop')
 
 
-def test_family_edit_rebuilds_model_inputs_and_live_filters(store):
+def test_historical_family_changes_reach_model_inputs_and_live_filters(store):
     entry = store.tracks.upsert_track('v','Song','Artist',None,120)
     store.tracks.set_track_genre(entry,'Synth Pop')
     key = store.rec_query.key_for_video('v')
     inputs = content_model.ContentInputs([key],{key:('Synth-Pop',None)},{})
     original = content_model.input_fingerprint(inputs,genre_axes=store.genres.feature_axes(['Synth-Pop']))
-    store.genres.rename_genre('synth pop','New label')
-    pin = radio_genres.GenrePolicy(1,[],current={'genre':'New label'},store=store)
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET name='New label' WHERE key='synth pop'")
+    from yt_playlist.controllers.radio_inputs import inputs_for
+    pin = radio_genres.GenrePolicy(1,[],current={'genre':'New label'},axes=inputs_for(store).taxonomy(['New label','Synth Pop']))
     assert pin.allows({'genre':'Synth Pop'})
     assert pin.bonus({'genre':'Synth Pop'}) == 1
-    store.genres.set_genre_family('synth pop','jazz')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET family_key='jazz',family_source='custom' WHERE key='synth pop'")
     axes = store.genres.feature_axes(['Synth-Pop', 'New label'])
     assert content_model.input_fingerprint(inputs,genre_axes=axes) != original
     model = content_model.build_content_model(inputs.content,{},genre_axes=axes)
@@ -125,7 +120,6 @@ def test_family_edit_rebuilds_model_inputs_and_live_filters(store):
     choices,_ = album_choices.menu([{'browse_id':'release','artist':'Artist','genre':'New label',
                                      'classification':'discovery'}],{'novelty':.5},genres=['jazz'],genre_axes=axes)
     assert [row['browse_id'] for row in choices] == ['release']
-    assert store.conn.execute("SELECT revision FROM rec_change_queue WHERE kind='refresh'").fetchone()[0] > 1
 
 
 def test_detached_family_consumers_use_current_relationships(store):
@@ -138,12 +132,14 @@ def test_detached_family_consumers_use_current_relationships(store):
     path = store.tracks.identity_key_for_video('jazz')
     assert not any(row['kind']=='genre' for row in cluster_explain.connection_reasons(
         store.cluster_evidence.connection(key,[path])))
-    store.genres.set_genre_family('synth pop','jazz')
+    with store.conn:
+        store.conn.execute("UPDATE genre_catalog SET family_key='jazz',family_source='custom' WHERE key='synth pop'")
     assert any(row['kind']=='genre' for row in cluster_explain.connection_reasons(
         store.cluster_evidence.connection(key,[path])))
     axes = store.genres.feature_axes(['Synth Pop','Jazz'])
     meta = {key:('Artist','Synth Pop')}
-    month = trend_statistics.compute_months([(1,key,2)],meta,{},genre_axes=axes)[0]
+    month = trend_statistics.compute_months([(1,key,2)],meta,{},genre_axes=axes,
+                                           family_adjacency={})[0]
     assert month['families']=={'jazz':2}
     assert recap_story.energy_axis({key:2},{},meta,genre_axes=axes)==(.3,'genre')
     assert _is_overlap({'artist':'Other','genre':'Synth Pop','family':'jazz'},
@@ -154,7 +150,8 @@ def test_detached_family_consumers_use_current_relationships(store):
 def test_retained_genre_evidence_keeps_captured_identity_after_alias_reassignment(store, operation):
     store.genres.configure_catalog()
     label = 'A retained provider label'
-    store.genres.set_genre_alias(label, 'synth pop')
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_alias VALUES (?,?,'synth pop','custom')", (label.casefold(), label))
     entry = store.tracks.upsert_track('retained', 'Original song', 'Artist', None, 200)
     with store.conn:
         metadata.select(store.conn, entry, 'genre', label, 'provider', now=10)
@@ -165,7 +162,8 @@ def test_retained_genre_evidence_keeps_captured_identity_after_alias_reassignmen
     assert (original['text_value'], original['genre_key']) == (label, 'synth pop')
     original_row = tuple(original)
 
-    store.genres.set_genre_alias(label, 'drum bass')
+    with store.conn:
+        store.conn.execute("UPDATE genre_alias SET genre_key='drum bass' WHERE label_key=?", (label.casefold(),))
     assert genre_identity.resolve(store.conn, label) == ('drum bass', None)
     # New evidence must use the new alias; only the retained capture keeps its old identity.
     fresh_entry = store.tracks.upsert_track('fresh', 'Fresh song', 'Artist', None, 200)
@@ -226,8 +224,14 @@ def test_retained_genre_evidence_follows_chained_merges_without_rewriting_captur
     assert (original['text_value'], original['genre_key']) == ('Captured original style', 'captured original style')
     original_row = tuple(original)
 
-    store.genres.merge_genres('captured original style', 'merged middle style', now=20)
-    store.genres.merge_genres('merged middle style', 'merged final style', now=21)
+    # Installed redirects flatten successive merges without rewriting captures.
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_redirects VALUES ('captured original style','merged middle style')")
+    assert genre_identity.resolve(store.conn, 'Captured original style') == ('merged middle style', None)
+    with store.conn:
+        store.conn.execute("UPDATE genre_redirects SET genre_key='merged final style' WHERE retired_key='captured original style'")
+        store.conn.execute("INSERT INTO genre_redirects VALUES ('merged middle style','merged final style')")
+        store.conn.execute("UPDATE recordings SET genre_key='merged final style' WHERE id=?", (recording,))
     assert genre_identity.resolve(store.conn, 'Captured original style') == ('merged final style', None)
     target_entry, target_recording = entry, recording
     if operation == 'replay':
@@ -276,7 +280,8 @@ def test_retained_unresolved_genre_is_not_reinterpreted_by_a_new_alias(store, op
     assert original['text_value'] == label
     original_row = tuple(original)
 
-    store.genres.set_genre_alias(label, 'synth pop')
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_alias VALUES (?,?,'synth pop','custom')", (label.casefold(), label))
     fresh = store.tracks.upsert_track('new-genre', 'Fresh song', 'Artist', None, 200)
     with store.conn:
         metadata.select(store.conn, fresh, 'genre', label, 'provider', now=20)
@@ -332,7 +337,8 @@ def test_legacy_unattributed_genre_transfer_preserves_unresolved_label_without_n
             "VALUES (?,'genre','legacy_unresolved','old_provider',10)", (previous,))
     original = tuple(store.conn.execute(
         "SELECT * FROM recording_metadata_selections WHERE recording_id=? AND field='genre'", (previous,)).fetchone())
-    store.genres.set_genre_alias(label, 'synth pop')
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_alias VALUES (?,?,'synth pop','custom')", (label.casefold(), label))
     assert genre_identity.resolve(store.conn, label) == ('synth pop', None)
     with store.conn:
         store.conn.execute('BEGIN')

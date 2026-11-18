@@ -6,9 +6,7 @@ radio observes playback separately, so its writes never block this response pump
 import asyncio
 import json
 import logging
-import math
 import time
-from urllib.parse import urlencode, urlparse, parse_qs
 
 from anyio import CancelScope
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
@@ -16,45 +14,14 @@ from starlette.websockets import WebSocketState
 from starlette.concurrency import run_in_threadpool
 
 from yt_playlist.core.activity import activity_for
-from yt_playlist.library import live_plays, player_events, ratings
-from yt_playlist.rec import measurement
+from yt_playlist.controllers.playback_observations import player_snapshot as _now_playing_snapshot
+from yt_playlist.web.context import Ctx
 
 logger = logging.getLogger(__name__)
 EXTENSION_ID = "opmmbolbdgdkphfocffpjpgmelkkjkcn"  # Chrome Web Store build
 DEV_EXTENSION_ID = "edhplcadobipneepllhkkajckoammpnk"  # unpacked extension/ manifest key
 EXTENSION_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
 EXTENSION_ORIGINS = {EXTENSION_ORIGIN, f"chrome-extension://{DEV_EXTENSION_ID}"}
-
-
-def _now_playing_snapshot(msg, previous=None):
-    snapshot = {"title": msg.get("title"), "artist": msg.get("artist"),
-                "thumbnail": msg.get("thumbnail"), "likeStatus": msg.get("likeStatus"),
-                "video_id": msg.get("videoId"), "paused": bool(msg.get("paused")),
-                # Presence can come from an unverified heartbeat. Keep the producer's
-                # exact tri-state available for diagnostics without treating it as a play.
-                "metadata_verified": msg.get("metadataVerified")
-                if type(msg.get("metadataVerified")) is bool else None}
-    for field, key in (("muted", "muted"), ("tabMuted", "tab_muted")):
-        if field in msg:
-            snapshot[key] = bool(msg[field])
-    position = msg.get('position')
-    snapshot['position'] = position if (type(position) in (int, float) and math.isfinite(position)
-                                        and position >= 0) else None
-    # Older sensors report a growing buffered endpoint as duration. Resolve the full
-    # exact-upload length from the catalog when serving status, never from this frame.
-    snapshot['duration'] = None
-    for field, key in (('brandId', 'brand_id'), ('brandKnown', 'brand_known')):
-        if field in msg:
-            snapshot[key] = msg[field]
-        elif previous and previous.get('video_id') == snapshot['video_id'] and key in previous:
-            snapshot[key] = previous[key]
-    # Old sensors omit context on heartbeats. Preserve it only for the same video.
-    for field, key in (("playlist", "playlist_ytm_id"), ("albumBrowseId", "album_browse_id")):
-        if field in msg:
-            snapshot[key] = msg.get(field) or ""
-        elif previous and previous.get("video_id") == snapshot["video_id"] and key in previous:
-            snapshot[key] = previous[key]
-    return snapshot
 
 
 def _capture_diagnostics(value):
@@ -87,96 +54,26 @@ def _capture_diagnostics(value):
 
 
 def _record_connection(ctx):
-    # Maintenance can begin between socket acceptance and this worker running.
-    # Pairing is optional during maintenance; check its admission under the same
-    # lock that changes the serving connection's read-only state.
-    store = getattr(ctx, 'store', None)
-    clear = getattr(ctx, 'clear_all_auth_expired', None)
-    if store is None:
-        if callable(clear):
-            clear()
-        return
-    with store._lock:
-        if not store.activity_paused:
-            store.settings.set_setting('bridge_paired', '1')
-        if callable(clear):
-            clear()
+    # Compatibility hook for independently assembled transports. The command
+    # owns persistence, and the socket never waits here before receiving replies.
+    return Ctx.bridge_connection(ctx).record()
 
 
-def build(ctx) -> APIRouter:
+def build(ctx, *, observations=None) -> APIRouter:
     router = APIRouter()
     bridge = ctx.bridge
+    if observations is None:
+        observations = Ctx.bridge_observations(ctx, connected=lambda: _record_connection(ctx))
     # Suspension runs in a worker. A new socket must not take ownership while
     # the previous owner's suspension is still changing the Radio controller.
     lifecycle_lock = asyncio.Lock()
 
-    def prepare_radio(msg):
-        playing = bridge.now_playing or {}
-        if (not playing.get("video_id") or not playing.get("playlist_ytm_id")
-                or playing.get("paused") or msg.get("muted") or msg.get("tabMuted")
-                or msg.get("volume") == 0 or msg.get("metadataVerified") is False):
-            return
-        radio = getattr(ctx, "radio", None)
-        if radio is not None:
-            try:
-                # Only schedule work here. Joining may need authenticated reads
-                # whose replies must continue through this same receive loop.
-                radio.prepare()
-            except Exception:
-                logger.debug("Radio reattachment deferred", exc_info=True)
-
     @router.get("/bridge/status")
     def bridge_status():
-        radio = getattr(ctx, "radio", None)
-        # The persisted session can already be playing before the radio panel has been opened
-        # and its controller reattached. Use the same snapshot for attribution and the tab light.
-        if radio is not None:
-            # Live status needs only the session lock. The controller opens a
-            # read-only view itself when a saved checkpoint is needed; never
-            # retain a scarce reader while waiting for live session state.
-            session = radio.state()
-        else:
-            session = {}
-        now_playing = bridge.now_playing
-        seen_at = getattr(bridge, "now_playing_seen_at", None)
-        if now_playing is not None and seen_at is not None and time.monotonic() - seen_at > 8:
-            bridge.now_playing = now_playing = None
-            bridge.now_playing_seen_at = None
-        if now_playing is not None:
-            now_playing = {**now_playing, "duration": None}
-            store = getattr(ctx, "store", None)
-            if getattr(store, "tracks", None) is not None:
-                duration = store.tracks.duration_for_video(now_playing.get("video_id"))
-                if type(duration) in (int, float) and math.isfinite(duration) and duration > 0:
-                    now_playing["duration"] = duration
-                rating = ratings.main_rating(store, now_playing.get("video_id"))
-                if rating:
-                    now_playing = {**now_playing, "likeStatus": rating["status"]}
-                # Sensors can verify playback before album artwork becomes available.
-                # Resolve the exact upload without borrowing the previous song's image.
-                if not now_playing.get("thumbnail") and now_playing.get("video_id"):
-                    thumbnail = store.tracks.thumbnail_for_video(now_playing["video_id"])
-                    if thumbnail:
-                        now_playing = {**now_playing, "thumbnail": thumbnail}
-            collection = getattr(getattr(ctx, "store", None), "collection", None)
-            resolve = getattr(collection, "playback_source", None)
-            source = resolve(now_playing.get("playlist_ytm_id"), now_playing.get("video_id"),
-                             now_playing.get("album_browse_id")) if resolve else None
-            if source:
-                url = (f"/playlist/{source['id']}" if source["kind"] == "playlist" else
-                       "/album?" + urlencode({"browse": source["browse"]}))
-                source = {"kind": source["kind"], "title": source["title"], "url": url, "external": False}
-            if session.get("active") and session.get("playlist_id") == now_playing.get("playlist_ytm_id"):
-                source = {"kind": "radio", "title": session["title"], "url": "/#radio", "external": False}
-            now_playing = {**now_playing, "source": source,
-                           "snapshot_age": max(0, time.monotonic() - seen_at) if seen_at is not None else 0}
-        return {"connected": bridge.connected, "now_playing": now_playing,
-                "radio_resume": session.get('resume_player'),
-                "resumable_player": bridge.resumable_player if bridge.connected and
-                bridge.resumable_player and bridge.resumable_player.get("paused") else None,
-                "sensor_health": getattr(bridge, "sensor_health", None),
-                "radio": bool(session.get("active")),
-                "radio_ready": bool(session.get("active") and not session.get("starting"))}
+        if getattr(ctx, 'store', None) is None:
+            return Ctx.playback_commands(ctx, monotonic=time.monotonic).status()
+        with ctx.store.read_view() as reader:
+            return Ctx.playback_commands(ctx, monotonic=time.monotonic, reader=reader).status()
 
     @router.post("/play")
     async def play(request: Request):
@@ -186,30 +83,9 @@ def build(ctx) -> APIRouter:
             url = ""
         if not url.startswith("https://music.youtube.com/"):
             return {"ok": False, "error": "url must be a music.youtube.com link"}
-        intent = bridge.begin_playback_intent()
-        return await activity_for(ctx).to_thread(_play, url, intent)
-
-    def _play(url, intent):
-        try:
-            query = parse_qs(urlparse(url).query)
-            playlist = (query.get('list') or [''])[0].removeprefix('RDAMPL')
-            if playlist:
-                for pl in ctx.store.playlists.get_playlists():
-                    if pl.provider_playlist_id == playlist and (ctx.store.playlist_recipes.get_recipe(pl.playlist_scope_id) or {}).get('media') == 'video':
-                        return {'ok': True, 'tv_url': f'/?tv_playlist={pl.id}#tv'}
-            bridge.send_control({"type": "navigate", "url": url}, intent=intent)
-            video_id = (query.get("v") or [None])[0]
-            if video_id:
-                measurement.record_action(ctx.store, "start", ctx.now_fn(), video_id=video_id)
-            elif query.get("list"):
-                playlist = query["list"][0].removeprefix("RDAMPL")
-                for pl in ctx.store.playlists.get_playlists():
-                    if pl.provider_playlist_id == playlist:
-                        measurement.record_action(ctx.store, "start", ctx.now_fn(), playlist_id=pl.id)
-                        break
-            return {"ok": True}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+        commands = Ctx.playback_commands(ctx)
+        intent = commands.admit()
+        return await activity_for(ctx).to_thread(commands.play, url, intent)
 
     @router.post("/now-playing/rate")
     async def now_playing_rate(request: Request):
@@ -226,30 +102,8 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": "displayed video ID is required"}
         if like_status is not None and like_status not in ("LIKE", "DISLIKE", "INDIFFERENT"):
             return {"ok": False, "error": "invalid rating state"}
-        if like_status is None:
-            # Compatibility with older pages that sent a toggle instead of the desired state.
-            rating = await asyncio.to_thread(ratings.main_rating, ctx.store, video_id)
-            playing = bridge.now_playing or {}
-            current = rating["status"] if rating else (
-                playing.get("likeStatus") if playing.get("video_id") == video_id else None)
-            want = "LIKE" if action == "like" else "DISLIKE"
-            like_status = "INDIFFERENT" if current == want else want
         try:
-            logger.info("rating requested: video=%s action=%s desired=%s connected=%s",
-                        video_id, action, like_status, bridge.connected)
-            # ytmusicapi performs the write through the authenticated extension transport.
-            # Run it off the event loop so that transport's WebSocket replies can be received.
-            loop = asyncio.get_running_loop()
-
-            def mirror(account_id):
-                # The admitted worker owns the complete command even if its HTTP waiter leaves.
-                # Keep its per-item turn until native reconciliation and exact-track skip settle.
-                return asyncio.run_coroutine_threadsafe(
-                    mirror_rating(action, video_id, like_status, account_id), loop).result()
-
-            result = await activity_for(ctx).to_thread(ctx.ops().set_rating, video_id, like_status,
-                                                       after_confirmed=mirror)
-            logger.info("rating confirmed: video=%s desired=%s", video_id, like_status)
+            result = await Ctx.playback_commands(ctx).rate(action, video_id, like_status)
         except Exception:
             logger.warning("rating failed: video=%s desired=%s", video_id, like_status, exc_info=True)
             return {"ok": False, "error": "Rating not confirmed. Check it in YouTube Music before trying again."}
@@ -259,91 +113,6 @@ def build(ctx) -> APIRouter:
                     "Rating saved. Some updates are not confirmed; check it in YouTube Music."}
         return {"ok": True, "error": ""}
 
-    async def mirror_rating(action, video_id, like_status, account_id):
-        # The API confirms the exact upload/account even if playback has moved on. When it
-        # is still playing, also drive Music's native control so its selected thumb follows
-        # the saved rating. Radio repairs its saved future before advancing.
-        playing = bridge.now_playing or {}
-        if bridge.connected and playing.get("video_id") == video_id:
-            player_failed = False
-            native_diagnostics = None
-            identity = None
-            try:
-                identities = await asyncio.to_thread(ctx.store.accounts.get_accounts)
-                identity = next(i for i in identities if i.id == account_id)
-                status, body = await bridge.request_control({
-                    "type": "rate", "action": action, "videoId": video_id,
-                    "likeStatus": like_status, "brandId": identity.brand_account_id or "",
-                    "skip": False}, timeout=10)
-                result = json.loads(body)
-                native_diagnostics = result.get("diagnostics")
-                if status != 200 or not result.get("ok"):
-                    raise ValueError(result.get("error") or "Player command failed")
-            except Exception:
-                logger.warning("rating saved but native thumb update failed: video=%s diagnostics=%s",
-                               video_id, json.dumps(native_diagnostics, ensure_ascii=True)[:4000], exc_info=True)
-                player_failed = True
-            # A missing native rating control must not prevent the requested
-            # skip after the exact song's dislike has already been saved.
-            if like_status == "DISLIKE" and identity is not None:
-                try:
-                    skipped = await skip_song(video_id, brand_id=identity.brand_account_id or "")
-                    if not skipped.get("ok"):
-                        raise ValueError(skipped.get("error") or "The player did not advance")
-                except Exception:
-                    logger.warning("rating saved but skip failed: video=%s", video_id, exc_info=True)
-                    player_failed = True
-            if player_failed:
-                return {"ok": True, "error": "", "player_error": "Player update not confirmed"}
-        return {"ok": True, "error": ""}
-
-    async def skip_song(video_id, *, brand_id=None):
-        playing, now = dict(bridge.now_playing or {}), getattr(ctx, 'now_fn', time.time)()
-        if (brand_id is not None and playing.get('brand_known') is True
-                and (playing.get('brand_id') or '') != brand_id):
-            return {'ok': False, 'error': 'Player account is unavailable or different'}
-        if brand_id is None and playing.get('brand_known') is True:
-            brand_id = playing.get('brand_id') or ''
-        if brand_id is not None and getattr(bridge, 'account_bound_next', None) is not True:
-            return {'ok': False, 'error': 'Update the TuneConsole extension before skipping for this account'}
-        radio = getattr(ctx, "radio", None)
-        if radio is not None and not ctx.store.activity_paused:
-            options = {'brand_id': brand_id} if brand_id is not None else {}
-            result = await activity_for(ctx).to_thread(radio.skip, video_id, **options)
-            if result is not None:
-                return result
-        # Gather optional catalog context before sending the command. A
-        # confirmed Next must reach its durable inbox even if replacement
-        # closes every main handle while the extension is responding.
-        identity, duration = None, None
-        if playing.get('video_id') == video_id and playing.get('brand_known') is True:
-            identity = live_plays.resolve_identity(ctx.store, playing.get('brand_id') or '')
-            if identity is not None:
-                from yt_playlist.core.db_space import StorageCompacting
-                try:
-                    with ctx.store.read_view() as reader:
-                        duration = reader.tracks.duration_for_video(video_id)
-                except StorageCompacting:
-                    pass  # Unknown duration remains explicit in the retained observation.
-        frame = {"type": "next", "videoId": video_id}
-        if brand_id is not None:
-            frame['brandId'] = brand_id
-        status, body = await bridge.request_control(frame, timeout=10)
-        result = json.loads(body)
-        if status != 200 or not result.get("ok"):
-            return {"ok": False, "error": result.get("error") or "The player did not advance"}
-        if identity is not None:
-            def retain():
-                from yt_playlist.core import playback_feedback
-                playback_feedback.record_next(ctx.store, identity, video_id, playing.get('position'),
-                    duration, playing.get('playlist_ytm_id'), now)
-            try:
-                await asyncio.to_thread(retain)
-            except Exception:
-                logger.warning('Player advanced but local Next capture failed: video=%s', video_id, exc_info=True)
-                return {'ok': True, 'player_error': 'Playback advanced, but this skip could not be saved to local history.'}
-        return {"ok": True}
-
     @router.post("/now-playing/next")
     async def now_playing_next(request: Request):
         video_id = None
@@ -351,7 +120,7 @@ def build(ctx) -> APIRouter:
             video_id = (await request.json()).get("videoId")
             if not isinstance(video_id, str) or not video_id:
                 return {"ok": False, "error": "displayed video ID is required"}
-            result = await skip_song(video_id)
+            result = await Ctx.playback_commands(ctx).skip(video_id)
             if not result.get("ok"):
                 logger.warning("skip not confirmed: video=%s reason=%s", video_id, result.get("error"))
             return result
@@ -360,64 +129,8 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": str(exc)}
 
     @router.post("/now-playing/toggle")
-    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = "",
-                                 confirm: bool = False):
-        if action not in ("toggle", "play", "pause"):
-            return {"ok": False, "error": "invalid playback action"}
-        frame = {"type": "playpause"}
-        if action != "toggle":
-            frame["action"] = action
-        if resume:
-            player = bridge.resumable_player
-            if not bridge.connected or not player or not player.get("paused") or not videoId or \
-                    player.get("video_id") != videoId:
-                return {"ok": False, "error": "Paused player is no longer available"}
-            frame.update(resumeOnly=True, videoId=videoId)
-        if confirm:
-            if action not in ("play", "pause") or not videoId:
-                return {"ok": False, "error": "A displayed song and playback action are required"}
-            player = bridge.resumable_player if resume else bridge.now_playing
-            if not player or player.get("video_id") != videoId:
-                return {"ok": False, "error": "The playing song changed. Try again."}
-            frame["videoId"] = videoId
-            paused = action == "pause"
-            started = time.monotonic()
-            connection_id = bridge.connection_id
-            command = asyncio.create_task(bridge.request_control(frame, timeout=5))
-            try:
-                while True:
-                    done, _ = await asyncio.wait({command}, timeout=.05)
-                    if done:
-                        status, body = command.result()
-                        result = json.loads(body)
-                        if (status == 200 and result.get("ok") and result.get("paused") is paused
-                                and result.get("videoId") == videoId):
-                            return {"ok": True, "paused": paused}
-                        return {"ok": False, "error": result.get("error") or "Playback was not confirmed"}
-                    # Identified store builds without control acknowledgements report actual media
-                    # state. Accept a fresh matching observation, never just a queued send, and
-                    # never resend a toggle whose delivery is uncertain. A new connection's
-                    # unreported capability must still wait for its native acknowledgement.
-                    observed = bridge.now_playing
-                    if (bridge.playback_confirmation is False and bridge.connection_id == connection_id
-                            and bridge.connected and observed
-                            and observed.get("video_id") == videoId and observed.get("paused") is paused
-                            and (bridge.now_playing_seen_at or 0) > started):
-                        return {"ok": True, "paused": paused}
-            except Exception:
-                logger.warning("playback not confirmed: action=%s video=%s", action, videoId, exc_info=True)
-                return {"ok": False, "error": "Playback was not confirmed. Open YouTube Music and try again."}
-            finally:
-                command.cancel()
-                try:
-                    await command
-                except (asyncio.CancelledError, Exception):
-                    pass
-        try:
-            bridge.send_control(frame)
-            return {"ok": True}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = "", confirm: bool = False):
+        return await Ctx.playback_commands(ctx, monotonic=time.monotonic).toggle(action, resume, videoId, confirm)
 
     @router.websocket("/bridge/ws")
     async def bridge_ws(ws: WebSocket):
@@ -428,10 +141,32 @@ def build(ctx) -> APIRouter:
         await ws.accept()
         loop = asyncio.get_running_loop()
         send_lock = asyncio.Lock()
+        send_failed = asyncio.Event()
 
         async def send(frame):
             async with send_lock:
-                await ws.send_json(frame)
+                try:
+                    await ws.send_json(frame)
+                except Exception:
+                    send_failed.set()
+                    raise
+
+        async def receive():
+            frame = asyncio.create_task(ws.receive_json())
+            lost = asyncio.create_task(send_failed.wait())
+            try:
+                done, _ = await asyncio.wait({frame, lost}, return_when=asyncio.FIRST_COMPLETED)
+                if lost in done:
+                    raise WebSocketDisconnect()
+                return frame.result()
+            finally:
+                frame.cancel()
+                lost.cancel()
+                # Preserve the original scope cancellation while joining both
+                # children; another cancellation at gather can replace it with
+                # an unscoped CancelledError and leak through ASGI shutdown.
+                with CancelScope(shield=True):
+                    await asyncio.gather(frame, lost, return_exceptions=True)
 
         async def keepalive():
             # MV3 service workers otherwise sleep after about 30 seconds without messages.
@@ -447,16 +182,13 @@ def build(ctx) -> APIRouter:
         ping_task = asyncio.create_task(keepalive())
         store = getattr(ctx, "store", None)
         try:
-            await run_in_threadpool(_record_connection, ctx)
+            observations.connection()
             logger.info("extension bridge connected")
-            wake = getattr(ctx, "sync_wake", None)
-            if wake is not None:
-                wake.set()
             # A concurrent command/keepalive can fail while pairing or play
             # persistence runs off-thread. Starlette then marks the socket
             # disconnected before receive_json can observe a disconnect frame.
             while ws.application_state == WebSocketState.CONNECTED:
-                msg = await ws.receive_json()
+                msg = await receive()
                 # No await separates this check from presence updates or reply
                 # resolution. Only this event loop installs socket owners.
                 if bridge.connection_id != conn_id:
@@ -511,7 +243,7 @@ def build(ctx) -> APIRouter:
                     if bridge.now_playing is not None:
                         bridge.now_playing_seen_at = time.monotonic()
                     if msg.get("title"):
-                        prepare_radio(msg)
+                        observations.prepare_radio(bridge.now_playing or {}, msg)
                     continue
                 if kind == "play":
                     bridge.now_playing = _now_playing_snapshot(msg)
@@ -520,11 +252,11 @@ def build(ctx) -> APIRouter:
                     if (msg.get("paused") or msg.get("muted") or msg.get("tabMuted")
                             or msg.get("volume") == 0):
                         continue
-                    prepare_radio(msg)
+                    observations.prepare_radio(bridge.now_playing or {}, msg)
                     now = getattr(ctx, "now_fn", time.time)()
                     if store is not None:
                         try:
-                            await activity_for(ctx).to_thread(live_plays.handle_play_event, ctx, msg, now)
+                            observations.receive('live', msg, now)
                         except Exception:
                             logger.warning("failed to persist play event", exc_info=True)
                     continue
@@ -542,7 +274,7 @@ def build(ctx) -> APIRouter:
                         bridge.now_playing_seen_at = None
                     if store is not None:
                         try:
-                            await activity_for(ctx).to_thread(player_events.handle_player_event, ctx, msg, now)
+                            observations.receive('player', msg, now)
                         except Exception:
                             logger.warning("failed to persist player event", exc_info=True)
                     continue
@@ -560,13 +292,11 @@ def build(ctx) -> APIRouter:
             # Socket cancellation must not skip suspension or release ownership
             # while a replacement is waiting to use the Radio controller.
             with CancelScope(shield=True):
+                await asyncio.gather(ping_task, return_exceptions=True)
                 async with lifecycle_lock:
                     if bridge.disconnect(conn_id):
                         try:
-                            radio = getattr(ctx, "radio", None)
-                            if radio is not None:
-                                suspend = getattr(radio, "suspend", None) or radio.stop
-                                await run_in_threadpool(suspend)
+                            await run_in_threadpool(observations.retire)
                         except Exception:
                             logger.warning("failed to stop Radio Session on disconnect", exc_info=True)
                         logger.info("extension bridge disconnected")

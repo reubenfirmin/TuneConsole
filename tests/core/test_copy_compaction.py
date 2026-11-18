@@ -1,6 +1,7 @@
 """Closed-handle replacement, durable recovery and continuing installed writes."""
 from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -11,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from yt_playlist.core import db_handles
-from yt_playlist.core.db_rebuild import install, job
+from yt_playlist.core import db_handles, fao, profile_files
+from yt_playlist.core.db_rebuild import files, install, job
 from yt_playlist.core.db_space import StorageCompacting
 from yt_playlist.core.store import Store
 
@@ -22,7 +23,7 @@ def disable_periodic_library_sync():
     """Closed-file replacement checks do not construct an HTTP application."""
 
 
-@pytest.mark.parametrize('installed',[79,93,107],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_closed_file_install_preserves_format_and_continuing_writes(installed,record_property):
     store,version = installed
     store.init_schema()
@@ -58,7 +59,7 @@ def test_closed_file_install_preserves_format_and_continuing_writes(installed,re
     assert store.settings.get_setting('after')=='accepted'
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 @pytest.mark.parametrize('phase',['copy','verify','staging','original_moved','installed','reopening'])
 def test_failure_restores_service_and_original_writes(installed,phase):
     store,_ = installed
@@ -74,7 +75,7 @@ def test_failure_restores_service_and_original_writes(installed,phase):
     store.settings.set_setting('resumed','yes')
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 @pytest.mark.parametrize('after_publication',[False, True])
 def test_initial_state_failure_restores_write_admission(installed,monkeypatch,after_publication):
     store,_ = installed
@@ -96,7 +97,7 @@ def test_initial_state_failure_restores_write_admission(installed,monkeypatch,af
     store.settings.set_setting('after initialization failure','accepted')
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_unpersistable_failure_keeps_maintenance_until_recovery(installed,monkeypatch):
     store,_ = installed
     save = install.save
@@ -122,7 +123,7 @@ def test_unpersistable_failure_keeps_maintenance_until_recovery(installed,monkey
     store.settings.set_setting('after recovery','accepted')
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_pinned_handle_blocks_replacement_and_same_file_reopens(installed, monkeypatch):
     store,_ = installed
     before = store._db_path.stat().st_ino
@@ -152,7 +153,7 @@ class ProcessDied(BaseException):
     pass
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 @pytest.mark.parametrize('phase',['copy','staging','original_moved','installed','reopening'])
 def test_restart_selects_original_or_verified_install(installed,phase):
     store,_ = installed
@@ -176,7 +177,60 @@ def test_restart_selects_original_or_verified_install(installed,phase):
     store.conn = db_handles.connect(store._db_path)
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+def test_installed_recovery_verifies_retained_files_without_discovering_sql_references(
+        file_backed_store, monkeypatch):
+    store = file_backed_store
+    database = store._db_path
+    store.tracks.upsert_track('recovery-track', 'Recovery track', 'Artist', '', 100)
+    key = store.conn.execute('SELECT identity_key FROM recordings').fetchone()[0]
+    profile = '{"dimensions": {}, "evidence": "installed recovery"}'
+    profile_digest = hashlib.sha256(profile.encode()).hexdigest()
+    store.musical_profiles.publish_recordings([(key, profile, 'test-v1', profile_digest)], 100)
+    profile_path, = profile_files.references(store.conn)
+    store.conn.close()
+    install.save(database, {
+        'format': 1, 'database': str(database), 'phase': 'installed',
+        'candidate_sha256': install.digest(database),
+    })
+
+    verifying = False
+    verification_sql, paths_read = [], []
+    connect, verify_references, read = sqlite3.connect, files.verify_references, fao.read
+
+    def trace(statement):
+        if verifying:
+            verification_sql.append(statement)
+
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(trace)
+        return conn
+
+    def traced_verify(descriptors):
+        nonlocal verifying
+        verifying = True
+        try:
+            verify_references(descriptors)
+        finally:
+            verifying = False
+
+    def traced_read(path, *args, **kwargs):
+        if verifying:
+            paths_read.append(Path(path))
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, 'connect', traced_connect)
+    monkeypatch.setattr(files, 'verify_references', traced_verify)
+    monkeypatch.setattr(fao, 'read', traced_read)
+    install.recover(database)
+
+    state = db_handles.state(database)
+    assert state['phase'] == 'complete' and state['recovered']
+    assert Path(profile_path) in paths_read
+    assert verification_sql == []
+
+
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_other_connections_obey_read_only_admission_and_closed_cursors(installed):
     store,_ = installed
     with closing(db_handles.connect(store._db_path)) as other:
@@ -199,7 +253,7 @@ def test_other_connections_obey_read_only_admission_and_closed_cursors(installed
             pytest.fail('the serving Store must still own its shared lifetime lease')
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_admitted_readonly_snapshot_finishes_before_closed_file_replacement(installed,monkeypatch):
     store,_ = installed
     store.settings.set_setting('bounded reader','exact retained value')
@@ -231,37 +285,8 @@ def test_admitted_readonly_snapshot_finishes_before_closed_file_replacement(inst
     assert result['phase']=='complete'
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
-@pytest.mark.parametrize('kind',['home','listening','documents','models','reports'])
-def test_installed_preparation_reuses_fenced_file_custody(installed,kind):
-    from tests.core.test_preparation_file_recovery import selected_owner,hashes,sql_custody
-    from yt_playlist.core import policy_documents, preparation_files
-    store,_ = installed
-    root,read,selected = selected_owner(store,kind)
-    expected,selection,custody = read(store),selected(store.conn),sql_custody(store.conn)
-    before_files = hashes(root)
-    before_references = list(preparation_files.references(store.conn))
-    observed = []
-    def progress(phase,detail):
-        if phase in {'copy','staging','original_moved'}:
-            with (root/'.readers.lock').open('a+b') as lock:
-                assert policy_documents._try_file_lock(lock,exclusive=True) is None
-            observed.append(phase)
-    report = job.run(store,progress=progress)
-    assert 'backup' not in report
-    assert {'copy','staging','original_moved'}<=set(observed)
-    assert read(store)==expected
-    assert selected(store.conn)==selection
-    assert sql_custody(store.conn)==custody
-    assert list(preparation_files.references(store.conn))==before_references
-    assert hashes(root)==before_files
-    with (root/'.readers.lock').open('a+b') as lock:
-        unlock = policy_documents._try_file_lock(lock,exclusive=True)
-        assert unlock is not None
-        unlock()
 
-
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_cross_filesystem_stages_a_verified_sibling_before_rename(installed,tmp_path,monkeypatch):
     store,_ = installed
     scratch = tmp_path/'scratch'
@@ -282,16 +307,18 @@ def test_cross_filesystem_stages_a_verified_sibling_before_rename(installed,tmp_
     assert Path(report['original']).exists()
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_different_mount_scratch_keeps_installed_custody_on_destination(installed):
-    from tests.core.test_preparation_file_recovery import selected_owner
+    from yt_playlist.rec import home_cache
 
     store,_ = installed
     with TemporaryDirectory(prefix='.test-compaction-scratch-',dir=Path.cwd()) as directory:
         scratch = Path(directory)
         if scratch.stat().st_dev==store._db_path.parent.stat().st_dev:
             pytest.skip('This machine has no distinct scratch mount for the fixture')
-        producer,read,_ = selected_owner(store,'home')
+        home_cache.put(store, 'home_prepared', {'tracks': ['retained song']}, 1)
+        producer = home_cache.root(store)
+        read = lambda current: home_cache.read(current, 'home_prepared')
         expected = read(store)
         store.settings.set_setting('cross mount','retained')
         report = job.run(store,scratch=scratch)
@@ -309,7 +336,7 @@ def test_different_mount_scratch_keeps_installed_custody_on_destination(installe
     assert any(producer.rglob('*.json'))
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_capacity_failure_restores_admission_without_allocating_a_copy(installed,monkeypatch):
     from yt_playlist.core import db_space
     store,_ = installed
@@ -325,7 +352,7 @@ def test_capacity_failure_restores_admission_without_allocating_a_copy(installed
     store.settings.set_setting('after space failure','retained')
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_existing_external_writer_rejects_copy_and_preserves_its_commit(installed):
     store,_ = installed
     with closing(sqlite3.connect(store._db_path)) as writer:
@@ -338,7 +365,7 @@ def test_existing_external_writer_rejects_copy_and_preserves_its_commit(installe
     store.settings.set_setting('resumed','accepted')
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_released_pre_swap_snapshot_cannot_publish_against_reopened_database(installed):
     store,_ = installed
     with store.read_snapshot() as snapshot:
@@ -348,7 +375,7 @@ def test_released_pre_swap_snapshot_cannot_publish_against_reopened_database(ins
         assert not snapshot.publish(lambda:pytest.fail('old snapshot published after database replacement'))
 
 
-@pytest.mark.parametrize('installed',[79],indirect=True)
+@pytest.mark.parametrize('installed',[107],indirect=True)
 def test_failed_internal_reopen_rolls_back_before_any_writer_is_admitted(installed,monkeypatch):
     store,_ = installed
     store.settings.set_setting('personal','retained')

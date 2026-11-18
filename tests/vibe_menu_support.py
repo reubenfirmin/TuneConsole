@@ -84,6 +84,8 @@ def vibe_selection():
         rec_model=SimpleNamespace(suppressed_keys=lambda *args, **kwargs: set(),
                                  get_weights=lambda **kwargs: {}, muted_artists=lambda: ()),
         rec_query=SimpleNamespace(group_candidates=lambda keys: {key: owned[key] for key in keys if key in owned}),
+        rec_candidates=SimpleNamespace(comfort_candidates=lambda now, *, keys, limit, **kwargs:
+            [item for item in lanes['comfort'] if item['key'] in keys][:limit]),
         discovery=SimpleNamespace(candidate_tracks_by_keys=lambda keys:
                                   {key: fresh[key] for key in keys if key in fresh}),
         genres=SimpleNamespace(feature_axes=lambda labels: {label: ('jazz', None) for label in labels}),

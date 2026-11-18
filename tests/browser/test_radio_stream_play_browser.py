@@ -43,8 +43,8 @@ def test_stream_artwork_hover_keyboard_play_and_metadata_links(page, radio_ui, t
     song_url = urlsplit(row.locator('.radio-proposed-song').get_attribute('href'))
     assert song_url.path == '/track/radio3'
     assert parse_qs(song_url.query)['title'] == ['Night frequency 4']
-    expect(row.locator('.radio-proposed-artist')).to_have_attribute('href', '/artist?name=Artist%204')
-    expect(row.locator('.radio-proposed-info > a')).to_have_count(2)
+    expect(row.locator('.radio-proposed-artist a')).to_have_attribute('href', '/artist?artist_id=4')
+    expect(row.locator('.radio-proposed-info a')).to_have_count(2)
     expect(row.locator('.radio-proposed-info')).to_have_text(re.compile(r'^\s*Night frequency 4\s*Artist 4\s*$'))
     expect(page.locator('.radio-direction .radio-proposed-album')).to_have_count(0)
     page.locator('.radio-session').screenshot(path=tmp_path / f'stream-song-play-{width}.png')

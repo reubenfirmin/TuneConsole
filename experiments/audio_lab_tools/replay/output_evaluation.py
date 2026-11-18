@@ -35,9 +35,9 @@ def inside(path):
 
 
 def modules():
-    from yt_playlist.rec import (audio_vibe_model, audio_vibe_cruise, audio_vibe_release,
+    from yt_playlist.rec import (audio_vibe_cruise, audio_vibe_release,
         audio_vibe_relax, audio_vibe_uplift, audio_vibe_energize, audio_vibe_focus)
-    return (audio_vibe_model, audio_vibe_cruise, audio_vibe_release,
+    return (audio_vibe_cruise, audio_vibe_release,
             audio_vibe_relax, audio_vibe_uplift, audio_vibe_energize, audio_vibe_focus)
 
 
@@ -200,10 +200,9 @@ def configure(patch, output):
     from yt_playlist.core import features
     patch.setenv('YT_PLAYLIST_HOME', str(output / 'app-home'))
     patch.setattr(features, 'LOCAL_ENV', output / '.env.local')
-    for index, module in enumerate(modules()):
+    for module in modules():
         patch.setenv(module.ENVIRONMENT_KEY, str(module.DEFAULT_PATH))
-        if index:
-            patch.setenv(module.MODE_KEY, 'active')
+        patch.setenv(module.MODE_KEY, 'active')
     def offline(*_args, **_kwargs):
         raise AssertionError('Offline evaluation attempted a network connection')
     patch.setattr(socket.socket, 'connect', offline)

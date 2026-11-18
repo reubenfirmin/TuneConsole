@@ -57,7 +57,7 @@ def test_sync_events_unknown_job_404(store):
     assert c.get("/sync/events/99999").status_code == 404
 
 def test_sync_reports_failure_in_stream(store, monkeypatch, sync_routes_only):
-    from yt_playlist.library import sync
+    from yt_playlist.controllers import library_synchronization as sync
 
     waits = []
     monkeypatch.setattr(sync, 'with_retry', partial(sync.with_retry, sleep=waits.append))
