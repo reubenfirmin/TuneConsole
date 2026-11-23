@@ -1,6 +1,7 @@
 """Track details retain exact-upload collection facts and honest listening precision."""
 from contextlib import closing
 from datetime import datetime, timezone
+import hashlib
 from tests.enrichment_support import seed_audio
 from urllib.parse import parse_qs, urlsplit
 
@@ -26,10 +27,10 @@ def detail_routes(request, monkeypatch):
         return
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, track
+    from yt_playlist.web.routes import app_update, audio_vibes, track
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, track)])
+        for module in (app_update, audio_vibes, track)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
 
@@ -64,14 +65,15 @@ def test_musical_evidence_uses_saved_profiles_without_foreground_preparation(son
     # A source cache can advance before the recording resolver gets its next turn.
     # Its new observations must not be attributed to the older recording result.
     with store.conn:
-        store.conn.execute("UPDATE rec_musical_source_profiles SET digest='newer-source'")
+        store.conn.execute("UPDATE rec_musical_sources SET musical_profile_digest='newer-source' "
+                           "WHERE musical_profile_version IS NOT NULL")
     body = songs['http'].get('/track/owned-song').text
     assert 'Some source details are unavailable or awaiting refresh.' in body
     assert 'mood aggressive: 0.9 (probability)' not in body
     assert store.musical_profiles.by_keys([key])[key] == profile
 
 
-def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(songs):
+def test_musical_evidence_distinguishes_genre_hints_corrections_and_unknowns(songs):
     from tests.musical_support import prepare_profiles
     from yt_playlist.core import catalog
     store = songs['store']
@@ -79,7 +81,7 @@ def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(so
     store.tracks.set_track_genre(tid, 'Ambient')
     seed_audio(store, tid, danceability=.8)
     with store.conn:
-        catalog.choose_field(store.conn, tid, 'energy', .9)
+        catalog.choose_field(store.conn, tid, 'mood_relaxed', .1)
         catalog.choose_field(store.conn, tid, 'mood_happy', None)
     prepare_profiles(store)
     body = songs['http'].get('/track/owned-song').text
@@ -87,17 +89,18 @@ def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(so
     groove = body.split('data-musical-signal="groove"')[1].split('</dd>')[0]
     relaxed = body.split('data-musical-signal="relaxed"')[1].split('</dd>')[0]
     happiness = body.split('data-musical-signal="happiness"')[1].split('</dd>')[0]
-    assert 'High' in intensity and 'Your correction' in intensity and 'Genre hint' not in intensity
-    assert 'Legacy metadata' in groove and 'Limited evidence' in groove
-    assert 'Genre hint' in relaxed and 'Limited evidence' in relaxed
+    assert 'Your correction' in intensity and 'Genre hint' not in intensity
+    assert 'Unknown' in groove
+    assert 'Your correction' in relaxed
     assert 'Unavailable after corrections' in happiness and 'Your correction' in happiness
 
 
 def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference(songs, monkeypatch):
     import json
     from tests.musical_support import prepare_profiles
-    from yt_playlist.core.audio_vibe_contract import PREDICTION_VERSION, serving_prefix
-    from yt_playlist.rec import musical_profiles
+    from yt_playlist.core.audio_vibe_contract import PREDICTION_VERSION
+    from yt_playlist.rec.vibe_score_policy import joint_suffix, serving_prefix
+    from yt_playlist.rec import musical_profiles, vibe_joint_state
     store = songs['store']
     prepare_profiles(store)
     key = store.tracks.identity_key_for_video('owned-song')
@@ -115,14 +118,15 @@ def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference
                              'fits': {vibe: {'score': score, 'support': 1}}}}
     tracks = {k: measured('relax', .63, 'provider_measurement') for k in contributors}
     tracks[key] = measured('cruise', .72, 'audio_measurement')
+    tracks[key]['version'] += '/' + joint_suffix(vibe_joint_state.config_identity())
     resolved = {k: {'relax': {'score': .63, 'support': 1, 'source': 'provider_measurement'}} for k in contributors}
     resolved[key] = {'cruise': {'score': .72, 'support': 1, 'source': 'audio_measurement'},
                      'relax': {'score': .63, 'support': .2, 'source': 'artist', 'recordings': 3,
                                'variance': 0, 'inputs': {k: None for k in contributors}},
                      'release': {'score': .5, 'support': 0, 'source': 'heuristic'}}
-    with store.conn:
-        store.conn.execute('UPDATE rec_musical_profiles SET payload=? WHERE identity_key=?',
-                           (json.dumps(profile), key))
+    raw = json.dumps(profile)
+    store.musical_profiles.publish_recordings(
+        [(key, raw, musical_profiles.VERSION, hashlib.sha256(raw.encode()).hexdigest())], 1000)
     with store.read_snapshot() as snapshot:
         with closing(snapshot.store.vibe_predictions.prepare_publication(tracks, resolved, [], 1000)) as plan:
             assert snapshot.publish_ordered(lambda: store.vibe_predictions.publish_prepared(plan))
@@ -139,9 +143,8 @@ def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference
     assert 'not your ratings' in body and store.conn.total_changes == before
 
 
-@pytest.mark.parametrize('dimension,support,expected', [
-    ('tempo', 1, 'Unknown'), ('intensity', 0, 'Unknown'), ('intensity', 1, '50/100')])
-def test_vibe_fallback_needs_relevant_supported_attributes(dimension, support, expected):
+@pytest.mark.parametrize('dimension,support', [('tempo', 1), ('intensity', 0), ('intensity', 1)])
+def test_vibe_evidence_does_not_use_heuristic_fits(dimension, support):
     from yt_playlist.rec import musical_profiles
     from yt_playlist.web.musical_evidence import describe
 
@@ -149,7 +152,7 @@ def test_vibe_fallback_needs_relevant_supported_attributes(dimension, support, e
     profile['dimensions'][dimension].update(value=.5, support=support)
     profile['vibes'] = {'fits': {'energize': {'score': .5, 'support': 0, 'source': 'heuristic'}}}
     rows = describe(profile)['vibes']
-    assert next(row for row in rows if row['name'] == 'energize')['description'] == expected
+    assert next(row for row in rows if row['name'] == 'energize')['description'] == 'Unknown'
 
 
 def test_musical_source_details_are_bounded(songs):
@@ -190,7 +193,7 @@ def test_track_metadata_and_playlist_membership_use_exact_upload(songs):
 
 def test_discovery_preview_retains_metadata_without_saving(songs, monkeypatch):
     store = songs['store']
-    before = store.conn.execute('SELECT COUNT(*) FROM catalog_entries').fetchone()[0]
+    before = store.conn.execute('SELECT COUNT(*) FROM track_sources').fetchone()[0]
     def unexpected(*args):
         pytest.fail('A preview with metadata must not fetch the song again')
     monkeypatch.setattr(songs['main'], 'get_song', unexpected)
@@ -203,7 +206,7 @@ def test_discovery_preview_retains_metadata_without_saving(songs, monkeypatch):
     assert 'MPRE_new' in body and 'Save album to collection' in body
     assert '3:45' in body and 'Create playlist with song' in body
     assert store.tracks.track_detail(SONG['video_id']) is None
-    assert store.conn.execute('SELECT COUNT(*) FROM catalog_entries').fetchone()[0] == before
+    assert store.conn.execute('SELECT COUNT(*) FROM track_sources').fetchone()[0] == before
     assert not songs['main'].rated and not songs['main'].created
 
 
@@ -282,12 +285,10 @@ def test_ledger_keeps_unknown_history_precision_and_paginates(songs):
     assert second.count('<strong>Played</strong>') == 1 and 'Newer entries' in second
     assert 'Older entries' not in second
     with store.conn:
-        capture = store.conn.execute('INSERT INTO listening_capture_receipts(account_id,captured_at) '
-                                     'VALUES (?,?)', (songs['main_id'], 1800000000)).lastrowid
         store.conn.execute('INSERT INTO listening_observations(account_id,raw_identity_key,recording_id,'
             'source_day,day,source,precision,first_observed_at,last_observed_at,capture_id,capture_item_id) '
             "VALUES (?,?,?,'2023-11-14','2023-11-14','ytm_history','legacy_unknown',?,?,?,?)",
-            (songs['main_id'], track['identity_key'], track['recording_id'], 1800000000, 1800000000, capture, 1))
+            (songs['main_id'], track['identity_key'], track['recording_id'], 1800000000, 1800000000, 1, 1))
     body = songs['http'].get('/track/owned-song').text
     assert 'Play time unknown' in body
     assert 'History observations do not establish an exact play time or count.' in body

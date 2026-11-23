@@ -5,7 +5,7 @@ ranking remain with the feature owners; reading a gate never schedules work.
 """
 from yt_playlist.controllers.growth_readiness import GrowthReadiness
 
-from yt_playlist.rec import (album_choices, album_tuning, choice_evidence, fresh_pool, home_cache, home_cards,
+from yt_playlist.rec import (album_choices, album_tuning, choice_evidence, fresh_pool, group_viz, home_cache, home_cards,
                              home_prepared, mix_tuning)
 
 # Enough ranked discoveries to fill one ordinary four-card row. Selection still
@@ -32,12 +32,12 @@ def foundation(store, now):
                 continue  # Collected evidence is pending preparation, not a broken Home.
             yield context
     def reserve():
-        bundles = (None if getattr(store, '_recommendation_files', False)
-                   else store.rec_proposals.fresh_candidates())
-        return fresh_pool.pick(store, now, size=POOL_TRACKS, minimum=1, bundles=bundles)
-    command = GrowthReadiness(modes=lambda: store.modes.list_summaries(active_only=True),
-        contexts=contexts, configuration=lambda: (store.settings.get_setting('rec_content_generation'),
-            store.settings.get_setting('rec_fit_inputs')), reserve=reserve, album_menu=lambda: [])
+        return fresh_pool.pick(store, now, size=POOL_TRACKS, minimum=1)
+    def configuration():
+        recording = store.rec_model.recording_state()
+        return recording.generation, recording.fit_fingerprint
+    command = GrowthReadiness(modes=lambda: (group_viz.prepared(store) or {}).get('groups', ()),
+        contexts=contexts, configuration=configuration, reserve=reserve, album_menu=lambda: [])
     return store.memoized_read(('growth-foundation', 1, int(now // 60)), lambda: command.foundation(POOL_TRACKS))
 
 

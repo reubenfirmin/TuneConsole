@@ -75,6 +75,10 @@ def prepare(store, now, fetch_fn=None):
     return stories(store).prepare(now, fetch_fn)
 
 
+def refresh_due(store, now):
+    return stories(store).refresh_due(now)
+
+
 def load(store, now, epoch=0, schedule=lambda: None):
     return stories(store).load(now, epoch, schedule)
 

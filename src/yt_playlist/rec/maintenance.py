@@ -49,12 +49,13 @@ class Projections:
                     self.active.difference_update(pending)
 
     def run(self, kind):
-        from yt_playlist.rec import actions, listening_analytics, model_health, trend_rollups
+        from yt_playlist.rec import actions, listening_analytics, model_health, taste_analysis, trend_rollups
         result = None
         try:
             fingerprint = inputs(self.store, kind, self.now_fn())
             target = {'trends': trend_rollups.build, 'cleanup': actions.refresh_cleanup,
-                      'analytics': listening_analytics.build, 'model_health': model_health.prepare}[kind]
+                      'analytics': listening_analytics.build, 'model_health': model_health.prepare,
+                      'library_taste': taste_analysis.prepare_library_summary}[kind]
             result = self.execute(kind + ' summary', target, self.store, self.now_fn())
             return result
         except WorkClosing:

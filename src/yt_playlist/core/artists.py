@@ -1,11 +1,12 @@
 """Artist identities and ordered source credits. Names are evidence, never provider identities."""
+import sqlite3
 import time
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.core import artist_credits, legacy_evidence
+from yt_playlist.core import artist_credits
 from yt_playlist.core.artist_keys import canonical_id, lookup
 from yt_playlist.core.discovery_sources import reconcile_artist as reconcile_discovery_artist
-from yt_playlist.core.artist_reconciliation import latest
+from yt_playlist.core.artist_reconciliation import move_lastfm_cache
 from yt_playlist.core.recommendation_invalidation import artist_reconciled
 from yt_playlist.util.matching import normalize
 
@@ -16,22 +17,25 @@ def token(artist_id):
 
 def ambiguous_context(conn, artist_id):
     """A recorded split of unresolved credits cannot later become a global identity guess."""
-    if legacy_evidence.available(conn):
-        return bool(conn.execute('SELECT 1 FROM artist_ambiguities WHERE artist_id=?', (artist_id,)).fetchone())
-    return bool(conn.execute('SELECT 1 FROM identity_state_archive WHERE kind=? AND source_id=?',
-                             ('ambiguous_album_artist',str(artist_id))).fetchone())
+    return conn.execute('SELECT 1 FROM artists WHERE id=? AND contextual_credit=1', (artist_id,)).fetchone() is not None
+
+
+def mark_ambiguity(conn, artist_id):
+    conn.execute('UPDATE artists SET contextual_credit=1 WHERE id=? AND contextual_credit=0', (artist_id,))
+
+
+def redirect(conn, previous, target, source, now):
+    changed = conn.execute('UPDATE artists SET redirect_artist_id=?,redirect_source=?,redirect_created_at=? '
+                           'WHERE id=? AND redirect_artist_id IS NULL', (target, source, now, previous)).rowcount
+    if changed != 1:
+        raise sqlite3.IntegrityError('Artist redirect source changed during reconciliation')
+    conn.execute('UPDATE artists SET redirect_artist_id=? WHERE redirect_artist_id=?', (target, previous))
 
 
 def _reconcile_feature_state(conn, previous, target, source):
     """Compatibility workflow for offline catalog preparation."""
     conn.execute('UPDATE rec_feedback SET artist_id=? WHERE artist_id=?', (target, previous))
-    rows = [dict(row) for row in conn.execute(
-        'SELECT * FROM rec_artist_similar WHERE artist_id IN (?,?)', (previous, target))]
-    winner = latest(rows, 'fetched_at', target, legacy=True)
-    if winner is not None:
-        conn.execute('DELETE FROM rec_artist_similar WHERE artist_id IN (?,?)', (previous, target))
-        conn.execute('INSERT INTO rec_artist_similar (' + ','.join(winner) + ') VALUES (' +
-                     ','.join('?' for _ in winner) + ')', tuple(winner.values()))
+    move_lastfm_cache(conn, previous, target)
     edges = conn.execute('SELECT * FROM artist_similarity_targets WHERE source_artist_id=? OR target_artist_id=?',
                          (previous, previous)).fetchall()
     conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=? OR target_artist_id=?',
@@ -60,9 +64,7 @@ def reconcile_provisional(conn, previous, target, *, source, now=None):
     if not conn.execute('SELECT 1 FROM artists a JOIN artist_provider_ids p ON p.artist_id=a.id '
                         'WHERE a.id=? AND a.provisional=0',(target,)).fetchone():
         return previous
-    conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,?)',
-                 (previous,target,source,time.time() if now is None else now))
-    conn.execute('UPDATE artist_redirects SET artist_id=? WHERE artist_id=?',(target,previous))
+    redirect(conn, previous, target, source, time.time() if now is None else now)
     artist_credits.reconcile_current(conn, previous, target, source, time.time() if now is None else now)
     conn.execute('UPDATE album_artists SET artist_id=? WHERE artist_id=?',(target,previous))
     conn.execute('INSERT OR IGNORE INTO artist_aliases SELECT ?,alias,source FROM artist_aliases WHERE artist_id=?',
@@ -77,17 +79,16 @@ def reconcile_provisional(conn, previous, target, *, source, now=None):
 
 def ensure(conn, name, *, provider=None, provider_id=None, previous=None):
     previous = canonical_id(conn,previous) if previous is not None else None
+    if previous is None and not (provider and provider_id):
+        return _ensure_provisional(conn, name, provider or 'unidentified_credit')
     if previous is not None and provider and provider_id and ambiguous_context(conn,previous):
         previous = None
     if previous is not None and not (provider and provider_id):
         # A weaker refresh cannot replace the identity of an existing exact credit.
         row = (previous,)
-    elif provider and provider_id:
+    else:
         row = conn.execute('SELECT artist_id FROM artist_provider_ids WHERE provider=? AND provider_id=?',
                            (provider,provider_id)).fetchone()
-    else:
-        rows = conn.execute('SELECT id FROM artists WHERE provisional=1 AND name=? ORDER BY id', (name,)).fetchall()
-        row = next((r for r in rows if canonical_id(conn,r[0])==r[0]),None)
     if row:
         artist_id = canonical_id(conn,row[0])
         if previous is not None and provider and provider_id:
@@ -107,6 +108,17 @@ def ensure(conn, name, *, provider=None, provider_id=None, previous=None):
     if name:
         conn.execute('INSERT OR IGNORE INTO artist_aliases VALUES (?,?,?)',
                      (artist_id,name,provider or 'unidentified_credit'))
+    return artist_id
+
+
+def _ensure_provisional(conn, name, source):
+    row = conn.execute('SELECT id FROM artists WHERE provisional=1 AND name=? AND redirect_artist_id IS NULL '
+        'ORDER BY id LIMIT 1',
+        (name,)).fetchone()
+    artist_id = (row[0] if row else conn.execute('INSERT INTO artists(name,provisional) VALUES (?,1)',
+                                               (name,)).lastrowid)
+    if name:
+        conn.execute('INSERT OR IGNORE INTO artist_aliases VALUES (?,?,?)', (artist_id, name, source))
     return artist_id
 
 
@@ -144,7 +156,7 @@ def state_id(conn, value):
         return artist_id
     if isinstance(value,int) or str(value).startswith('@artist:'):
         raise ValueError(f'Unknown artist reference: {value}')
-    return ensure(conn,str(value))
+    return _ensure_provisional(conn, str(value), 'unidentified_credit')
 
 
 def credit_subject(conn, existing, name):
@@ -176,9 +188,7 @@ def public_keys(conn, artist_ids):
     requested = set(artist_ids)
     if not requested:
         return {}
-    redirects = (dict(conn.execute('SELECT retired_id,artist_id FROM artist_redirects'))
-                 if conn.execute("SELECT 1 FROM sqlite_master WHERE name='artist_redirects'").fetchone()
-                 else {})
+    redirects = dict(conn.execute('SELECT id,redirect_artist_id FROM artists WHERE redirect_artist_id IS NOT NULL'))
     canonical = {aid: redirects.get(aid, aid) for aid in requested}
     wanted = set(canonical.values())
     names = {row['id']: normalize(row['name']) for row in conn.execute('SELECT id,name FROM artists')

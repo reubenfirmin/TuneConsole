@@ -1,5 +1,6 @@
 import json
 import re
+from copy import deepcopy
 from html import unescape
 
 import numpy as np
@@ -24,7 +25,7 @@ def _pristine_current_schema():
 
 
 def _client(store, now=1000.0):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     prepare_home(store, now)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now,
                                  background_work=False),
@@ -73,9 +74,21 @@ def _seed_bundles(store):
     return payload
 
 
-def test_cards_route_renders_mode_cards(store, home_routes_only):
+def serve_ranked_result(monkeypatch, protos):
+    def cards(service, request):
+        detached = deepcopy(protos)
+        for proto in detached:
+            proto['experiment_id'] = home_cards.experiment_id(proto)
+        return home_cards.CardsResult(detached, [{'proto': proto, 'pool': None} for proto in detached],
+            None, None, [], [], home_cards._epoch(service.store, 'cards'), '')
+
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
+
+
+def test_cards_route_renders_mode_cards(store, home_routes_only, monkeypatch):
     seed_modes(store, 1, 2)
     payload = publish_menu(store, prefix='song', count=2, mode_ids=(1, 2))
+    serve_ranked_result(monkeypatch, payload['menus'][0]['protos'])
     # A discovery inside a mix must not acquire individual track exposure when
     # only the mix descriptor becomes visible. Keep this assertion nonempty.
     track = payload['menus'][0]['protos'][0]['tracks'][0]
@@ -110,7 +123,8 @@ def test_mix_choice_capture_failure_keeps_playable_cards_and_logs(
     from yt_playlist.rec import choice_evidence
 
     seed_modes(store, 1, 2)
-    publish_menu(store, prefix='song', count=2, mode_ids=(1, 2))
+    payload = publish_menu(store, prefix='song', count=2, mode_ids=(1, 2))
+    serve_ranked_result(monkeypatch, payload['menus'][0]['protos'])
     calls = []
 
     def unavailable(writer, format, options, now, **kwargs):
@@ -132,7 +146,7 @@ def test_mix_choice_capture_failure_keeps_playable_cards_and_logs(
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
 
 
-def _publish_mode_menu(store, now):
+def _publish_mode_menu(store, now, monkeypatch):
     # HTTP consumers use the full original pools and actual card completion.
     # Enumerating every alternative menu belongs to worker preparation tests.
     cards = mode_surfaces.assemble_cards(store, now, 0)
@@ -140,14 +154,15 @@ def _publish_mode_menu(store, now):
     result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
                                    None, None, [], [], 0, None)
     publish_cards(store, result, now)
+    serve_ranked_result(monkeypatch, protos)
     return cards
 
 
-def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store):
+def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store, monkeypatch):
     from html import unescape
     from yt_playlist.rec import choice_evidence
     _seed_bundles(store)
-    _publish_mode_menu(store, 1000)
+    _publish_mode_menu(store, 1000, monkeypatch)
     with prepared_client(store, background_work=False) as client:
         first = client.get('/home/cards')
         match = re.search(r'hx-vals=\'([^\']*opportunity_id[^\']*)\'', first.text)
@@ -163,7 +178,7 @@ def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store):
     assert all(row['opportunity_id'] != other for row in closes)
 
 
-def test_mode_card_recipe_carries_a_journey(store):
+def test_mode_card_recipe_carries_a_journey(store, monkeypatch):
     # A saved mode card must record a DJ journey in its recipe so the playlist page can show + tune
     # the Flow lever (parity with the per-lane _carded cards). Regression: the mode-card recipe was
     # just {"model": "mode", "mode_id": N} with no journey, so the saved playlist showed no Flow.
@@ -180,6 +195,7 @@ def test_mode_card_recipe_carries_a_journey(store):
         for index, (mid, lane) in enumerate(((1, 'wheelhouse'), (2, 'explore')))]
     publish_cards(store, home_cards.CardsResult(protos,
         [{'proto': proto, 'pool': None} for proto in protos], None, None, [], [], 0, None), 1000)
+    serve_ranked_result(monkeypatch, protos)
     with prepared_client(store, background_work=False) as client:
         r = client.get("/home/cards")
     assert r.status_code == 200
@@ -195,7 +211,7 @@ def test_mode_card_recipe_carries_a_journey(store):
         assert rec.get("journey") in journeys.JOURNEYS
 
 
-def test_fresh_mode_card_recipe_retains_lane(store):
+def test_fresh_mode_card_recipe_retains_lane(store, monkeypatch):
     bundles = _seed_bundles(store)
     publish_bundles(store, {
         **{mid: {'fresh': bucket['fresh']} for mid, bucket in bundles.items()},
@@ -203,7 +219,7 @@ def test_fresh_mode_card_recipe_retains_lane(store):
     }, 1)
     # Preserve real mode selection, recipe completion and HTTP serialization.
     # Preparing every Home menu is a separate worker obligation.
-    cards = _publish_mode_menu(store, 1)
+    cards = _publish_mode_menu(store, 1, monkeypatch)
     assert cards and all(card['lane'] == 'fresh' for card in cards)
     with prepared_client(store, now=1, background_work=False) as client:
         response = client.get("/home/cards")
@@ -218,9 +234,7 @@ def test_cards_route_ok_when_empty(store):
     assert r.status_code == 200      # falls back / empty, never 500
 
 
-def test_explicit_tuning_with_object_tracks_is_cached_without_request_fallback(store, monkeypatch):
-    # Explicit tuning can still produce ForYouItem objects. Ordinary reads must use the
-    # prepared result instead of invoking the legacy ranker when mode bundles are missing.
+def test_live_tuning_renders_object_tracks_and_captures_the_offer(store, monkeypatch):
     from html import unescape
     from yt_playlist.rec import choice_evidence, stored_home
     from yt_playlist.rec.surfaces import ForYouItem
@@ -234,7 +248,7 @@ def test_explicit_tuning_with_object_tracks_is_cached_without_request_fallback(s
 
     def candidates(store, now, **kwargs):
         calls.append('wheelhouse')
-        return [proto]
+        return [deepcopy(proto)]
 
     monkeypatch.setattr(stored_home, "unmodeled_cards", candidates)
     context = choice_evidence.freeze_context(store, choice_evidence.model_context(store, 1000))
@@ -242,35 +256,21 @@ def test_explicit_tuning_with_object_tracks_is_cached_without_request_fallback(s
     publish_cards(store, empty, 1000)
     with prepared_client(store, background_work=False) as client:
         assert client.get("/home/cards").status_code == 200
-        assert calls == []
+        assert calls == ['wheelhouse']
         r = client.post("/home/breadth", data={"breadth_bias": "0.5"})
         assert r.status_code == 200
         assert "Song" in r.text and "Mix" in r.text
-        assert "wheelhouse" in calls
-        tuned = store.rec_proposals.get_proposals('home_tuned')
-        held = store.rec_proposals.get_proposals('home_choice')
-        assert home_prepared._valid(tuned)
-        cached = tuned['menus'][0]['protos'][0]
-        assert cached['tracks'] == held['menu']['protos'][0]['tracks']
-        assert [track['key'] for track in cached['tracks']] == [f'k{i}' for i in range(4)]
-        assert all(track['reason'] == 'reason' for track in cached['tracks'])
+        assert calls == ['wheelhouse', 'wheelhouse']
+        assert re.findall(r'data-key="([^"]+)"', r.text) == [f'k{i}' for i in range(4)]
         recipe = json.loads(unescape(re.search(r"data-recipe='([^']*)'", r.text)[1]))
         offered = choice_evidence.opportunity(store, recipe['opportunity_id'])
-        assert recipe['option_id'] == recipe['experiment_id'] == cached['experiment_id']
-        assert [option['id'] for option in offered['options']] == [cached['experiment_id']]
-        assert offered['options'][0]['assignment'] is held['assignment'] is None
-        assert tuned['choice_context'] == held['choice_context']
-        frozen = choice_evidence.resolve_context(store, tuned['choice_context'])
-        captured = choice_evidence.resolve_context(store, {'artifact': offered['context']})
-        # Mix offers retain compact correction timing; the prepared cache separately
-        # keeps the complete frozen model inputs. Both describe this same choice.
-        assert captured['at'] == frozen['at'] == 1000
-        assert 'comparison' not in captured
-        tuning_calls = calls.copy()
+        assert recipe['option_id'] == recipe['experiment_id']
+        assert [option['id'] for option in offered['options']] == [recipe['experiment_id']]
+        assert offered['options'][0]['assignment'] is None
         r = client.get("/home/cards")
         assert r.status_code == 200
         assert "Song" in r.text and "Mix" in r.text
-        assert calls == tuning_calls
+        assert calls == ['wheelhouse'] * 3
 
 
 def test_prepared_mode_card_copies_keep_sql_and_files_private(
@@ -300,7 +300,8 @@ def test_prepared_mode_card_copies_keep_sql_and_files_private(
 
         def bodies(owner):
             return {tuple(row[:3]): Path(row[3]) for row in owner.conn.execute(
-                'SELECT publication_id,surface,chunk_key,filename FROM home_display_files')}
+                "SELECT p.value->>'id',p.value->>'surface',f.value->>2,f.value->>3 "
+                "FROM prepared_display_manifests p,json_each(p.value,'$.files') f WHERE p.key GLOB 'prepared_home:*'")}
 
         original, first, second = (bodies(owner) for owner in (template.source, store, other))
         assert original and original.keys() == first.keys() == second.keys()

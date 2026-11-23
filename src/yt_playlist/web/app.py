@@ -7,14 +7,14 @@ import signal
 import threading
 import time
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from markupsafe import Markup, escape
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from starlette.concurrency import run_in_threadpool
-from yt_playlist.web.fao_static import ManagedStaticFiles
+from yt_playlist.web.fao_static import HOME_SHELL, HOME_SHELL_SCRIPTS, ManagedStaticFiles
 from yt_playlist.core import fao
 from yt_playlist.core.db_reads import MAX_READERS
 from fastapi.templating import Jinja2Templates
@@ -23,8 +23,8 @@ from yt_playlist.web.icons import arrow_icon
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
-from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
-from yt_playlist.core.storage_maintenance import StorageMaintenance, StorageCompacting
+from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, cancellable_work
+from yt_playlist.core.storage_maintenance import RETIREMENT_MESSAGE, StorageMaintenance
 from yt_playlist.core.work_diagnostics import CpuDiagnostics
 from yt_playlist.library.update_composition import acquire_shutdown
 from yt_playlist.rec.journeys import JOURNEY_LABELS
@@ -36,7 +36,8 @@ from yt_playlist.util.navigation import LINK_CONFIG, album_url, artist_url, play
 from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGINS, build as build_bridge_route
-from yt_playlist.rec import account_growth, home_vibe
+from yt_playlist.web.routes.home import preload_templates as preload_home_templates
+from yt_playlist.rec import account_growth, group_viz, home_vibe
 
 
 home_vibe.configure_access(lambda store, now: account_growth.vibe_access(store, now))
@@ -226,10 +227,27 @@ def create_app(store, client_provider, *, now_fn=time.time,
     background_work = BACKGROUND_WORK if background_work is None else background_work
     stop = threading.Event()
     worker_lifecycle = threading.Lock()
+
+    def preload_group_tree():
+        try:
+            with cancellable_work(stop.is_set):
+                if graph := group_viz.prepared(store):
+                    group_viz.recording_groups(store, graph['generation'])
+        except WorkClosing:
+            return
+        except Exception:
+            ctx.logger.warning('Could not load the published musical group graph at startup', exc_info=True)
+
+    def preload_home():
+        preload_home_templates(templates.env)
+        str(asset_version)
+        for path in HOME_SHELL:
+            static_files.bundle(path)
+
     @asynccontextmanager
     async def lifespan(app):
         logging.getLogger(__name__).info(
-            'Foreground read scheduling enabled: total_readers=%d background_max=%d maintenance_guard=worker '
+            'Foreground read scheduling enabled: total_readers=%d background_max=%d '
             'radio_planning=detached live_radio_reader=checkpoint-only radio_rejoin=checkpoint '
             'radio_tuning=retained-intent-v2 radio_candidate_reads=bounded-planning-pages-v1',
             MAX_READERS, MAX_READERS - 1)
@@ -239,20 +257,17 @@ def create_app(store, client_provider, *, now_fn=time.time,
         threads = []
         diagnostics = CpuDiagnostics(ctx.work)
         try:
+            await asyncio.to_thread(preload_group_tree)
+            await asyncio.to_thread(preload_home)
             if background_work:
                 diagnostics.start()
-                ctx.storage_maintenance.start()
                 def start_background():
-                    while not ctx.storage_maintenance.ready.wait(.1):
-                        if stop.is_set():
-                            return
                     with worker_lifecycle:
                         if stop.is_set():
                             return
                         if bridge.connected:
                             store.settings.set_setting('bridge_paired', '1')
                             ctx.clear_all_auth_expired()
-                        # Refresh local genre configuration after storage preparation.
                         genre_lib.configure(store)
                         ctx.radio.prepare()
                         ctx.rec_worker.start_ticker()
@@ -260,12 +275,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                         ctx.rec_worker.trigger_mode_refresh()
                     _background_sync_loop(ctx, setup, bridge, stop=stop, wake=ctx.sync_wake)
                 threads.append(threading.Thread(target=start_background, daemon=True))
-                def start_updates():
-                    while not ctx.storage_maintenance.ready.wait(.1):
-                        if stop.is_set():
-                            return
-                    _background_update_loop(ctx, stop)
-                threads.append(threading.Thread(target=start_updates, daemon=True))
+                threads.append(threading.Thread(target=_background_update_loop, args=(ctx, stop), daemon=True))
             if idle_monitor is not None:
                 threads.append(threading.Thread(target=idle_monitor, args=(stop,), daemon=True))
             for thread in threads:
@@ -278,7 +288,6 @@ def create_app(store, client_provider, *, now_fn=time.time,
             with worker_lifecycle:
                 stop.set()
                 ctx.sync_wake.set()
-                ctx.storage_maintenance.stop()
                 ctx.rec_worker.shutdown()
                 ctx.enrich_worker.shutdown()
             ctx.work.stop_executor()  # cancel queued applies; running mutations drain normally
@@ -287,7 +296,6 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 await asyncio.to_thread(thread.join, 1.0)
             await asyncio.to_thread(ctx.rec_worker.join, 1.0)
             await asyncio.to_thread(ctx.enrich_worker.join, 1.0)
-            await asyncio.to_thread(ctx.storage_maintenance.join, _DRAIN_TIMEOUT_S)
             if not drained or any(thread.is_alive() for thread in threads):
                 raise RuntimeError(f"Application shutdown timed out: {ctx.work.active}")
             if ctx.updater is not None:
@@ -295,7 +303,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     app = FastAPI(lifespan=lifespan)
     app.add_middleware(RequestPriorityMiddleware, priority=store.priority)
-    app.mount("/static", ManagedStaticFiles(directory=str(static_dir)), name="static")
+    static_files = ManagedStaticFiles(directory=str(static_dir))
+    app.mount("/static", static_files, name="static")
     allowed = set(allowed_hosts)
     # Cache-bust the front-end by a CONTENT hash across ALL top-level static JS/CSS so browsers always
     # fetch the current build after an edit (otherwise a stale cached file silently diverges). Content
@@ -311,7 +320,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
             try:
                 files = sorted((p for p in [*static_dir.glob("*.js"), *static_dir.glob("*.css"),
                                             static_dir / "favicon.svg"] if p.exists()), key=lambda p: p.name)
-                key = tuple((p.name, fao.read(p).info.identity) for p in files)
+                key = tuple((p.name, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                            for p, stat in ((p, p.stat()) for p in files))
                 if key != self._key:
                     h = hashlib.md5()
                     for p in files:
@@ -321,6 +331,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
             except (OSError, ValueError):
                 return "0"
     asset_version = _AssetVersion()
+    templates.env.globals['home_shell_scripts'] = ' '.join(HOME_SHELL_SCRIPTS)
     templates.env.globals["asset_v"] = asset_version
     templates.context_processors.append(lambda request: {"asset_v": str(asset_version)})
     from yt_playlist.web.theme import mix_launch_tokens
@@ -364,13 +375,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 '/radio/start', '/radio/stop', '/radio/select', '/radio/tune', '/radio/seen',
                 '/home/tv/takeover', '/heartbeat', '/goodbye') or (
                 request.url.path.startswith('/home/tv/playlist/') and request.url.path.endswith('/event'))
-            if ctx is not None and not playback_request and request.url.path != '/storage-maintenance/rebuild':
-                # Status reads the durable feedback inbox and can wait for a
-                # capture/ack or SQLite. Keep that admission off the event loop
-                # just like the synchronous route handlers it protects.
-                maintenance = await run_in_threadpool(ctx.storage_maintenance.status)
-                if maintenance['active']:
-                    return PlainTextResponse(maintenance['message'], status_code=503)
+            if ctx is not None and ctx.store.activity_paused and not playback_request:
+                return PlainTextResponse(RETIREMENT_MESSAGE, status_code=503)
             if (ctx is not None and ctx.updater is not None
                     and ctx.updater.phase == "restarting"
                     and request.url.path not in ("/app-update/restart", "/app-update/restart/cancel", "/heartbeat", "/goodbye")):
@@ -385,7 +391,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return PlainTextResponse(str(error), status_code=503)
         try:
             with home_vibe.access_policy(lambda reader, now: account_growth.vibe_access(
-                    reader, now, app.state.ctx.radio.bootstrap(reader=reader))):
+                    reader, now, lambda: app.state.ctx.radio.bootstrap(reader=reader))):
                 if release is not None:
                     with ctx.work.entered(release):
                         return await call_next(request)
@@ -396,10 +402,6 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     @app.exception_handler(WorkClosing)
     async def closing_work(request, error):
-        return PlainTextResponse(str(error), status_code=503)
-
-    @app.exception_handler(StorageCompacting)
-    async def compacting_storage(request, error):
         return PlainTextResponse(str(error), status_code=503)
 
     @app.exception_handler(WorkBudgetExceeded)
@@ -430,23 +432,15 @@ def create_app(store, client_provider, *, now_fn=time.time,
         from yt_playlist.core.flatpak_update import FlatpakUpdater
         updater = FlatpakUpdater()
     ctx.updater = updater
-    def resume_storage():
-        reload_config = getattr(ctx.setup,'load',None)
-        if reload_config is not None:
-            reload_config()
-        ctx.radio.retain_provenance()
-    ctx.storage_maintenance = StorageMaintenance(store, on_resume=resume_storage)
-    def maintenance_notice():
+    ctx.storage_maintenance = StorageMaintenance(store)
+    def maintenance_notice(reader=store):
         status = ctx.storage_maintenance.status()
-        if not status['banner_message'] and not status['warning'] and status['phase'] != 'recovery_required' and (not ctx.storage_maintenance.ready.is_set()
-                or ctx.rec_worker.preparing or ctx.enrich_worker.busy) and not any(
-                    store.rec_proposals.has_proposals(surface) for surface in
+        if not status['banner_message'] and not status['warning'] and (
+                ctx.rec_worker.preparing or ctx.enrich_worker.busy) and not any(
+                    reader.rec_proposals.has_proposals(surface) for surface in
                     ('home_prepared', 'home_tuned', 'album_prepared', 'adaptive_group_preview')):
             status['banner_message'] = 'Preparing library data. Features will appear as they are ready.'
         return status
-    templates.env.globals['storage_maintenance_status'] = maintenance_notice
-    templates.env.globals['early_adopter_notice'] = lambda: store.settings.get_setting('early_adopter_notice')
-
     @app.post('/early-adopter-notice/dismiss', status_code=204)
     def dismiss_early_adopter_notice():
         store.settings.set_setting('early_adopter_notice', '')
@@ -456,31 +450,39 @@ def create_app(store, client_provider, *, now_fn=time.time,
         status = maintenance_notice()
         return {**status, 'auth_labels': [] if status['active'] else list(ctx.auth_expired.values())}
 
-    @app.post('/storage-maintenance/compact', status_code=202)
-    def compact_storage():
-        ctx.storage_maintenance.start_compaction()
-        return ctx.storage_maintenance.status()
-
-    @app.post('/storage-maintenance/rebuild', status_code=202)
-    def rebuild_storage(resume: bool = False):
-        ctx.storage_maintenance.start_rebuild(resume=resume)
-        return ctx.storage_maintenance.status()
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx, enabled=background_work)
-    from yt_playlist.library.vibe_composition import requests as VibeRequests
-    ctx.vibe_requests = VibeRequests(ctx)
     from yt_playlist.enrich.enrich_worker import EnrichWorker
     ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
     from yt_playlist.rec import onboarding
-    templates.env.globals["initial_setup_pending"] = lambda: (
-        onboarding.initial_setup_pending(store, now_fn()) or
-        store.settings.get_setting('last_sync_at') is None and bool(ctx.jobs.find_active_library()))
-    templates.env.globals['player_tour_dismissed'] = lambda: store.settings.get_setting('onboard_player_tour_dismissed') == '1'
-    templates.env.globals["has_multiple_identities"] = (
-        lambda: len(store.accounts.get_accounts()) > 1
-    )
+
+    def setup_pending(reader, defer=None):
+        pending = onboarding.initial_setup_pending(reader, now_fn())
+        if defer is not None and not pending and reader.settings.get_setting(onboarding.SETUP_COMPLETE) != '1':
+            defer('record setup completion', onboarding._remember_completion, store, True)
+        return pending or reader.settings.get_setting('last_sync_at') is None and bool(ctx.jobs.find_active_library())
+
+    shell_checks = {
+        'storage_maintenance_status': maintenance_notice,
+        'initial_setup_pending': setup_pending,
+        'early_adopter_notice': lambda reader: reader.settings.get_setting('early_adopter_notice'),
+        'player_tour_dismissed': lambda reader: reader.settings.get_setting('onboard_player_tour_dismissed') == '1',
+        'has_multiple_identities': lambda reader: len(reader.accounts.get_accounts()) > 1,
+    }
+    templates.env.globals.update({name: partial(check, store) for name, check in shell_checks.items()})
+
+    def home_shell_context(request):
+        shell = getattr(request.state, 'home_shell', None)
+        if shell is None:
+            return {}
+        # Home already holds a read session for the selected panel.
+        reader, defer = shell
+        return {**{name: partial(check, reader) for name, check in shell_checks.items()},
+                'initial_setup_pending': partial(setup_pending, reader, defer)}
+
+    templates.context_processors.append(home_shell_context)
     # Background library-sync daemon: runs the full sync (setup + periodic) with no manual card, so
     # the initial post-setup sync fires as soon as the extension connects and the library then
     # refreshes on its own. It gates on bridge.connected, so in tests (no live WS) it never fires.

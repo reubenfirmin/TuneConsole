@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.audio_vibe_fixture_support import disable_periodic_library_sync, specialist_store
+from tests.audio_vibe_fixture_support import assert_only_playback_annotations, disable_periodic_library_sync, specialist_store
 from tests.rec.test_vibe_prediction import catalog_track as track, drain, fits
 from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import catalog, features
@@ -47,11 +47,11 @@ def controlled(tmp_path, value=.9):
 
 
 @pytest.mark.parametrize('count', [1, 2, 3])
-def test_energize_preserves_four_specialists_classification_and_input(count, monkeypatch):
+def test_energize_preserves_the_other_specialists_and_input(count, monkeypatch):
     rows = samples()[:count]
     untouched = deepcopy(rows)
     before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
-    assert after['arc'] == before['arc']
+    assert after['sample_count'] == before['sample_count'] == count
     assert set(after['individual_models']) == {'cruise', 'release', 'relax', 'uplift', 'energize'}
     for vibe in ('cruise', 'release', 'relax', 'uplift'):
         assert after['individual_models'][vibe] == before['individual_models'][vibe]
@@ -174,7 +174,7 @@ def test_default_active_local_rollback_and_identity(monkeypatch):
     assert energize.configured_path() is None and vibe_preparation.version() != active
 
 
-def test_missing_metadata_and_explicit_intensity_override(store):
+def test_direct_measurement_works_without_catalog_audio(store):
     tid = store.tracks.upsert_track('bare', 'Bare', '', '', 240)
     key = store.tracks.identity_key_for_video('bare')
     for now, row in enumerate(samples('bare'), 1):
@@ -182,12 +182,10 @@ def test_missing_metadata_and_explicit_intensity_override(store):
     drain(store, batch=1)
     assert fits(store, key)['energize']['score'] == predictor.predict(samples('bare'))['suitability']['energize']
     assert fits(store, key)['energize']['source'] == 'audio_measurement'
-    with store.conn:
-        catalog.choose_field(store.conn, tid, 'energy', .05, now=4)
-    drain(store, batch=1)
     profile = musical_character.load(store, [key])[key]
-    assert musical_character.intensity_evidence({'musical': profile}) == (.05, 1)
-    assert musical_character.provenance({'musical': profile})['intensity_vibe'] is None
+    assert musical_character.intensity_evidence({'musical': profile})[1] == 1
+    with pytest.raises(ValueError, match='Unknown metadata field'):
+        catalog.choose_field(store.conn, tid, 'energy', .05, now=4)
 
 
 def test_bounded_refresh_preserves_intensity_lineage_feedback_and_rollback(specialist_store, tmp_path, monkeypatch):
@@ -200,14 +198,14 @@ def test_bounded_refresh_preserves_intensity_lineage_feedback_and_rollback(speci
     for now, row in enumerate(rows[:2], 1):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1).close()
-    assert fits(store, own)['energize']['source'] == 'heuristic'
+    assert 'energize' not in fits(store, own)
     store.audio_vibes.save_sample(rows[2], 3)
     store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['energize'], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(rows[0]['run_id'])
     drain(store, batch=1).close()
     keys = [own, neighbour]
     before = {key: fits(store, key) for key in keys}
-    old_profiles = musical_character.load(store, keys)
+    assert 'energize' not in before[own] and 'energize' not in before[neighbour]
     monkeypatch.setenv(energize.ENVIRONMENT_KEY, str(controlled(tmp_path)))
     monkeypatch.setenv(energize.MODE_KEY, 'active')
     statements = []
@@ -215,18 +213,17 @@ def test_bounded_refresh_preserves_intensity_lineage_feedback_and_rollback(speci
     drain(store, batch=1).close()
     active = musical_character.load(store, keys)
     assert fits(store, own)['energize']['score'] == pytest.approx(.9)
-    assert fits(store, neighbour)['energize']['recordings'] == 1
-    assert fits(store, neighbour)['energize']['score'] > before[neighbour]['energize']['score']
+    assert fits(store, own)['energize']['source'] == 'audio_measurement'
+    assert fits(store, own)['energize']['support'] == 1
+    assert fits(store, neighbour) == before[neighbour]
     for key in keys:
         after = fits(store, key)
-        assert set(after) == set(shared.LABELS)
-        assert active[key]['vibes']['intensity_fits']['energize']['score'] == after['energize']['score']
-        for vibe in shared.LABELS:
-            if vibe != 'energize':
-                assert after[vibe] == before[key][vibe]
-        assert musical_character.provenance({'musical': active[key]})['intensity_ensemble']['components']['energize']['score'] == after['energize']['score']
-        assert home_vibe.affinity({'key': key}, 'energize', active) == after['energize']['score']
-    measured = vibe_preparation.measured({'samples': rows, 'metadata': {}}, [], {}, {})['fits']
+        assert {vibe: fit for vibe, fit in after.items() if vibe != 'energize'} == before[key]
+        if key == own:
+            assert active[key]['vibes']['intensity_fits']['energize']['score'] == after['energize']['score']
+            assert musical_character.provenance({'musical': active[key]})['intensity_ensemble']['components']['energize']['score'] == after['energize']['score']
+        assert home_vibe.affinity({'key': key}, 'energize', active) == (.9 if key == own else .5)
+    measured = vibe_preparation.measured({'samples': rows, 'metadata': {}}, [], {})['fits']
     shared_scores = {r['vibe']: r['score'] for r in predictor.predict(rows)['ranking']}
     for channel, vibe in INTENSITY_CHANNELS.items():
         assert measured[channel]['score'] == shared_scores[vibe]
@@ -238,14 +235,16 @@ def test_bounded_refresh_preserves_intensity_lineage_feedback_and_rollback(speci
     for now, row in enumerate(samples(), 10):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1).close()
-    assert fits(store, neighbour)['energize']['recordings'] == 1
+    assert fits(store, neighbour) == before[neighbour]
     history = {r[0] for r in store.conn.execute('SELECT id FROM measurements')}
     monkeypatch.setenv(energize.MODE_KEY, 'off')
     drain(store, batch=1).close()
     assert history <= {r[0] for r in store.conn.execute('SELECT id FROM measurements')}
+    restored = musical_character.load(store, keys)
     for key in keys:
         assert fits(store, key) == before[key]
+        assert home_vibe.affinity({'key': key}, 'energize', restored) == .5
     store.conn.set_trace_callback(None)
     assert store.audio_vibes.feedback(rows[0]['run_id']) == feedback
-    assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
+    assert_only_playback_annotations(statements)
     assert not list(store.conn.execute('PRAGMA foreign_key_check'))

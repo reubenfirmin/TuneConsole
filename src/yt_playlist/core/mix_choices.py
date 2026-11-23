@@ -1,8 +1,18 @@
 """Displayed mix descriptors, independent of track membership and group history."""
-import hashlib
+import json
 
+from . import choice_learning_state, worker_settings
 from .evidence_ledger import canonical
 from .mix_choice_policy import PRECISION, GROUP_FIELDS, visible_option, context, menu_plan, project as project_record
+
+
+DESCRIPTORS = '''CREATE TABLE mix_choice_descriptors (
+    id INTEGER PRIMARY KEY,intent TEXT NOT NULL,label TEXT NOT NULL,note TEXT NOT NULL,
+    genres_json TEXT NOT NULL CHECK(json_valid(genres_json) AND json_type(genres_json)='array'
+        AND json_array_length(genres_json)<=256),UNIQUE(intent,label,note,genres_json))'''
+IMMUTABLE_DESCRIPTOR = ("CREATE TRIGGER mix_choice_descriptors_immutable BEFORE UPDATE ON mix_choice_descriptors "
+                        "BEGIN SELECT RAISE(ABORT,'Captured mix choice is immutable'); END")
+CONTEXT_PREFIX = 'choice_context:'
 
 
 def definitions():
@@ -84,11 +94,6 @@ def validate(conn):
             raise MigrationError('Incompatible mix choice owner: ' + name)
 
 
-def _intern(conn, table, fields, values):
-    conn.execute('INSERT INTO '+table+'('+','.join(fields)+') VALUES ('+','.join('?' for _ in values)+') ON CONFLICT DO NOTHING', values)
-    return conn.execute('SELECT id FROM '+table+' WHERE '+' AND '.join(f+'=?' for f in fields), values).fetchone()[0]
-
-
 def descriptor(conn, option):
     return insert_descriptor(conn, visible_option(option))
 
@@ -97,33 +102,18 @@ def insert_descriptor(conn, option):
     if 'descriptor_id' in option:
         read_descriptor(conn, option['descriptor_id'])
         return option['descriptor_id']
-    genres = tuple(option['genres'])
-    digest = hashlib.sha256(canonical(genres)).digest()
-    prior = conn.execute('SELECT id FROM mix_choice_genre_sets WHERE digest=?', (digest,)).fetchone()
-    if prior:
-        set_id = prior[0]
-        members = tuple(row[0] for row in conn.execute('SELECT g.label FROM mix_choice_genre_members m '
-            'JOIN mix_choice_raw_genres g ON g.id=m.genre_id WHERE m.set_id=? ORDER BY g.label', (set_id,)))
-        if members != genres:
-            raise ValueError('Mix genre-set digest collision')
-    else:
-        set_id = conn.execute('INSERT INTO mix_choice_genre_sets(digest) VALUES (?)', (digest,)).lastrowid
-        for genre in genres:
-            genre_id = _intern(conn, 'mix_choice_raw_genres', ('label',), (genre,))
-            conn.execute('INSERT INTO mix_choice_genre_members VALUES (?,?)', (set_id, genre_id))
-    theme = _intern(conn, 'mix_choice_themes', ('intent', 'label', 'note'),
-                    tuple(option.get(key) or '' for key in ('intent', 'label', 'note')))
-    return _intern(conn, 'mix_choice_descriptors', ('theme_id', 'genre_set_id'), (theme, set_id))
+    shown = (*(option.get(key) or '' for key in ('intent', 'label', 'note')), canonical(option['genres']).decode())
+    conn.execute('INSERT INTO mix_choice_descriptors(intent,label,note,genres_json) VALUES (?,?,?,?) '
+                 'ON CONFLICT(intent,label,note,genres_json) DO NOTHING', shown)
+    return conn.execute('SELECT id FROM mix_choice_descriptors WHERE intent=? AND label=? AND note=? AND genres_json=?',
+                        shown).fetchone()[0]
 
 
 def read_descriptor(conn, identity):
-    row = conn.execute('SELECT t.intent,t.label,t.note,d.genre_set_id FROM mix_choice_descriptors d '
-        'JOIN mix_choice_themes t ON t.id=d.theme_id WHERE d.id=?', (identity,)).fetchone()
+    row = conn.execute('SELECT intent,label,note,genres_json FROM mix_choice_descriptors WHERE id=?', (identity,)).fetchone()
     if row is None:
         raise ValueError('Missing mix choice descriptor')
-    genres = [r[0] for r in conn.execute('SELECT g.label FROM mix_choice_genre_members m '
-        'JOIN mix_choice_raw_genres g ON g.id=m.genre_id WHERE m.set_id=? ORDER BY g.label', (row[3],))]
-    return dict(zip(('intent', 'label', 'note'), row[:3])) | {'genres': genres}
+    return {'intent': row[0], 'label': row[1], 'note': row[2], 'genres': json.loads(row[3])}
 
 
 def publish_menu(conn, record, context_id, *, source=None):
@@ -140,18 +130,24 @@ def insert_menu(conn, plan):
         if prior[0] != plan['source_digest']:
             raise ValueError('Mix menu source changed during preparation')
         return
-    conn.execute('INSERT INTO mix_choice_menus VALUES (?,?,?,?,?)',
-                 tuple(plan[key] for key in ('id', 'context', 'source_context', 'source_digest', 'context_at')))
+    options = []
+    option_ids = set()
     for position, option in enumerate(plan['options'], 1):
+        option_id = str(option['id'])
+        origin = option.get('genre_origin', 'rendered')
+        if option_id in option_ids or origin not in ('rendered', 'legacy_tracks'):
+            raise ValueError('Invalid captured mix choice')
+        option_ids.add(option_id)
         identity = insert_descriptor(conn, option)
         complete = bool(option.get('genres_complete', True))
-        origin = option.get('genre_origin', 'rendered')
-        conn.execute('INSERT INTO mix_choice_options VALUES (?,?,?,?,?,?)',
-                     (plan['id'], str(option['id']), position, identity, int(complete), origin))
+        options.append((option_id, position, identity, int(complete), origin))
+    conn.execute('INSERT INTO mix_choice_menus VALUES (?,?,?,?,?,?)',
+                 (*[plan[key] for key in ('id', 'context', 'source_context', 'source_digest', 'context_at')],
+                  json.dumps(options, ensure_ascii=False)))
 
 
 def project(conn, record):
-    """Overlay a prepared legacy menu; immutable original JSON remains until #626."""
+    """Resolve retained menu context and display descriptors."""
     if not record or 'context' not in record:
         return record
     return project_record(record, projection_facts(conn, record.get('id'), record['context'],
@@ -159,19 +155,16 @@ def project(conn, record):
 
 
 def projection_facts(conn, opportunity_id, context_id, *, mixes):
-    installed = available(conn)
-    facts = {'installed': installed, 'context': None, 'context_at': None, 'options': {}}
-    if not installed:
-        return facts
+    facts = {'context': None, 'context_at': None, 'options': {}}
     if not mixes:
-        context = conn.execute("SELECT context FROM choice_context_projections WHERE source_context=? AND kind='independent'",
-                               (context_id,)).fetchone()
-        return {**facts, 'context': context[0] if context else None}
-    menu = conn.execute('SELECT context,context_at FROM mix_choice_menus WHERE opportunity_id=?', (opportunity_id,)).fetchone()
+        raw = worker_settings.read(conn, CONTEXT_PREFIX + 'independent:' + context_id) if context_id is not None else None
+        return {**facts, 'context': json.loads(raw)['context'] if raw else None}
+    menu = conn.execute('SELECT context,context_at,options FROM mix_choice_menus WHERE opportunity_id=?', (opportunity_id,)).fetchone()
     if menu is None:
         return facts
-    options = {row['option_id']: dict(row) for row in conn.execute('SELECT * FROM mix_choice_options '
-                                                                'WHERE opportunity_id=?', (opportunity_id,))}
+    options = {option_id: {'opportunity_id': opportunity_id, 'option_id': option_id, 'position': position,
+                           'descriptor_id': descriptor_id, 'genres_complete': complete, 'origin': origin}
+               for option_id, position, descriptor_id, complete, origin in json.loads(menu[2])}
     return {**facts, 'context': menu[0], 'context_at': menu[1], 'options': options}
 
 
@@ -182,14 +175,11 @@ def expand(conn, option):
 
 def retire(conn, identities):
     """Called after the ledger has removed these exact menu files."""
-    if available(conn):
-        conn.executemany('DELETE FROM mix_choice_menus WHERE opportunity_id=?', ((i,) for i in identities))
+    conn.executemany('DELETE FROM mix_choice_menus WHERE opportunity_id=?', ((i,) for i in identities))
 
 
 def collect_unpublished(store, limit=128):
     """Reconcile SQL committed before a failed event write, under admission."""
-    if not available(store.conn):
-        return 0
     from . import group_admission
     with group_admission.admission(store):
         after = getattr(store, '_mix_choice_orphan_after', '')
@@ -206,22 +196,10 @@ def collect_unpublished(store, limit=128):
 
 
 def collect_dictionary(conn, limit=128):
-    """One bounded dependency-first prefix, preserving live learning descriptors."""
-    if not available(conn):
-        return 0
-    predicates = (
-        ('mix_choice_descriptors', 'id', 'NOT EXISTS(SELECT 1 FROM mix_choice_options o WHERE o.descriptor_id=d.id) '
-         'AND NOT EXISTS(SELECT 1 FROM choice_interest_mix_descriptors i WHERE i.descriptor_id=d.id) '
-         'AND NOT EXISTS(SELECT 1 FROM prepared_choice_interest_mix_descriptors i WHERE i.descriptor_id=d.id)'),
-        ('mix_choice_themes', 'id', 'NOT EXISTS(SELECT 1 FROM mix_choice_descriptors x WHERE x.theme_id=d.id)'),
-        ('mix_choice_genre_members', '(set_id,genre_id)', 'NOT EXISTS(SELECT 1 FROM mix_choice_descriptors x WHERE x.genre_set_id=d.set_id)'),
-        ('mix_choice_genre_sets', 'id', 'NOT EXISTS(SELECT 1 FROM mix_choice_descriptors x WHERE x.genre_set_id=d.id) '
-         'AND NOT EXISTS(SELECT 1 FROM mix_choice_genre_members m WHERE m.set_id=d.id)'),
-        ('mix_choice_raw_genres', 'id', 'NOT EXISTS(SELECT 1 FROM mix_choice_genre_members m WHERE m.genre_id=d.id)'))
-    for table, key, predicate in predicates:
-        columns = key.strip('()')
-        count = conn.execute(f'DELETE FROM {table} WHERE {key} IN (SELECT {columns} FROM {table} d WHERE {predicate} LIMIT ?)',
-                             (limit,)).rowcount
-        if count:
-            return count
-    return 0
+    return conn.execute(f'''DELETE FROM mix_choice_descriptors WHERE id IN (
+        SELECT d.id FROM mix_choice_descriptors d
+        WHERE d.id NOT IN (
+            SELECT o.value->>2 FROM mix_choice_menus m,json_each(m.options) o
+            UNION {choice_learning_state.DESCRIPTORS}
+        )
+        LIMIT ?)''', (limit,)).rowcount

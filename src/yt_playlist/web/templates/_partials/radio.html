@@ -1,5 +1,6 @@
 <div class="radio-home" x-ref="fieldContent" x-data="radioHome({{ radio_bootstrap|default({})|tojson|forceescape }})" x-effect="setVisible(panel === 'radio')"
      :class="{'is-artwork-paused': !artworkRunning}"
+     @radio-choose-another="chooseAnotherSong()"
      @bridge-status.window="syncRecordPlayback($event.detail)"
      @playback-requested.window="previewRecord($event.detail)"
      @playback-settled.window="settleRecord($event.detail)"
@@ -10,7 +11,8 @@
       {% with loader_radio=true %}{% include "_partials/launch_loader.html" %}{% endwith %}
     </template>
   </div>
-  <div class="radio-seeds" x-ref="seeds" x-show="showSeeds" :aria-busy="busy || loading">
+  <p class="radio-seed-empty" x-show="showSeeds && !seeds.length" x-cloak role="status">Starter songs aren’t available yet.</p>
+  <div class="radio-seeds" x-ref="seeds" x-show="showSeeds && seeds.length" :aria-busy="busy || loading">
     <template x-for="song in seeds" :key="song.video_id">
       <div class="radio-seed">
       <button type="button" class="radio-seed-start" :disabled="busy || launchUncertain" @click="start(song)"
@@ -32,15 +34,17 @@
       </div>
     </template>
   </div>
-  <div class="radio-session" x-ref="session" x-show="state.active && state.playlist_id && !state.starting" x-cloak
+  <div class="radio-session" x-ref="session" x-show="state.active && state.playlist_id && !sessionStarting" x-cloak
        :class="{'is-preparing': launching}" :aria-hidden="launching.toString()" :aria-busy="launching.toString()">
     <div class="radio-playlist" x-ref="playlist">{% if radio_bootstrap and radio_bootstrap.state.active and radio_bootstrap.state.playlist_id %}{% with session=radio_bootstrap.state, tracks=radio_tracks %}{% include "_partials/radio_playlist.html" %}{% endwith %}{% endif %}</div>
     <div class="radio-junction-space">
-      <button class="radio-tune" x-ref="tuningControl" type="button" @click="openTuning()" aria-label="Tune streams" title="Tune streams"
+      <button class="radio-tune" x-ref="tuningControl" type="button" @click="openTuning()" aria-label="Tune streams"
+              :class="{'is-applying': tuningWorking}" :title="tuningWorking ? 'Applying stream tuning…' : 'Tune streams'"
               :style="'--queue-color: ' + queueColor(activeSlot)"
               aria-haspopup="dialog" aria-controls="radio-tuning-dialog">
         <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h5m6 0h15M3 12h16m6 0h4M3 19h8m6 0h12"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
       </button>
+      <span class="radio-tune-announcement" role="status" x-text="tuningWorking ? 'Applying stream tuning…' : ''"></span>
       <svg class="radio-junction" x-ref="junction" viewBox="0 0 1000 112" preserveAspectRatio="none" aria-hidden="true"
          :style="'--queue-color: ' + queueColor(connectedSlot)">
       <defs>
@@ -65,15 +69,14 @@
       </svg>
     </div>
     <div class="radio-directions" x-ref="directions" aria-label="Possible radio directions" @scroll.passive="measureQueues()"
-         :class="{'is-tuning': tuningWorking}" :aria-busy="tuningWorking.toString()"
          @mouseleave="hoveredSlot = null" @focusout="if (!$el.contains($event.relatedTarget)) focusedSlot = null">
       <template x-for="branch in displayDirections" :key="branch.slot">
-        <section class="radio-direction" :class="{'is-active': branch.active, 'is-preview': previewSlot === branch.slot && !branch.active}"
+        <section class="radio-direction" :class="{'is-active': branch.active, 'is-filling': branch.preparing, 'is-preview': !branch.preparing && previewSlot === branch.slot && !branch.active}"
                  :data-slot="branch.slot" :style="'--queue-color: ' + queueColor(branch.slot)"
-                 @mouseenter="hoveredSlot = branch.slot" @focusin="focusedSlot = branch.slot">
+                 @mouseenter="if (!branch.preparing) hoveredSlot = branch.slot" @focusin="focusedSlot = branch.slot">
           <button type="button" class="radio-direction-heading" @click="select(branch)"
-                  :disabled="busy || !state.active || !branch.tracks.length"
-                  :aria-pressed="branch.active" :aria-label="pendingSong?.slot === branch.slot ? 'Starting ' + pendingSong.title + ' in stream ' + (branch.slot + 1) : (branch.active ? 'Active stream ' : 'Change to this stream, ') + (branch.slot + 1) + (branch.tracks[0] ? ', starting with ' + branch.tracks[0].title : '')">
+                  :disabled="busy || branch.preparing || !state.active || !branch.tracks.length"
+                  :aria-pressed="branch.active" :aria-label="branch.preparing ? 'Stream ' + (branch.slot + 1) + ', filling in' : pendingSong?.slot === branch.slot ? 'Starting ' + pendingSong.title + ' in stream ' + (branch.slot + 1) : (branch.active ? 'Active stream ' : 'Change to this stream, ') + (branch.slot + 1) + (branch.tracks[0] ? ', starting with ' + branch.tracks[0].title : '')">
             <svg class="radio-queue-drawing" viewBox="0 0 300 90" preserveAspectRatio="none" aria-hidden="true">
               <path d="M-20 26C52-24 90 82 170 37S265 5 320 30M-20 34C52-16 90 90 170 45S265 13 320 38M-20 42C52-8 90 98 170 53S265 21 320 46M-20 50C52 0 90 106 170 61S265 29 320 54M-20 58C52 8 90 114 170 69S265 37 320 62"/>
               <circle cx="252" cy="22" r="11"/><path d="M22 12h12m-6-6v12m236 56h12m-6-6v12"/>
@@ -91,7 +94,7 @@
                 <small x-text="pendingSong?.slot === branch.slot ? 'Starting · ' + pendingSong.artist : ''"></small></span>
             </span>
             <span class="radio-queue-number" x-text="String(branch.slot + 1).padStart(2, '0')"></span>
-            <span class="radio-queue-status" x-text="pendingSong?.slot === branch.slot ? 'Starting…' : branch.active ? 'Up next' : 'Change to this stream'"></span>
+            <span class="radio-queue-status" x-text="branch.preparing ? 'Filling in…' : pendingSong?.slot === branch.slot ? 'Starting…' : branch.active ? 'Up next' : 'Change to this stream'"></span>
           </button>
           <p class="radio-selection-error" role="status" x-show="selectionMessage && (selectionSlot ?? activeSlot) === branch.slot" x-cloak x-text="selectionMessage"></p>
           <ol class="radio-direction-tracks">
@@ -119,7 +122,8 @@
               </li>
             </template>
           </ol>
-          <div class="radio-decay" :class="{'is-playing': branch.active}" role="progressbar"
+          <p class="radio-direction-fill" x-show="branch.more_pending" x-cloak>Adding songs…</p>
+          <div class="radio-decay" x-show="!branch.preparing" :class="{'is-playing': branch.active}" role="progressbar"
                :aria-label="branch.active ? 'Playing stream ' + (branch.slot + 1) : 'Stream ' + (branch.slot + 1) + ' refreshes after song changes'"
                aria-valuemin="0" :aria-valuemax="branch.decay_total || 3"
                :aria-valuenow="branch.decay_remaining ?? 3"

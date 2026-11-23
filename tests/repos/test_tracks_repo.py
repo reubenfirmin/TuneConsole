@@ -6,7 +6,7 @@ def test_upsert_dedupes_by_identity_and_backfills(store):
     a = store.tracks.upsert_track("v1", "Song", "Artist", "Album", 100)
     b = store.tracks.upsert_track("v1", "Song", "Artist", "Album", 100, thumbnail="t.jpg")
     assert a == b                                          # same identity_key + video_id → same row
-    assert store.conn.execute("SELECT thumbnail FROM tracks WHERE id=?", (a,)).fetchone()["thumbnail"] == "t.jpg"
+    assert store.conn.execute("SELECT thumbnail FROM catalog_tracks WHERE id=?", (a,)).fetchone()["thumbnail"] == "t.jpg"
 
 
 def test_manual_genre_year_overrides(store):
@@ -24,18 +24,18 @@ def test_set_title_artist_and_reset(store):
     t = store.tracks.upsert_track("v1", "Bad - Title (junk)", "Bad Artist", "Al", 100)
     store.tracks.set_track_title(t, "Good Title")
     store.tracks.set_track_artist(t, "Good Artist")
-    row = store.conn.execute("SELECT title, artist FROM tracks WHERE id=?", (t,)).fetchone()
+    row = store.conn.execute("SELECT title, artist FROM catalog_tracks WHERE id=?", (t,)).fetchone()
     assert (row["title"], row["artist"]) == ("Good Title", "Good Artist")
     store.tracks.reset_track_title(t)
     store.tracks.reset_track_artist(t)
-    row = store.conn.execute("SELECT title, artist FROM tracks WHERE id=?", (t,)).fetchone()
+    row = store.conn.execute("SELECT title, artist FROM catalog_tracks WHERE id=?", (t,)).fetchone()
     assert (row["title"], row["artist"]) == ("Bad - Title (junk)", "Bad Artist")
 
 
 def test_set_title_rejects_blank(store):
     t = store.tracks.upsert_track("v1", "Keep Me", "A", "Al", 100)
     store.tracks.set_track_title(t, "   ")
-    assert store.conn.execute("SELECT title FROM tracks WHERE id=?", (t,)).fetchone()["title"] == "Keep Me"
+    assert store.conn.execute("SELECT title FROM catalog_tracks WHERE id=?", (t,)).fetchone()["title"] == "Keep Me"
 
 
 def test_preferred_provider_fills_metadata_and_manual_choices_survive_refresh(store):
@@ -50,7 +50,7 @@ def test_preferred_provider_fills_metadata_and_manual_choices_survive_refresh(st
 
 
 def test_waterfall_selects_missing_genre_and_year_in_playlist_order(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
     t1 = store.tracks.upsert_track("v1", "S1", "A", "Al", 100)
     t2 = store.tracks.upsert_track("v2", "S2", "A", "Al", 100)

@@ -1,8 +1,29 @@
-"""Taste analysis: read-only summaries of the library's taste, covering breadth, era spread,
+"""Taste analysis: summaries of the library's taste, covering breadth, era spread,
 the Home fingerprint, and per-playlist facets/diversity. A leaf below scoring (imports no scoring)."""
 import math
 
 from yt_playlist.rec import mix_tuning, rec_params, transient
+
+
+def library_summary(store):
+    return store.rec_proposals.library_taste_summary() or {
+        'breadth': {'families': {}, 'breadth': 0, 'n_families': 0, 'n_tagged': 0},
+        'eras': [], 'genre_plays': {}, 'genre_options': [],
+    }
+
+
+def prepare_library_summary(store, now):
+    from yt_playlist.rec import home_themes
+
+    with store.read_view(seconds=None) as reader:
+        facets = reader.rec_query.play_weighted_facets(reader.rec_query.play_counts())
+        genres = facets['genres']
+        summary = {'breadth': taste_breadth(reader, genre_plays=genres),
+                   'eras': era_distribution(reader, era_plays=facets['eras']),
+                   'genre_plays': genres,
+                   'genre_options': home_themes.genre_options(reader, genre_plays=genres)}
+    store.rec_proposals.publish_library_taste_summary(summary, now)
+    return summary
 
 
 def era_distribution(store, *, era_plays=None) -> list:
@@ -128,7 +149,7 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
     Each family/era carries its current steering weight so the header can render a draggable bar.
     Also includes 'effective' = permanent x standing lean, clamped to [GENRE_MIN, GENRE_MAX], which
     is what the slider THUMB binds to (the held steer the user experiences), plus 'live' = effective x
-    the live transient facet multiplier (recent plays/likes/dislikes/mood), clamped the same way, which
+    the live transient facet multiplier (recent plays, likes, skips and mood), clamped the same way, which
     a separate MARKER binds to. Splitting them keeps the two independent mood signals (explicit steer
     vs. listen behavior) from overloading one bar position. 'live_active' is False when there is no
     meaningful live signal (e.g. a stale sync), so the bar can hide the marker.

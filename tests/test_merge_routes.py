@@ -16,7 +16,7 @@ def test_merge_apply_route(route_store, monkeypatch, tmp_path, return_to, label)
     store = route_store
     install_routes(monkeypatch, 'merge', 'actions')
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "One", "X", None, None, 1)
@@ -50,7 +50,7 @@ def test_merge_apply_ignores_stale_ids_in_url(store, monkeypatch, tmp_path):
     # a non-existent id in ?ids (e.g. a playlist deleted after the link was made) must not break Apply:
     # the editor renders the existing playlists, and Apply operates on that filtered member set.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "One", "X", None, None, 1)
@@ -63,7 +63,7 @@ def test_merge_apply_ignores_stale_ids_in_url(store, monkeypatch, tmp_path):
     assert store.playlists.get_playlist(b) is None                  # kept A, deleted B -> merge ran
 
 def test_merge_editor_renders_nway(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Mix", 2, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "One", "X", None, 1); t2 = store.tracks.upsert_track("v2", "Two", "X", None, 1)
@@ -76,7 +76,7 @@ def test_merge_editor_renders_nway(store):
 
 
 def test_merge_update_toggle_and_setall_persist(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Mix2", 2, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "One", "X", None, None, 1)
@@ -97,7 +97,7 @@ def test_merge_update_toggle_and_setall_persist(store):
 
 
 def test_merge_update_sort_mode_keep_pick(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Mix2", 1, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "Beta", "X", None, None, 1)

@@ -12,6 +12,17 @@ on:
       revision:
         default: ''
         type: string
+    secrets:
+      SPARKLE_PRIVATE_ED_KEY:
+        required: false
+      MACOS_CERTIFICATE_P12:
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      MACOS_NOTARY_APPLE_ID:
+        required: false
+      MACOS_NOTARY_APP_PASSWORD:
+        required: false
 permissions:
   contents: read
 jobs:
@@ -45,18 +56,34 @@ jobs:
       - name: Prepare locked dependencies within their own budget
         timeout-minutes: 9
         run: python3 packaging/ci_stage.py --timeout 240 --attempts 2 macos-dependencies -- packaging/macos/build.sh --prepare-only
-      - name: Build locked app and DMG
+      - name: Build local-test app and DMG
+        if: inputs.tag == ''
         timeout-minutes: 6
         run: |
           test "$(uname -m)" = "${{ matrix.arch }}"
           packaging/macos/build.sh --build-only
+      - name: Build, notarize and verify the Developer ID release
+        if: inputs.tag != ''
+        timeout-minutes: 16
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          MACOS_TEAM_ID: ${{ vars.MACOS_TEAM_ID }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          bash packaging/macos/build-release.sh
       - name: Smoke-test frozen app and DMG
         if: github.event_name == 'pull_request'
         timeout-minutes: 2
         run: packaging/macos/smoke.sh
       - name: Stage architecture-specific downloads
         run: |
-          cp packaging/macos/dist/TuneConsole-*.dmg "TuneConsole-macos-${{ matrix.arch }}.dmg"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            cp packaging/macos/dist/TuneConsole-*.dmg "TuneConsole-macos-${{ matrix.arch }}.dmg"
+          fi
           if [[ '${{ matrix.arch }}' == arm64 ]]; then cp TuneConsole-macos-arm64.dmg TuneConsole-macos.dmg; fi
       - name: Sign and verify the immutable update feed
         if: inputs.tag != ''
@@ -81,10 +108,18 @@ jobs:
           path: ci-stage-timings.json
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
+        if: always() && inputs.tag != ''
+        with:
+          name: macos-notary-logs-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: TuneConsole-macos-*.notary-log.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
         with:
           name: release-macos-${{ matrix.arch }}
+          overwrite: true
           retention-days: 30
           if-no-files-found: error
           path: |
             TuneConsole-macos*.dmg
             appcast-macos-*.xml
+            macos-notarization-*.json

@@ -60,3 +60,24 @@ def test_saved_artist_requests_are_prepared_outside_current_video_pool(store, mo
     assert not tv_artwork.prepare(store, client, [], 2)
     assert tv_artwork.images(store, 'Saved artist')[0] == ['https://img/saved.jpg']
     assert not store.rec_proposals.get_proposals(tv_artwork.REQUESTS)
+
+
+def test_artwork_lookup_retries_when_same_artist_demand_is_refreshed(store, monkeypatch):
+    artist = 'Saved artist'
+    key = search_squash(artist)
+    store.discovery.upsert_discovered_artist(artist, 1, [], [], None, 1)
+    assert tv_artwork.request(store, artist, 1)
+
+    def refresh_during_lookup(name):
+        assert tv_artwork.request(store, name, 3)
+        return {'url': 'https://img/stale.jpg'}
+
+    client = FakeClient()
+    monkeypatch.setattr(tv_artwork.wikipedia, 'fetch_artwork', refresh_during_lookup)
+    assert tv_artwork.prepare(store, client, [], 2)
+    assert store.rec_proposals.get_proposals(tv_artwork.REQUESTS) == {key: artist}
+    assert tv_artwork.images(store, artist)[0] == []
+    monkeypatch.setattr(tv_artwork.wikipedia, 'fetch_artwork', lambda name: {'url': 'https://img/current.jpg'})
+    assert not tv_artwork.prepare(store, client, [], 4)
+    assert not store.rec_proposals.get_proposals(tv_artwork.REQUESTS)
+    assert tv_artwork.images(store, artist)[0] == ['https://img/current.jpg']

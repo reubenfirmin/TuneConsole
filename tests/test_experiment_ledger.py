@@ -44,7 +44,7 @@ def test_pair_replay_and_actual_assignment_propensity(store):
 
 
 def test_shadow_cannot_steal_actions_or_listening(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     _record(store, "pair:live")
     _record(store, "pair:shadow", "counterfactual", "ppr", at=110)
     store.history.import_play_events(iid, [("song|band", "v1", 120)])
@@ -120,7 +120,7 @@ def test_retention_prunes_both_policies_and_versions(store):
     store.rec_ledger.record_served_impressions("prune", "home", [], 1000, prune_before=500)
     assert not store.conn.execute("SELECT 1 FROM rec_served_impressions").fetchone()
     assert store.rec_ledger.policy_configuration('m1') is None
-    assert not store.conn.execute("SELECT 1 FROM rec_lane_impressions").fetchone()
+    assert store.rec_ledger.lane_impression_counts() == {}
 
 
 def test_experiment_endpoints_validate_decisions(store):
@@ -164,7 +164,7 @@ def _seed_mature_live_arms(store, *, episodes=range(100), **first_assignment):
         {'key': f'{arm}{i}|band', 'video_id': f'{arm}{i}|band',
          'title': f'{arm}{i}', 'artist': 'band', 'duration_s': 200}
         for i in episodes for arm in ('ppr', 'cosine')])
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.set_playlist_group("PLGEN", "Generated")
     store.playlists.mark_generated_playlist('PLGEN')
     store.rec_ledger.record_serving_policy('m1', {'schema': 3}, base)

@@ -5,12 +5,11 @@ import threading
 import pytest
 
 from yt_playlist.rec import experiments, scorecard
-from yt_playlist.rec import scorecard_attribution
 from yt_playlist.repos.scorecard_attribution import ScorecardFacts
 
 
 def seed(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     store.rec_ledger.record_served_impressions('shown', 'home', [{
         'key': 'song|artist', 'rank': 1, 'model_version': 'm',
@@ -131,14 +130,12 @@ def test_repeated_exits_use_bulk_historical_lookup_and_index(store):
     store.conn.set_trace_callback(sql.append)
     try:
         report = scorecard.recommendation_scorecard(store, 90, 110)
-        plan = store.conn.execute(
-            'EXPLAIN QUERY PLAN SELECT identity_key FROM rec_served_impressions '
-            f'WHERE {scorecard_attribution.VIDEO}=? AND {scorecard_attribution.LIVE} '
-            'AND served_at>=? AND served_at<=?', ('video', 0, 1000)).fetchall()
     finally:
         store.conn.set_trace_callback(None)
     assert report['completion'] == 1
     lookups = [statement for statement in sql
-               if 'FROM rec_served_impressions' in statement and not statement.startswith('EXPLAIN')]
+               if 'FROM rec_served_impressions' in statement]
     assert len(lookups) <= 3  # report, ownership and distinct-video history, regardless of exit count
+    [video_lookup] = [statement for statement in lookups if ' video_id FROM rec_served_impressions ' in statement]
+    plan = store.conn.execute('EXPLAIN QUERY PLAN ' + video_lookup).fetchall()
     assert any('SEARCH' in row[3] and 'ix_rec_served_video_at' in row[3] for row in plan)

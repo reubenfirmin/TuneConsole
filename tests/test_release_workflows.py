@@ -39,8 +39,8 @@ def test_only_coordinator_can_publish_and_every_required_platform_blocks_promoti
     for name in promote["needs"]:
         assert f"needs.{name}.result == 'success'" in promote["if"]
     candidates = release["jobs"]["candidates"]
-    assert set(candidates["needs"]) == {"version", "prepared"}
-    assert "needs.prepared.result == 'success'" in candidates["if"]
+    assert candidates["needs"] == "version"
+    assert set(release["jobs"]["preflight"]["needs"]) == {"version", "candidates"}
     assert set(workflow("prepared-candidates")["jobs"]["provenance"]["needs"]) == {"wheel", "flatpak", "macos", "containers"}
     assert promote["concurrency"] == {"group": "release-production", "cancel-in-progress": "false"}
     for name in ("macos", "container", "flatpak"):
@@ -71,10 +71,10 @@ def test_publication_retry_checks_the_original_builds_and_reuses_their_artifacts
     for name in ("wheel", "flatpak", "macos", "containers"):
         assert name not in jobs
     checkout = jobs["version"]["steps"][0]
-    assert checkout["with"]["ref"] == "${{ inputs.tag || github.ref }}"
+    assert checkout["with"]["ref"] == "${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}"
     verify = next(step for step in jobs["candidates"]["steps"]
                   if "release_candidates.py" in step.get("run", ""))
-    assert verify["env"]["SOURCE_RUN"] == "${{ inputs.source_run || github.run_id }}"
+    assert verify["env"]["SOURCE_RUN"] == "${{ inputs.source_run }}"
     assert verify["env"]["RELEASE_TAG"] == "${{ needs.version.outputs.tag }}"
     assert verify["env"]["RELEASE_REVISION"] == "${{ needs.version.outputs.revision }}"
     download = next(step for step in jobs["promote"]["steps"]
@@ -91,7 +91,8 @@ def test_containers_smoke_only_on_prs_and_never_rebuild_for_publication():
     stage = next(i for i, s in enumerate(steps) if "docker push" in s.get("run", ""))
     assert len(builds) == 1 and builds[0] < smoke < stage
     assert steps[smoke]["if"] == "github.event_name == 'pull_request'"
-    assert "docker inspect" in steps[stage]["run"]
+    assert "packaging/container/receipt.py" in steps[stage]["run"]
+    assert "RepoDigests" not in steps[stage]["run"]
     assert steps[builds[0]]["with"].get("push") != "true"
 
 
@@ -104,21 +105,29 @@ def test_all_platform_builds_use_the_coordinator_normalized_version():
     assert jobs["macos"]["with"]["tag"] == "${{ inputs.tag }}"
 
 
-def test_pr_packaging_waits_for_source_checks_and_release_builds_are_independent():
+def test_pr_packaging_chooses_one_build_path_and_prepares_release_assets_in_ci():
     jobs = workflow("ci")["jobs"]
     assert jobs["checks"]["needs"] == ["plan", "unit", "browser", "coverage"]
     assert jobs["checks"]["if"] == "always()"
-    for name in ("containers", "macos", "wheel", "flatpak"):
+    for name in ("containers", "macos", "wheel", "flatpak", "release-candidate"):
         assert "checks" in jobs[name]["needs"]
-        assert jobs[name]["if"] == "github.event_name == 'pull_request'"
-    assert "prepared" not in jobs and "release-ready" not in jobs
-    release = workflow("release")["jobs"]
-    assert "checks" not in release
-    assert release["preflight"]["needs"] == "version"
-    prepared = release["prepared"]
-    assert prepared["needs"] == ["version", "preflight"]
+    trust = jobs["release-version"]["if"]
+    assert "head.repo.full_name == github.repository" in trust
+    assert "user.login == github.repository_owner" in trust
+    assert "base.ref == 'main'" in trust
+    assert "needs.release-version.result == 'success'" in jobs["release-candidate"]["if"]
+    for name in ("containers", "macos", "wheel"):
+        assert "needs.release-version.result == 'skipped'" in jobs[name]["if"]
+        assert "secrets" not in jobs[name]
+    assert jobs["flatpak"]["needs"] == ["checks", "wheel"]
+    assert jobs["release-candidate"]["uses"] == "./.github/workflows/prepared-candidates.yml"
+    assert jobs["release-candidate"]["with"]["revision"] == "${{ github.sha }}"
+    prepare = workflow("prepare-release")
+    assert set(prepare["on"]) == {"workflow_dispatch"}
+    assert prepare["jobs"]["version"]["if"] == "github.ref == 'refs/heads/main'"
+    prepared = prepare["jobs"]["prepared"]
+    assert prepared["needs"] == "version"
     assert prepared["uses"] == "./.github/workflows/prepared-candidates.yml"
-    assert prepared["if"] == "${{ !inputs.source_run }}"
     assert prepared["with"]["revision"] == "${{ needs.version.outputs.revision }}"
     for name in ("containers", "macos", "flatpak"):
         assert workflow("prepared-candidates")["jobs"][name]["with"]["revision"] == "${{ inputs.revision }}"
@@ -165,6 +174,8 @@ def test_platform_ci_exercises_release_build_and_packaged_smoke_on_both_architec
             assert "packaging/macos/build.sh" in commands
             assert "packaging/macos/smoke.sh" in commands
         else:
+            assert {entry["arch"]: entry["runner"] for entry in job["strategy"]["matrix"]["include"]} == {
+                "x86_64": "ubuntu-24.04", "aarch64": "ubuntu-24.04-arm"}
             assert "flatpak-builder" in commands and "--install-deps-from=flathub" in commands
             assert "flatpak install --user" in commands and 'python3 smoke.py "$VERSION"' in commands
         smoke = next(step for step in job["steps"] if "smoke." in step.get("run", ""))
@@ -175,6 +186,8 @@ def test_platform_ci_exercises_release_build_and_packaged_smoke_on_both_architec
     assert workflow("ci")["permissions"] == {"contents": "read"}
     assert "secrets" not in workflow("ci")["jobs"]["flatpak"]
     assert "permissions" not in workflow("container")["jobs"]["build"]
+    assert workflow("prepared-candidates")["jobs"]["provenance"]["runs-on"] == "ubuntu-24.04"
+    assert workflow("release")["jobs"]["promote"]["runs-on"] == "ubuntu-24.04"
 
 
 def test_publisher_rehearsal_is_trusted_isolated_and_cleans_up_after_failure():
@@ -202,9 +215,8 @@ def test_publisher_rehearsal_is_trusted_isolated_and_cleans_up_after_failure():
 
 def test_publication_retry_reuses_validated_artifacts_without_platform_builds():
     jobs = workflow("release")["jobs"]
-    for name in ("containers", "macos", "wheel", "flatpak"):
-        assert name not in jobs
-    assert jobs["prepared"]["if"] == "${{ !inputs.source_run }}"
+    assert set(jobs) == {"version", "preflight", "candidates", "promote", "summary"}
+    assert all("uses" not in job for job in jobs.values())
     download = next(s for s in jobs["promote"]["steps"] if s.get("uses", "").startswith("actions/download-artifact"))
     assert download["with"]["run-id"] == "${{ needs.candidates.outputs.source_run }}"
     assert download["with"]["artifact-ids"] == "${{ needs.candidates.outputs.artifact_ids }}"
@@ -215,13 +227,26 @@ def test_publication_retry_reuses_validated_artifacts_without_platform_builds():
         assert any(s.get("if") == "always()" and "upload-artifact" in s.get("uses", "") for s in steps)
 
 
-def test_release_timing_reads_only_this_attempts_flattened_candidate_status():
-    steps = workflow("release")["jobs"]["summary"]["steps"]
+def test_release_timing_reuses_the_selected_candidates_exact_status_on_retry():
+    jobs = workflow("release")["jobs"]
+    steps = jobs["summary"]["steps"]
     download = next(step for step in steps if step.get("with", {}).get("path") == "evidence/candidates")
-    assert download["with"]["pattern"] == "candidate-status-${{ github.run_attempt }}"
+    assert jobs["candidates"]["outputs"]["status_artifact"] == "${{ steps.evidence.outputs.artifact-id }}"
+    assert download["with"]["artifact-ids"] == "${{ needs.candidates.outputs.status_artifact }}"
     assert download["with"]["merge-multiple"] == "true"
     timing = next(step for step in steps if "packaging/release_timing.py" in step.get("run", ""))
     assert timing["if"] == "needs.candidates.outputs.release_started_at != ''"
+
+
+def test_legacy_recovery_skips_every_builder_and_uses_original_artifact_ids():
+    jobs = workflow("prepared-candidates")["jobs"]
+    for name in ("containers", "macos", "wheel"):
+        assert jobs[name]["if"] == "inputs.source-run == ''"
+    assert jobs["flatpak"]["needs"] == "wheel"
+    assert "inputs.source-run != '' ||" in jobs["provenance"]["if"]
+    recovery = next(step for step in jobs["provenance"]["steps"] if "artifact-ids" in step.get("with", {}))
+    assert recovery["with"]["run-id"] == "${{ inputs.source-run }}"
+    assert recovery["with"]["artifact-ids"] == "${{ steps.retained.outputs.artifact_ids }}"
 
 
 def test_serial_shards_keep_minimum_runtime_resolution_checks_and_diagnostics(tmp_path, monkeypatch):
@@ -314,8 +339,7 @@ def test_tests_and_measurements_can_only_run_on_prs():
     definition = workflow("ci")
     assert set(definition["on"]) == {"pull_request"}
     jobs = definition["jobs"]
-    for name in ("unit", "browser", "coverage", "metrics", "publisher-contract",
-                 "containers", "macos", "flatpak"):
+    for name in ("unit", "browser", "coverage", "metrics", "publisher-contract"):
         assert "github.event_name == 'pull_request'" in jobs[name]["if"]
     assert jobs["metrics"]["needs"] == ["plan", "coverage", "checks"]
     assert "always()" in jobs["metrics"]["if"]

@@ -246,164 +246,18 @@ document.addEventListener('htmx:afterRequest', event => {
 });
 
 let homeVibeUpdate = null;
-let homeVibeFeedbackTimer;
-let homeVibePollTimer;
-let homeVibeRead;
-
-function scheduleHomeVibeRead(update, delay = 700) {
-  clearTimeout(homeVibePollTimer);
-  homeVibePollTimer = setTimeout(() => readHomeVibe(update), delay);
-}
-
-async function readHomeVibe(update) {
-  if (homeVibeUpdate !== update || !update.feedback?.isConnected) return;
-  homeVibeRead?.abort();
-  const read = homeVibeRead = new AbortController();
-  try {
-    const response = await fetch('/home/vibe/status', {signal: read.signal});
-    if (!response.ok) throw new Error('Vibe observation unavailable');
-    const state = await response.json();
-    if (homeVibeUpdate !== update || read.signal.aborted) return;
-    if (!state && update.requestId) { clearHomeVibeFeedback(); syncHomeVibe(); return; }
-    // A lost mutation reply is reconciled by reading its persisted receipt.
-    // An older receipt cannot establish that the new selection was accepted.
-    if (!state || (!update.requestId && (state.id === update.previousRequestId || state.vibe !== update.value))) {
-      update.phase = 'error';
-      renderHomeVibeFeedback();
-      syncHomeVibe();
-      return;
-    }
-    update.requestId = state.id;
-    update.value = state.vibe;
-    update.label = homeVibeLabel(state.vibe);
-    if (state.phase === 'failed') {
-      update.phase = 'error';
-      renderHomeVibeFeedback();
-      syncHomeVibe();
-      return;
-    }
-    if (state.phase === 'ready') {
-      if (genHomeBusy(document.getElementById('home-mode-cards'))) {
-        scheduleHomeVibeRead(update);
-        return;
-      }
-      await htmx.ajax('GET', '/home/cards', {target: '#home-mode-cards', swap: 'outerHTML',
-        values: {vibe_request: state.id}});
-      if (homeVibeUpdate === update) {
-        syncHomeVibe();
-        if (update.phase === 'waiting') scheduleHomeVibeRead(update);
-      }
-      return;
-    }
-    update.phase = 'waiting';
-    renderHomeVibeFeedback();
-    scheduleHomeVibeRead(update, state.phase === 'waiting' ? 3000 : 700);
-  } catch (error) {
-    if (read.signal.aborted || homeVibeUpdate !== update) return;
-    console.debug('[Vibe observation]', error);
-    scheduleHomeVibeRead(update, 3000);
-  }
-}
-
-function homeVibeLabel(value) {
-  return [...document.querySelectorAll('#home-vibe-form input')]
-    .find(input => input.value === value)?.closest('label').querySelector('strong')?.textContent.trim() || 'your vibe';
-}
 
 function dismissHomeVibeFeedback() {
-  if (homeVibeUpdate) homeVibeUpdate.dismissed = true;
-  document.getElementById('home-vibe-feedback')?.setAttribute('hidden', '');
+  homeVibeUpdate?.feedback?.setAttribute('hidden', '');
 }
 
 function clearHomeVibeFeedback() {
-  clearTimeout(homeVibeFeedbackTimer);
-  clearTimeout(homeVibePollTimer);
-  homeVibeRead?.abort();
+  dismissHomeVibeFeedback();
   homeVibeUpdate = null;
-  document.getElementById('home-vibe-feedback')?.setAttribute('hidden', '');
-}
-
-function renderHomeVibeFeedback() {
-  const update = homeVibeUpdate;
-  const feedback = document.getElementById('home-vibe-feedback');
-  if (!feedback || !update) return;
-  feedback.hidden = !!update.dismissed;
-  feedback.dataset.state = update.phase;
-  const readyMixes = !!document.querySelector('#home-mode-cards .gen-card-body');
-  let title = update.value ? 'Adjusting your mixes for ' + update.label + '…' : 'Adjusting your mixes…';
-  let detail = readyMixes ? '' : 'Your mix tapes will appear here when they’re ready.';
-  if (update.phase === 'ready') {
-    title = update.value ? 'Your ' + update.label + ' mix tapes are ready.' : 'Your mix tapes are ready.';
-    detail = '';
-  } else if (update.phase === 'error') {
-    title = 'Couldn’t update your mix tapes.';
-    detail = 'Choose a vibe to try again.';
-  } else if (update.phase === 'notice') {
-    title = update.notice;
-    detail = 'We’ll keep trying to prepare your mix tapes.';
-  }
-  // Repeated preparation polls must not repeat an unchanged live announcement.
-  const heading = document.getElementById('home-vibe-feedback-title');
-  const description = document.getElementById('home-vibe-feedback-detail');
-  if (heading.textContent !== title) heading.textContent = title;
-  if (description.textContent !== detail) description.textContent = detail;
-}
-
-function syncHomeVibeFeedback() {
-  const feedback = document.getElementById('home-vibe-feedback');
-  const row = document.getElementById('home-mode-cards');
-  if (!feedback || !row) return;
-  // Navigation replaces the feed; a previous page's request must not own its status.
-  if (homeVibeUpdate?.feedback !== feedback) {
-    clearHomeVibeFeedback();
-  }
-  const value = row.dataset.vibe || '';
-  if (homeVibeUpdate?.phase === 'saving'
-      || (homeVibeUpdate?.phase === 'waiting' && homeVibeUpdate.request && !homeVibeUpdate.requestId)) return;
-  if (homeVibeUpdate?.requestId && (row.dataset.vibeRequest !== homeVibeUpdate.requestId
-      || ['pending', 'waiting'].includes(row.dataset.vibeRequestPhase))) {
-    renderHomeVibeFeedback();
-    return;
-  }
-  if (homeVibeUpdate?.phase === 'error') {
-    if (value === homeVibeUpdate.previousValue) return;
-    clearHomeVibeFeedback();
-  }
-  if (homeVibeUpdate && homeVibeUpdate.value !== value) {
-    clearTimeout(homeVibeFeedbackTimer);
-    homeVibeUpdate = null;
-    feedback.hidden = true;
-  }
-  // Restore ongoing preparation after a reload, without announcing old completed changes.
-  if (!homeVibeUpdate && row.dataset.vibeRequest && ['pending', 'waiting', 'failed'].includes(row.dataset.vibeRequestPhase)) {
-    homeVibeUpdate = {feedback, value, label: homeVibeLabel(value), requestId: row.dataset.vibeRequest,
-      previousValue: value, phase: row.dataset.vibeRequestPhase === 'failed' ? 'error' : 'waiting'};
-    if (homeVibeUpdate.phase === 'waiting') scheduleHomeVibeRead(homeVibeUpdate, 0);
-    renderHomeVibeFeedback();
-    return;
-  } else if (!homeVibeUpdate && value && row.dataset.preparing === 'true') {
-    homeVibeUpdate = {feedback, value, label: homeVibeLabel(value), phase: 'waiting'};
-  }
-  if (!homeVibeUpdate) return;
-  const phase = row.dataset.preferenceNotice ? 'notice'
-    : row.dataset.preparing === 'true' || !row.querySelector('.gen-card-body') ? 'waiting' : 'ready';
-  if (phase !== homeVibeUpdate.phase) {
-    clearTimeout(homeVibeFeedbackTimer);
-    homeVibeUpdate.phase = phase;
-    if (phase === 'ready') {
-      const completed = homeVibeUpdate;
-      homeVibeFeedbackTimer = setTimeout(() => {
-        if (homeVibeUpdate === completed) dismissHomeVibeFeedback();
-      }, 8000);
-    }
-  }
-  homeVibeUpdate.notice = row.dataset.preferenceNotice;
-  renderHomeVibeFeedback();
 }
 
 function homeVibeFeedback() {
   return {
-    init() { syncHomeVibeFeedback(); },
     destroy() {
       if (homeVibeUpdate?.feedback === this.$el) clearHomeVibeFeedback();
     },
@@ -411,42 +265,59 @@ function homeVibeFeedback() {
 }
 
 function syncHomeVibe() {
-  syncHomeVibeFeedback();
   const panel = document.getElementById('fingerprint');
   if (!panel) return;
   const row = document.getElementById('home-mode-cards');
-  const vibe = homeVibeUpdate && ['saving', 'waiting'].includes(homeVibeUpdate.phase)
-    ? homeVibeUpdate.value : row?.dataset.vibe ?? panel.dataset.vibe ?? '';
+  const vibe = homeVibeUpdate?.value ?? row?.dataset.vibe ?? panel.dataset.vibe ?? '';
   panel.querySelectorAll('#home-vibe-form input').forEach(input => { input.checked = input.value === vibe; });
   window.dispatchEvent(new CustomEvent('home-vibe-sync', {detail: vibe}));
 }
 
-document.addEventListener('htmx:beforeRequest', event => {
-  if (event.detail.elt?.matches('[hx-post="/home/fingerprint/reset"]')) clearHomeVibeFeedback();
-  if (event.detail.elt?.id !== 'home-vibe-form') return;
+function holdsVibeSwap(row) {
+  return row.querySelector('.gen-card.is-focused, [data-generation-pending]');
+}
+
+function showDeferredLiveVibe() {
+  const update = homeVibeUpdate;
+  const row = document.getElementById('home-mode-cards');
+  if (!update?.html || !row || holdsVibeSwap(row)) return;
+  clearHomeVibeFeedback();
+  htmx.swap(row, update.html, {swapStyle: 'outerHTML'}, {afterSettleCallback: syncHomeVibe});
+}
+
+document.addEventListener('mix-board-unfocused', showDeferredLiveVibe);
+document.addEventListener('mix-save-settled', showDeferredLiveVibe);
+document.addEventListener('htmx:afterSettle', showDeferredLiveVibe);
+
+document.addEventListener('htmx:beforeSend', event => {
+  const detail = event.detail;
+  if (detail.elt?.id !== 'home-vibe-form') {
+    if (detail.requestConfig?.verb === 'post' && ['home-mode-cards', 'fingerprint'].includes(detail.target?.id)) {
+      clearHomeVibeFeedback();
+    }
+    return;
+  }
   const selected = event.detail.elt.querySelector('input:checked');
-  clearTimeout(homeVibeFeedbackTimer);
-  homeVibeUpdate = {
-    feedback: document.getElementById('home-vibe-feedback'),
-    request: event.detail.xhr,
-    previousValue: document.getElementById('home-mode-cards')?.dataset.vibe || '',
-    previousRequestId: document.getElementById('home-mode-cards')?.dataset.vibeRequest || '',
-    value: selected?.value || '', label: homeVibeLabel(selected?.value || ''), phase: 'saving',
-  };
+  const feedback = document.getElementById('home-vibe-feedback');
+  const request = event.detail.xhr;
+  const update = homeVibeUpdate = {feedback, request, value: selected?.value || ''};
+  if (feedback) {
+    const label = selected?.closest('label')?.querySelector('strong')?.textContent.trim();
+    feedback.querySelector('strong').textContent = update.value && label
+      ? 'Adjusting your mixes for ' + label + '…' : 'Adjusting your mixes…';
+    feedback.hidden = false;
+  }
+  // The form can be replaced while the request is running. The XHR still ends.
+  request.addEventListener('loadend', () => {
+    if (homeVibeUpdate !== update) return;
+    dismissHomeVibeFeedback();
+    if (update.html) showDeferredLiveVibe();
+    else clearHomeVibeFeedback();
+    syncHomeVibe();
+  }, {once: true});
   window.dispatchEvent(new CustomEvent('home-vibe-saving'));
-  renderHomeVibeFeedback();
 });
 document.addEventListener('htmx:afterRequest', event => {
-  if (event.detail.elt?.id === 'home-vibe-form') {
-    if (homeVibeUpdate?.request !== event.detail.xhr) return;
-    if (homeVibeUpdate?.request === event.detail.xhr) {
-      homeVibeUpdate.phase = 'waiting';
-      homeVibeUpdate.requestId = event.detail.xhr.getResponseHeader('X-Home-Vibe-Request');
-      renderHomeVibeFeedback();
-      scheduleHomeVibeRead(homeVibeUpdate, 0);
-    }
-    syncHomeVibe();
-  }
   if (event.detail.elt?.matches('.fp-slider, .fp-breadth-slider')) {
     const status = document.getElementById('home-preference-status');
     if (status) status.textContent = event.detail.successful ? 'Freshly adjusted. Find your next mix.'
@@ -455,17 +326,11 @@ document.addEventListener('htmx:afterRequest', event => {
 });
 
 document.addEventListener('htmx:beforeSwap', event => {
-  const id = event.detail.requestConfig?.parameters?.vibe_request;
-  if (id && (homeVibeUpdate?.requestId !== id || genHomeBusy(document.getElementById('home-mode-cards')))) {
-    event.detail.shouldSwap = false;
+  const detail = event.detail;
+  if (homeVibeUpdate?.request === detail.xhr && detail.shouldSwap && holdsVibeSwap(detail.target)) {
+    homeVibeUpdate.html = detail.serverResponse;
+    detail.shouldSwap = false;
   }
-});
-window.addEventListener('pagehide', () => {
-  clearTimeout(homeVibePollTimer);
-  homeVibeRead?.abort();
-});
-window.addEventListener('pageshow', event => {
-  if (event.persisted && homeVibeUpdate?.phase === 'waiting') scheduleHomeVibeRead(homeVibeUpdate, 0);
 });
 
 // Remember the taste panel's open/closed state across page loads and fragment swaps.
@@ -474,7 +339,7 @@ function fpPanel() {
     // Power-user control: compact on first encounter; an explicit expansion remains remembered.
     collapsed: localStorage.getItem('fp_collapsed') !== '0',
     tab: ['vibe', 'mixes', 'preferences'].includes(sessionStorage.getItem('fp_tuning_tab')) ? sessionStorage.getItem('fp_tuning_tab') : 'vibe',
-    vibe: '',
+    vibe: '', pendingVibeTab: false,
     get vibesAvailable() { return this.growth?.vibes_ready === true ||
       this.growth?.nodes.some(node => node.id === 'vibes' && node.unlocked); },
     init() {
@@ -482,6 +347,9 @@ function fpPanel() {
       if (this.tab === 'vibe' && !this.vibesAvailable) this.tab = 'mixes';
       this.$watch('vibesAvailable', available => {
         if (!available && this.tab === 'vibe') this.selectTab('mixes');
+        if (available && this.pendingVibeTab && this.$refs.dialog.open && document.activeElement === this.$refs.mixesTab) {
+          this.selectTab('vibe', true);
+        }
       });
       this._saveRecovery = event => this.saveRecovery(event);
       this._restoreRecovery = event => this.restoreRecovery(event);
@@ -490,12 +358,14 @@ function fpPanel() {
       if (!this.collapsed) this.$nextTick(() => this.show());
     },
     destroy() {
+      this._dialogRequest?.abort();
       window.removeEventListener('app-page-leaving', this._saveRecovery);
       window.removeEventListener('app-page-changed', this._restoreRecovery);
     },
     saveRecovery(event) {
       if (!event.detail?.state) return;
       const options = this.$el.querySelector('#home-genre-options');
+      if (!options) return;
       const focused = document.activeElement;
       event.detail.state.homeMixControls = {
         options: options.dataset.draft ? options : null,
@@ -505,9 +375,10 @@ function fpPanel() {
         focusGenre: options.contains(focused) ? focused.value : null,
       };
     },
-    restoreRecovery(event) {
+    async restoreRecovery(event) {
       const state = event.detail?.state?.homeMixControls;
       if (!state) return;
+      if (!await this.loadDialog()) return;
       // A quiet page reconciliation must not turn an edited draft back into
       // applied choices. Keep its actual inputs, including unchecked choices.
       if (state.options) this.$el.querySelector('#home-genre-options').replaceWith(state.options);
@@ -515,7 +386,7 @@ function fpPanel() {
       syncHomeThemes();
       filterHomeGenres();
       if (state.open) {
-        this.show();
+        await this.show();
         const focused = state.focusGenre !== null
           ? this.$el.querySelector('#home-genre-options input[value="' + CSS.escape(state.focusGenre) + '"]')
           : state.focusId ? this.$el.querySelector('#' + CSS.escape(state.focusId)) : null;
@@ -523,6 +394,7 @@ function fpPanel() {
       }
     },
     selectTab(name, focus = false) {
+      this.pendingVibeTab = false;
       if (name === 'vibe' && !this.vibesAvailable) name = 'mixes';
       this.tab = name;
       sessionStorage.setItem('fp_tuning_tab', name);
@@ -532,13 +404,45 @@ function fpPanel() {
       const tabs = this.vibesAvailable ? ['vibe', 'mixes', 'preferences'] : ['mixes', 'preferences'];
       this.selectTab(tabs[(tabs.indexOf(this.tab) + direction + tabs.length) % tabs.length], true);
     },
-    show() {
+    async loadDialog() {
+      const dialog = this.$refs.dialog;
+      if (dialog.querySelector('.fp-dialog-head')) return true;
+      if (!this._dialogLoad) {
+        const request = new AbortController();
+        this._dialogRequest = request;
+        this._dialogLoad = fetch('/home/fingerprint?dialog=true', {
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(10000)]),
+        }).then(async response => {
+          if (!response.ok || response.headers.has('X-Read-Pending')) return false;
+          const html = await response.text();
+          if (!dialog.isConnected || request.signal.aborted) return false;
+          dialog.innerHTML = html;
+          htmx.process(dialog);
+          syncHomeThemes();
+          await this.$nextTick();
+          return true;
+        }).catch(() => false).finally(() => {
+          this._dialogRequest = null;
+          this._dialogLoad = null;
+        });
+      }
+      return this._dialogLoad;
+    },
+    async show(preferred = null) {
+      this._showDialog = true;
+      if (!await this.loadDialog() || !this._showDialog || !this.$el.isConnected) return;
+      preferred ??= sessionStorage.getItem('fp_tuning_tab') || 'vibe';
+      if (preferred === 'vibe' && this.vibesAvailable) this.selectTab('vibe');
+      this.pendingVibeTab = preferred === 'vibe' && this.growth?.vibes_ready === null && !this.vibesAvailable;
       this.collapsed = false;
       localStorage.setItem('fp_collapsed', '0');
       if (!this.$refs.dialog.open) this.$refs.dialog.showModal();
       this.$refs[this.tab + 'Tab'].focus();
+      if (this.growth?.vibes_ready === null) this.$dispatch('home-growth-request');
     },
     close() {
+      this._showDialog = false;
+      this.pendingVibeTab = false;
       const wasOpen = this.$refs.dialog.open;
       this.$refs.dialog.close();
       this.collapsed = true;

@@ -31,16 +31,18 @@ class RecommendationEvidence:
         axes = self.genres.feature_axes({row['genre'] for row in facets if row['genre']})
         return baskets + evidence_baskets.content(facets, good, axes)
 
-    def rec_baskets_as_of(self, cutoff, max_album=30, max_session=120):
+    def rec_baskets_as_of(self, cutoff, max_album=30, max_session=120, *, session_memberships=None):
         if not self.read_only:
             with self.read_view() as reader:
-                return reader.rec_evidence.rec_baskets_as_of(cutoff, max_album, max_session)
+                return reader.rec_evidence.rec_baskets_as_of(cutoff, max_album, max_session,
+                                                             session_memberships=session_memberships)
         safe = self.repository.unchanged_playlists(cutoff) - self._excluded_playlists()
         memberships = self.repository.playlist_memberships(included=safe)
         proven = {key for _, key in memberships}
         good = (self.repository.dated_keys(cutoff) | proven) & self._eligible()
         baskets = evidence_baskets.grouped(memberships, good)
-        sessions = self.repository.dated_session_memberships(cutoff)
+        sessions = (self.repository.dated_session_memberships(cutoff)
+                    if session_memberships is None else session_memberships)
         baskets += evidence_baskets.grouped(sessions, good, cap=max_session)
         coverage = evidence_baskets.historical_coverage(eligible=good, safe_playlists=safe,
             known_playlists=self.repository.known_playlist_count(cutoff),
@@ -49,6 +51,9 @@ class RecommendationEvidence:
 
     def evaluation_history_bounds(self):
         return self.repository.evaluation_history_bounds()
+
+    def evaluation_listening(self, end, *, start=None):
+        return self.repository.evaluation_listening(end, start=start)
 
     def generated_only_keys_between(self, start_ts, end_ts, group='Generated'):
         return self.repository.generated_only_keys_between(start_ts, end_ts, group)

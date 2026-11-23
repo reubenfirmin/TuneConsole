@@ -10,10 +10,10 @@ from yt_playlist.web.app import create_app
 def generated_playlist_routes(monkeypatch):
     from yt_playlist.web import app as webapp
     from yt_playlist.web import generated_playlist
-    from yt_playlist.web.routes import audio_preview
+    from yt_playlist.web.routes import audio_vibes
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (audio_preview, generated_playlist)])
+        module.build(ctx) for module in (audio_vibes, generated_playlist)])
 
 
 def _client(store, provider):
@@ -21,7 +21,7 @@ def _client(store, provider):
 
 
 def test_redirects_to_the_local_row_when_sync_has_already_imported_it(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     local = store.playlists.upsert_playlist(iid, "PLX", "Imported", 1, "h", 1.0)
     c = _client(store, lambda: {})
     r = c.get(f"/playlist/saved/{iid}/PLX", follow_redirects=False)
@@ -30,7 +30,7 @@ def test_redirects_to_the_local_row_when_sync_has_already_imported_it(store):
 
 
 def test_falls_back_to_a_live_fetch_when_no_receipt_is_cached(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient(tracks={"PLY": [{"videoId": "v1", "title": "Song", "artists": [{"name": "Artist"}]}]})
     c = _client(store, lambda: {iid: fc})
     r = c.get(f"/playlist/saved/{iid}/PLY", follow_redirects=False)
@@ -39,7 +39,7 @@ def test_falls_back_to_a_live_fetch_when_no_receipt_is_cached(store):
 
 
 def test_returns_503_when_no_client_is_connected_and_nothing_is_cached(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     c = _client(store, lambda: {})
     r = c.get(f"/playlist/saved/{iid}/PLZ", follow_redirects=False)
     assert r.status_code == 503

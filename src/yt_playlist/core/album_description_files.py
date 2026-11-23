@@ -1,4 +1,4 @@
-"""Immutable paid description bodies, directly owned by requests and results."""
+"""Immutable files for retained provider evidence and installed paid-result migration."""
 import hashlib
 import json
 import os
@@ -7,16 +7,11 @@ import tempfile
 
 from .evidence_ledger import canonical
 from .description_paths import record_id, record_path
-from . import fao
+from . import fao, paid_description_access
 
 FORMAT = 'album-description-1'
 MAX_BYTES = 256 * 1024
-OWNERS = {
-    'album_description_requests': (('id',), 'outcome_filename', 'outcome_digest'),
-    'album_descriptions': (('id',), 'filename', 'content_digest'),
-    'legacy_album_description_usage': (('id',), 'filename', 'content_digest'),
-    'album_description_access': (('provider', 'scope', 'credential_key'), 'evidence_filename', 'evidence_digest'),
-}
+USAGE_RECORD = 'provider_usage'  # Stable backup manifest type.
 
 
 def directory(conn, memory_key=None):
@@ -59,11 +54,6 @@ def _existing(path, *, with_age=False):
     return (encoded, age) if with_age else encoded
 
 
-def describe(raw):
-    encoded = document(raw)
-    return hashlib.sha256(encoded).hexdigest(), len(encoded)
-
-
 def publish_reserved(root, identity, raw, *, age=None):
     encoded = document(raw)
     path = record_path(root, identity)
@@ -84,12 +74,21 @@ def read(filename, digest, *, with_age=False):
     return (value['record_json'], age) if with_age else value['record_json']
 
 
+def _usage_owner(conn):
+    # Snapshot tools also export and restore a database before opening it.
+    previous = conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?", (USAGE_RECORD,))
+    return (USAGE_RECORD, 'id') if previous.fetchone() else ('album_description_requests', 'usage_id')
+
+
 def _references(conn):
-    for owner, (keys, filename, digest) in OWNERS.items():
-        fields = ','.join((*keys, filename, digest))
-        for row in conn.execute(f'SELECT {fields} FROM {owner} WHERE {filename} IS NOT NULL ORDER BY '
-                                + ','.join(keys)):
-            yield owner, tuple(row[:len(keys)]), row[-2], row[-1]
+    table, key = _usage_owner(conn)
+    for identity, filename, digest in conn.execute(
+            f'SELECT {key},evidence_filename,evidence_digest FROM {table} '
+            f'WHERE evidence_filename IS NOT NULL ORDER BY {key}'):
+        yield USAGE_RECORD, (identity,), filename, digest
+    for key, filename, digest in paid_description_access.receipts(conn):
+        # Preserve the manifest's original owner label across the storage change.
+        yield 'settings', (key,), filename, digest
 
 
 def export(conn, root):
@@ -123,8 +122,8 @@ def _digest(value):
     return value
 
 
-def _key(owner, value):
-    if (not isinstance(value, list) or len(value) != len(OWNERS[owner][0])
+def _key(columns, value):
+    if (not isinstance(value, list) or len(value) != len(columns)
             or any(type(part) not in (int, str) for part in value)):
         raise ValueError('Invalid paid description backup owner key')
     return tuple(value)
@@ -138,6 +137,8 @@ def restore(conn, manifest, *, memory_key=None):
     if (not isinstance(value, dict) or set(value) != {'type', 'chunks'}
             or value['type'] != 'backup-manifest' or not isinstance(value['chunks'], list)):
         raise ValueError('Unsupported paid description backup manifest')
+    keys = {USAGE_RECORD: ('usage_id',), 'settings': ('key',)}
+    usage_table, usage_key = _usage_owner(conn)
     entries = {}
     for digest in value['chunks']:
         _digest(digest)
@@ -147,9 +148,7 @@ def restore(conn, manifest, *, memory_key=None):
             raise ValueError('Unsupported paid description backup chunk')
         for entry in chunk['entries']:
             if (not isinstance(entry, dict) or set(entry) != {'owner', 'key', 'digest', 'relative_filename'}
-                    or entry['owner'] not in OWNERS or not isinstance(entry['key'], list)
-                    or not isinstance(entry['relative_filename'], str)
-                    or len(entry['key']) != len(OWNERS[entry['owner']][0])):
+                    or entry['owner'] not in keys or not isinstance(entry['relative_filename'], str)):
                 raise ValueError('Invalid paid description backup entry')
             digest = _digest(entry['digest'])
             relative = Path(entry['relative_filename'])
@@ -158,7 +157,7 @@ def restore(conn, manifest, *, memory_key=None):
                              else record_path(Path(), identity))
             if relative != expected_path:
                 raise ValueError('Invalid paid description backup path')
-            identity = (entry['owner'], _key(entry['owner'], entry['key']))
+            identity = (entry['owner'], _key(keys[entry['owner']], entry['key']))
             if identity in entries:
                 raise ValueError('Duplicate paid description in backup manifest')
             entries[identity] = entry
@@ -182,9 +181,11 @@ def restore(conn, manifest, *, memory_key=None):
                 raise ValueError('Paid description restore changed original evidence')
             targets.append((owner, key, filename))
         for owner, key, filename in targets:
-            columns, field, _digest_column = OWNERS[owner]
-            conn.execute(f'UPDATE {owner} SET {field}=? WHERE ' + ' AND '.join(f'{column}=?' for column in columns),
-                         (filename, *key))
+            if owner == 'settings':
+                paid_description_access.rebase_receipt(conn, key[0], filename)
+            else:
+                conn.execute(f'UPDATE {usage_table} SET evidence_filename=? WHERE {usage_key}=?',
+                             (filename, *key))
         conn.commit()
     except BaseException:
         conn.rollback()

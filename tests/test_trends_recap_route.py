@@ -39,10 +39,10 @@ def _pristine_current_schema():
 @pytest.fixture(autouse=True)
 def recap_routes(monkeypatch, home_page_bytecode):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, trends
+    from yt_playlist.web.routes import app_update, audio_vibes, home, trends
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, home, trends)])
+        module.build(ctx) for module in (app_update, audio_vibes, home, trends)])
     templates = webapp.Jinja2Templates
 
     def compiled_templates(*args, **kwargs):
@@ -60,7 +60,7 @@ _STORY = {
          "thesis": "The month you cast a wide net.", "personality": "Daylight Trailblazer"},
         {"kind": "numbers", "plays": 535, "listen_days": 19, "streak": 14, "distinct_artists": 300},
         {"kind": "wide_net", "artists": 300, "plays": 535},
-        {"kind": "personality", "name": "Daylight Trailblazer", "blurb": "high-energy and curious",
+        {"kind": "personality", "name": "Daylight Trailblazer", "blurb": "Your genres skew high-energy.", "audio_plays": 0,
          "axes": {"energy": 0.5, "exploration": 0.6, "rhythm": 0.4}, "aura": _AURA, "top_family": "house"},
         {"kind": "closing", "month_name": "June", "plays": 535, "personality": "Daylight Trailblazer",
          "aura": _AURA, "top_artist": "Ben Böhmer", "listen_days": 19},
@@ -133,7 +133,7 @@ _NOW = datetime(2026, 7, 15, tzinfo=timezone.utc).timestamp()
 
 
 def _recap_app(store, story, synced=True, now_fn=lambda: _NOW):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     if synced:
         store.settings.set_setting("last_sync_at", "1700000000")
         publish_personal_mix(store, now=now_fn())
@@ -169,26 +169,38 @@ def _client(_pristine_current_schema, tmp_path, monkeypatch):
         yield create
 
 
-@pytest.fixture
-def _reel_client():
-    from fastapi import FastAPI
+def _story_output(story, directory):
     from yt_playlist.controllers.home_outputs import HomeOutputs
+    from yt_playlist.core import home_outputs, recommendation_outputs
+    from yt_playlist.repos.home_cache import HomeCacheRepo
+
+    cache = Mock(spec_set=HomeCacheRepo)
+    manifest = None
+    if story is not None:
+        prepared = home_outputs.prepare('trend_rollups', json.dumps({'story': story}), _NOW)
+        parts = [(str(position), *recommendation_outputs.publish(directory, part))
+                 for position, part in enumerate(prepared.parts)]
+        manifest = home_outputs.Manifest(1, prepared.digest, prepared.byte_size, parts)
+    cache.document.return_value = manifest
+    return HomeOutputs(cache, None, Mock(retained=nullcontext), home_outputs.read_manifest)
+
+
+@pytest.fixture
+def _reel_client(tmp_path):
+    from fastapi import FastAPI
     from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
     from yt_playlist.controllers.settings import Settings
-    from yt_playlist.repos.home_cache import HomeCacheRepo
     from yt_playlist.repos.settings import SettingsRepo
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import trends
 
     with ExitStack() as clients:
         def create(story):
-            cache = Mock(spec_set=HomeCacheRepo)
-            cache.document.return_value = (json.dumps({'story': story}) if story else None, None)
-            home = HomeOutputs(cache, None, Mock(retained=nullcontext), None)
+            home = _story_output(story, tmp_path)
             settings = Mock(spec_set=SettingsRepo)
             store = SimpleNamespace(
                 rec_proposals=RecommendationProposals(
-                    None, None, None, None, None, home, None, None),
+                    None, None, None, None, None, home, None),
                 settings=Settings(settings, None, None))
             templates = webapp.Jinja2Templates(directory=Path(webapp.__file__).with_name('templates'))
             templates.env.globals['asset_v'] = 'test'
@@ -244,29 +256,42 @@ def test_there_is_no_trends_tab(_client):
     assert 'href="/trends"' not in c.get("/").text           # ...and there is no nav link to it
 
 
+def _home_notices(client):
+    response = client.get('/?panel=notices&fragment=1')
+    assert response.status_code == 200
+    return response.text
+
+
 def test_home_recap_nag_links_into_the_reel(_client):
     c, _ = _client(_STORY)
-    r = c.get("/")
-    assert r.status_code == 200
-    assert 'id="recap-nudge"' in r.text
-    assert "Your June is wrapped" in r.text
-    assert 'href="/trends/story/2026-06"' in r.text
+    home = c.get('/')
+    assert home.status_code == 200
+    assert 'Needs attention' in home.text
+    assert 'id="recap-nudge"' not in home.text
+    navigation = c.get('/home/growth?navigation=true')
+    assert navigation.status_code == 200
+    assert navigation.json()['has_action_notices'] is True
+    notices = _home_notices(c)
+    assert 'id="recap-nudge"' in notices
+    assert "Your June is wrapped" in notices
+    assert 'href="/trends/story/2026-06"' in notices
 
 
 def test_opening_recap_hides_notice_across_reloads_rebuilds_and_app_restarts(_client):
     c, store = _client(_STORY)
     # Seeing the notice on Home does not count as viewing the recap.
     for _ in range(2):
-        assert 'id="recap-nudge"' in c.get("/").text
+        assert 'id="recap-nudge"' in _home_notices(c)
     assert store.settings.get_setting("recap_viewed_month") is None
 
     assert c.get("/trends/story/2026-06").status_code == 200
     assert store.settings.get_setting("recap_viewed_month") == "2026-06"
-    assert 'id="recap-nudge"' not in c.get("/").text
+    assert 'id="recap-nudge"' not in _home_notices(c)
     store.rec_proposals.put_proposals("trend_rollups", {"story": _STORY}, 2000.0)
+    assert 'id="recap-nudge"' not in _home_notices(c)
     app = create_app(store, lambda: {}, now_fn=lambda: _NOW)
     with TestClient(app, base_url="http://127.0.0.1") as restarted:
-        assert 'id="recap-nudge"' not in restarted.get("/").text
+        assert 'id="recap-nudge"' not in _home_notices(restarted)
         # The direct recap link remains usable after viewing.
         assert restarted.get("/trends/story/2026-06").status_code == 200
 
@@ -278,29 +303,25 @@ def test_viewing_a_recap_does_not_hide_the_next_months_notice(_client):
     clock[0] = datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()
     july = {**_STORY, "month": "2026-07", "month_name": "July"}
     store.rec_proposals.put_proposals("trend_rollups", {"story": july}, 2000.0)
-    assert 'id="recap-nudge"' in c.get("/").text
+    assert 'id="recap-nudge"' in _home_notices(c)
     assert c.get("/trends/story/2026-07").status_code == 200
-    assert 'id="recap-nudge"' not in c.get("/").text
+    assert 'id="recap-nudge"' not in _home_notices(c)
 
 
-def test_missing_recap_does_not_change_viewed_month():
+def test_missing_recap_does_not_change_viewed_month(tmp_path):
     from fastapi import FastAPI
-    from yt_playlist.controllers.home_outputs import HomeOutputs
     from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
     from yt_playlist.controllers.settings import Settings
-    from yt_playlist.repos.home_cache import HomeCacheRepo
     from yt_playlist.repos.settings import SettingsRepo
     from yt_playlist.web.routes import trends
 
     for story, month, viewed in ((_STORY, '1999-01', '2026-05'), (None, '2026-06', None)):
-        cache = Mock(spec_set=HomeCacheRepo)
-        cache.document.return_value = (json.dumps({'story': story}) if story else None, None)
-        home = HomeOutputs(cache, None, Mock(retained=nullcontext), None)
+        home = _story_output(story, tmp_path)
         settings = Mock(spec_set=SettingsRepo)
         settings.get_setting.return_value = viewed
         store = SimpleNamespace(
             rec_proposals=RecommendationProposals(
-                None, None, None, None, None, home, None, None),
+                None, None, None, None, None, home, None),
             settings=Settings(settings, None, None))
         templates = Mock()
         app = FastAPI()
@@ -310,41 +331,41 @@ def test_missing_recap_does_not_change_viewed_month():
             assert client.get(f'/trends/story/{month}').status_code == 404
         assert store.settings.get_setting('recap_viewed_month') == viewed
         assert settings.mock_calls == [call.get_setting('recap_viewed_month', None)]
-        cache.document.assert_called_once_with('trend_rollups')
+        home.repository.document.assert_called_once_with('trend_rollups')
         templates.TemplateResponse.assert_not_called()
 
 
 def test_home_recap_nag_hidden_once_dismissed(_client):
     clock = [_NOW]
     c, store = _client(_STORY, now_fn=lambda: clock[0])
-    assert 'id="recap-nudge"' in c.get("/").text
-    store.settings.set_setting("recap_dismissed_month", "2026-06")
-    assert "recap-nudge" not in c.get("/").text
+    assert 'id="recap-nudge"' in _home_notices(c)
+    assert c.post('/onboard/recap/dismiss?month=2026-06').status_code == 200
+    assert 'id="recap-nudge"' not in _home_notices(c)
     # a later month's recap re-shows (the dismissal is per-month)
     clock[0] = datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()
     store.rec_proposals.put_proposals("trend_rollups", {"story": {**_STORY, "month": "2026-07", "month_name": "July"}}, 1000.0)
-    assert 'id="recap-nudge"' in c.get("/").text
+    assert 'id="recap-nudge"' in _home_notices(c)
 
 
 @pytest.mark.parametrize("month", ["2026-07", "2026-08", "2026-10"])
 def test_home_hides_cached_recap_outside_the_previous_calendar_month(_client, month):
     october = datetime(2026, 10, 19, tzinfo=timezone.utc).timestamp()
     c, _ = _client({**_STORY, "month": month}, now_fn=lambda: october)
-    assert 'id="recap-nudge"' not in c.get("/").text
+    assert 'id="recap-nudge"' not in _home_notices(c)
 
 
 def test_home_recap_expires_at_rollover_without_waiting_for_a_worker_rebuild(_client):
     clock = [datetime(2026, 7, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp()]
     c, _ = _client(_STORY, now_fn=lambda: clock[0])
-    assert 'id="recap-nudge"' in c.get("/").text
+    assert 'id="recap-nudge"' in _home_notices(c)
     clock[0] += 1
-    assert 'id="recap-nudge"' not in c.get("/").text
+    assert 'id="recap-nudge"' not in _home_notices(c)
 
 
 def test_home_offers_september_in_october(_client):
     october = datetime(2026, 10, 19, tzinfo=timezone.utc).timestamp()
     c, _ = _client({**_STORY, "month": "2026-09", "month_name": "September"}, now_fn=lambda: october)
-    html = c.get("/").text
+    html = _home_notices(c)
     assert "Your September is wrapped" in html
     assert 'href="/trends/story/2026-09"' in html
 

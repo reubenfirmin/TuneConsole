@@ -26,11 +26,11 @@ def _pristine_current_schema():
 @pytest.fixture(autouse=True)
 def album_routes(store, monkeypatch, home_page_bytecode):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import album, app_update, audio_preview, home, taste
+    from yt_playlist.web.routes import album, app_update, audio_vibes, home, taste
 
     # Retain the real bridge: album playback and the shared clock use it below.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (album, app_update, audio_preview, home, taste)])
+        for module in (album, app_update, audio_vibes, home, taste)])
     templates = webapp.Jinja2Templates
 
     def compiled_templates(*args, **kwargs):
@@ -316,7 +316,7 @@ def _album(browse="MPREb_x"):
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     albums = _album()
     fc = FakeClient(albums=albums, catalog={track['videoId']: track
                     for album in albums.values() for track in album['tracks']})
@@ -382,7 +382,7 @@ def test_unsaved_album_and_expansion_reuse_identical_standard_rows(store):
     assert page.count('<th ') == 10
     assert not store.collection.saved_album_ids()
     assert [t['video_id'] for t in store.charts.album_tracks_detail('MPREb_x')] == ['v1','v2']
-    assert not store.conn.execute('SELECT 1 FROM library_memberships').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM track_sources WHERE library_origin IS NOT NULL').fetchone()
 
 
 def test_album_fetch_retains_exact_upload_lengths_for_the_shared_clock_without_saving(store):
@@ -402,7 +402,7 @@ def test_album_fetch_retains_exact_upload_lengths_for_the_shared_clock_without_s
     assert c.get('/bridge/status').json()['now_playing']['duration'] == 160
     assert not store.collection.saved_album_ids()
     assert [t['video_id'] for t in store.charts.album_tracks_detail('MPREb_x')] == ['v1','v2']
-    assert not store.conn.execute('SELECT 1 FROM library_memberships').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM track_sources WHERE library_origin IS NOT NULL').fetchone()
 
 
 def test_inline_fetch_failure_does_not_show_incidental_library_subset(store):
@@ -506,6 +506,80 @@ def test_successive_deliberate_album_selections_from_one_menu_are_retained(store
     assert sum(row['episode_support'] for row in contexts) == 1
     replay = choice_evidence.replay(store, 3)
     assert len(replay['source_ids']) == 3
+
+
+@pytest.mark.parametrize('first_report, second_report, second_start', [
+    ('exact', 'exact', None),
+    ('exact', 'exact', 11),
+    ('exact', 'exact', 300),
+    ('standalone', 'exact', 300),
+    ('browse', 'exact', 11),
+    ('browse', 'exact', 300),
+    ('exact', 'browse', 300),
+    ('browse', 'browse', None),
+], ids=['same-queue', 'within-exact-window', 'within-repeat-window', 'standalone-to-exact',
+        'browse-to-other-exact-nearby', 'browse-to-other-exact', 'exact-to-other-browse',
+        'browse-to-same-exact'])
+def test_like_credits_the_verified_album_queue_even_when_the_upload_repeats(
+        store, first_report, second_report, second_start):
+    from types import SimpleNamespace
+    from yt_playlist.core import playback_feedback
+    from yt_playlist.library import live_plays, player_events
+
+    client, remote, account = _client(store)
+    first_album, first_queue = 'MPREb_x', 'OLAK5uy_album'
+    second_album, second_queue = 'MPREb_other', 'OLAK5uy_other'
+    remote._albums[first_album]['audioPlaylistId'] = first_queue
+    remote._albums[second_album] = {**remote._albums[first_album], 'audioPlaylistId': second_queue}
+    opportunity = choice_evidence.issue(store, 'albums', [
+        {'id': first_album, 'keys': ['one|artist x'], 'score': 1},
+        {'id': second_album, 'keys': ['one|artist x'], 'score': .9},
+    ], 0, context={})
+    sent = []
+    now = 1
+    ctx = client.app.state.ctx
+    ctx.now_fn = lambda: now
+    ctx.bridge = SimpleNamespace(connected=True, begin_playback_intent=lambda: len(sent) + 1,
+                                 send_control=lambda message, **kwargs: sent.append(message))
+
+    def select(album, queue, action):
+        assert client.post('/album/play', data={'browse_id': album, 'opportunity_id': opportunity,
+                                                'action_id': action}).status_code == 204
+        assert sent[-1]['url'] == f'https://music.youtube.com/watch?v=v1&list={queue}'
+        assert store.rec_ledger.album_playback_context()['at'] == now
+
+    def report(album, queue, at):
+        return live_plays.handle_play_event(ctx, {'type': 'play', 'videoId': 'v1', 'title': 'One', 'artist': 'Artist X',
+            'albumBrowseId': album, 'playlist': queue, 'brandKnown': True, 'brandId': '',
+            'videoVerified': True, 'metadataVerified': True, 'position': 0, 'duration': 180}, at)
+
+    if first_report != 'standalone':
+        select(first_album, first_queue, 'first-choice')
+    assert report(first_album if first_report != 'standalone' else '',
+                  first_queue if first_report == 'exact' else '', 10)
+    album, queue, action = first_album, first_queue, 'first-choice'
+    expected = [(first_album, 10)] if first_report != 'standalone' else []
+    if second_start is not None:
+        now = second_start - .25
+        album, queue, action = second_album, second_queue, 'second-choice'
+        select(album, queue, action)
+        assert report(album, queue if second_report == 'exact' else '', second_start)
+        expected.append((album, second_start))
+    at = second_start or 10
+    assert not report(album, queue, at + .25)
+    assert not report(album, queue, at + 5)
+    frame = {'kind': 'rate', 'brandKnown': True, 'brandId': '', 'requestedAt': (at + 10) * 1000,
+        'href': (f'https://music.youtube.com/watch?v=v1&list={queue}' if second_report == 'exact'
+                 else f'https://music.youtube.com/browse/{album}'),
+        'url': 'https://music.youtube.com/youtubei/v1/like/like', 'phase': 'settled', 'success': True,
+        'httpStatus': 200, 'body': json.dumps({'target': {'videoId': 'v1'}})}
+    assert player_events.handle_player_event(ctx, frame, at + 11)
+    playback_feedback.drain(store)
+    assert store.tracks.item_rating(account, 'v1')['status'] == 'LIKE'
+    responses = store.rec_ledger.evidence().records('response')
+    assert [(row['option_id'], row['at']) for row in responses if row['kind'] == 'start'] == expected
+    assert [(row['details']['choice_action_id'], row['option_id'])
+            for row in responses if row['kind'] == 'save'] == [(action, album)]
 
 
 def test_album_share_uses_full_live_album_not_incidental_library_track(store):

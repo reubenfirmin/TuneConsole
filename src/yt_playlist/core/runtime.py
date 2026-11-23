@@ -3,24 +3,19 @@ import logging
 import threading
 from pathlib import Path
 
-from yt_playlist.core.config import parse_accounts
-from yt_playlist.core.config_files import ConfigFiles
+from yt_playlist.core.config import account_configs, load_accounts
 from yt_playlist.core.identities import build_client
-from yt_playlist.core.setup import serialize_config, BROWSER_CREDENTIAL_FILENAME
 
 logger = logging.getLogger(__name__)
 
 
 class Runtime:
-    def __init__(self, store, config_path, creds_dir, *, files=None):
+    def __init__(self, store, config_path):
         self.store = store
         self.config_path = Path(config_path)
-        self.creds_dir = Path(creds_dir)
-        self.files = ConfigFiles() if files is None else files
         self._provider = None
         self._configured = False
         self._lock = threading.RLock()
-        self._last_config = None
         self.bridge = None  # shared Bridge instance; wired in __main__, used by the client provider
 
     @property
@@ -48,71 +43,48 @@ class Runtime:
         return lambda: {ids[c.label]: build_client(c, self.bridge) for c in configs}
 
     def load(self) -> None:
-        """(Re)load config + credentials and rebuild the client provider.
-
-        Startup failures leave setup available; reload failures retain the last usable state.
-        """
+        """Import existing bindings once, then build clients from the database."""
         with self._lock:
-            if not self.files.exists(self.config_path):
-                self._provision_default()
-            if not self.files.exists(self.config_path):
-                return
+            accounts = self.store.accounts.get_accounts()
             try:
-                content = self.files.read(self.config_path)
-                cfgs = parse_accounts(content.decode('utf-8'))
-                self._validate_clients(cfgs)
-                if self.store.activity_paused:
-                    ids = self.store.accounts.configured_ids(cfgs)
-                else:
-                    ids = self.store.accounts.replace_accounts(cfgs)
-                provider = self._provider_for(cfgs, ids)
-            except Exception as e:
-                if self._last_config is not None:
-                    self.files.restore(self._last_config, self.config_path)
-                logger.warning("config not usable; retaining previous runtime: %s", e)
-                return
-            self._provider, self._configured, self._last_config = provider, True, content
-
-    def _provision_default(self) -> None:
-        """First run has no config yet. Credentials are live via the extension bridge now, so a single
-        default identity is all a one-account user needs: write it so the app is usable immediately
-        (no "Save an identity" gate) and the /setup wizard is only for people who actually have
-        multiple (brand) identities. Best-effort: never let provisioning crash startup."""
-        try:
-            self.files.mkdir(self.creds_dir)
-            self.files.mkdir(self.config_path.parent)
-            content = serialize_config([{"label": "main", "is_master": True,
-                                        "credential_ref": BROWSER_CREDENTIAL_FILENAME}]).encode('utf-8')
-            with self.files.stage(self.config_path, content) as staged:
-                self.files.publish(staged, self.config_path)
-        except Exception:                       # noqa: BLE001 - app still works via /setup
-            logger.warning("could not provision default identity", exc_info=True)
+                if not self.store.activity_paused and not self.store.accounts.bindings_saved():
+                    try:
+                        configs = load_accounts(self.config_path)
+                    except FileNotFoundError:
+                        configs = []
+                    if not configs:
+                        configs = account_configs([
+                            {'id': row.id, 'label': row.label, 'brand_account_id': row.brand_account_id,
+                             'is_master': row.is_master} for row in accounts
+                        ] or [{'label': 'main', 'is_master': True}])
+                    self._validate_clients(configs)
+                    self.store.accounts.replace_accounts(configs, importing=True)
+                    accounts = self.store.accounts.get_accounts()
+            except Exception:
+                logger.warning('could not import account bindings', exc_info=True)
+                accounts = self.store.accounts.get_accounts()
+            if accounts:
+                try:
+                    self._validate_clients(accounts)
+                except Exception:
+                    logger.warning('account bindings could not build clients', exc_info=True)
+                    return
+                self._provider = self._provider_for(accounts, {row.label: row.id for row in accounts})
+                self._configured = True
 
     def apply_setup(self, identities) -> None:
-        """Validate clients, commit account bindings, then publish config and runtime.
+        """Validate clients, commit account bindings, then update the runtime.
 
         Raises ValueError on bad input. Account definition (labels, brand_account_id, master) is
         independent of the credential: the extension bridge is paired separately and live (see
         credentials_present / bridge_paired), so identities can be saved on their own even before
         pairing completes.
         """
-        cfgs = parse_accounts(serialize_config(identities))
-        self.files.mkdir(self.creds_dir)
-        self.files.mkdir(self.config_path.parent)
+        cfgs = account_configs(identities)
         with self._lock:
             try:
                 self._validate_clients(cfgs)
-                with self.files.stage(self.config_path, serialize_config(identities).encode('utf-8')):
-                    ids = self.store.accounts.replace_accounts(cfgs)
-                    rows = [{"id": ids[c.label], "label": c.label, "credential_ref": c.credential_ref,
-                             "brand_account_id": c.brand_account_id, "is_master": c.is_master} for c in cfgs]
-                    content = serialize_config(rows).encode('utf-8')
-                    final_cfgs = parse_accounts(content.decode('utf-8'))
-                    with self.files.stage(self.config_path, content) as staged:
-                        self.files.publish(staged, self.config_path)
-                    provider = self._provider_for(final_cfgs, ids)
-                self._provider, self._configured, self._last_config = provider, True, content
-            except BaseException as error:
-                if not isinstance(error, Exception):
-                    raise
+                ids = self.store.accounts.replace_accounts(cfgs)
+                self._provider, self._configured = self._provider_for(cfgs, ids), True
+            except Exception as error:
                 raise ValueError(f"Configuration was not saved: {error}") from error

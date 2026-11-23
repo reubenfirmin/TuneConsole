@@ -4,7 +4,7 @@ from yt_playlist.core.store import Store
 
 def _store():
     s = Store(":memory:"); s.init_schema()
-    s.accounts.upsert_account("main", "bridge", None, True)
+    s.accounts.upsert_account("main", None, True)
     return s
 
 

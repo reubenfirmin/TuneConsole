@@ -14,7 +14,7 @@ from tests.store_fixture_support import (
     reuse_reporting_reader, without_query_timing,
 )
 from tests.recommendation_support import seed_publication_subjects
-from tests.home_fixture_support import without_metadata_providers
+from tests.home_fixture_support import returning_listener, without_metadata_providers
 
 
 @pytest.fixture
@@ -22,12 +22,12 @@ def checkpoint_controls(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.rec import candidate_refresh
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, taste
+    from yt_playlist.web.routes import app_update, audio_vibes, taste
 
     # Checkpoint persistence owns the real controls and rendered checkpoint;
     # background candidate ranking and other feature routers are lower inputs.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, taste)])
+        module.build(ctx) for module in (app_update, audio_vibes, taste)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(candidate_refresh, 'due', lambda *args: False)
 
@@ -43,10 +43,10 @@ def duration_store(monkeypatch, tmp_path, controls_schema, without_metadata_prov
     """Real control SQL and rendering, below vocabulary and reader admission."""
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, taste
+    from yt_playlist.web.routes import app_update, audio_vibes, taste
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, taste)])
+        module.build(ctx) for module in (app_update, audio_vibes, taste)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
     with _file_consumer_store(tmp_path, controls_schema, snapshot_guards=False) as database:
@@ -127,7 +127,7 @@ def test_maximum_track_length_setting_controls_generated_playlists(duration_stor
 
 
 def test_taste_page_uses_sliders_not_number_fields(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste/panels/recommendations").text
@@ -139,7 +139,7 @@ def test_taste_page_uses_sliders_not_number_fields(store):
 
 
 def test_taste_page_renders_genre_slider_for_tagged_library(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -264,6 +264,8 @@ def test_taste_reset_all_clears_weights_and_params(store):
 def test_recommendation_controls_are_all_available_and_rendered_once(
         duration_store, native_sql_calls, without_query_timing):
     store = duration_store
+    returning_listener(store, 'mixes')
+
     class RecommendationPanel(HTMLParser):
         def __init__(self):
             super().__init__()
@@ -286,12 +288,13 @@ def test_recommendation_controls_are_all_available_and_rendered_once(
         html = client.get("/taste/panels/recommendations" + query).text
         panel.feed(html)
         assert panel.details == []
-        assert len(panel.features) == 9
+        assert [section['id'] for section in panel.features] == [f'taste-feature-{key}' for key in (
+            'album-menus', 'home', 'discovery', 'preferences', 'artists', 'clusters', 'ranking', 'cleanup')]
         assert all(f.get("role") == "tabpanel" and f.get("aria-labelledby") == f'{f["id"]}-tab'
                    for f in panel.features)
         for p in rec_params.PARAMS:
             if p.group == "discovery" or p.name in rec_params.SEMANTIC_PARAMS:
-                expected = 0 if p.name.startswith("radio_") else 1
+                expected = 0 if p.name.startswith("radio_") or p.name in rec_params.LEGACY_MODE_PARAMS else 1
                 assert panel.ids.count(f"param-{p.name}") == expected, p.name
         assert 'id="param-radio_' not in html.lower()
         assert 'taste-home-format' not in html

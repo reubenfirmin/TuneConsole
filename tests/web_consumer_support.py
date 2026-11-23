@@ -32,9 +32,9 @@ def install_routes(monkeypatch, *names):
     """Construct the actual feature routes and shared template helpers."""
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview
+    from yt_playlist.web.routes import app_update, audio_vibes
 
-    modules = [app_update, audio_preview, *(
+    modules = [app_update, audio_vibes, *(
         import_module('yt_playlist.web.routes.' + name) for name in names)]
     monkeypatch.setattr(webapp, 'build_all',
                         lambda ctx: [module.build(ctx) for module in modules])

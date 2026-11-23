@@ -331,14 +331,16 @@ def test_response_headers_release_priority_even_for_long_lived_stream(file_backe
     assert priority._foreground == 0
 
 
-@pytest.mark.parametrize('path,query,headers', [
-    ('/home/growth', b'', []),
-    ('/home/cards', b'prepare_attempt=1', []),
-    ('/home/cards', b'prepare_attempt=', []),
-    ('/home/cards', b'prepare_attempt=1&other=%FF', []),
-    ('/', b'', [(b'x-home-refresh', b'sync')]),
+@pytest.mark.parametrize('method,path,query,headers', [
+    ('GET', '/home/growth', b'', []),
+    ('GET', '/radio/status', b'', []),
+    ('GET', '/home/cards', b'prepare_attempt=1', []),
+    ('GET', '/home/cards', b'prepare_attempt=', []),
+    ('GET', '/home/cards', b'prepare_attempt=1&other=%FF', []),
+    ('GET', '/', b'', [(b'x-home-refresh', b'sync')]),
+    ('POST', '/home/into-recently/impressions', b'', []),
 ])
-def test_automatic_home_poll_yields_to_interactive_work_without_holding_priority(path, query, headers):
+def test_automatic_request_yields_to_interactive_work_without_holding_priority(method, path, query, headers):
     priority = RequestPriority()
     elapsed = []
     release = priority.enter()
@@ -354,7 +356,7 @@ def test_automatic_home_poll_yields_to_interactive_work_without_holding_priority
 
     try:
         asyncio.run(RequestPriorityMiddleware(app, priority)(
-            {'type': 'http', 'method': 'GET', 'path': path,
+            {'type': 'http', 'method': method, 'path': path,
              'query_string': query, 'headers': headers}, None, None))
         assert elapsed[0] >= .09
         assert priority._foreground == 1

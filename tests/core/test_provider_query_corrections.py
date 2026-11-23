@@ -17,7 +17,7 @@ def test_changed_query_resumes_its_retry_across_installed_formats(
         _pristine_installed_schema(version).backup(copied)
     store = Store(path)
     try:
-        store.init_schema(defer_metadata=True)
+        store.init_schema()
         entry = store.tracks.upsert_track('query', 'Song', 'Original artist', None, 200)
         other = store.tracks.upsert_track('other', 'Other', 'Artist', None, 200)
         if correction == 'reset':

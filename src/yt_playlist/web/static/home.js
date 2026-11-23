@@ -1,8 +1,63 @@
+const homeAreaLoads = new WeakMap();
+
 function loadHomeArea(element) {
-  // Alpine can initialize a swapped Home before HTMX settles its descendants.
-  // Register the fragment listener before sending the area's first open event.
-  htmx.process(element);
-  htmx.trigger(element, 'home-area-open');
+  if (element.dataset.loaded || homeAreaLoads.has(element)) return;
+  const panel = element.closest('[data-dash]').dataset.dash;
+  const dashboard = element.closest('.home-dashboard');
+  const load = {timer: null, fragment: false};
+  homeAreaLoads.set(element, load);
+  const active = () => homeAreaLoads.get(element) === load &&
+    element.isConnected && Alpine.$data(dashboard).panel === panel;
+  const loadAssets = async attempt => {
+    if (!active()) return;
+    try {
+      const assets = JSON.parse(document.getElementById('home-area-assets').textContent);
+      await loadHomeAssets(assets.styles[panel] || [], assets.scripts[panel] || [], assets.version, active);
+    } catch (error) {
+      if (!active()) return;
+      console.debug('[Home tab] assets unavailable', error);
+      if (attempt < 2) load.timer = setTimeout(() => loadAssets(attempt + 1), 350 * 2 ** attempt);
+      else homeAreaLoads.delete(element);
+      return;
+    }
+    if (!active()) return;
+    // Alpine can initialize a swapped Home before HTMX settles its descendants.
+    // Register the fragment listener before sending the area's first open event.
+    load.fragment = true;
+    htmx.process(element);
+    htmx.trigger(element, 'home-area-open');
+  };
+  loadAssets(0);
+}
+
+function cancelHomeArea(element) {
+  const load = homeAreaLoads.get(element);
+  if (!load) return;
+  homeAreaLoads.delete(element);
+  clearTimeout(load.timer);
+  if (load.fragment) cancelReadFragment(element);
+}
+
+function mountHomeTv(element) {
+  if (document.querySelector('body > .tv-session')) return;
+  const session = element.querySelector('.tv-session-template');
+  if (session) document.body.append(session.content.cloneNode(true));
+}
+
+function finishHomeArea(element, event) {
+  if (!homeAreaLoads.has(element)) return;
+  const status = event.detail.xhr.status;
+  // The shared fragment recovery owns these retries until the tab closes.
+  if (status === 0 || status === 429 || status >= 500) return;
+  homeAreaLoads.delete(element);
+  if (status !== 200 || event.detail.xhr.getResponseHeader('X-Read-Pending')) return;
+  element.dataset.loaded = '1';
+  window.dispatchEvent(new Event('home-area-loaded'));
+}
+
+function homeRefreshUrl() {
+  const area = location.hash.slice(1);
+  return area ? '/?' + new URLSearchParams({panel: area.startsWith('gen-') ? 'directions' : area}) : '/';
 }
 
 function onboardingArrival(artistsRequired = false) {
@@ -63,12 +118,11 @@ function onboardingArrival(artistsRequired = false) {
       if (data.setup?.complete && (data.setup.offers_ready || data.setup.mixes_ready || data.setup.albums_ready)
           && !this._openingHome) {
         this._openingHome = true;
-        // Replace only Home once complete offers exist. The shared player and setup
-        // details stay mounted, and navigating elsewhere never brings the user back.
-        htmx.ajax('GET', '/', {target: '#home', select: '#home', swap: 'outerHTML'})
+        // Load the newly selected area's assets before mounting it. The shared
+        // player stays outside the replaceable page.
+        refreshHomePage()
           .then(() => {
-            // HTMX resolves HTTP errors as well as successful responses. The
-            // required result is a mounted Home feed, not a settled request.
+            // A recoverable read can settle before the ready feed arrives.
             if (document.querySelector('#onboarding-feed')) throw new Error('Home did not arrive.');
             document.querySelector('main.page-home')?.classList.remove('page-setup');
           })
@@ -327,15 +381,35 @@ function homeStatus() {
         this.failed = true;
       }
     },
-    refreshOffers() {
-      if (this._disposed || this._suspended || this._refreshing || window.genHomeBusy?.(this.$el)) return;
+    async refreshOffers() {
+      if (this._disposed || this._suspended || this._refreshing) return;
+      const root = this.$el;
+      const boardIdle = window.homeBoardRefreshGuard?.(root);
+      if (boardIdle && !boardIdle()) return;
+      const url = homeRefreshUrl();
+      const signal = AbortSignal.any([this._requests.signal, AbortSignal.timeout(10000)]);
+      const active = () => !signal.aborted && root.isConnected && url === homeRefreshUrl();
       this._refreshing = true;
-      htmx.ajax('GET', '/', {target: '#home', select: '#home', swap: 'outerHTML',
-        headers: {'X-Home-Refresh': 'sync'}})
-        .catch(() => {})
-        .finally(() => { this._refreshing = false; });
-      // A successful replacement disposes this instance. A guarded swap or
-      // transport failure leaves the pending refresh for the next normal scan.
+      try {
+        const response = await fetch(url, {signal, headers: {'X-Home-Refresh': 'sync'}});
+        if (!response.ok) return;
+        const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+        const next = page.getElementById('home');
+        if (!next || next.querySelector('#onboarding-feed') || !active()) return;
+        const panel = next.dataset.homePanel;
+        const assets = JSON.parse(page.getElementById('home-area-assets').textContent);
+        await loadHomeAssets(assets.styles[panel] || [], assets.scripts[panel] || [], assets.version, active);
+        if (!active() || (boardIdle && !boardIdle())) return;
+        Alpine.destroyTree(root);
+        htmx.swap(root, next.outerHTML, {swapStyle: 'outerHTML', settleDelay: 0});
+        const tv = page.querySelector('body > .tv-session');
+        if (tv && !document.querySelector('body > .tv-session')) document.body.append(tv);
+      } catch (error) {
+        if (!signal.aborted) console.debug('[Home sync] refresh unavailable', error);
+      } finally {
+        // A guarded or failed refresh stays pending for the next scan.
+        this._refreshing = false;
+      }
     },
   };
 }

@@ -45,6 +45,7 @@ class MutationResult:
     remote: tuple[dict, ...] = ()
     rejected: dict | None = None
     substitutions: tuple[UploadSubstitution, ...] = ()
+    snapshot: dict | None = None
 
 
 class RadioMutations:
@@ -57,19 +58,25 @@ class RadioMutations:
     def _journal(self, target: PlaylistTarget, operation: PlaylistOperation):
         self.persistence.record_edit(target.episode_id, operation)
 
-    def _send(self, target: PlaylistTarget, edits: RadioEdits, operation: PlaylistOperation, edit: PlaylistEdit):
-        """One intent/receipt protocol for append and replacement; an unknown reply is never replayed."""
+    def _send(self, target: PlaylistTarget, edits: RadioEdits, operation: PlaylistOperation, edit: PlaylistEdit,
+              *, prior_write: PendingWrite | None = None):
+        """Journal a new edit before sending it. An unknown reply is never replayed."""
         if target.stop.is_set():
             return False
         if edits.active is not operation:
             raise ValueError('Cannot send a superseded playlist operation')
-        if operation.write is not None:
+        if operation.write is not prior_write:
             raise ValueError('Reconcile the outstanding write before sending another')
         if isinstance(operation, RadioPlaylistTail):
             operation.begin(edit, self.now_fn())
         else:
             operation.write = PendingWrite(edit, self.now_fn())
-        self._journal(target, operation)
+        try:
+            self._journal(target, operation)
+        except Exception:
+            if prior_write is not None:
+                operation.write = prior_write
+            raise
         if target.stop.is_set():
             return False
         window = [self.now_fn(), float('inf')]
@@ -84,8 +91,8 @@ class RadioMutations:
             window[1] = self.now_fn() + 3
         return True
 
-    def substitute(self, requested, row, known, *, account_id=None, playlist=None):
-        """Retain the actual upload without declaring two recordings equivalent."""
+    def substitute(self, requested, row, known, *, playlist=None):
+        """Retain the actual upload and prefer it when its recording matches."""
         video = row['videoId']
         previous = known.get(video) or {}
         accepted = {**requested, **previous, 'video_id': video,
@@ -101,7 +108,10 @@ class RadioMutations:
         else:
             tid = self.catalog.upsert_track(video, accepted['title'], accepted['artist'],
                 accepted['album'], accepted['duration'], thumbnail=accepted.get('thumbnail'))
-            accepted['key'] = self.catalog.catalog_subject(tid)['identity_key']
+            canonical = self.catalog.remember_playback_upload(requested, accepted,
+                evidence={'playlist': playlist, 'set_video_id': row.get('setVideoId'),
+                          'source': 'youtube-music-playlist-occurrence'}, now=self.now_fn())
+            accepted['key'] = canonical or self.catalog.catalog_subject(tid)['identity_key']
         # An older offer for this upload does not own the new allocation.
         accepted['_radio_rotation_slot'] = (requested.get('_radio_rotation_slot')
                                             if accepted['key'] == requested['key'] else None)
@@ -109,10 +119,6 @@ class RadioMutations:
             accepted.update(radio_rotation.metadata(self.rotation_facts([accepted['key']]).get(accepted['key'])))
             radio_rotation.issue(accepted)
         log.info('Radio accepted upload substitution: requested=%s actual=%s', requested['video_id'], video)
-        if account_id is not None and not self.paused():
-            self.catalog.remember_playback_alternate(account_id, requested, accepted,
-                evidence={'playlist': playlist, 'set_video_id': row.get('setVideoId'),
-                          'source': 'youtube-music-playlist-occurrence'}, now=self.now_fn())
         return UploadSubstitution(requested, accepted)
 
     def _publish(self, target, view, tracks, remote):
@@ -138,30 +144,94 @@ class RadioMutations:
                 and row['videoId'] not in expected and row['videoId'] != operation.track['video_id']
                 and matches_substitution(operation.track, row, operation.write.receipt or {}))
 
+    @staticmethod
+    def _owned_duplicate(expected, remote, handle):
+        # A repeat of a playable ID alone could also be an unrelated playlist edit.
+        return bool(handle and len(remote) == len(expected) + 1
+                    and remote[-1]['videoId'] in expected and remote[-1].get('setVideoId') == handle
+                    and all(row['videoId'] == video and row.get('setVideoId') != handle
+                            for row, video in zip(remote[:-1], expected)))
+
+    def _duplicate_removal_row(self, expected, remote, receipt):
+        handle = receipt.get('setVideoId')
+        if receipt.get('status') != 'STATUS_SUCCEEDED' or not self._owned_duplicate(expected, remote, handle):
+            return None
+        saved_id, receipt_id = remote[-1].get('playlistVideoId'), receipt.get('videoId')
+        # The provider may expose a different upload in the playback button.
+        # Use a saved identity tied to the acknowledged occurrence handle.
+        if saved_id and receipt_id and saved_id != receipt_id:
+            return None
+        if video_id := saved_id or receipt_id:
+            return {'videoId': video_id, 'setVideoId': handle}
+        return None
+
+    def _append_conflict(self, target, edits, expected, remote):
+        # Settle complete readbacks after reconnect before treating them as external edits.
+        fields = ('videoId', 'playlistVideoId', 'setVideoId')
+        received = tuple(tuple(row.get(field) for field in fields) for row in remote)
+        if edits.conflict != received:
+            edits.conflict, edits.conflict_at = received, time.monotonic()
+            log.info('Radio readback settling: playlist=%s expected=%s receipt=%s received_fields=%s received=%s',
+                     target.playlist, expected, edits.append.write.receipt if edits.append.write else None,
+                     fields, received)
+        if time.monotonic() - edits.conflict_at < CONFIRM_TIMEOUT:
+            raise PlaylistPending()
+        raise PlaylistChanged('The playlist was changed elsewhere. Radio stopped to preserve those changes.')
+
+    def _confirm_duplicate_removal(self, target, edits, expected, remote):
+        operation = edits.append
+        write = operation.write
+        handle = write.edit.row['setVideoId']
+        if ([row['videoId'] for row in remote] == expected
+                and all(row.get('setVideoId') != handle for row in remote)):
+            return MutationResult('rejected', rejected=operation.track)
+        if not self._owned_duplicate(expected, remote, handle):
+            return self._append_conflict(target, edits, expected, remote)
+        edits.conflict = None
+        status = (write.receipt or {}).get('status')
+        if (status and status != 'STATUS_SUCCEEDED'
+                or self.now_fn() - write.started_at >= CONFIRM_TIMEOUT):
+            log.warning('Radio duplicate removal unconfirmed: playlist=%s row=%s receipt=%s',
+                        target.playlist, write.edit.row, write.receipt)
+            raise PlaylistChanged('Radio stopped because the saved queue could not be confirmed.')
+        return MutationResult()
+
     def append(self, target: PlaylistTarget, edits: RadioEdits, view: TailView) -> MutationResult:
         operation = edits.append
         expected = [t['video_id'] for t in view.tracks]
         desired = expected + [operation.track['video_id']]
-        remote = self.playlists.read(target.client, target.playlist)
+        snapshot = self.playlists.read_snapshot(target.client, target.playlist)
+        remote = snapshot['tracks']
         actual = [t['videoId'] for t in remote]
         if actual == expected and operation.write is None:
             if operation.track['video_id'] in view.blocked:
                 return MutationResult('discarded')
             if not self._send(target, edits, operation, PlaylistEdit('add', tuple(desired), track=operation.track)):
                 return MutationResult()
-            remote = self.playlists.read(target.client, target.playlist)
+            snapshot = self.playlists.read_snapshot(target.client, target.playlist)
+            remote = snapshot['tracks']
             actual = [t['videoId'] for t in remote]
+        if write := operation.write:
+            if write.edit.kind == 'remove':
+                return self._confirm_duplicate_removal(target, edits, expected, remote)
+            if row := self._duplicate_removal_row(expected, remote, write.receipt or {}):
+                log.info('Radio removing owned duplicate append: playlist=%s requested=%s playable=%s saved=%s handle=%s',
+                         target.playlist, operation.track['video_id'], remote[-1]['videoId'],
+                         row['videoId'], row['setVideoId'])
+                if not self._send(target, edits, operation, PlaylistEdit('remove', tuple(expected), row=row),
+                                  prior_write=write):
+                    return MutationResult()
+                remote = self.playlists.read(target.client, target.playlist)
+                return self._confirm_duplicate_removal(target, edits, expected, remote)
         accepted, substitutions = operation.track, ()
         if self.append_substitution(operation, view.tracks, remote):
-            substitution = self.substitute(operation.track, remote[-1], view.known,
-                account_id=target.account_id,
-                playlist=target.playlist)
+            substitution = self.substitute(operation.track, remote[-1], view.known, playlist=target.playlist)
             accepted, substitutions = substitution.accepted, (substitution,)
             desired = expected + [accepted['video_id']]
         if actual == desired:
             tracks = (*view.tracks, accepted)
             tracks = self._publish(target, view, tracks, remote)
-            return MutationResult('confirmed', tracks, tuple(remote), substitutions=substitutions)
+            return MutationResult('confirmed', tracks, tuple(remote), substitutions=substitutions, snapshot=snapshot)
         if actual == expected:
             edits.conflict = None
             if operation.write:
@@ -177,22 +247,14 @@ class RadioMutations:
         if tuple(actual) in view.stale_states:
             edits.conflict = None
             return MutationResult()
-        # A complete stale read after reconnect is not enough to establish an external edit.
-        if edits.conflict != tuple(actual):
-            edits.conflict, edits.conflict_at = tuple(actual), time.monotonic()
-            log.info('Radio readback settling: playlist=%s expected=%s received=%s', target.playlist, desired, actual)
-        if time.monotonic() - edits.conflict_at < CONFIRM_TIMEOUT:
-            raise PlaylistPending()
-        raise PlaylistChanged('The playlist was changed elsewhere. Radio stopped to preserve those changes.')
+        return self._append_conflict(target, edits, desired, remote)
 
     def _accept_tail(self, target: PlaylistTarget, tail: RadioPlaylistTail, view: TailView, remote):
         accepted = tail.accept(remote, view)
         substitutions = ()
         known = dict(view.known)
         if isinstance(accepted, Substitution):
-            substitution = self.substitute(accepted.requested, accepted.row, known,
-                account_id=target.account_id,
-                playlist=target.playlist)
+            substitution = self.substitute(accepted.requested, accepted.row, known, playlist=target.playlist)
             known[substitution.accepted['video_id']] = substitution.accepted
             substitutions = (substitution,)
             tail.adopt(tuple(row['videoId'] for row in remote), accepted.requested, substitution.accepted)
@@ -212,11 +274,17 @@ class RadioMutations:
         actual = tuple(t['videoId'] for t in remote)
         expected = tuple(t['video_id'] for t in view.tracks)
         allowed, substitutions = {expected}, ()
-        if edits.append:
-            allowed.add((*expected, edits.append.track['video_id']))
-            receipt = (edits.append.write.receipt if edits.append.write else None) or {}
-            if receipt.get('videoId'):
-                allowed.add((*expected, receipt['videoId']))
+        if operation := edits.append:
+            write = operation.write
+            if write and write.edit.kind == 'remove':
+                handle = write.edit.row['setVideoId']
+                if actual != expected or any(row.get('setVideoId') == handle for row in remote):
+                    return MutationResult()
+            else:
+                allowed.add((*expected, operation.track['video_id']))
+                receipt = (write.receipt if write else None) or {}
+                if self._duplicate_removal_row(expected, remote, receipt):
+                    allowed.add(actual)
         if edits.replacement:
             try:
                 result = self.recover_tail(target, edits.replacement, view, remote)

@@ -58,7 +58,11 @@ class ServedFiles:
                 identity = int(path.stem)
                 if identity < 1 or path != self.root / served_facts.relative(identity):
                     continue
-                info = fao.read(path).info
+                try:
+                    info = fao.read(path).info
+                except FileNotFoundError:
+                    # Cleanup may remove a path after the cursor yields it.
+                    continue
                 if info.ctime_ns / 1e9 <= before:
                     result.append((identity, info.identity))
             work.save()

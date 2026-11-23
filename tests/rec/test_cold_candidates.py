@@ -11,7 +11,10 @@ from yt_playlist.rec.scoring import PlaylistTaste
 def candidate_store(no_database):
     return transient_repository_store(
         discovery={'get_discovered_tracks': []},
-        rec_model={'get_rec_vectors': [], 'suppressed_keys': set(), 'muted_artists': set()},
+        musical_profiles={'by_keys': {}},
+        rec_model={'get_rec_vectors': [('library|artist', np.array([1., 0.], dtype=np.float32).tobytes())],
+                   'content_generation': {'model': None, 'library': [], 'discovered': []},
+                   'suppressed_keys': set(), 'muted_artists': set()},
         genres={'feature_axes': {'techno': ('techno', None), 'ambient': ('ambient', None),
                                  'jazz': ('jazz', None), 'folk': ('folk', None)}},
     )
@@ -19,7 +22,7 @@ def candidate_store(no_database):
 
 class _Proj:
     """genre -> a fixed collaborative vector; None genre -> zero vector (no usable features)."""
-    def predict(self, genre, year=None, audio=None, artist=None):
+    def predict(self, genre, year=None, audio=None, artist=None, *, genre_axes=None):
         return {"techno": np.array([1.0, 0.0]), "ambient": np.array([0.0, 1.0]),
                 None: np.array([0.0, 0.0])}[genre]
 
@@ -28,12 +31,8 @@ def _patch(monkeypatch, proj=None):
     proj = _Proj() if proj is None else proj
     monkeypatch.setattr(surfaces, "playlist_taste",
                         lambda s, *, now: PlaylistTaste(["p"], np.array([[1.0, 0.0]]), np.array([1.0])))
-    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: proj))
-    monkeypatch.setattr(surfaces.vectors, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
-    # #85 staleness_factor is gone; isolate taste-only ranking by zeroing both tilt producers directly.
-    monkeypatch.setattr(scoring.transient, "centroid_tilt", lambda s, now, V, idx: None)
-    monkeypatch.setattr(scoring.transient, "audio_centroid_tilt", lambda s, now, **kwargs: None)
-    monkeypatch.setattr(surfaces, "discovery_facet_weight", lambda s, fam, now: 1.0)
+    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s, **kwargs: proj))
+    monkeypatch.setattr(surfaces, "discovery_facet_weight", lambda s, fam, now, *, leans=None: 1.0)
 
 
 def _row(key, genre, audio=None):
@@ -47,7 +46,8 @@ def test_ranks_by_taste_fit(monkeypatch, candidate_store):
     store.discovery.get_discovered_tracks.return_value = pool
     _patch(monkeypatch)
     out = surfaces.cold_candidates(store, 0.0)
-    assert out and out[0].key == "t|a"          # techno aligns with the [1,0] taste centroid
+    assert [item.key for item in out] == ["t|a", "m|b"]
+    assert out[0].score > out[1].score
     assert out[0].lane == "cold"
 
 
@@ -63,7 +63,7 @@ def test_genre_controls_keep_their_direction_and_bound(monkeypatch, candidate_st
             "jazz": offset + 0.1, "folk": offset}
 
     class Projection:
-        def predict(self, genre, year=None, audio=None, artist=None):
+        def predict(self, genre, year=None, audio=None, artist=None, *, genre_axes=None):
             if genre is None:
                 return np.zeros(2)
             fit = fits[genre]
@@ -99,7 +99,7 @@ def test_no_projection_keeps_discovery_order(monkeypatch, candidate_store):
     pool = [_row("n|c", None), _row("t|a", "techno")]
     store.discovery.get_discovered_tracks.return_value = pool
     _patch(monkeypatch)
-    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: None))
+    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s, **kwargs: None))
     out = surfaces.cold_candidates(store, 0.0)
     assert [t.key for t in out] == ["t|a"]
     assert out[0].score is None
@@ -142,9 +142,9 @@ def test_no_projection_still_respects_muted_genres(monkeypatch, candidate_store)
     pool = [_row("n|c", None), _row("t|a", "techno")]
     store.discovery.get_discovered_tracks.return_value = pool
     _patch(monkeypatch)
-    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: None))
+    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s, **kwargs: None))
     monkeypatch.setattr(surfaces, "discovery_facet_weight",
-                        lambda s, fam, now: None if fam == "techno" else 1.0)
+                        lambda s, fam, now, *, leans=None: None if fam == "techno" else 1.0)
     assert surfaces.cold_candidates(store, 0.0) == []
 
 
@@ -153,7 +153,7 @@ def test_muted_family_excluded(monkeypatch, candidate_store):
     pool = [_row("t|a", "techno")]
     store.discovery.get_discovered_tracks.return_value = pool
     _patch(monkeypatch)
-    monkeypatch.setattr(surfaces, "discovery_facet_weight", lambda s, fam, now: None)  # muted family
+    monkeypatch.setattr(surfaces, "discovery_facet_weight", lambda s, fam, now, *, leans=None: None)
     assert surfaces.cold_candidates(store, 0.0) == []
 
 
@@ -163,7 +163,7 @@ def test_large_pool_evaluates_feedback_once_per_genre_family(monkeypatch, candid
     store.discovery.get_discovered_tracks.return_value = pool
     _patch(monkeypatch)
     calls = []
-    def weight(store, family, now):
+    def weight(store, family, now, *, leans=None):
         calls.append(family)
         return None if family == "ambient" else 1.0
     monkeypatch.setattr(surfaces, "discovery_facet_weight", weight)

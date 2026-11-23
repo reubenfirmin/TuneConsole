@@ -2,40 +2,33 @@
 import json
 import uuid
 
-from . import catalog, collection_recovery, genre_identity, taste_axes
+from . import catalog, genre_identity, taste_axes, worker_settings
 
-from .taste_settings import CHECKPOINT, BASELINE
-KEYS = frozenset({CHECKPOINT,BASELINE})
-
-
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='taste_settings_checkpoints'").fetchone() is not None
-
-
-@collection_recovery.pinned_read
-def get(conn,key,default=None):
-    captured = document(conn, key)
-    if captured is None:
-        return default
-    row = captured['header']
-    kind = 'taste-checkpoint' if key == CHECKPOINT else 'taste-comparison'
-    value = collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],kind=kind,owner=1)
-    return restore(key, captured, value)
+from .taste_settings import CHECKPOINT, BASELINE, STATE_KEYS
+KEYS = frozenset(STATE_KEYS)
+REFERENCE_FIELDS = ('recovery_filename', 'recovery_digest', 'recovery_bytes')
 
 
 def document(conn, key):
-    table = 'taste_settings_checkpoints' if key == CHECKPOINT else 'taste_comparison_baselines'
-    row = conn.execute(f'SELECT * FROM {table} WHERE id=1').fetchone()
-    if row is None:
+    if key == CHECKPOINT:
+        facts = checkpoint_facts(conn)
+        if facts['header'] is None:
+            return None
+        return {'header': facts['header'], 'weights': [
+            {'axis': weight['captured_axis'], 'weight': weight['weight'], 'updated_at': weight['updated_at']}
+            for weight in facts['weights']
+        ]}
+    raw = worker_settings.read(conn, STATE_KEYS[key])
+    if raw is None:
         return None
-    if key==CHECKPOINT:
-        weights = [{'axis':r['captured_axis'],'weight':r['weight'],'updated_at':r['updated_at']}
-                   for r in conn.execute('SELECT * FROM taste_checkpoint_weights ORDER BY position')]
-        return {'header': dict(row), 'weights': weights}
-    rows = list(conn.execute('SELECT e.*,COALESCE(c.identity_key,r.identity_key,e.unresolved_key) current_key '
-        'FROM taste_comparison_entries e LEFT JOIN recordings r ON r.id=e.recording_id '
-        'LEFT JOIN recording_redirects d ON d.retired_id=r.id LEFT JOIN recordings c ON c.id=d.recording_id ORDER BY position'))
-    return {'header': dict(row), 'entries': [dict(entry) for entry in rows]}
+    header = json.loads(raw)
+    entries = header.pop('entries')
+    keys = conn.execute('''SELECT COALESCE(c.identity_key,r.identity_key,e.value->>'unresolved_key')
+        FROM json_each(?,'$.entries') e LEFT JOIN recordings r ON r.id=e.value->>'recording_id'
+        LEFT JOIN recordings c ON c.id=r.redirect_recording_id ORDER BY e.key''', (raw,))
+    for entry, (current_key,) in zip(entries, keys, strict=True):
+        entry['current_key'] = current_key
+    return {'header': header, 'entries': entries}
 
 
 def restore(key, captured, value):
@@ -46,15 +39,6 @@ def restore(key, captured, value):
         raise ValueError('Taste comparison traces do not match their ordered owner rows')
     return json.dumps([{'key':r['current_key'],'rank':r['rank'],'score':r['score'],'lane':r['lane'],
                        'lane_weight':r['lane_weight'],'trace':value[index]} for index,r in enumerate(rows)])
-
-
-def put(conn,values,*,legacy=False):
-    for key,raw in values.items():
-        table = 'taste_settings_checkpoints' if key == CHECKPOINT else 'taste_comparison_baselines'
-        conn.execute(f'UPDATE {table} SET revision=revision WHERE 0')
-        value, kind, opaque = prepare(key, raw)
-        reference = collection_recovery.publish(conn, kind, 1, opaque) if value is not None else None
-        register(conn, key, value, reference, legacy=legacy)
 
 
 def prepare(key, raw):
@@ -81,46 +65,69 @@ def prepare(key, raw):
     return value, kind, [item['trace'] for item in value]
 
 
-def register(conn, key, value, reference, *, legacy=False):
-    table = 'taste_settings_checkpoints' if key == CHECKPOINT else 'taste_comparison_baselines'
+def register(conn, key, value, reference):
     if value is None:
-        conn.execute(f'DELETE FROM {table}')
+        worker_settings.save(conn, STATE_KEYS[key], None)
         return
     if key == CHECKPOINT:
-        weights = [(1, position, taste_axes.identity(conn, weight['axis'], create=True),
-                    weight['axis'], weight['weight'], weight['updated_at']) for position, weight in enumerate(value['weights'])]
-        conn.execute('DELETE FROM taste_settings_checkpoints')
-        conn.execute('INSERT INTO taste_settings_checkpoints VALUES (1,?,?,?,?,?)',
-                     (uuid.uuid4().hex, value['saved_at'], *reference))
-        conn.executemany('INSERT INTO taste_checkpoint_weights VALUES (?,?,?,?,?,?)', weights)
+        save_checkpoint(conn, uuid.uuid4().hex, value['saved_at'], reference, value['weights'])
         return
-    rows = []
+    entries = []
     for position, item in enumerate(value):
         key_now = catalog.resolve_key(conn, item['key'])
         recording = conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key_now,)).fetchone() if key_now else None
-        if recording is None and not legacy:
+        if recording is None:
             raise ValueError('Comparison entry requires a known recording')
-        rows.append((1, position, recording[0] if recording else None, None if recording else item['key'],
-                     item['key'], item['rank'], item['score'], item['lane'], item['lane_weight']))
-    conn.execute('DELETE FROM taste_comparison_baselines')
-    conn.execute('INSERT INTO taste_comparison_baselines VALUES (1,?,?,?,?)', (uuid.uuid4().hex, *reference))
-    conn.executemany('INSERT INTO taste_comparison_entries VALUES (?,?,?,?,?,?,?,?,?)', rows)
+        rank = item['rank']
+        if rank is not None and (type(rank) is not int or rank <= 0):
+            raise ValueError('Comparison rank must be a positive integer')
+        if not isinstance(item['lane'], str):
+            raise ValueError('Comparison entry requires a lane')
+        entries.append(dict(position=position, recording_id=recording[0],
+            unresolved_key=None, captured_key=item['key'], rank=rank,
+            score=float(item['score']), lane=item['lane'],
+            lane_weight=None if item['lane_weight'] is None else float(item['lane_weight'])))
+    header = dict(id=1, revision=uuid.uuid4().hex, entries=entries)
+    save(conn, key, header, reference)
 
 
-def restored_weights(conn):
+def save_checkpoint(conn, revision, saved_at, reference, weights):
+    captured, seen = [], set()
+    for position, row in enumerate(weights):
+        axis = taste_axes.identity(conn, row['axis'], create=True)
+        if axis in seen:
+            raise ValueError('A taste checkpoint must capture each axis once')
+        seen.add(axis)
+        captured.append(dict(position=position, axis_id=axis, captured_axis=row['axis'], weight=float(row['weight']),
+                             updated_at=None if row['updated_at'] is None else float(row['updated_at'])))
+    header = dict(id=1, revision=revision, saved_at=float(saved_at), weights=captured)
+    save(conn, CHECKPOINT, header, reference)
+
+
+def save(conn, key, header, reference):
+    fields = dict(zip(REFERENCE_FIELDS, reference, strict=True))
+    worker_settings.save(conn, STATE_KEYS[key], json.dumps({**header, **fields}, allow_nan=False))
+
+
+def checkpoint_facts(conn):
+    raw = worker_settings.read(conn, STATE_KEYS[CHECKPOINT])
+    header = json.loads(raw) if raw is not None else None
+    return {'header': header, 'weights': header.pop('weights') if header else []}
+
+
+def checkpoint_axes(conn, positions):
     """Restore captured identities; alias edits cannot reinterpret old checkpoints."""
-    from .recommendation_settings import LANE_NAMES
-    result,seen = [],set()
-    for row in conn.execute('SELECT w.*,a.kind,a.genre_key FROM taste_checkpoint_weights w '
-                            'JOIN taste_axes a ON a.id=w.axis_id ORDER BY position').fetchall():
-        if row['captured_axis'].startswith('lane:') and row['captured_axis'][5:] not in LANE_NAMES:
+    selected = set(positions)
+    result = []
+    raw = worker_settings.read(conn, STATE_KEYS[CHECKPOINT])
+    rows = conn.execute('''SELECT w.value,a.kind,a.genre_key FROM json_each(?,'$.weights') w
+        JOIN taste_axes a ON a.id=w.value->>'axis_id' ORDER BY w.key''', (raw,)).fetchall()
+    for encoded, kind, genre in rows:
+        row = json.loads(encoded)
+        if row['position'] not in selected:
             continue
         axis = row['axis_id']
-        if row['kind']=='genre':
-            key = genre_identity.current_key(conn,row['genre_key'])
-            axis = taste_axes.identity(conn,'genre:'+key,create=True)
-        if axis in seen:
-            raise ValueError('Merged checkpoint axes require an explicit choice before restoring')
-        seen.add(axis)
-        result.append((axis,row['weight'],row['updated_at']))
+        if kind == 'genre':
+            axis = taste_axes.identity(conn, 'genre:' + genre_identity.current_key(conn, genre), create=True)
+        result.append((axis, row['weight'], row['updated_at']))
     return result

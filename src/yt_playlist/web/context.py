@@ -22,7 +22,6 @@ from yt_playlist.web.jobs import SyncJobs
 
 logger = logging.getLogger("yt_playlist.web")
 
-from yt_playlist.core.account_auth_state import KEY as AUTH_EXPIRED_KEY
 
 
 async def request_form(request: Request):
@@ -64,7 +63,6 @@ class Ctx:
     # flag_/clear_ helpers below so the persisted copy stays in sync.
     auth_expired: dict = field(default_factory=dict)
     rec_worker: object | None = None   # decoupled recommendation worker (set in create_app)
-    vibe_requests: object | None = None
     enrich_worker: object | None = None  # background enrichment worker (set in create_app)
     bridge: object | None = None       # shared Bridge instance the WS route and runtime read from
     radio: object | None = None        # saved-playlist Radio Session, set in create_app
@@ -111,14 +109,18 @@ class Ctx:
 
     def suggestions(self):
         from yt_playlist.library.suggestion_composition import suggestions
-        return suggestions(self.store, getattr(self, 'rec_worker', None))
+        return suggestions(self.store, getattr(self, 'rec_worker', None), self.client_provider)
 
     def home_tuning(self, prepared):
         from yt_playlist.controllers.home_tuning import HomeTuning
-        from yt_playlist.rec import home_cache, home_prepared, mix_tuning, rec_params
+        from yt_playlist.rec import home_prepared, mix_tuning, rec_params
         from yt_playlist.rec.home_cards import _epoch
         from yt_playlist.providers import genres
         store = self.store
+        def picker():
+            inputs = prepared(self.now_fn())
+            return genres.picker_options(store, (inputs or {}).get('fingerprint'))
+
         return HomeTuning(store.settings, store.rec_model, store.rec_proposals, store.rec_ledger, store.genres,
             adjusting=lambda now: mix_tuning.adjusting(store, now),
             parameter=lambda name: rec_params.get_param(store, name),
@@ -127,8 +129,7 @@ class Ctx:
             expire=lambda now: mix_tuning.expire(store, now), reset=lambda: mix_tuning.reset(store),
             fingerprint=lambda now: home_prepared.fingerprint(store, prepared(now), now),
             refresh=lambda: self.rec_worker.trigger_candidate_refresh() if self.rec_worker else None,
-            picker=lambda: genres.picker_options(store, (home_cache.read(store, home_prepared.SURFACE,
-                fields=('fingerprint',)) or {}).get('fingerprint')))
+            picker=picker)
 
     def cluster_commands(self):
         import logging
@@ -153,7 +154,8 @@ class Ctx:
         return RoadTripCommands(self.store.road_trip, drafts,
             account=lambda: client_for(self.store, self.client_provider()),
             generated=lambda: Ctx.generated_playlists(self),
-            artist_genre=lambda name: road_trip_candidates.artist_genre(self.store, name), logger=self.logger)
+            artist_genre=lambda name: road_trip_candidates.artist_genre(self.store, name), logger=self.logger,
+            artist_identity=self.store.artists.provider_identity)
 
     def suggestion_feedback(self):
         from yt_playlist.library.suggestion_composition import feedback
@@ -257,7 +259,7 @@ class Ctx:
         return AlbumCommands(store.collection, store.tracks, store.charts, store.genres,
             store.enrichment_reports, store.album_notes, store.rec_ledger, self.jobs,
             client=client, fetch=fetch_album, remember=lambda *args: remember_album(store, *args),
-            now=self.now_fn, paused=lambda: bool(getattr(store, 'activity_paused', False)),
+            now=self.now, paused=lambda: bool(getattr(store, 'activity_paused', False)),
             respond=lambda *args, **kwargs: choice_evidence.safe_respond(store, *args, **kwargs),
             present=lambda *args, **kwargs: choice_evidence.present(store, *args, **kwargs),
             feedback=lambda *args: album_choices.set_feedback(store, *args),
@@ -305,6 +307,7 @@ class Ctx:
             enrich=lambda pid: start_playlist_enrichment(self, pid), navigate=navigate,
             refresh=self.rec_worker.trigger_home_refresh if self.rec_worker else lambda: None,
             recipes=self.store.playlist_recipes,
+            mix_playback=self.store.recommendations.mix_playback_details,
             begin_intent=self.bridge.begin_playback_intent if self.bridge is not None else lambda: None)
 
     def playlist_queries(self):
@@ -401,7 +404,7 @@ class Ctx:
             now=getattr(self, 'now_fn', time.time), ops=lambda: self.ops(),
             rating=lambda video: ratings.main_rating(store, video),
             identity=lambda brand: live_plays.resolve_identity(store, brand), duration=duration,
-            record_next=lambda *args: playback_feedback.record_next(store, *args),
+            record_next=lambda *args, **kwargs: playback_feedback.record_next(store, *args, **kwargs),
             paused=lambda: bool(getattr(store, 'activity_paused', False)),
             measure=lambda *args, **kwargs: measurement.record_action(store, *args, **kwargs),
             logger=getattr(self, 'logger', logger), monotonic=monotonic)

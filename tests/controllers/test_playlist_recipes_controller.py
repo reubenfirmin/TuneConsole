@@ -18,7 +18,7 @@ def recipes():
     repo = create_autospec(PlaylistRecipesRepo, instance=True, spec_set=True)
     files = create_autospec(PlaylistFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
-    repo.document_owner.return_value = {'native': True, 'scope': 'TV', 'id': 8}
+    repo.document_owner.return_value = {'scope': 'TV', 'id': 8}
     repo.reserve_file.side_effect = [41, 42]
     files.describe.return_value = ('digest', 12)
     files.publish_reserved.return_value = ('file', 'digest', 12)
@@ -49,8 +49,7 @@ def test_catalog_rekey_preserves_future_document_formats(recipes):
     recipes.set_recipe.assert_not_called()
 
 
-def test_recipe_and_append_file_records_commit_before_writes_and_selection(recipes):
-    recipes.repository.append_owner.return_value = {'id': 9, 'prior': None}
+def test_recipe_file_and_append_checkpoint_share_one_commit(recipes):
     checkpoint = {'request_id': 'request', 'state': 'pending', 'at': 10,
                   'before': ['one', 'one'], 'additions': [{'video_id': 'two'}], 'items': []}
     value = {'media': 'video', 'facets': {'genres': ['house', 'house'], 'eras': ['2010']},
@@ -60,13 +59,13 @@ def test_recipe_and_append_file_records_commit_before_writes_and_selection(recip
     order.attach_mock(recipes.files.publish_reserved, 'file')
     order.attach_mock(recipes.repository.publish_recipe, 'sql')
     recipes.set_recipe('TV', value, 10)
-    assert [call[0] for call in order.mock_calls] == ['reserve', 'file', 'reserve', 'file', 'sql']
-    assert [call.args[0] for call in recipes.files.publish_reserved.call_args_list] == [41, 42]
+    assert [call[0] for call in order.mock_calls] == ['reserve', 'file', 'sql']
+    assert recipes.files.publish_reserved.call_args.args[3]['tv_refill'] == {'request_id': 'request'}
     assert recipes.repository.publish_recipe.call_args.kwargs['file_id'] == 41
     args = recipes.repository.publish_recipe.call_args.args
     assert args[3] == [('genre', 0, 'genre:house', 'house'), ('genre', 1, 'genre:house', 'house'),
                        ('era', 0, 'era:2010', '2010')]
-    assert args[5]['roles'] == {'before': ['one', 'one'], 'additions': ['two'], 'items': []}
+    assert args[5]['checkpoint'] == checkpoint
 
 
 @pytest.mark.parametrize('value', [None, {'facets': []}, {'facets': {'genres': 'house'}}, {'facets': {'genres': ['']}}])
@@ -79,16 +78,15 @@ def test_invalid_recipe_does_not_write_files_or_select_sql_references(recipes, v
 
 
 def test_completed_append_cannot_become_pending(recipes):
-    recipes.repository.append_owner.return_value = {'id': 9, 'prior': {'state': 'complete', 'started_at': 1}}
+    recipes.repository.check_append.side_effect = ValueError('A completed TV append cannot become pending again')
     with pytest.raises(ValueError, match='completed TV append'):
         recipes.set_recipe('TV', {'tv_stream': 'stream', 'tv_refill': {'request_id': 'request', 'state': 'pending'}})
     recipes.files.publish_reserved.assert_not_called()
     recipes.repository.publish_recipe.assert_not_called()
 
 
-def test_second_file_failure_leaves_original_recipe_and_append_selected(recipes):
-    recipes.repository.append_owner.return_value = {'id': 9, 'prior': None}
-    recipes.files.publish_reserved.side_effect = [('file', 'digest', 12), OSError('full')]
+def test_recipe_file_failure_leaves_original_recipe_and_append_selected(recipes):
+    recipes.files.publish_reserved.side_effect = OSError('full')
     with pytest.raises(OSError):
         recipes.set_recipe('TV', {'tv_stream': 'stream', 'tv_refill': {'request_id': 'request', 'state': 'pending'}})
     recipes.repository.publish_recipe.assert_not_called()
@@ -97,22 +95,20 @@ def test_second_file_failure_leaves_original_recipe_and_append_selected(recipes)
 def test_recipe_projects_current_facets_and_preserves_opaque_captured_fields(recipes):
     header = {'id': 8, 'media': 'video', 'model': 'current', 'recovery_filename': 'file',
               'recovery_digest': 'digest', 'recovery_bytes': 12}
-    recipes.repository.document_facts.return_value = {'scope': 'TV', 'native': True, 'header': header,
+    recipes.repository.document_facts.return_value = {'header': header, 'appends': [],
                                                       'facets': [('genre', 'new-key'), ('genre', 'new-key')]}
     recipes.files.read.return_value = {'media': 'audio', 'model': 'old', 'facets': {'genres': ['old-key', 'old-key'],
         'eras': None}, 'opaque': {'original': [2, 1]}}
-    recipes.repository.append_facts.return_value = None
     assert recipes.get_recipe('TV') == {'media': 'video', 'model': 'current',
         'facets': {'genres': ['new-key', 'new-key'], 'eras': None}, 'opaque': {'original': [2, 1]}}
 
 
 def test_native_append_projection_preserves_duplicate_order_and_metadata(recipes):
-    recipes.repository.document_facts.return_value = {'scope': 'TV', 'native': False, 'prepared': False,
-        'raw': '{"tv_stream":"stream","tv_refill":{"request_id":"request"}}'}
-    recipes.repository.append_facts.return_value = {'native': True, 'header': {'id': 9, 'request_id': 'request',
-        'state': 'complete', 'started_at': 1, 'stream_token': 'stream', 'recovery_filename': 'file',
-        'recovery_digest': 'digest', 'recovery_bytes': 12}, 'roles': {'before': ['one', 'one'], 'items': ['two', 'two']}}
-    recipes.files.read.return_value = {'at': 99, 'before': ['obsolete'], 'items': [{'video_id': 'two', 'title': 'Saved'}]}
+    recipes.repository.document_facts.return_value = {'facets': [], 'header': {'id': 8, 'recovery_filename': 'recipe',
+        'recovery_digest': 'digest', 'recovery_bytes': 12}, 'appends': [{'stream_token': 'stream', 'request_id': 'request',
+            'checkpoint': {'request_id': 'request', 'at': 1, 'state': 'complete', 'before': ['one', 'one'],
+                           'items': [{'video_id': 'two', 'title': 'Saved'}] * 2}}]}
+    recipes.files.read.return_value = {'tv_stream': 'stream', 'tv_refill': {'request_id': 'request'}}
     checkpoint = recipes.get_recipe('TV')['tv_refill']
     assert checkpoint['at'] == 1 and checkpoint['state'] == 'complete'
     assert checkpoint['before'] == ['one', 'one']
@@ -120,8 +116,9 @@ def test_native_append_projection_preserves_duplicate_order_and_metadata(recipes
 
 
 def test_missing_append_intent_is_not_reported_as_a_complete_recipe(recipes):
-    recipes.repository.document_facts.return_value = {'scope': 'TV', 'native': False, 'prepared': False, 'raw': '{}'}
-    recipes.repository.append_facts.return_value = {'native': True, 'header': None, 'roles': {}}
+    recipes.repository.document_facts.return_value = {'facets': [], 'header': {'id': 8, 'recovery_filename': 'recipe',
+        'recovery_digest': 'digest', 'recovery_bytes': 12}, 'appends': []}
+    recipes.files.read.return_value = {'tv_stream': 'stream', 'tv_refill': {'request_id': 'request'}}
     with pytest.raises(ValueError, match='no retained intent'):
         recipes.get_recipe('TV')
 
@@ -133,9 +130,9 @@ def test_canvas_file_failure_leaves_original_sql_reference(recipes):
     recipes.repository.publish_canvas.assert_not_called()
 
 
-def test_prepared_original_canvas_is_read_without_reencoding(recipes):
-    recipes.repository.document_facts.return_value = {'scope': 'TV', 'native': False, 'prepared': True,
-                                                      'header': {'source': 'TV'}, 'parts': ['parts']}
-    recipes.files.read_original.return_value = 'not JSON; keep this text\n'
+def test_canvas_is_read_without_reencoding(recipes):
+    recipes.repository.document_facts.return_value = {'header': {'id': 8, 'recovery_filename': 'canvas',
+        'recovery_digest': 'digest', 'recovery_bytes': 12}}
+    recipes.files.read.return_value = 'not JSON; keep this text\n'
     assert recipes.get_cluster_canvas('TV') == 'not JSON; keep this text\n'
-    recipes.files.read_original.assert_called_once_with({'source': 'TV'}, ['parts'])
+    recipes.files.read.assert_called_once_with(('canvas', 'digest', 12), kind='playlist-canvas', owner=8)

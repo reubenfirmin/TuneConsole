@@ -1,19 +1,18 @@
 """Fit the established models privately and publish one coherent generation.
 
 The worker owns scheduling. This module keeps full fits off the serving connection:
-the SVD/SGNS objective, content encoder, artist model and cluster matching retain
+the SVD/SGNS objective, content encoder and artist model retain
 their existing implementations. Requests keep using the last published generation.
 """
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from yt_playlist.core.activity import check_stopping
-from yt_playlist.rec import (artist_model, content_model, embedding_training as training,
-                             embedding_vectors as vector_reads, mode_discovery as taste_modes)
+from yt_playlist.core.model_state import ArtistModelUpdate, RecordingModelUpdate
+from yt_playlist.rec import artist_model, content_character, content_model, embedding_training as training
 from yt_playlist.util import genre_catalog
-from yt_playlist.controllers.recommendation_refresh import VERSION
 
 
 class MemoryBudgetExceeded(RuntimeError):
@@ -70,17 +69,14 @@ class PreparationInputs:
     dim: int
     baskets: list
     weights: dict | None
-    fingerprints: dict
+    recording_fit: str | None
+    artist_fit: str | None
     content: object
     previous: dict
     discoveries: list
     axes: dict
     artist_profiles: dict
     artist_baskets: list
-    mode_params: dict
-    modes: list
-    next_mode_id: int
-    genres: dict
     track_count: int
 
 
@@ -90,17 +86,19 @@ def calculate(captured, now, *, keep_collaborative=False, memory_bytes=None, fit
     method, dim = captured.method, captured.dim
     baskets, weights = captured.baskets, captured.weights
     fit_inputs = _fingerprint(['canonical-baskets-1', method, dim, baskets, weights])
-    settings, vectors = {"rec_refresh_version": VERSION}, {}
+    vectors = {}
+    recording = RecordingModelUpdate()
+    artist = None
     if keep_collaborative:
-        settings["rec_fit_inputs"] = fit_inputs
-    elif captured.fingerprints['rec_fit_inputs'] != fit_inputs:
+        recording = replace(recording, fit_fingerprint=fit_inputs)
+    elif captured.recording_fit != fit_inputs:
         _check_fit_memory(baskets, dim, memory_bytes)
         def fit_tracks():
             keys, matrix = training.build_vectors_from_baskets(baskets, dim=dim, method=method, weights=weights)
             return [(key, matrix[i].tobytes()) for i, key in enumerate(keys)]
         vectors['rec_vectors'] = (fit_cache.vectors('tracks', fit_inputs, fit_tracks)
                                   if fit_cache is not None else fit_tracks())
-        settings["rec_fit_inputs"] = fit_inputs
+        recording = replace(recording, fit_fingerprint=fit_inputs)
 
     previous, inputs = captured.previous, captured.content
     discoveries, axes = captured.discoveries, captured.axes
@@ -110,7 +108,7 @@ def calculate(captured, now, *, keep_collaborative=False, memory_bytes=None, fit
     generation = previous
     if content_changed:
         if memory_bytes is not None:
-            model = content_model.build_content_model(inputs.content, inputs.audio,genre_axes=axes)
+            model = content_model.build_content_model(inputs.content, inputs.audio, genre_axes=axes, policy=inputs.policy)
             estimated = (len(inputs.keys) * (2048 + (model['ncat'] + len(model['cont'])) * 32))
             if estimated > memory_bytes:
                 raise MemoryBudgetExceeded(f'Content fit estimate {estimated} exceeds {memory_bytes} bytes')
@@ -121,10 +119,8 @@ def calculate(captured, now, *, keep_collaborative=False, memory_bytes=None, fit
                       "discovered": content_model.encode_discovered(discoveries, model,genre_axes=axes)}
         vectors["rec_content_vectors"] = generation["library"]
         vectors["rec_discovered_content_vectors"] = generation["discovered"]
-        settings.update(rec_content_model=generation["model"],
-                        rec_content_generation=generation["generation"],
-                        rec_content_genre_revision=generation["revision"],
-                        rec_content_inputs=content_inputs)
+        recording = replace(recording, encoder=generation["model"], generation=generation["generation"],
+                            genre_revision=generation["revision"], input_fingerprint=content_inputs)
     elif generation["model"]:
         # Discovery membership can change without changing the library's encoder.
         rows = content_model.encode_discovered(discoveries,
@@ -132,11 +128,11 @@ def calculate(captured, now, *, keep_collaborative=False, memory_bytes=None, fit
         if dict(rows) != dict(generation["discovered"]):
             generation = {**generation, "generation": new_generation(), "discovered": rows}
             vectors["rec_discovered_content_vectors"] = rows
-            settings["rec_content_generation"] = generation["generation"]
+            recording = replace(recording, generation=generation["generation"])
 
     profiles, artist_baskets = captured.artist_profiles, captured.artist_baskets
-    artist_inputs = _fingerprint([artist_baskets, profiles])
-    if captured.fingerprints['rec_artist_fit_inputs'] != artist_inputs:
+    artist_inputs = _fingerprint([content_character.VERSION, artist_baskets, profiles])
+    if captured.artist_fit != artist_inputs:
         _check_fit_memory(artist_baskets, training.DIM, memory_bytes)
         def fit_artists():
             keys, matrix = artist_model.fit_artist_baskets(artist_baskets)
@@ -151,27 +147,11 @@ def calculate(captured, now, *, keep_collaborative=False, memory_bytes=None, fit
             if vector is not None:
                 rows.append((artist, vector.tobytes()))
         vectors["rec_artist_content_vectors"] = rows
-        settings.update(rec_artist_fit_inputs=artist_inputs, rec_artist_content_model=json.dumps(model))
+        artist = ArtistModelUpdate(encoder=json.dumps(model), fit_fingerprint=artist_inputs)
 
-    mode_inputs = _fingerprint([generation["model"], sorted(generation["library"]),
-        captured.mode_params])
-    modes = None
-    if captured.fingerprints['rec_mode_fit_inputs'] != mode_inputs:
-        keys, matrix, _index = vector_reads.load_vector_rows(generation['library'])
-        space = content_model.content_model_fingerprint(json.loads(generation['model'])) if generation['model'] else ''
-        discovered = taste_modes.discover_from_inputs(keys, matrix, space=space,
-            genres=captured.genres, genre_axes=axes, k=captured.mode_params['modes_k'],
-            min_members=captured.mode_params['modes_min_members'])
-        modes = (taste_modes.assign_mode_ids(captured.modes, discovered,
-            threshold=captured.mode_params['modes_match_threshold'], next_id=captured.next_mode_id)
-            if discovered else None)
-        if modes is not None:
-            upserts, retired = modes
-            modes = ([(m["mode_id"], m["label"], json.dumps(m["families"]), m["centroid"].tobytes(),
-                       m["size"], json.dumps(m["rep_keys"]), now, now, m["space"]) for m in upserts], retired)
-        settings["rec_mode_fit_inputs"] = mode_inputs
     check_stopping()
-    return {"vectors": vectors, "settings": settings, "modes": modes,
+    return {"vectors": vectors, "artist": artist,
+            "recording": None if recording == RecordingModelUpdate() else recording,
             "tracks": len(vectors.get("rec_vectors", ())) if "rec_vectors" in vectors
                       else captured.track_count}
 

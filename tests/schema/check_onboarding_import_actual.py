@@ -64,7 +64,7 @@ def run(source, profile, saved_song_stress):
                 return
             clients = {}
             for account in sorted({row['account_id'] for row in playlists}):
-                identity = store.accounts.upsert_account(f'Account {account}', 'fixture', None, not clients)
+                identity = store.accounts.upsert_account(f'Account {account}', None, not clients)
                 listing = [{'playlistId': row['provider_playlist_id'], 'title': row['title'], 'count': len(contents[row['id']])}
                            for row in playlists if row['account_id'] == account]
                 tracks = {row['provider_playlist_id']: contents[row['id']] for row in playlists if row['account_id'] == account}
@@ -90,7 +90,8 @@ def run(source, profile, saved_song_stress):
                 saved_song_stress=saved_song_stress, synthesized_saved_song_occurrences=len(songs) * len(clients),
                 accounts=len(clients), status=result['status'], first_playlist_seconds=first,
                 seconds=time.monotonic() - start,
-                imported_songs=store.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0],
+                imported_songs=store.conn.execute(
+                    'SELECT count(*) FROM track_sources WHERE library_origin IS NOT NULL').fetchone()[0],
                 foreign_key_failures=[tuple(row) for row in store.conn.execute('PRAGMA foreign_key_check')],
                 account_resources={account: {name: resource['status'] for name, resource in value['resources'].items()}
                                    for account, value in result['accounts'].items()})

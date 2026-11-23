@@ -1,4 +1,4 @@
-"""A failed guard refresh must leave a live Store usable for immediate retries."""
+"""Revision guards bind at admission and survive interrupted construction."""
 from contextlib import closing, nullcontext
 import sqlite3
 from types import SimpleNamespace
@@ -15,10 +15,9 @@ def disable_periodic_library_sync():
 
 
 @pytest.mark.parametrize('database', ['store', 'file_backed_store'])
-@pytest.mark.parametrize('entrypoint', ['snapshot', 'tracked-view'])
 @pytest.mark.parametrize('failure', ['begin-cancel', 'cancel', 'timeout', 'schema-denied', 'trigger-denied'])
-def test_failed_revision_refresh_retries_without_writes_or_restart(
-        request, monkeypatch, database, entrypoint, failure):
+def test_failed_revision_binding_retries_without_writes_or_restart(
+        request, monkeypatch, database, failure):
     store = request.getfixturevalue(database)
     store.settings.set_setting('guard-input', 'committed')
     clock = [0.0]
@@ -32,6 +31,7 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
         else:
             with closing(sqlite3.connect(store._db_path)) as external, external:
                 external.execute('CREATE TABLE guard_new_owner(value TEXT)')
+        Revisions.unbind(store.conn)
         assert not store.conn.in_transaction
 
         state = {'schema_reads': 0, 'armed': False, 'statement': '',
@@ -41,7 +41,7 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
             state['statement'] = sql
             if sql == 'PRAGMA main.schema_version':
                 state['schema_reads'] += 1
-                state['armed'] = state['schema_reads'] == 2
+                state['armed'] = state['schema_reads'] == 1
                 if state['armed'] and failure == 'timeout':
                     clock[0] = 2.0
 
@@ -80,10 +80,7 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
             store.conn.set_progress_handler(activity.interrupt_query, 1)
         try:
             with pytest.raises(error), scope:
-                reader = (store.read_snapshot() if entrypoint == 'snapshot' else
-                          store.read_view(tracked=True, seconds=None))
-                with reader:
-                    pytest.fail('Failed guard construction yielded a reader')
+                Revisions(store.conn)
         finally:
             store.conn.set_trace_callback(None)
             store.conn.set_authorizer(None)
@@ -99,6 +96,7 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
             "SELECT 1 FROM sqlite_temp_schema WHERE name='snapshot_revisions'").fetchone()
 
         # Neither retry may require an unrelated write to release a transaction.
+        store._snapshot_revisions = Revisions(store.conn)
         for _ in range(2):
             with store.read_snapshot() as retry:
                 assert retry.store.settings.get_setting('guard-input') == 'committed'
@@ -109,7 +107,8 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
                         for table in store._snapshot_revisions.tables
                         for operation in ('insert', 'update', 'delete')} <= guards
                 assert retry.publish(lambda: None)
-        assert not older.publish(lambda: pytest.fail('Published across an external schema epoch'))
+        assert not older.publish(lambda: pytest.fail('Published across database admission'))
+        assert not older.publish(lambda: pytest.fail('Published across database admission'), validate_inputs=False)
 
     with store.read_snapshot() as retry:
         assert retry.store.settings.get_setting('guard-input') == 'committed'
@@ -120,6 +119,32 @@ def test_failed_revision_refresh_retries_without_writes_or_restart(
     with store.read_snapshot() as current:
         assert current.store.conn.execute('SELECT value FROM guard_new_owner').fetchone()[0] == 'continuing write'
         assert current.publish(lambda: None)
+
+
+def test_snapshots_and_tracked_views_use_admitted_guards(file_backed_store):
+    from yt_playlist.rec import onboarding
+
+    store = file_backed_store
+    queries = []
+    store.conn.set_trace_callback(queries.append)
+    try:
+        for _ in range(2):
+            with store.read_view(tracked=True, seconds=None) as view:
+                view.settings.get_setting('guard-input')
+            with store.read_snapshot() as snapshot:
+                snapshot.store.settings.get_setting('guard-input')
+                assert snapshot.publish(lambda: None)
+            with store.read_snapshot() as snapshot:
+                assert snapshot.publish(lambda: None, validate_inputs=False)
+        with store.discovery.repository.cleanup_snapshot() as snapshot:
+            assert snapshot.publish(lambda: None)
+        assert not onboarding.setup_completed(store)
+        store.recording_keys.invalidate_catalog()
+    finally:
+        store.conn.set_trace_callback(None)
+    assert queries
+    assert not [sql for sql in queries if any(word in sql.lower() for word in (
+        'sqlite_schema', 'sqlite_master', 'schema_version', 'user_version', 'table_info', 'table_xinfo', 'table_list'))]
 
 
 @pytest.mark.parametrize('fail', [False, True])

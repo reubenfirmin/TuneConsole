@@ -27,13 +27,6 @@ class RecommendationFiles:
         fao.write(path, fao.Content(encoded, max_bytes=recommendation_content.MAX_BYTES, metadata=age))
         return str(path), *integrity
 
-    def publish_original(self, encoded):
-        """Retain the historical codec during an explicit offline import."""
-        digest, size = self.describe(encoded)
-        path = Path(self.root) / digest[:2] / (digest + '.json')
-        fao.write(path, fao.Content(encoded, max_bytes=recommendation_content.MAX_BYTES))
-        return str(path), digest, size
-
     def exists(self, filename):
         return Path(filename).is_file()
 

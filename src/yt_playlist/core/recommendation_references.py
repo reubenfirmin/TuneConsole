@@ -5,10 +5,6 @@ MAX_GENERATIONS = 128
 MAX_TRACKS = 8192
 
 
-def enabled(store):
-    return getattr(store, '_recommendation_files', False)
-
-
 def references(context):
     values = context.get('recommendation_generations', [])
     if (not isinstance(values, list) or len(values) > MAX_GENERATIONS
@@ -43,8 +39,7 @@ def from_options(options):
 
 
 def retain(conn, kind, identity, generations):
-    current = {row[0] for row in conn.execute('SELECT generation_id FROM recommendation_generation_refs '
-                                             'WHERE kind=? AND external_key=?', (kind, identity))}
+    current = set(publication.retainers(conn, kind, identity))
     if current and current != set(generations):
         raise ValueError('Recommendation evidence owner changed its immutable publication references')
     for generation in generations:

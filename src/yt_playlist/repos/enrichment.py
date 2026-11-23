@@ -2,7 +2,7 @@
 import json
 from contextlib import contextmanager
 
-from yt_playlist.core import catalog, metadata, metadata_evidence, metadata_conflicts, metadata_attempts
+from yt_playlist.core import metadata, metadata_evidence, metadata_conflicts, metadata_hints
 from yt_playlist.core import metadata_runtime, metadata_values, genre_classifications
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 from yt_playlist.repos import metadata_file_writes
@@ -10,94 +10,71 @@ from yt_playlist.repos import metadata_file_writes
 class EnrichmentRepo(Repo):
     @synchronized
     def genre_refresh_input(self, recording_id):
-        entry = self.conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? ORDER BY id LIMIT 1', (recording_id,)).fetchone()
+        entry = self.conn.execute('SELECT id FROM track_sources WHERE recording_id=? ORDER BY id LIMIT 1', (recording_id,)).fetchone()
         if entry is None:
             return None
         return {'entry_id': entry[0], 'source': metadata.selected_source(self.conn, entry[0], 'genre'),
-                'attempts': metadata_attempts.available(self.conn)}
+                'attempts': not metadata_runtime.active(self.conn)}
 
     @snapshot_read
     def provider_inputs(self, entry, provider):
-        entry = catalog.resolve_entry(self.conn, entry)
-        subject = self.conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()
+        subject = self.conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry,)).fetchone()
         if subject is None:
             raise ValueError('Unknown provider input')
-        layout = ('runtime' if metadata_runtime.active(self.conn) else
-                  'evidence' if metadata_evidence.available(self.conn) else 'legacy')
-        state = self.conn.execute('SELECT at FROM enrichment_provider_state WHERE recording_id=? AND provider=?',
+        runtime = metadata_runtime.active(self.conn)
+        state = self.conn.execute("SELECT at FROM enrichment_provider_state WHERE recording_id=? AND provider=? AND status<>'queued'",
                                   (subject['recording_id'], provider)).fetchone()
-        return {'entry_id': entry, **dict(subject), 'layout': layout,
-                'provider_at': state['at'] if state else None, 'attempts': metadata_attempts.available(self.conn),
+        return {'entry_id': entry, **dict(subject), 'layout': 'runtime' if runtime else 'evidence',
+                'provider_at': state['at'] if state else None, 'attempts': not runtime,
                 'genre': genre_classifications.read(self.conn, 'recordings', subject['recording_id']),
-                'sources': {field: metadata.selected_source(self.conn, entry, field)
-                            for field in (*metadata_values.ITEM_FIELDS, *metadata_values.RECORDING_FIELDS)}}
+                'sources': metadata.selected_sources(self.conn, entry,
+                    (*metadata_values.ITEM_FIELDS, *metadata_values.RECORDING_FIELDS))}
 
     @snapshot_read
     def reuse_inputs(self, recording, provider, fields):
         if not fields:
             return {}
-        rows = self.conn.execute('SELECT s.field concept,o.* FROM provider_state_fields s JOIN metadata_observations o '
-            'ON o.id=s.observation_id WHERE s.recording_id=? AND s.provider=? AND s.field IN (' +
+        rows = self.conn.execute('SELECT f.key concept,o.* FROM enrichment_provider_state s,json_each(s.field_links) f '
+            'JOIN metadata_observations o ON o.id=f.value->>1 WHERE s.recording_id=? AND s.provider=? AND f.key IN (' +
             ','.join('?' for _ in fields) + ')', (recording, provider, *fields))
         return {row['concept']: {**dict(row), 'value': metadata_evidence.value_from_row(row)} for row in rows}
 
     @synchronized
-    def store_finding(self, entry, recording, field, provider, value, at):
+    def retire_entry_hints(self, entry, field):
         with self.conn.atomic():
-            self.conn.execute('INSERT INTO metadata_findings(entry_id,recording_id,field,provider,value_json,observed_at) '
-                              'VALUES (?,?,?,?,?,?)', (entry, recording, field, provider, json.dumps(value), at))
-
-    @synchronized
-    def retire_entry_hints(self, layout, entry, field):
-        table = {'evidence': 'metadata_hints', 'legacy': 'catalog_field_hints'}[layout]
-        with self.conn.atomic():
-            self.conn.execute(f'UPDATE {table} SET active=0 WHERE entry_id=? AND field=?', (entry, field))
+            metadata_hints.retire_entry(self.conn, entry, field)
 
     @snapshot_read
     def hint_inputs(self, entry, fields):
-        entry = catalog.resolve_entry(self.conn, entry)
         track = self.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone()
         if track is None:
             return None
-        layout = ('runtime' if metadata_runtime.active(self.conn) else
-                  'evidence' if metadata_evidence.available(self.conn) else 'legacy')
+        layout = 'runtime' if metadata_runtime.active(self.conn) else 'evidence'
         result = {}
         for field in fields:
             if field not in (*metadata_values.ITEM_FIELDS, *metadata_values.RECORDING_FIELDS):
                 continue
             hints = []
             if layout != 'runtime':
-                table = 'metadata_hints' if layout == 'evidence' else 'catalog_field_hints'
-                rows = self.conn.execute('SELECT h.*' + (',o.value_kind,o.text_value,o.number_value,o.genre_key,o.unit,o.resolution_reason'
-                    if layout == 'evidence' else '') + f' FROM {table} h ' +
-                    ('JOIN metadata_observations o ON o.id=h.observation_id ' if layout == 'evidence' else '') +
-                    'JOIN catalog_entries e ON e.id=h.entry_id WHERE h.active=1 AND h.field=? AND ' +
-                    ('e.recording_id=?' if field in metadata_values.RECORDING_FIELDS else 'e.id=?'),
-                    (field, track['recording_id'] if field in metadata_values.RECORDING_FIELDS else entry))
+                rows = metadata_hints.active(self.conn, entry, track['recording_id'], field)
                 for row in rows:
-                    if layout == 'evidence':
-                        value = metadata_evidence.value_from_row(row)
-                    else:
-                        raw = json.loads(row['value_json'])
-                        value = metadata_values.Value('value', number=raw) if isinstance(raw, (int, float)) else metadata_values.Value('value', text=raw)
+                    value = metadata_evidence.value_from_row(row)
                     hints.append({'entry_id': row['entry_id'], 'source': row['source'], 'value': value})
             result[field] = {'current': track[field], 'source': metadata.selected_source(self.conn, entry, field), 'hints': hints}
         return {'entry_id': entry, 'layout': layout, 'fields': result}
 
     @synchronized
-    def retire_hints(self, layout, field, keys):
+    def retire_hints(self, field, keys):
         if not keys:
             return
-        table = {'evidence': 'metadata_hints', 'legacy': 'catalog_field_hints'}[layout]
         with self.conn.atomic():
-            self.conn.executemany(f'UPDATE {table} SET active=0 WHERE entry_id=? AND field=? AND source=?',
-                                  [(entry, field, source) for entry, source in keys])
+            metadata_hints.retire(self.conn, field, keys)
 
     @contextmanager
     def conflict_transaction(self):
         with self._lock:
             with self.conn.atomic():
-                self.conn.execute('UPDATE catalog_entries SET id=id WHERE 0')
+                self.conn.execute('UPDATE recordings SET id=id WHERE 0')
                 yield
 
     @contextmanager
@@ -110,37 +87,26 @@ class EnrichmentRepo(Repo):
 
     @snapshot_read
     def conflict_inputs(self, track_id, field=None):
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        subject = self.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (track_id,)).fetchone()
+        subject = self.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (track_id,)).fetchone()
         if subject is None:
             return None
         recording = subject[0]
         result = []
         if metadata_runtime.active(self.conn):
             layout = 'runtime'
-            rows = self.conn.execute('SELECT * FROM metadata_runtime_conflicts WHERE (entry_id=? OR recording_id=?)' +
-                (' AND field=?' if field is not None else '') + ' ORDER BY id',
-                (track_id, recording, metadata_runtime.code(field)) if field is not None else (track_id, recording))
+            rows = self.conn.execute(f'SELECT {metadata_runtime.CONFLICT_COLUMNS} FROM metadata_conflicts '
+                'WHERE runtime_id IS NOT NULL AND (entry_id=? OR recording_id=?)' +
+                (' AND field=?' if field is not None else '') + ' ORDER BY runtime_id',
+                (track_id, recording, metadata_conflicts.field_name(field)) if field is not None else (track_id, recording))
             for row in rows:
-                result.append({**dict(row), 'field': metadata_runtime.FIELDS[row['field'] - 1],
+                result.append({**dict(row),
                     'evidence': {'reference': (row['id'], row['revision']), 'updated_at': row['updated_at'],
                         'file': metadata_file_writes.reference(self.conn, 'conflicts', (row['id'],), row['revision'])}})
-        elif metadata_evidence.available(self.conn):
+        else:
             layout = 'evidence'
             for row in metadata_conflicts.for_entry(self.conn, track_id, field):
                 result.append({**dict(row), 'status': {'unresolved': 0, 'user_resolved': 1, 'provider_converged': 2}[row['status']],
                                'evidence': {'candidates': metadata_conflicts.candidates(self.conn, row['id'])}})
-        else:
-            layout = 'legacy'
-            concept = 'year' if field == 'mb_year' else field
-            rows = self.conn.execute('SELECT * FROM enrichment_conflict WHERE ' +
-                ('track_id=? AND field=?' if field is not None else
-                 "(track_id=? OR (field_scope='recording' AND recording_id=?))"),
-                (track_id, concept) if field is not None else (track_id, recording))
-            for row in rows:
-                result.append({**dict(row), 'entry_id': row['track_id'], 'status': row['resolved'],
-                    'field': 'mb_year' if row['field'] == 'year' else row['field'],
-                    'evidence': {'candidates': json.loads(row['candidates'])}})
         return {'entry_id': track_id, 'recording_id': recording, 'layout': layout, 'conflicts': result}
 
     @synchronized
@@ -149,13 +115,14 @@ class EnrichmentRepo(Repo):
             return {}
         return {row['provider']: dict(row) | {'file': metadata_file_writes.reference(self.conn, 'alternatives',
                     (recording_id, row['provider_id']), float(row['at']))} for row in self.conn.execute(
-            'SELECT s.provider,p.id provider_id,s.at FROM enrichment_provider_state s '
-            'JOIN metadata_runtime_providers p ON p.name=s.provider WHERE s.recording_id=? '
+            'SELECT s.provider,p.metadata_provider_id provider_id,s.at FROM enrichment_provider_state s '
+            'JOIN enrichment_provider_config p ON p.provider=s.provider AND p.metadata_provider_id IS NOT NULL '
+            "WHERE s.recording_id=? AND s.status<>'queued' "
             f'AND s.provider IN ({",".join("?" for _ in providers)})', (recording_id, *providers))}
 
     @synchronized
     def reserve_conflict_identity(self):
-        return metadata_file_writes.next_owner_id(self.conn, 'conflicts', 'metadata_runtime_conflicts')
+        return metadata_file_writes.next_conflict_id(self.conn)
 
     @synchronized
     def reserve_file(self, record):
@@ -169,11 +136,8 @@ class EnrichmentRepo(Repo):
                 if file_record is None:
                     raise ValueError('Runtime metadata conflict requires its reserved file')
                 metadata_file_writes.complete(self.conn, file_record, kind='conflicts', owner=(identity,), revision=revision)
-                self.conn.execute('INSERT INTO metadata_runtime_conflicts VALUES (?,?,?,?,?,?,?) '
-                    'ON CONFLICT(id) DO UPDATE SET status=excluded.status,revision=excluded.revision,updated_at=excluded.updated_at',
-                    (identity, recording if scope == 'recording' else None, None if scope == 'recording' else entry,
-                     metadata_runtime.code(field), status, revision, at))
-            elif layout == 'evidence':
+                metadata_runtime.store_conflict(self.conn, entry, recording, field, scope, identity, status, revision, at)
+            else:
                 observations = []
                 for candidate in candidates:
                     observation = candidate['observation_id']
@@ -199,46 +163,27 @@ class EnrichmentRepo(Repo):
                         recording if scope == 'recording' else None, scope, field, stored_status, at)).lastrowid
                 else:
                     self.conn.execute('UPDATE metadata_conflicts SET status=?,updated_at=? WHERE id=?', (stored_status, at, identity))
-                    self.conn.execute('DELETE FROM metadata_conflict_candidates WHERE conflict_id=?', (identity,))
-                self.conn.executemany('INSERT OR IGNORE INTO metadata_conflict_candidates(conflict_id,observation_id,position) VALUES (?,?,?)',
-                    ((identity, observation, position) for position, observation in enumerate(observations)))
-            else:
-                payload = [{key: value for key, value in candidate.items() if key != 'prepared'} for candidate in candidates]
-                self.conn.execute('INSERT INTO enrichment_conflict(track_id,field,candidates,resolved,updated_at,recording_id,input_video_id,field_scope) '
-                    'VALUES (?,?,?,?,?,?,(SELECT video_id FROM catalog_entries WHERE id=?),?) '
-                    'ON CONFLICT(track_id,field) DO UPDATE SET candidates=excluded.candidates,resolved=excluded.resolved,'
-                    'updated_at=excluded.updated_at,recording_id=excluded.recording_id,input_video_id=excluded.input_video_id,field_scope=excluded.field_scope',
-                    (entry, 'year' if field == 'mb_year' else field, json.dumps(payload), status, at, recording, entry, scope))
+                metadata_conflicts.save_candidates(self.conn, identity, observations)
 
     @synchronized
     def mark_converged(self, layout, identities, at):
-        table, column, value = {'runtime': ('metadata_runtime_conflicts', 'status', 2),
-                               'evidence': ('metadata_conflicts', 'status', 'provider_converged'),
-                               'legacy': ('enrichment_conflict', 'resolved', 2)}[layout]
-        self.conn.executemany(f'UPDATE {table} SET {column}=?,updated_at=? WHERE id=?',
-                              ((value, at, identity) for identity in identities))
+        column = 'runtime_id' if layout == 'runtime' else 'id'
+        self.conn.executemany(f"UPDATE metadata_conflicts SET status='provider_converged',updated_at=? WHERE {column}=?",
+                              ((at, identity) for identity in identities))
 
     @synchronized
-    def mark_resolved(self, track_id, field, value, observation, at):
-        track_id = catalog.resolve_entry(self.conn, track_id)
+    def mark_resolved(self, track_id, field, observation, at):
         with self.conn.atomic(join=True):
             if metadata_runtime.active(self.conn):
                 conflict = metadata_runtime.conflict(self.conn, track_id, field)
                 if conflict:
-                    self.conn.execute('UPDATE metadata_runtime_conflicts SET status=1,updated_at=? WHERE id=?',
+                    self.conn.execute("UPDATE metadata_conflicts SET status='user_resolved',updated_at=? WHERE runtime_id=?",
                                       (at, conflict['id']))
                 return
-            if metadata_evidence.available(self.conn):
-                metadata_conflicts.resolve(self.conn, track_id, field, observation, now=at)
-                return
-            self.conn.execute(
-                "UPDATE enrichment_conflict SET resolved=1, resolved_value=?, updated_at=? "
-                "WHERE track_id=? AND field=?",
-                (None if value is None else str(value), at, track_id, field))
+            metadata_conflicts.resolve(self.conn, track_id, field, observation, now=at)
 
     @snapshot_read
     def resolution_inputs(self, track_id, field, *, column):
-        track_id = catalog.resolve_entry(self.conn, track_id)
         row = self.conn.execute(
             f"SELECT c.candidates, t.{column} current_value FROM enrichment_conflict c "
             "JOIN catalog_tracks t ON t.id=c.track_id WHERE c.track_id=? AND c.field=?",

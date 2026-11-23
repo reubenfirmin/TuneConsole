@@ -67,9 +67,10 @@ def request_state(store, album=ALBUM):
 
 
 def assert_credential_not_stored(store):
-    for table in ('album_description_requests', 'provider_usage', 'album_description_access'):
-        rows = store.conn.execute(f'SELECT * FROM {table}').fetchall()
-        assert KEY not in json.dumps([tuple(row) for row in rows])
+    rows = store.conn.execute('SELECT * FROM album_description_requests').fetchall()
+    assert KEY not in json.dumps([tuple(row) for row in rows])
+    rows = store.conn.execute("SELECT description_access FROM enrichment_provider_config WHERE provider='deepseek'").fetchall()
+    assert KEY not in json.dumps([tuple(row) for row in rows])
     record = store.album_descriptions.cached(store.album_descriptions.album_id(ALBUM),
         store.album_descriptions.policy_version(deepseek.description_policy()))
     assert KEY not in json.dumps(record)
@@ -272,7 +273,7 @@ def test_lease_takeover_during_pacing_keeps_new_owner_and_authorizes_only_once(b
         assert usage['claim_token'] == replacement['token'] and first.album_descriptions.requests_today(1000) == 2
         assert usage['status'] == 'claimed' and usage['authorized_at'] is None
         old = request_state(first)
-        assert old['status'] == 'paused' and old['outcome_filename'] is None
+        assert old['status'] == 'paused' and old['outcome_json'] is None
         assert first.album_descriptions.authorize(
             replacement['request_id'], replacement['token'], transport.credential_id(KEY), 20, b.clock[0])
         assert not second.album_descriptions.authorize(

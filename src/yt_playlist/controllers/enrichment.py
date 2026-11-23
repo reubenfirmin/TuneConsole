@@ -151,13 +151,11 @@ class Enrichment:
         for field, value in fields.items():
             if value in (None, ''):
                 continue
-            if facts['layout'] == 'legacy':
-                self.repository.store_finding(facts['entry_id'], facts['recording_id'], field, provider, value, at)
             if not selections.provider_wins(field, value, provider, facts['sources'].get(field), facts['genre'], providers):
                 continue
             self.choices.select(facts['entry_id'], field, value, provider, now=at, observation_id=observations.get(field))
             if facts['layout'] != 'runtime':
-                self.repository.retire_entry_hints(facts['layout'], facts['entry_id'], field)
+                self.repository.retire_entry_hints(facts['entry_id'], field)
 
     def reuse_provider_fields(self, entry_id, provider, fields, *, providers=(), now=None, select=True):
         # Credits are selected with their original delivery. Reusing completed
@@ -203,8 +201,9 @@ class Enrichment:
             previous = facts['fields'][field]
             if selections.replaces_hint(facts['layout'], previous['source'], previous['current'], previous['hints']):
                 self.choices.select(facts['entry_id'], field, value, 'catalog_hint_replacement')
-                self.repository.retire_hints(facts['layout'], field,
-                    [(hint['entry_id'], hint['source']) for hint in previous['hints']])
+                if previous['hints']:
+                    self.repository.retire_hints(field,
+                        [(hint['entry_id'], hint['source']) for hint in previous['hints']])
 
     def upsert_conflict(self, track_id, field, candidates, now=None, *, refreshed_providers=None):
         field, prepared = policy.prepare_candidates(field, candidates)
@@ -291,7 +290,7 @@ class Enrichment:
         column, prepared = policy.selected_value(field, value)
         at = clock(now)
         observation = self.choices.choose(track_id, column, prepared, source='conflict_resolution', now=at)
-        self.repository.mark_resolved(track_id, field, value, observation, at)
+        self.repository.mark_resolved(track_id, field, observation, at)
 
     def resolve_enrichment_candidate(self, track_id, field, value, now=None):
         spec = FIELD_COLUMN.get(field)

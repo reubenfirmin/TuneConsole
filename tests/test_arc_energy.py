@@ -1,14 +1,13 @@
 """Journeys consume saved intensity; they cannot derive a competing definition."""
 import pytest
-from tests.enrichment_support import seed_audio
-
-from tests.musical_support import prepare_profiles
+from tests.musical_support import publish_intensities
 from yt_playlist.rec import arc_energy, home_cards, journeys, musical_character, recipes
-from yt_playlist.rec.musical_profiles import resolve
+from yt_playlist.rec.vibe_score_policy import serving_prefix
 
 
 def profile(value):
-    return musical_character.compact(resolve([], overrides={'energy': value}))
+    return {'vibes': {'inputs_version': serving_prefix() + 'test-specialist', 'intensity_fits': {'energize': {
+        'score': value, 'source': 'audio_measurement', 'support': 1}}}}
 
 
 def test_unchanged_recording_keeps_its_intensity_in_different_pools():
@@ -22,8 +21,7 @@ def test_unchanged_recording_keeps_its_intensity_in_different_pools():
 
 @pytest.mark.parametrize('value', [None, float('nan'), float('inf'), True, -.1, 1.1])
 def test_unknown_or_invalid_evidence_orders_neutrally(value):
-    assert arc_energy.arc_energies(['k'], {'k': {'dimensions': {
-        'intensity': {'value': value, 'support': 1}}}}) == {'k': .5}
+    assert arc_energy.arc_energies(['k'], {'k': profile(value)}) == {'k': .5}
 
 
 def test_energy_arc_peaks_in_middle_using_the_shared_dimension():
@@ -39,9 +37,8 @@ def test_mix_and_cluster_journeys_read_prepared_intensity_without_loading_audio(
     keys = []
     for i in range(8):
         tid = store.tracks.upsert_track(f'v{i}', f'Song {i}', f'Artist {i}', '', 200)
-        seed_audio(store, tid, energy=i / 7, bpm=180 - i * 15)
         keys.append(store.tracks.catalog_subject(tid)['identity_key'])
-    prepare_profiles(store)
+    publish_intensities(store, {key: i / 7 for i, key in enumerate(keys)})
     def unexpected():
         pytest.fail('Journeys must not load catalog-wide audio')
     monkeypatch.setattr(store.rec_query, 'track_audio_features', unexpected)

@@ -1,6 +1,8 @@
-import numpy as np
-from yt_playlist.rec import embedding_vectors as embed, surfaces, ppr, mode_surfaces as ms
+from dataclasses import replace
+
+from yt_playlist.rec import surfaces, ppr, mode_surfaces as ms
 from tests.conftest import seed_catalog_track
+from tests.group_support import publish, recordings
 
 
 def seed_items(store, keys):
@@ -16,42 +18,40 @@ class _Item:
 
 
 def test_prepare_stashes_ppr_order(monkeypatch, store):
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
-    ], retired_ids=[], now=1.0)
     keys = ["k1", "k2"]
     seed_items(store, keys)
-    V = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
-    idx = {"k1": 0, "k2": 1}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
+    corpus = recordings([('House', 1, .1), ('Metal', 1, .9)])
+    head = publish(store, [replace(track, key=key) for track, key in zip(corpus, keys)])
+    membership = store.taste_groups.leaf_members(head['generation'])
+    assert len(set(membership.values())) == 2
+    monkeypatch.setattr(ppr, 'build_transition', lambda s: ppr.transition_from_baskets([keys]))
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
-        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0: [_Item("k1"), _Item("k2")])
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
-    # Stub the PPR ranking so the assertion is exact and independent of the graph internals.
-    monkeypatch.setattr(ppr, "mode_rankings", lambda s, **kw: {1: ["k2", "k1"]})
-
+        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0, **kw: [_Item("k1"), _Item("k2")])
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None, **kw: [])
     payload = ms.prepare_bundles(store, now=10.0)
-    assert payload["_ppr"] == {"1": ["k2", "k1"]}
-    assert [row['key'] for row in store.recommendations.page('radio', '1', 'ppr')] == ['k2', 'k1']
+    assert payload['_meta']['group_generation'] == head['generation']
+    assert not store.modes.list_modes()
+    for key, group in membership.items():
+        assert [row['key'] for row in payload[group]['wheelhouse']] == [key]
+        assert payload['_radio']['members'][group] == [key]
+        expected = [key, *[other for other in keys if other != key]]
+        assert payload['_ppr'][group] == expected
+        assert [row['key'] for row in store.recommendations.page('radio', group, 'ppr')] == expected
 
 
 def test_prepare_ppr_failopen(monkeypatch, store):
     seed_items(store, ['k1'])
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
-    ], retired_ids=[], now=1.0)
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (["k1"], np.array([[1.0, 0.0]], dtype=np.float32), {"k1": 0}))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
+    track, = recordings([('House', 1, .1)])
+    head = publish(store, [replace(track, key='k1')])
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
-        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0: [])
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
+        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0, **kw: [])
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None, **kw: [])
 
     def _boom(s, **kw):
         raise RuntimeError("ppr blew up")
-    monkeypatch.setattr(ppr, "mode_rankings", _boom)
+    monkeypatch.setattr(ppr, "build_transition", _boom)
 
     payload = ms.prepare_bundles(store, now=10.0)      # must not raise
     assert payload["_ppr"] == {}
+    group, = store.taste_groups.leaf_members(head['generation']).values()
+    assert payload['_radio']['members'][group] == ['k1']

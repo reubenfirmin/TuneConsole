@@ -11,7 +11,7 @@ from tests.conftest import FakeClient
 
 
 def test_generated_playlist_retains_acknowledged_occurrence_handles(store):
-    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
 
     class ReceiptClient(FakeClient):
         def add_playlist_items(self, playlist, video_ids, **kwargs):
@@ -32,7 +32,7 @@ def test_generated_playlist_retains_acknowledged_occurrence_handles(store):
     for source in ("supplied", "cached", "fetched") for materialize in (False, True)
 ] + [(5, "supplied", True), (120, "fetched", False)])
 def test_duration_limit_filters_before_remote_writes(store, minutes, source, materialize):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     if minutes != 20:
         rec_params.set_param(store, "max_track_minutes", minutes)
     lengths = {"short": 200, "boundary": minutes * 60, "long": minutes * 60 + 1, "unknown": None}
@@ -72,7 +72,7 @@ def test_duration_limit_filters_before_remote_writes(store, minutes, source, mat
 
 
 def test_all_overlong_tracks_do_not_create_an_empty_remote_playlist(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = FakeClient(song_durations={"mix": 7200})
     with pytest.raises(ValueError, match="maximum track length set in Taste Model"):
         create_generated_playlist(store, "Gen", [{"video_id": "mix", "title": "Concert"}],
@@ -84,7 +84,7 @@ def test_all_overlong_tracks_do_not_create_an_empty_remote_playlist(store):
 
 
 def test_exact_upload_duration_takes_precedence_over_an_alternate_version(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     store.tracks.observe_track_entry('live-version', 'Song', 'Artist', duration_s=9000)
     store.tracks.observe_track_entry('single', 'Song', 'Artist', duration_s=200)
     client = FakeClient(catalog={'single': {'videoId': 'single'}})
@@ -97,7 +97,7 @@ def test_exact_upload_duration_takes_precedence_over_an_alternate_version(store)
 def test_failed_duration_lookup_still_allows_generation(store, monkeypatch):
     from yt_playlist.library import playlist_catalog
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     calls = []
 
     class UnavailableClient(FakeClient):
@@ -116,7 +116,7 @@ def test_failed_duration_lookup_still_allows_generation(store, monkeypatch):
 
 @pytest.mark.parametrize('duration,resume', [(200, False), (9000, False), (200, True)])
 def test_learned_duration_during_pause_filters_without_writing(store, duration, resume):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
 
     class DuringPause(FakeClient):
         def add_playlist_items(self, *args, **kwargs):

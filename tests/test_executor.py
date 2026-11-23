@@ -31,8 +31,8 @@ def test_serialize_deserialize_roundtrip(store):
 def test_copy_and_move_record_creation_date_and_undo_removes_new_row(store, tmp_path, monkeypatch, move):
     from yt_playlist.library.executor import copy_or_move_playlist
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    source = store.accounts.upsert_account("source", "bridge", None, True)
-    target = store.accounts.upsert_account("target", "bridge", None, False)
+    source = store.accounts.upsert_account("source", None, True)
+    target = store.accounts.upsert_account("target", None, False)
     pid = store.playlists.upsert_playlist(source, "PLoriginal", "Original", 0, "", 1, created_at=1)
     source_client, target_client = FakeClient(), FakeClient()
     copy_or_move_playlist(store, pid, target, source_client, target_client, 100, delete_source=move)
@@ -49,7 +49,7 @@ def test_copy_and_move_record_creation_date_and_undo_removes_new_row(store, tmp_
 def test_backup_filename_sanitizes_remote_playlist_id(store, monkeypatch, tmp_path):
     # provider_playlist_id comes from the YouTube API; a "../" must not escape backups dir.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid = store.playlists.upsert_playlist(iid, "../../../../etc/pwned", "Evil", 0, "h", 1.0)
     path = backup_playlist(store, pid, 123.0, FakeClient())
     from yt_playlist.core import paths
@@ -62,7 +62,7 @@ def test_execute_planned_delete_removes_identical_copy(store, monkeypatch, tmp_p
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library.executor import store_plan, execute_planned, MergePlan
     from tests.conftest import FakeClient, _track
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Artist", None, 200)
     keep = store.playlists.upsert_playlist(iid, "KEEP", "Keep", 1, "h", 1.0); store.playlists.set_playlist_tracks(keep, [t])
     dele = store.playlists.upsert_playlist(iid, "DEL", "Dupe", 1, "h", 1.0); store.playlists.set_playlist_tracks(dele, [t])
@@ -79,7 +79,7 @@ def test_execute_planned_delete_refuses_if_not_subset(store, monkeypatch, tmp_pa
     from yt_playlist.library.executor import store_plan, execute_planned, MergePlan
     from tests.conftest import FakeClient, _track
     import pytest
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t1 = store.tracks.upsert_track("v1", "Song", "Artist", None, 200)
     t2 = store.tracks.upsert_track("v2", "Other", "Artist", None, 200)
     keep = store.playlists.upsert_playlist(iid, "KEEP", "Keep", 1, "h", 1.0); store.playlists.set_playlist_tracks(keep, [t1])
@@ -99,7 +99,7 @@ def test_delete_prunes_row_and_undo_recreates_via_backup(store, monkeypatch, tmp
     from yt_playlist.library.executor import store_plan, execute_planned, MergePlan
     from yt_playlist.library.playlist_undo import undo_action
     from tests.conftest import FakeClient, _track
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Artist", None, 200)
     keep = store.playlists.upsert_playlist(iid, "KEEP", "Keep", 1, "h", 1.0); store.playlists.set_playlist_tracks(keep, [t])
     dele = store.playlists.upsert_playlist(iid, "DEL", "Dupe", 1, "h", 1.0); store.playlists.set_playlist_tracks(dele, [t])
@@ -116,7 +116,7 @@ def test_apply_result_reconciles_and_deletes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library.executor import apply_result
     from tests.conftest import FakeClient, _track
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # A has v1,v2 ; B has v1,v3. Result = v1 + v3 (drop v2, add v3 from B). Keep A, delete B.
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 2, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 2, "h", 1.0)
@@ -134,7 +134,7 @@ def test_apply_result_update_both(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library.executor import apply_result
     from tests.conftest import FakeClient, _track
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
     client = FakeClient(tracks={"PLA": [_track("v1", "One", "X", set_video_id="item-a")],
@@ -175,7 +175,7 @@ def test_apply_result_partial_failure_records_undoable_action(store, monkeypatch
     # undoable APPLY_MERGE with the kept playlist's prior contents, not exit leaving no undo trail.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library.executor import apply_result
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 2, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 2, "h", 1.0)
 
@@ -201,7 +201,7 @@ def test_undo_apply_merge_restores(store, monkeypatch, tmp_path):
     from yt_playlist.library.executor import apply_result
     from yt_playlist.library.playlist_undo import undo_action
     from tests.conftest import FakeClient, _track
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 2, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 2, "h", 1.0)
     client = FakeClient(tracks={"PLA": [_track("v1", "One", "X"), _track("v2", "Two", "X")],
@@ -221,7 +221,7 @@ def test_undo_delete_empty_recreates(store, monkeypatch, tmp_path):
     from yt_playlist.library.executor import delete_empty_playlist
     from yt_playlist.library.playlist_undo import undo_action
     from tests.conftest import FakeClient
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     p = store.playlists.upsert_playlist(iid, "PLe", "empty", 0, "h", 1.0)
     client = FakeClient()
     delete_empty_playlist(store, p, client, now=1.0)

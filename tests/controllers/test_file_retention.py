@@ -40,16 +40,15 @@ def test_managed_file_deletion_requires_admission_and_sql_release(admitted, requ
     database = SimpleNamespace(_managed_file_orphans=files)
     owner = ManagedFileRetention(database, repository, (), ())
     assert owner.maintain(100) == int(admitted and not required)
-    expected = [('fence', 'root')]
+    expected = ['reserved', ('fence', 'root')]
     if admitted:
-        expected += ['inspected', 'reserved', 'checked']
+        expected += ['inspected', 'checked']
         if not required:
             expected += ['deleted']
-        expected += ['released']
         repository.required.assert_called_once_with('metadata-runtime', 'path', ('receipt', 7))
     else:
         repository.required.assert_not_called()
-    assert events == expected + ['unfenced']
+    assert events == expected + ['unfenced', 'released']
 
 
 def test_failed_ownership_check_does_not_delete_and_releases_file_fence():

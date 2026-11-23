@@ -29,8 +29,8 @@ def test_consumer_adapter_reuses_only_original_votes_and_preserves_unknown_profi
     assert result['10']['vibes']['fits']['relax']['score'] == .9
     assert result['12']['vibes']['fits']['relax']['score'] == pytest.approx(.66)
     assert result['12']['vibes']['fits']['relax']['recordings'] == 1
-    assert musical_character.intensity({'musical': result['10']}) == .85
-    assert musical_character.intensity({'musical': result['11']}) == .3
+    assert musical_character.intensity_evidence({'musical': result['10']}) == (None, 0)
+    assert musical_character.intensity_evidence({'musical': result['11']}) == (None, 0)
     assert musical_character.intensity_evidence({'musical': result['99']}) == (None, 0)
     assert result['99'] == untouched['99']
     assert profiles == untouched
@@ -119,7 +119,8 @@ def test_paired_resume_rejects_changed_summary_and_path_escape(tmp_path):
 def test_consumer_comparison_keeps_unknown_intensity_distinct_from_known_midpoint(tmp_path):
     output = tmp_path / 'checkpoint'
     output.mkdir()
-    tracks = [{'key': 'known', 'musical': {'dimensions': {'intensity': {'value': .5, 'support': .8}}}},
+    tracks = [{'key': 'known', 'musical': {'vibes': {'intensity_fits': {
+        'energize': {'score': .5, 'support': .8, 'source': 'audio_measurement'}}}}},
               {'key': 'unknown', 'musical': {}}]
     (output / 'candidate-mixes.json').write_text(json.dumps({
         'relax': [{'lane': 'wheelhouse', 'tracks': tracks}]}))
@@ -129,8 +130,8 @@ def test_consumer_comparison_keeps_unknown_intensity_distinct_from_known_midpoin
     coverage = result['intensity_coverage']
     assert coverage['known_tracks'] == coverage['unknown_tracks'] == 1
     assert coverage['mean_known_intensity'] == .5
-    assert coverage['selected_input_sources'] == {'profile_dimension': 1, 'unknown': 1}
-    assert coverage['selected_vibe_inputs'] == {}
+    assert coverage['selected_input_sources'] == {'specialist_ensemble': 1, 'unknown': 1}
+    assert coverage['selected_vibe_inputs'] == {'energize': 1}
     assert coverage['known_adjacent_pairs'] == 0
     assert coverage['mean_known_adjacent_intensity_change'] is None
 

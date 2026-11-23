@@ -57,7 +57,7 @@ class LaggingClient(FakeClient):
 
 
 def seed(store, *, completed_catalog=False):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tracks = [_track(vid, title, "Artist", set_video_id="set_" + vid)
               for vid, title in (("anchor", "Original"), ("next", "Next"),
                                  ("alt1", "Alternate one"), ("alt2", "Alternate two"))]
@@ -66,7 +66,7 @@ def seed(store, *, completed_catalog=False):
                       title=t['title'], artist='Artist', album='Alb', duration_s=200)
                  for t in tracks]
         seed_publication_subjects(store, items, unowned={item['key'] for item in items[2:]})
-        tids = [store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+        tids = [store.conn.execute('SELECT id FROM track_sources WHERE video_id=?',
                                   (t['videoId'],)).fetchone()[0] for t in tracks[:2]]
     else:
         tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", "Alb", 200) for t in tracks[:2]]
@@ -92,12 +92,12 @@ def completed_placement_catalog(store, monkeypatch, native_sql_calls, without_qu
     inputs = seed(store, completed_catalog=True)
 
     def known_track(video_id, *args, **kwargs):
-        entry = store.conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=?',
+        entry = store.conn.execute('SELECT id,recording_id FROM track_sources WHERE video_id=?',
                                    (video_id,)).fetchone()
         assert entry is not None, video_id
         if kwargs.get('library', True):
             with store.conn:
-                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                store.conn.execute("UPDATE track_sources SET library_origin='fixture',library_added_at=NULL WHERE id=? AND library_origin IS NULL",
                                    (entry['recording_id'],))
         return entry['id']
 
@@ -128,12 +128,12 @@ def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path, c
     path = str(tmp_path / "library.db")
     store = consumer_store(path)
     def known_track(video_id, *args, **kwargs):
-        row = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+        row = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?',
                                  (video_id,)).fetchone()
         assert row is not None, video_id
         if kwargs.get('library', True):
             with store.conn:
-                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                store.conn.execute("UPDATE track_sources SET library_origin='fixture',library_added_at=NULL WHERE id=? AND library_origin IS NULL",
                                    (row[0],))
         return row[0]
     with reuse_reporting_reader(store, monkeypatch):
@@ -161,7 +161,7 @@ def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path, c
                 # repository binding and the persisted pending action stay real.
                 startup.setattr(migrations, 'migrate', admitted)
                 store.init_schema()
-            admitted.assert_called_once_with(store.conn, defer_validation=False)
+            admitted.assert_called_once_with(store.conn)
             # The same four completed catalog subjects are reconciled on every
             # remote read. Placement owns membership/order, not metadata ingest.
             monkeypatch.setattr(store.tracks, 'upsert_track', known_track)

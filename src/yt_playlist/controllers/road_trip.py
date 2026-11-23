@@ -1,5 +1,4 @@
 """Recipe decisions and ordered draft publication through SQLite and file access."""
-import json
 from uuid import uuid4
 
 from yt_playlist.core import road_trip_contract as policy
@@ -23,9 +22,7 @@ class RoadTrips:
         policy.validate_recipe_values(own_pct, familiarity_pct, target_minutes, now)
         excluded = blacklist_genres or []
         values = dict(name=name, own_pct=own_pct, target_minutes=target_minutes, familiarity_pct=familiarity_pct,
-                      updated_at=now, artists=artists, genres=genres, blacklist_genres=excluded)
-        if not self.repository.uses_memberships():
-            return self.repository.save_recipe(recipe_id, values)
+                      updated_at=now)
         policy.validate_selections(artists, genres, excluded)
         with self.repository.transaction():
             resolved_artists = []
@@ -51,12 +48,12 @@ class RoadTrips:
                             if self.repository.genre_key_exists(identity):
                                 raise ValueError('Custom genre key collides with an existing identity: '+label)
                             custom[identity] = label
-                    identities.append(identity)
+                    identities.append((label, identity))
                 resolved_genres.append((role, identities))
-            memberships = policy.membership_rows(resolved_artists, resolved_genres)
+            selections = policy.recipe_selections(resolved_artists, resolved_genres)
             for key, label in custom.items():
                 self.repository.insert_custom_genre(key, label)
-            return self.repository.save_recipe(recipe_id, values, memberships=memberships)
+            return self.repository.save_recipe(recipe_id, values, selections=selections)
 
     def delete_road_trip_recipe(self, recipe_id):
         self.repository.delete_road_trip_recipe(recipe_id)
@@ -64,12 +61,10 @@ class RoadTrips:
     def _read(self, facts):
         if facts is None:
             return None
-        if 'row' in facts:
-            row = facts['row']
-            state = self.recovery.read((row['recovery_filename'], row['recovery_digest'], row['recovery_bytes']),
-                                       kind='road-trip-draft', owner=row['id'])
-            return policy.restore_draft(state, row['revision'], facts['selections'])
-        return json.loads(facts['raw'])
+        row = facts['row']
+        state = self.recovery.read((row['recovery_filename'], row['recovery_digest'], row['recovery_bytes']),
+                                   kind='road-trip-draft', owner=row['id'])
+        return policy.restore_draft(state, row['revision'], facts['selections'])
 
     def get_road_trip_draft(self, recipe_id):
         with self.recovery.retained():
@@ -87,15 +82,6 @@ class RoadTrips:
         return self._save(recipe_id, state, now, expected_revision=expected_revision, conditional=True)
 
     def _save(self, recipe_id, state, now, *, expected_revision=None, conditional=False):
-        if not self.repository.uses_draft_files():
-            with self.recovery.retained():
-                facts = self.repository.draft_facts(recipe_id, include_raw=True) if conditional else None
-                if conditional:
-                    current = self._read(facts)
-                    if current is None or current.get('revision') != expected_revision:
-                        return False
-                return self.repository.save_legacy_draft(recipe_id, json.dumps(state), now,
-                    expected_raw=facts['raw'] if conditional else None, conditional=conditional)
         with self.recovery.retained():
             for _ in range(3):
                 with self.repository.transaction():
@@ -108,13 +94,13 @@ class RoadTrips:
                         raise ValueError('Choose an active account before creating a draft')
                     revision, status, recovery, selected = policy.draft_document(state)
                     selections = []
-                    entries = {}
-                    for kind, position, video, candidate in selected:
-                        if video not in entries:
-                            entries[video] = self.repository.captured_video(video, identity_key='@unresolved-video:'+video,
+                    captured = set()
+                    for kind, video, candidate in selected:
+                        if video not in captured:
+                            self.repository.captured_video(video, identity_key='@unresolved-video:'+video,
                                 title=candidate.get('title') or '', artist=candidate.get('artist') or '', now=now)
-                        entry, recording = entries[video]
-                        selections.append((kind, position, recording, entry, video))
+                            captured.add(video)
+                        selections.append((kind, video))
                 integrity = self.recovery.describe('road-trip-draft', owner, recovery)
                 file_id = self.repository.reserve_draft_file(owner, integrity)
                 reference = self.recovery.publish_reserved(file_id, 'road-trip-draft', owner, recovery,
@@ -131,8 +117,8 @@ class RoadTrips:
 
     def rekey_recordings(self, keymap):
         with self.recovery.retained():
-            for recipe, updated in self.repository.draft_updated_ats().items():
-                facts = self.repository.draft_facts(recipe, include_raw=True)
+            for recipe in self.repository.draft_updated_ats():
+                facts = self.repository.draft_facts(recipe)
                 if facts is None:
                     continue
                 value = self._read(facts)
@@ -142,20 +128,16 @@ class RoadTrips:
                     continue
                 if revised == value:
                     continue
-                if 'row' in facts:
-                    row = facts['row']
-                    revision = revised['revision'] = uuid4().hex
-                    revised.pop('picks')
-                    revised.pop('banned')
-                    integrity = self.recovery.describe('road-trip-draft', row['id'], revised)
-                    file_id = self.repository.reserve_draft_file(row['id'], integrity)
-                    reference = self.recovery.publish_reserved(file_id, 'road-trip-draft', row['id'], revised,
-                                                               expected=integrity)
-                    saved = self.repository.rekey_draft_reference(row['id'], row['revision'], revision, reference,
-                                                                  file_id=file_id)
-                else:
-                    saved = self.repository.save_legacy_draft(recipe, json.dumps(revised), updated,
-                        expected_raw=facts['raw'], conditional=True)
+                row = facts['row']
+                revision = revised['revision'] = uuid4().hex
+                revised.pop('picks')
+                revised.pop('banned')
+                integrity = self.recovery.describe('road-trip-draft', row['id'], revised)
+                file_id = self.repository.reserve_draft_file(row['id'], integrity)
+                reference = self.recovery.publish_reserved(file_id, 'road-trip-draft', row['id'], revised,
+                                                           expected=integrity)
+                saved = self.repository.rekey_draft_reference(row['id'], row['revision'], revision, reference,
+                                                              file_id=file_id)
                 if not saved:
                     raise RuntimeError('Draft changed during catalog key update')
 

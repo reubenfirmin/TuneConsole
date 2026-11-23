@@ -18,8 +18,6 @@ def test_split_retains_parent_identity_and_exact_past_membership(store):
     children = [group for group in second['groups'] if group['parent_version'] == parent['version']]
     assert len(children) == 2
     assert set(parent['members']) == set().union(*(set(child['members']) for child in children))
-    assert any(edge['source'] == old['version'] and edge['target'] == parent['version']
-               and edge['relation'] == 'continuation' for edge in store.taste_groups.lineage())
 
 
 def test_rename_preserves_identity_and_merge_retains_umbrella(store):
@@ -57,11 +55,11 @@ def test_definition_and_member_history_cannot_be_rewritten(store):
         store.conn.execute('INSERT INTO recordings(identity_key) VALUES (?)', (tracks[0].key,))
     head = publish(store, tracks)
     version = head['groups'][0]['version']
-    version = store.conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?',
+    version = store.conn.execute('SELECT id FROM group_versions WHERE external_version=? AND is_origin=1',
                                  (version,)).fetchone()[0]
     for sql in ('UPDATE group_versions SET content_digest=\'changed\' WHERE id=?',
-                'DELETE FROM group_members WHERE group_version_id=?',
-                'DELETE FROM unresolved_group_members WHERE group_version_id=?'):
+                'DELETE FROM group_members WHERE group_version_id=? AND recording_id IS NOT NULL',
+                'DELETE FROM group_members WHERE group_version_id=? AND raw_key IS NOT NULL'):
         with pytest.raises(sqlite3.IntegrityError, match='immutable|sealed'):
             with store.conn:
                 store.conn.execute(sql, (version,))

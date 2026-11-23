@@ -1,54 +1,31 @@
-"""Cold originals remain exact without SQL receipts or the producer directory."""
-from tests.file_custody_support import export_owner, restore_owner
-import shutil
+"""Retired archive files respect read leases and the collection grace period."""
+from types import SimpleNamespace
 
 import pytest
 
-from yt_playlist.core import fao, file_map, legacy_evidence, legacy_journals as owner
-from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.store import Store
+
+from yt_playlist.controllers.managed_file_retention import ManagedFileRetention
+from yt_playlist.core import fao, file_map, policy_documents
 
 
-def test_insert_once_rollback_snapshots_expiry_and_independent_restore(store, tmp_path):
-    with atomic_write(store):
-        legacy_evidence.retain(store.conn,'actions','operation',' exact signature ','unknown scope')
-        legacy_evidence.retain_many(store.conn,'catalog', [('library',str(i),' {"old": %d} '%i,'conversion') for i in range(129)])
-    assert store.conn.execute('SELECT count(*) FROM legacy_catalog_evidence').fetchone()[0] == 0
-    with pytest.raises(RuntimeError):
-        with atomic_write(store):
-            legacy_evidence.retain(store.conn,'actions','rolled-back','uncommitted','recovery')
-            raise RuntimeError('interrupted')
-    assert legacy_evidence.original(store.conn,'workflow','actions','rolled-back') is None
-    with store.read_view() as snapshot:
-        before = owner.head(snapshot.conn,'catalog')
-        for _ in range(40):
-            with atomic_write(store):
-                owner.maintain(store.conn,10**10)
-        assert owner.head(snapshot.conn,'catalog') == before
-        assert legacy_evidence.original(snapshot.conn,'catalog','library','128') == ' {"old": 128} '
-        assert owner.collect(store.conn,10**10) == 0
-    assert legacy_evidence.original(store.conn,'catalog','library','128') is None
-    assert owner.read(store.conn,'catalog','library','128')['state'] == 'expired'
-    with atomic_write(store):
-        legacy_evidence.retain_many(store.conn,'catalog',[('library','128','replacement','retry')])
-        legacy_evidence.retain(store.conn,'actions','operation','replacement','retry')
-    assert legacy_evidence.original(store.conn,'catalog','library','128') is None
-    assert legacy_evidence.original(store.conn,'workflow','actions','operation') == ' exact signature '
-    manifest = export_owner(store.conn, owner,tmp_path/'saved')
-    restored = Store(tmp_path/'restored.db')
+def test_retired_archive_pages_wait_for_the_reader_and_grace_period(tmp_path):
+    root = tmp_path / 'state.db.legacy-journals'
+    publication = file_map.update(root / 'artist', None, {'old': {'diagnostic': True}})
+    page = root / 'artist' / file_map.relative(publication)
+    unrelated = root / 'artist' / page.parent.name / 'keep.json'
+    fao.write(unrelated, b'{}')
+    collector = ManagedFileRetention(SimpleNamespace(), None, [(root, 'retired-archive-journals')], [])
+    now = fao.read(page).info.ctime_ns / 1e9
     try:
-        store.conn.backup(restored.conn)
-        shutil.rmtree(owner.directory(store.conn))
-        restore_owner(restored.conn, 'legacy-journals', owner,manifest)
-        restored.init_schema()
-        assert legacy_evidence.original(restored.conn,'workflow','actions','operation') == ' exact signature '
-        assert owner.read(restored.conn,'catalog','library','128')['state'] == 'expired'
-        path = next(owner.references(restored.conn))
-        fao.write(path, b'{}')
-        with pytest.raises(fao.CorruptFile):
-            legacy_evidence.original(restored.conn,'catalog','library','128')
+        assert collector.maintain(now) == 0
+        with policy_documents.retained_reader(root):
+            assert collector.maintain(now + 31 * 86400) == 0
+            assert page.exists()
+        assert collector.maintain(now + 31 * 86400) == 1
+        assert not page.exists()
+        assert unrelated.exists()
     finally:
-        restored.conn.close()
+        collector.close()
 
 
 def test_trie_seek_is_bounded_and_missing_required_pages_fail(tmp_path, monkeypatch):

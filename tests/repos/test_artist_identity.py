@@ -4,7 +4,7 @@ from contextlib import closing
 
 import pytest
 
-from yt_playlist.core import artists, legacy_evidence
+from yt_playlist.core import artists
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
@@ -27,18 +27,13 @@ def mute(s,aid):
     s.discovery.mark_scanned(aid,10)
 
 
-@pytest.mark.parametrize('legacy', [False, True])
-def test_ambiguity_guard_remains_effective_without_a_recovery_payload(tmp_path, legacy):
+def test_ambiguity_guard_remains_effective_without_a_recovery_payload(tmp_path):
     with closing(sqlite3.connect(tmp_path / 'guard.sqlite')) as conn:
-        if legacy:
-            conn.execute('CREATE TABLE identity_state_archive(kind TEXT,source_id TEXT,payload TEXT,reason TEXT,'
-                         'PRIMARY KEY(kind,source_id))')
-        else:
-            conn.execute('CREATE TABLE legacy_catalog_evidence(id INTEGER PRIMARY KEY)')
-            conn.execute('CREATE TABLE artist_ambiguities(artist_id INTEGER PRIMARY KEY,reason TEXT)')
+        conn.execute('CREATE TABLE artists(id INTEGER PRIMARY KEY,contextual_credit INTEGER NOT NULL DEFAULT 0)')
+        conn.execute('INSERT INTO artists(id) VALUES (7)')
         assert not artists.ambiguous_context(conn, 7)
-        legacy_evidence.mark_artist_ambiguity(conn, 7)
-        legacy_evidence.mark_artist_ambiguity(conn, 7)
+        artists.mark_ambiguity(conn, 7)
+        artists.mark_ambiguity(conn, 7)
         assert artists.ambiguous_context(conn, 7)
         assert not artists.ambiguous_context(conn, 8)
 
@@ -53,7 +48,7 @@ def test_first_provider_identity_keeps_provisional_id_and_feedback(store):
     assert store.artists.get_artist(aid)['provider_ids']=={'youtube':'verified'}
     assert store.tracks.identity_key_for_video('v') in store.rec_model.suppressed_keys('for_you',30)
     assert store.artist_similarity.cached_similar(aid,30)==[['Neighbor',.8]]
-    assert store.conn.execute('SELECT scanned_at FROM artist_scans WHERE artist_id=?',(aid,)).fetchone()[0]==10
+    assert store.conn.execute('SELECT discography_scanned_at FROM artists WHERE id=?',(aid,)).fetchone()[0]==10
 
 
 @pytest.mark.parametrize('other_first',[False,True])
@@ -81,7 +76,7 @@ def test_existing_provider_reconciles_state_and_old_handles_atomically(store,oth
     assert store.artists.resolve(f'@artist:{old}')==target
     assert store.artists.track_credits(tid)[0]['artist_id']==target
     assert store.tracks.identity_key_for_video('v') in store.rec_model.suppressed_keys('for_you',40)
-    assert store.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:]==(target,15)
+    assert store.discovery.repository.artist_scan_times([old,target])=={target:15}
     assert store.conn.execute('SELECT artist_id FROM album_artists').fetchone()[0]==target
     candidate = store.discovery.get_discovered_artists()[0]
     assert candidate['found_at']==20 and candidate['offered_count']==1
@@ -90,7 +85,7 @@ def test_existing_provider_reconciles_state_and_old_handles_atomically(store,oth
                                   (observations,)).fetchall()
     assert sorted(row[0] for row in captures)==['identity_reconciliation','provider_delivery']
     store.discovery.mark_scanned(old,50)
-    assert store.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:]==(target,50)
+    assert store.discovery.repository.artist_scan_times([old,target])=={target:50}
 
 
 def test_completed_artist_reconciliation_survives_a_later_ingestion_failure(store,monkeypatch):
@@ -179,7 +174,7 @@ def test_artist_reconciliation_excludes_retired_candidates_and_rebuilds_artist_s
     assert home_prepared.discovery(store, retained, 101)['discovery_artists'] == []
     assert store.rec_model.content_generation()==track_space
     assert store.rec_refresh.has_pending_changes()
-    assert store.settings.get_setting('rec_artist_fit_inputs') is None
+    assert store.rec_model.artist_state().fit_fingerprint is None
     assert store.conn.execute('SELECT identity_version FROM rec_model_selection_runs').fetchone()[0]==0
     prepared = model_refresh.rebuild(store,101)
     assert prepared is not None and 'rec_artist_content_vectors' in prepared['vectors']
@@ -210,22 +205,23 @@ def test_retained_impressions_do_not_erase_surviving_discovery_count(store,survi
         store.discovery.record_discovery_impressions('artist',[aid],'same-view',20)
     retired_candidate = target if surviving=='old' else old
     with store.conn:
-        store.conn.execute('DELETE FROM discovered_artists WHERE artist_id=?',(retired_candidate,))
+        store.conn.execute('UPDATE artists SET discovery_candidate=0 WHERE id=?', (retired_candidate,))
     refresh(store)
     assert store.discovery.get_discovered_artists()[0]['offered_count']==1
-    assert store.conn.execute("SELECT COUNT(*) FROM discovery_impressions WHERE artist_id IS NOT NULL").fetchone()[0]==1
+    assert store.conn.execute('SELECT count(*) FROM artists a,json_each(a.discovery_views)').fetchone()[0] == 1
 
 
 def test_redirects_reject_unverified_targets_verified_sources_and_chains(store):
     old = store.artists.ensure_artist('Provisional')
     other = store.artists.ensure_artist('Other provisional')
     target = store.artists.ensure_artist('Verified',provider='youtube',provider_id='verified')
+    set_redirect = 'UPDATE artists SET redirect_artist_id=?,redirect_source=?,redirect_created_at=1 WHERE id=?'
     for source,destination in [(old,other),(target,old)]:
         with pytest.raises(sqlite3.IntegrityError,match='provisional source and canonical target'):
-            store.conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,1)',(source,destination,'test'))
-    store.conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,1)',(old,target,'test'))
+            store.conn.execute(set_redirect,(destination,'test',source))
+    store.conn.execute(set_redirect,(target,'test',old))
     with pytest.raises(sqlite3.IntegrityError,match='provisional source and canonical target'):
-        store.conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,1)',(other,old,'test'))
+        store.conn.execute(set_redirect,(old,'test',other))
     store.conn.commit()
 
 
@@ -257,7 +253,7 @@ def test_unverified_normalized_names_never_mutate_another_artist_state(store):
     assert candidate['artist_id']!=known and candidate['artist']=='AC DC'
     assert store.artists.get_artist(candidate['artist_id'])['provisional']==1
     store.discovery.mark_scanned('AC DC',30)
-    scans = dict(store.conn.execute('SELECT artist_id,scanned_at FROM artist_scans'))
+    scans = store.discovery.repository.artist_scan_times([known,candidate['artist_id']])
     assert scans=={known:10,candidate['artist_id']:30}
 
 
@@ -304,7 +300,7 @@ def test_identified_release_keeps_provisional_artist_state(store,via):
                                   credits=[{'name':'Artist','id':'verified'}])
     assert store.artists.resolve(old)==target
     assert store.conn.execute('SELECT artist_id FROM album_artists').fetchone()[0]==target
-    assert store.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:]==(target,10)
+    assert store.discovery.repository.artist_scan_times([old,target])=={target:10}
     assert store.tracks.identity_key_for_video('known') in store.rec_model.suppressed_keys('for_you',30)
 
 
@@ -339,7 +335,7 @@ def test_identifying_shared_unresolved_release_credit_does_not_identify_other_re
     assert release_artists()=={'one':target,'two':second,'three':target}
     assert store.artists.resolve(old)==old
     assert store.conn.execute('SELECT artist_id FROM rec_feedback').fetchone()[0]==old
-    assert store.conn.execute('SELECT scanned_at FROM artist_scans WHERE artist_id=?',(old,)).fetchone()[0]==10
+    assert store.conn.execute('SELECT discography_scanned_at FROM artists WHERE id=?',(old,)).fetchone()[0]==10
     # A later exact upload can also be identified without promoting this ambiguous state.
     unknown = store.tracks.upsert_track('unknown','Unknown','Artist',None,200)
     assert store.artists.track_credits(unknown)[0]['artist_id']==old
@@ -371,5 +367,5 @@ def test_two_verified_homonyms_are_not_merged_on_a_changed_credit(store):
     refresh(store,provider='two')
     assert store.artists.track_credits(tid)[0]['artist_id']==target
     assert store.artists.resolve(old)==old
-    assert not store.conn.execute('SELECT * FROM artist_redirects').fetchall()
+    assert not store.conn.execute('SELECT 1 FROM artists WHERE redirect_artist_id IS NOT NULL').fetchall()
     assert store.tracks.identity_key_for_video('v') not in store.rec_model.suppressed_keys('for_you',40)

@@ -1,29 +1,31 @@
 """Current metadata facts in SQL; alternatives and explanations in keyed JSON.
 
-Installed histories keep their old readers/writers until explicit preparation.
+Provider evidence keeps its current data owner until explicit preparation.
 The SQL owners below are bounded by current subjects/fields, not lookup count.
 """
 import json
 import sqlite3
 import time
 
-from . import metadata_runtime_files as files
+from . import content_work, metadata_selections, metadata_runtime_files as files
+from . import runtime_metadata_choices as choices
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
-from .metadata_contract import ALTERNATIVE_SECONDS, PROVIDER_FIELDS, Capture, clock, runtime_active as active
+from .metadata_contract import ACTIVE, ALTERNATIVE_SECONDS, PROVIDER_FIELDS, Capture, clock, runtime_active as active
 
-# Append new names; these persisted numeric field codes must never be reordered.
-FIELDS = ('genre', 'bpm', 'energy', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
-          'mood_happy', 'mood_sad', 'mood_relaxed', 'mood_acoustic', 'instrumental', 'title', 'artist',
-          'orig_title', 'orig_artist', 'album', 'duration_s', 'available', 'video_type', 'artist_browse_id',
-          'album_browse_id', 'thumbnail', 'mb_year', 'loudness', 'dynamic_complexity', 'popularity', 'gain', 'label')
-CODES = {name: index + 1 for index, name in enumerate(FIELDS)}
+from .metadata_values import RUNTIME_CODES as CODES, RUNTIME_FIELDS as FIELDS
+from .recommendation_invalidation import queue_refresh
+
+CONFLICT_STATUS = ('unresolved', 'user_resolved', 'provider_converged')
+CONFLICT_COLUMNS = ('runtime_id AS id,recording_id,entry_id,field,'
+                    "CASE status WHEN 'user_resolved' THEN 1 WHEN 'provider_converged' THEN 2 ELSE 0 END AS status,"
+                    'runtime_revision AS revision,updated_at')
 
 
 def reserve(conn):
     if not conn.in_transaction:
         conn.execute('BEGIN IMMEDIATE')
     else:
-        conn.execute('UPDATE metadata_runtime_state SET active=active WHERE id=1')
+        conn.execute('UPDATE settings SET value=value WHERE 0')
 
 
 def next_identity(conn, table):
@@ -35,7 +37,7 @@ def code(field):
     return CODES['mb_year' if field == 'year' else field]
 
 
-def definitions():
+def definitions(*, entry_owner='catalog_entries'):
     yield 'metadata_runtime_state', '''CREATE TABLE metadata_runtime_state (
         id INTEGER PRIMARY KEY CHECK(id=1),active INTEGER NOT NULL CHECK(active IN (0,1)),
         gc_cursor INTEGER NOT NULL DEFAULT 0,gc_after REAL NOT NULL DEFAULT 0,
@@ -45,14 +47,14 @@ def definitions():
     yield 'metadata_runtime_recording_genres', '''CREATE TABLE metadata_runtime_recording_genres (
         recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,genre_id INTEGER REFERENCES metadata_runtime_genres(id),
         unresolved TEXT,CHECK(genre_id IS NULL OR unresolved IS NULL))'''
-    for scope, owner in (('recording', 'recordings'), ('entry', 'catalog_entries')):
+    for scope, owner in (('recording', 'recordings'), ('entry', entry_owner)):
         name = 'metadata_runtime_' + scope + '_sources'
         yield name, f'''CREATE TABLE {name} ({scope}_id INTEGER NOT NULL REFERENCES {owner}(id) ON DELETE CASCADE,
             field INTEGER NOT NULL CHECK(field BETWEEN 1 AND {len(FIELDS)}),
             provider_id INTEGER NOT NULL REFERENCES metadata_runtime_providers(id),
             PRIMARY KEY({scope}_id,field)) WITHOUT ROWID'''
     yield 'metadata_runtime_choices', f'''CREATE TABLE metadata_runtime_choices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,entry_id INTEGER NOT NULL REFERENCES catalog_entries(id) ON DELETE CASCADE,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,entry_id INTEGER NOT NULL REFERENCES {entry_owner}(id) ON DELETE CASCADE,
         field INTEGER NOT NULL CHECK(field BETWEEN 1 AND {len(FIELDS)}),
         provider_id INTEGER NOT NULL REFERENCES metadata_runtime_providers(id),revision INTEGER NOT NULL CHECK(revision>0),
         kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 6),text_value TEXT,number_value,
@@ -63,7 +65,7 @@ def definitions():
            OR (kind=5 AND text_value IS NULL AND number_value IS NULL AND genre_id IS NOT NULL)))'''
     yield 'metadata_runtime_conflicts', f'''CREATE TABLE metadata_runtime_conflicts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,recording_id INTEGER REFERENCES recordings(id) ON DELETE CASCADE,
-        entry_id INTEGER REFERENCES catalog_entries(id) ON DELETE CASCADE,field INTEGER NOT NULL CHECK(field BETWEEN 1 AND {len(FIELDS)}),
+        entry_id INTEGER REFERENCES {entry_owner}(id) ON DELETE CASCADE,field INTEGER NOT NULL CHECK(field BETWEEN 1 AND {len(FIELDS)}),
         status INTEGER NOT NULL CHECK(status IN (0,1,2)),revision INTEGER NOT NULL CHECK(revision>0),updated_at REAL NOT NULL,
         CHECK((recording_id IS NULL)<>(entry_id IS NULL)))'''
     for scope in ('recording', 'entry'):
@@ -71,28 +73,40 @@ def definitions():
         yield name, f'CREATE UNIQUE INDEX {name} ON metadata_runtime_conflicts({scope}_id,field) WHERE {scope}_id IS NOT NULL'
 
 
-def install(conn, context=None):
-    if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='metadata_runtime_state'").fetchone():
-        validate(conn)
+def installed(conn):
+    return conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_runtime_choices'").fetchone() is not None
+
+
+def install(conn, *, enrichment_clock):
+    if installed(conn):
+        validate(conn, enrichment_clock=enrichment_clock)
         return
     for _, sql in definitions():
         conn.execute(sql)
     conn.execute('INSERT INTO metadata_runtime_state(id,active) VALUES (1,0)')
 
 
-def validate(conn):
+def validate(conn, *, enrichment_clock):
+    from . import track_sources
     from .schema_contract import tokens as _tokens
     from .schema_contract import MigrationError
     from .schema_inspection import definitions as read_definitions
-    expected = dict(definitions())
+    entry_owner = 'track_sources' if track_sources.folded(conn) else 'catalog_entries'
+    expected = dict(definitions(entry_owner=entry_owner))
     actual = read_definitions(conn, expected)
     for name, sql in expected.items():
-        if name not in actual or _tokens(actual[name]) != _tokens(sql):
+        valid = {_tokens(sql)}
+        if name == 'metadata_runtime_state':
+            valid.add(_tokens(sql[:-1] + ', ' + enrichment_clock + ')'))
+        if name not in actual or _tokens(actual[name]) not in valid:
             raise MigrationError('Incompatible runtime metadata object: ' + name)
-    if not conn.execute('SELECT 1 FROM metadata_runtime_state WHERE id=1').fetchone():
+    state = conn.execute('SELECT active FROM metadata_runtime_state WHERE id=1').fetchone()
+    if state is None:
         raise MigrationError('Missing runtime metadata state')
-    if active(conn):
-        expected = views()
+    if state[0]:
+        from . import catalog_metadata
+        expected = views(include_choices=not catalog_metadata.installed(conn) or not catalog_metadata.ready(conn),
+                         entry_owner=entry_owner)
         actual = read_definitions(conn, expected)
         for name, sql in expected.items():
             if name not in actual or _tokens(actual[name]) != _tokens(sql):
@@ -100,59 +114,97 @@ def validate(conn):
 
 
 def provider_id(conn, name, *, create=True):
-    row = conn.execute('SELECT id FROM metadata_runtime_providers WHERE name=?', (name,)).fetchone()
-    if row:
+    row = conn.execute('SELECT metadata_provider_id FROM enrichment_provider_config WHERE provider=?', (name,)).fetchone()
+    if row and row[0] is not None:
         return row[0]
     if not create:
         return None
     if not isinstance(name, str) or not 0 < len(name.encode()) <= 256:
         raise ValueError('Invalid metadata provider')
-    return conn.execute('INSERT INTO metadata_runtime_providers(name) VALUES (?)', (name,)).lastrowid
-
-
-def genre_id(conn, key):
-    if key is None:
-        return None
-    conn.execute('INSERT INTO metadata_runtime_genres(genre_key) VALUES (?) ON CONFLICT DO NOTHING', (key,))
-    return conn.execute('SELECT id FROM metadata_runtime_genres WHERE genre_key=?', (key,)).fetchone()[0]
+    return conn.execute('INSERT INTO enrichment_provider_config(provider,metadata_provider_id) '
+        'VALUES (?,(SELECT COALESCE(max(metadata_provider_id),0)+1 FROM enrichment_provider_config)) '
+        'ON CONFLICT(provider) DO UPDATE SET metadata_provider_id=COALESCE(enrichment_provider_config.metadata_provider_id,'
+        'excluded.metadata_provider_id) RETURNING metadata_provider_id', (name,)).fetchone()[0]
 
 
 def field_expression(alias):
     return 'CASE '+alias+'.field '+ ' '.join(f"WHEN {index+1} THEN '{name}'" for index, name in enumerate(FIELDS))+' END'
 
 
-def value_expression(alias):
-    return (f'CASE {alias}.kind WHEN 4 THEN {alias}.number_value WHEN 5 THEN '
-        f'(SELECT g.name FROM metadata_runtime_genres m JOIN genre_catalog g ON g.key=COALESCE('
-        f'(SELECT genre_key FROM genre_redirects WHERE retired_key=m.genre_key),m.genre_key) WHERE m.id={alias}.genre_id) '
-        f'ELSE {alias}.text_value END')
+def value_expression(alias, *, historical=False):
+    if historical:
+        genre = ('SELECT g.name FROM metadata_runtime_genres m JOIN genre_catalog g ON g.key=COALESCE('
+                 '(SELECT genre_key FROM genre_redirects WHERE retired_key=m.genre_key),m.genre_key) '
+                 f'WHERE m.id={alias}.genre_id')
+    else:
+        genre = ('SELECT g.name FROM genre_catalog g WHERE g.key=COALESCE('
+                 f'(SELECT redirect_key FROM genre_catalog WHERE key={alias}.genre_key),{alias}.genre_key)')
+    return (f'CASE {alias}.kind WHEN 4 THEN {alias}.number_value WHEN 5 THEN ({genre}) '
+            f'ELSE {alias}.text_value END')
 
 
-def views():
-    result = {'entry_field_choices': 'CREATE VIEW entry_field_choices AS SELECT c.entry_id,'+
-        field_expression('c')+' AS field,json_quote('+value_expression('c')+') AS value_json,p.name AS source '
-        'FROM metadata_runtime_choices c JOIN metadata_runtime_providers p ON p.id=c.provider_id WHERE c.kind<>0'}
+def selection_view(scope, *, runtime, relation='recording_metadata_selections'):
+    name = 'recording_field_sources' if scope == 'recording' else 'item_field_sources'
+    subject = scope + '_id'
+    if relation == metadata_selections.VIEW:
+        relation = '(' + metadata_selections.projection(scope) + ')'
+    if runtime:
+        return (f'CREATE VIEW {name} AS SELECT s.{subject},s.field,p.provider AS source,NULL AS selected_at '
+                f'FROM {relation} s JOIN enrichment_provider_config p '
+                f'ON p.metadata_provider_id=s.runtime_provider_id WHERE s.{subject} IS NOT NULL')
+    return (f'CREATE VIEW {name} AS SELECT s.{subject},s.field,COALESCE(d.provider,o.legacy_source,s.legacy_source) '
+            f'AS source,s.selected_at FROM {relation} s '
+            'LEFT JOIN metadata_observations o ON o.id=s.observation_id LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id '
+            f'WHERE s.{subject} IS NOT NULL AND s.attribution_status IS NOT NULL')
+
+
+def views(*, include_choices=True, entry_owner='catalog_entries', compact=False, selection_relation='recording_metadata_selections'):
+    result = {}
+    if include_choices:
+        result['entry_field_choices'] = ('CREATE VIEW entry_field_choices AS SELECT c.entry_id,'+
+            field_expression('c')+' AS field,json_quote('+value_expression('c', historical=True)+
+            ') AS value_json,p.name AS source '
+            'FROM metadata_runtime_choices c JOIN metadata_runtime_providers p ON p.id=c.provider_id WHERE c.kind<>0')
     for scope, view in (('recording', 'recording_field_sources'), ('entry', 'item_field_sources')):
-        result[view] = (f'CREATE VIEW {view} AS SELECT s.{scope}_id,'+field_expression('s')+
+        result[view] = selection_view(scope, runtime=True, relation=selection_relation) if compact else (
+            f'CREATE VIEW {view} AS SELECT s.{scope}_id,'+field_expression('s')+
             ' AS field,p.name AS source,NULL AS selected_at FROM metadata_runtime_'+scope+'_sources s '
             'JOIN metadata_runtime_providers p ON p.id=s.provider_id')
     result['enrichment_conflict'] = ('CREATE VIEW enrichment_conflict AS SELECT c.id,e.id AS track_id,'
         "CASE WHEN c.field="+str(code('mb_year'))+" THEN 'year' ELSE "+field_expression('c')+
         " END AS field,'[]' AS candidates,c.status AS resolved,NULL AS resolved_value,c.updated_at,e.recording_id,"
         "e.video_id AS input_video_id,CASE WHEN c.recording_id IS NOT NULL THEN 'recording' ELSE 'item' END AS field_scope "
-        'FROM metadata_runtime_conflicts c JOIN catalog_entries e ON e.id=c.entry_id OR e.recording_id=c.recording_id')
+        f'FROM metadata_runtime_conflicts c JOIN {entry_owner} e ON e.id=c.entry_id OR e.recording_id=c.recording_id')
+    if compact:
+        result['enrichment_conflict'] = ('CREATE VIEW enrichment_conflict AS SELECT c.runtime_id AS id,e.id AS track_id,'
+            "CASE c.field WHEN 'mb_year' THEN 'year' ELSE c.field END AS field,'[]' AS candidates,"
+            "CASE c.status WHEN 'user_resolved' THEN 1 WHEN 'provider_converged' THEN 2 ELSE 0 END AS resolved,"
+            'NULL AS resolved_value,c.updated_at,e.recording_id,e.video_id AS input_video_id,'
+            "CASE WHEN c.recording_id IS NOT NULL THEN 'recording' ELSE 'item' END AS field_scope "
+            f'FROM metadata_conflicts c JOIN {entry_owner} e ON e.id=c.entry_id OR e.recording_id=c.recording_id '
+            'WHERE c.runtime_id IS NOT NULL')
     return result
 
 
-def activate(conn):
-    for name, sql in views().items():
+def replace_views(conn, **layout):
+    for name, sql in views(**layout).items():
         conn.execute('DROP VIEW '+name)
         conn.execute(sql)
-    conn.execute('UPDATE metadata_runtime_state SET active=1 WHERE id=1')
+
+
+def activate(conn):
+    from . import source_metadata
+
+    changed = not active(conn)
+    replace_views(conn, include_choices=False, entry_owner='track_sources', compact=True,
+                  selection_relation=metadata_selections.VIEW)
+    conn.execute("UPDATE settings SET value='1' WHERE key=?", (ACTIVE,))
+    if changed:
+        source_metadata.refresh_range(conn)
 
 
 def subject(conn, entry):
-    row = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()
+    row = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry,)).fetchone()
     if row is None:
         raise ValueError('Unknown metadata catalog input')
     return tuple(row)
@@ -161,41 +213,38 @@ def subject(conn, entry):
 def selected_source(conn, entry, field):
     recording, _ = subject(conn, entry)
     scope, identity = ('recording', recording) if field in RECORDING_FIELDS else ('entry', entry)
-    row = conn.execute('SELECT p.name FROM metadata_runtime_'+scope+'_sources s '
-        'JOIN metadata_runtime_providers p ON p.id=s.provider_id WHERE s.'+scope+'_id=? AND s.field=?',
-        (identity, code(field))).fetchone()
+    view = 'recording_field_sources' if scope == 'recording' else 'item_field_sources'
+    row = conn.execute(f'SELECT source FROM {view} WHERE {scope}_id=? AND field=?', (identity, field)).fetchone()
     return row[0] if row else None
 
 
-def select(conn, entry, field, value, source):
+def select(conn, entry, field, value, source, *, now=None, prepared=None):
     from . import genre_classifications, metadata_values
+    from . import catalog_metadata
     if field not in CODES:
         raise ValueError('Unknown metadata field')
-    metadata_values.prepare(conn, field, value,
-        unit=metadata_values.DEFAULT_UNIT.get(field) if value not in (None, '') else None)
-    recording, video = subject(conn, entry)
+    if prepared is None:
+        prepared = metadata_values.prepare(conn, field, value,
+            unit=metadata_values.DEFAULT_UNIT.get(field) if value not in (None, '') else None)
+    recording, _ = subject(conn, entry)
     if field in RECORDING_FIELDS:
         scope, identity = 'recording', recording
         if field == 'genre':
-            genre_classifications.write(conn, 'recordings', recording, value)
-            from .genre_identity import resolve
-            key, _ = resolve(conn, value)
-            conn.execute('INSERT INTO metadata_runtime_recording_genres VALUES (?,?,?) '
-                'ON CONFLICT(recording_id) DO UPDATE SET genre_id=excluded.genre_id,unresolved=excluded.unresolved',
-                (recording, genre_id(conn, key), value if key is None else None))
+            genre_classifications.write_evidence(conn, 'recordings', recording, prepared)
         else:
             conn.execute(f'UPDATE recordings SET {field}=? WHERE id=? AND {field} IS NOT ?', (value, recording, value))
     else:
         scope, identity = 'entry', entry
-        table, key, target = ('youtube_items','video_id',video) if video is not None else ('unresolved_items','entry_id',entry)
-        conn.execute(f'UPDATE {table} SET {field}=? WHERE {key}=? AND {field} IS NOT ?', (value, target, value))
-    conn.execute('INSERT INTO metadata_runtime_'+scope+'_sources VALUES (?,?,?) ON CONFLICT('+scope+
-        '_id,field) DO UPDATE SET provider_id=excluded.provider_id', (identity, code(field), provider_id(conn, source)))
+        from . import track_sources
+        track_sources.write_field(conn, entry, field, value)
+    metadata_selections.save_runtime(conn, scope, identity, field, provider_id(conn, source))
+    catalog_metadata.audit(conn, entry, recording, field, source, 'select', value,
+                           time.time() if now is None else now, genre_key=prepared.genre_key)
 
 
 def choose(conn, entry, field, value=None, *, withdraw=False, source='user', now=None, expected_recording_id=None,
            _prepared=None, _invalidate=True, _identity=None, _revision=None):
-    from . import metadata_values
+    from . import metadata_values, recording_metadata
     reserve(conn)
     recording, video = subject(conn, entry)
     if expected_recording_id is not None and recording != expected_recording_id:
@@ -208,32 +257,29 @@ def choose(conn, entry, field, value=None, *, withdraw=False, source='user', now
     else:
         kind = {'null': 1, 'blank': 2, 'value': 4 if prepared.number is not None else 5 if prepared.genre_key else 3,
                 'unresolved': 6}[prepared.kind]
-        text, number, genre = prepared.text, prepared.number, genre_id(conn, prepared.genre_key)
+        text, number, genre = prepared.text, prepared.number, prepared.genre_key
         if kind == 5:
             text = None
-    previous = conn.execute('SELECT id,revision FROM metadata_runtime_choices WHERE entry_id=? AND field=?',
-                            (entry, code(field))).fetchone()
+    previous = choices.head(conn, entry, code(field))
     if (_identity is not None or _revision is not None) and active(conn):
         raise ValueError('Explicit metadata revisions are only valid during preparation')
     revision = _revision if _revision is not None else previous['revision'] + 1 if previous else 1
     identity = (_identity if _identity is not None else previous['id'] if previous else
-                next_identity(conn, 'metadata_runtime_choices'))
+                choices.next_identity(conn))
     files.publish(conn, 'choices', (identity,), revision, {'entry_id':entry, 'recording_id':recording,
         'input_video_id':video, 'field':field, 'value':value, 'withdrawn':withdraw, 'source':source, 'at':at})
-    conn.execute('INSERT INTO metadata_runtime_choices VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(entry_id,field) DO UPDATE SET '
-        'provider_id=excluded.provider_id,revision=excluded.revision,kind=excluded.kind,text_value=excluded.text_value,'
-        'number_value=excluded.number_value,genre_id=excluded.genre_id',
-        (identity, entry, code(field), provider_id(conn, source), revision, kind, text, number, genre))
+    choices.save(conn, entry, code(field), identity, provider_id(conn, source), revision, kind, text, number, genre)
+    recording_metadata.audit_choice(conn, entry, recording, field, source,
+                                  metadata_values.Value('withdrawn') if withdraw else prepared, at)
     if _invalidate:
-        conn.execute("INSERT INTO rec_change_queue(kind,item) VALUES ('refresh','') ON CONFLICT(kind,item) DO UPDATE SET revision=revision+1")
-        conn.execute('INSERT INTO rec_content_pending(identity_key) SELECT identity_key FROM recordings WHERE id=? '
-                     'ON CONFLICT(identity_key) DO UPDATE SET revision=revision+1', (recording,))
+        queue_refresh(conn)
+        content_work.for_recording(conn, recording)
     return identity
 
 
 def alternatives(conn, recording, provider, *, now=None):
     now = time.time() if now is None else now
-    state = conn.execute('SELECT at FROM enrichment_provider_state WHERE recording_id=? AND provider=?',
+    state = conn.execute("SELECT at FROM enrichment_provider_state WHERE recording_id=? AND provider=? AND status<>'queued'",
                          (recording, provider)).fetchone()
     identity = provider_id(conn, provider, create=False)
     if state is None or identity is None or state[0] <= now - ALTERNATIVE_SECONDS:
@@ -302,7 +348,7 @@ def record_attempt(conn, entry, provider, fields, *, cycle, retry=False, now=Non
     validate_capture(conn, entry, provider, fields, delivery_id, run_id=run_id)
     if delivery_id is not None and delivery_id.fields != fields:
         raise ValueError('Provider completion must account for its whole captured result')
-    previous = conn.execute('SELECT * FROM enrichment_provider_state WHERE recording_id=? AND provider=?',
+    previous = conn.execute("SELECT * FROM enrichment_provider_state WHERE recording_id=? AND provider=? AND status<>'queued'",
                             (recording, provider)).fetchone()
     prior = alternatives(conn, recording, provider, now=now)
     if previous and (now <= previous['at'] or delivery_id is not None and delivery_id.at <= previous['at']
@@ -328,8 +374,17 @@ def record_attempt(conn, entry, provider, fields, *, cycle, retry=False, now=Non
 
 def conflict(conn, entry, field):
     recording, _ = subject(conn,entry)
-    return conn.execute('SELECT * FROM metadata_runtime_conflicts WHERE field=? AND '
-                        '(entry_id=? OR recording_id=?) ORDER BY entry_id DESC LIMIT 1', (code(field),entry,recording)).fetchone()
+    return conn.execute(f'SELECT {CONFLICT_COLUMNS} FROM metadata_conflicts WHERE runtime_id IS NOT NULL AND field=? '
+        'AND (entry_id=? OR recording_id=?) ORDER BY entry_id DESC LIMIT 1',
+        ('mb_year' if field == 'year' else field, entry, recording)).fetchone()
+
+
+def store_conflict(conn, entry, recording, field, scope, identity, status, revision, at):
+    conn.execute('INSERT INTO metadata_conflicts(entry_id,recording_id,field_scope,field,status,updated_at,runtime_id,'
+                 'runtime_revision) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(runtime_id) DO UPDATE SET status=excluded.status,'
+                 'runtime_revision=excluded.runtime_revision,updated_at=excluded.updated_at',
+                 (None if scope == 'recording' else entry, recording if scope == 'recording' else None,
+                  scope, field, CONFLICT_STATUS[status], at, identity, revision))
 
 
 def conflict_details(conn, row, *, now=None):
@@ -371,23 +426,22 @@ def upsert_conflict(conn, entry, field, candidates, *, now=None, refreshed_provi
     if status==2 or status==1 and {str(c['value']) for c in current}-{str(c['value']) for c in previous.get('candidates',[])}:
         status=0
     revision = old['revision']+1 if old else 1
-    identity = old['id'] if old else next_identity(conn, 'metadata_runtime_conflicts')
+    identity = old['id'] if old else next_identity(conn, 'metadata_conflicts')
     files.publish(conn,'conflicts',(identity,),revision,{'candidates':current})
-    conn.execute('INSERT INTO metadata_runtime_conflicts VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
-        'status=excluded.status,revision=excluded.revision,updated_at=excluded.updated_at',
-        (identity,recording if field in RECORDING_FIELDS else None,None if field in RECORDING_FIELDS else entry,
-         code(field),status,revision,now))
+    store_conflict(conn, entry, recording, field, metadata_values.scope(field), identity, status, revision, now)
 
 
 def converge(conn, entry, agreeing, *, now=None):
     recording, _ = subject(conn,entry)
-    for row in conn.execute('SELECT * FROM metadata_runtime_conflicts WHERE status=0 AND (entry_id=? OR recording_id=?)',
+    for row in conn.execute(f'SELECT {CONFLICT_COLUMNS} FROM metadata_conflicts WHERE runtime_id IS NOT NULL '
+                            "AND status='unresolved' AND field<>'energy' "
+                            'AND (entry_id=? OR recording_id=?)',
                             (entry,recording)).fetchall():
-        field=FIELDS[row['field']-1]
+        field = row['field']
         previous={candidate['provider'] for candidate in conflict_details(conn,row,now=now)['candidates']}
         providers=set(agreeing.get('year' if field=='mb_year' else field,{}))
         if len(providers)>=2 and previous<=providers:
-            conn.execute('UPDATE metadata_runtime_conflicts SET status=2,updated_at=? WHERE id=?',
+            conn.execute("UPDATE metadata_conflicts SET status='provider_converged',updated_at=? WHERE runtime_id=?",
                          (time.time() if now is None else now,row['id']))
 
 

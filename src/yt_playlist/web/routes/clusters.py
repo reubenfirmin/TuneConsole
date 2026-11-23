@@ -32,6 +32,10 @@ def build(ctx) -> APIRouter:
     def genres():
         return JSONResponse(commands.genres())
 
+    @router.post('/clusters/uploads')
+    def playable_uploads(keys: list[str]):
+        return JSONResponse(commands.playable_uploads(keys))
+
     @router.post('/clusters/expand')
     async def expand(request: Request):
         return JSONResponse(await commands.expansion(await request.json()))

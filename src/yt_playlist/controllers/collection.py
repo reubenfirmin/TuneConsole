@@ -47,22 +47,18 @@ class Collection:
         with self.repository.membership_transaction():
             inputs = self.repository.tracklist_inputs(album_id, keys if entries is None else [])
             rows = policy.tracklist_rows(keys, entries, inputs)
-            self.repository.store_album_tracklist(album_id, browse_id, rows, occurrences=inputs['occurrences'],
+            self.repository.store_album_tracklist(album_id, browse_id, rows,
                 ordered=entries is not None, complete=bool(rows), expected_count=len(rows), now=now)
-            if not inputs['occurrences'] or entries is None and video_ids:
-                self.repository.store_album_share(album_id, browse_id, title, video_ids,
-                    occurrences=inputs['occurrences'], now=now)
-            if inputs['occurrences']:
-                self._collect_tracklists(browse_id)
+            if entries is None and video_ids:
+                self.repository.store_album_share(album_id, browse_id, title, video_ids)
+            self._collect_tracklists(browse_id)
 
     def cache_partial_album(self, browse_id, title, artist, thumbnail, entries, *, expected_count=None):
-        if not self.repository.uses_occurrences():
-            return
         entries = list(entries)
         album_id = self.albums.observe(browse_id, title=title, artist=artist, thumbnail=thumbnail, rank=1)
         with self.repository.membership_transaction():
-            rows = policy.tracklist_rows([], entries, {'occurrences': True})
-            self.repository.store_album_tracklist(album_id, browse_id, rows, occurrences=True,
+            rows = policy.tracklist_rows([], entries, {})
+            self.repository.store_album_tracklist(album_id, browse_id, rows,
                 ordered=True, complete=False, expected_count=expected_count, now=clock(None))
             self._collect_tracklists(browse_id)
 
@@ -71,9 +67,6 @@ class Collection:
 
     def cached_album_share(self, browse_id):
         return views.album_share(self.repository.album_share_inputs(browse_id))
-
-    def cached_album_tracklist_ids(self):
-        return self.repository.cached_album_tracklist_ids()
 
     def complete_album_tracklist_ids(self):
         return self.repository.complete_album_tracklist_ids()
@@ -92,7 +85,7 @@ class Collection:
         with self.repository.membership_transaction():
             self.repository.advance_album_revision(None)
             self.repository.delete_album_memberships(None)
-            self.repository.reset_legacy_cohort(replace=True)
+            self.repository.reset_saved_album_observations()
             for identity in ids:
                 self.repository.save_album_membership(identity, None)
 
@@ -107,7 +100,7 @@ class Collection:
                 for album_id in prepared[identity]:
                     self.repository.save_album_membership(album_id, identity)
                 self.repository.store_snapshot_observation(identity, at)
-            if accepted and policy.can_retire_legacy(self.repository.legacy_cohort_inputs()):
+            if accepted and self.repository.all_active_albums_synced():
                 self.repository.delete_album_memberships(None)
             return set(accepted)
 
@@ -137,7 +130,7 @@ class Collection:
         with self.repository.membership_transaction():
             self.repository.advance_album_revision(account_id)
             if account_id is None:
-                self.repository.reset_legacy_cohort(replace=not self.repository.legacy_cohort_inputs()['has_legacy'])
+                self.repository.reset_saved_album_observations()
             self.repository.save_album_membership(identity, account_id)
 
     def _observe_saved_album(self, data):

@@ -130,11 +130,12 @@ def test_reused_definition_is_resolved_for_each_served_generation(store):
     state, rows = compiled(store, second, 1103 + 86400)
     assert rows[gid]['positive'] == .5 and rows[gid]['days'] == 2
     assert not any(state['excluded'].values())
-    version = first['groups'][0]['version']
-    next_version = second['groups'][0]['version']
-    assert not store.conn.execute("SELECT 1 FROM group_evidence_generations WHERE kind='offer'").fetchone()
-    assert store.conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?', (version,)).fetchone()[0] == (
-        store.conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?', (next_version,)).fetchone()[0])
+    assert not store.conn.execute("SELECT 1 FROM group_evidence_contexts "
+                                  "WHERE kind='offer' AND generation_id IS NOT NULL").fetchone()
+    versions = list(store.conn.execute('SELECT v.id,v.content_digest FROM group_versions v '
+        'JOIN taste_groups g ON g.id=v.group_id WHERE g.external_key=? ORDER BY v.generation_id', (gid,)))
+    assert len(versions) == 2 and versions[0]['id'] != versions[1]['id']
+    assert versions[0]['content_digest'] == versions[1]['content_digest']
 
 
 def test_regrouped_parent_keeps_history_without_inventing_child_history(store):
@@ -207,9 +208,6 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
     from tests.test_group_preparation import seed
     from yt_playlist.rec import choice_bandit, choice_context, choice_retention, group_preparation
 
-    # Keep this contract on the current compact layout. Revision binding is
-    # independently checked against genuine startup in test_store_fixture.
-    assert store._compact_group_files
     tracks = recordings([('House', 3, .1)])
     seed(store, tracks)
     worker = group_preparation.Preparation(store)

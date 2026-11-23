@@ -17,7 +17,7 @@ def test_profile_preparation_budget_on_synthetic_catalog(store, record_property)
     elapsed = time.monotonic() - start
     record_property('musical_profile_96_recordings_seconds', elapsed)
     assert elapsed < 15
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 96
-    plans = store.conn.execute('EXPLAIN QUERY PLAN SELECT identity_key FROM rec_musical_profiles '
-                               'WHERE version<? LIMIT 32', (profiles.VERSION,)).fetchall()
+    assert store.conn.execute('SELECT COUNT(*) FROM recordings WHERE musical_profile_version IS NOT NULL').fetchone()[0] == 96
+    plans = store.conn.execute('EXPLAIN QUERY PLAN SELECT identity_key FROM recordings '
+                               'WHERE musical_profile_version<? LIMIT 32', (profiles.VERSION,)).fetchall()
     assert any('SEARCH' in row[3] and 'version' in row[3] for row in plans)

@@ -1,0 +1,130 @@
+body:has(.page-schema-admin) { overflow: hidden; }
+body:not(:has(.page-clusters)) main.page-schema-admin {
+  position: fixed; inset: var(--setup-banner-height, 0px) 0 0 13.5rem;
+  width: auto; max-width: none; margin: 0; padding: 0; animation: none;
+}
+#schema-map {
+  --sd-accent: var(--teal);
+  --sd-view: var(--accent-2);
+  --sd-primary: var(--amber);
+  display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; background: var(--bg);
+}
+.sd-header {
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  padding: 1rem 1.45rem; border-bottom: 1px solid var(--border); background: var(--surface-card); z-index: 2;
+}
+.sd-header h1 { margin: 0 0 .18rem; font-size: 1.3rem; line-height: 1.15; letter-spacing: -.025em; }
+.sd-header p { margin: 0; color: var(--dim); font: .72rem var(--font-mono); }
+.sd-tools { display: flex; align-items: center; gap: .65rem; }
+#sd-filter { width: min(23vw, 14.5rem); cursor: pointer; }
+.sd-search { position: relative; }
+#schema-map :is(button, input, select) { font: .8rem var(--font-sans); color: var(--text); }
+#schema-map :is(input, select, .sd-zoom button) {
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-card);
+  padding: .55rem .65rem;
+}
+#schema-map .sd-tools :is(input, select) { height: 2.25rem; margin: 0; }
+#schema-map :is(button, summary) { cursor: pointer; }
+#schema-map :is(button, input, select, svg):focus-visible { outline: 2px solid var(--sd-accent); outline-offset: 2px; }
+#sd-search { width: min(28vw, 23rem); }
+#sd-results {
+  position: absolute; z-index: 3; top: calc(100% + .4rem); left: 0; width: max(100%, 18rem); max-height: 24rem;
+  overflow: auto; background: var(--surface-card); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: 0 12px 32px color-mix(in srgb, var(--shadow-ink) 38%, transparent);
+}
+#sd-results button {
+  display: block; width: 100%; text-align: left; background: transparent; border: 0;
+  border-bottom: 1px solid var(--border); padding: .65rem .8rem; overflow-wrap: anywhere;
+}
+#sd-results button:is(:hover, :focus-visible) { background: var(--surface-interactive); }
+#sd-results small { display: block; margin-top: .18rem; color: var(--dim); }
+#sd-results > p { padding: .7rem .8rem; }
+.sd-body { display: flex; min-height: 0; }
+.sd-workspace {
+  position: relative; flex: 1; min-width: 0; overflow: hidden;
+  background: radial-gradient(circle, color-mix(in srgb, var(--dim) 22%, transparent) .7px, transparent 1px) 0 0 / 20px 20px;
+}
+.sd-legend, .sd-zoom {
+  position: absolute; z-index: 1; display: flex; align-items: center; gap: .8rem; padding: .5rem .75rem;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-card);
+}
+.sd-legend { top: .85rem; left: .95rem; color: var(--dim); font-size: .7rem; pointer-events: none; }
+.sd-legend span { display: inline-flex; gap: .3rem; align-items: center; }
+.sd-legend i { display: inline-block; width: .65rem; height: .55rem; border: 1px solid var(--sd-accent); }
+.sd-legend .sd-primary-key { border-color: var(--sd-primary); background: var(--sd-primary); }
+.sd-legend .sd-view-key { border-color: var(--sd-view); border-style: dashed; }
+.sd-legend .sd-line-key { height: 0; border: 0; border-top: 2px solid var(--dim); }
+.sd-zoom { right: .95rem; bottom: .85rem; gap: .25rem; padding: .28rem; }
+#schema-map .sd-zoom button { padding: .32rem .55rem; }
+#schema-map .sd-zoom button:hover { background: var(--surface-interactive); }
+#sd-canvas { display: block; width: 100%; height: 100%; user-select: none; cursor: grab; }
+#sd-canvas [hidden] { display: none; }
+#sd-canvas.sd-dragging { cursor: grabbing; }
+.sd-card { cursor: pointer; }
+.sd-card:focus { outline: none; }
+.sd-card-box { fill: var(--surface-card); stroke: var(--border-strong); stroke-width: 1.2; }
+.sd-card-accent { fill: none; stroke: var(--sd-accent); stroke-width: 3; }
+.sd-card.sd-view { --sd-accent: var(--sd-view); }
+.sd-view .sd-card-box { stroke-dasharray: 5 3; }
+.sd-card.sd-primary { --sd-accent: var(--sd-primary); }
+.sd-primary .sd-card-box { fill: color-mix(in srgb, var(--surface-card) 87%, var(--sd-primary)); stroke: var(--sd-primary); }
+.sd-card:is(:focus-visible, :hover, .sd-selected) .sd-card-box { stroke: var(--sd-accent); stroke-width: 2; }
+.sd-card.sd-selected .sd-card-box { fill: color-mix(in srgb, var(--surface-card) 89%, var(--sd-accent)); }
+.sd-card-title { fill: var(--text); font-family: var(--font-mono); font-weight: 650; }
+.sd-primary .sd-card-title { fill: var(--sd-primary); }
+.sd-card-meta { fill: var(--dim); font: 11px var(--font-sans); }
+.sd-card-divider { stroke: var(--border); }
+.sd-card-key { fill: var(--sd-accent); font: 700 9px var(--font-mono); }
+.sd-card-column { fill: var(--text); font: 11px var(--font-mono); }
+.sd-edge { fill: none; stroke: var(--dim); stroke-width: 1.15; opacity: .47; stroke-linejoin: miter; }
+.sd-edge:hover { opacity: 1; }
+.sd-edge-missing { stroke-dasharray: 4 3; }
+.sd-tracing .sd-edge:not(.sd-highlight) { opacity: .12; }
+.sd-tracing .sd-highlight { opacity: 1; stroke: var(--sd-accent); stroke-width: 1.6; }
+.sd-tracing .sd-card:not(.sd-related, .sd-primary, .sd-selected) { opacity: .38; }
+.sd-tracing .sd-related .sd-card-box { stroke: var(--sd-accent); }
+#sd-canvas marker path { stroke: context-stroke; stroke-width: 1.4; fill: none; }
+.sd-landmark { display: none; cursor: pointer; }
+.sd-landmark rect { fill: var(--surface-card); stroke: var(--sd-primary); }
+.sd-landmark text { fill: var(--sd-primary); font: 650 12px var(--font-mono); pointer-events: none; }
+.sd-landmark:hover rect { fill: var(--surface-interactive); stroke-width: 2; }
+.sd-label-leader { fill: none; stroke: var(--text); stroke-opacity: .5; stroke-dasharray: 2 2; pointer-events: none; }
+.sd-overview .sd-landmark { display: initial; }
+.sd-overview .sd-card > :is(text, path) { display: none; }
+.sd-zoomed-out .sd-card-title { font-size: min(calc(11px / var(--sd-scale)), var(--sd-title-limit)); }
+.sd-zoomed-out .sd-card > :is(.sd-card-meta, .sd-card-divider, .sd-card-key, .sd-card-column) { display: none; }
+.sd-zoomed-out .sd-card-title { transform: translateY(35px); }
+.sd-overview .sd-card-box { vector-effect: non-scaling-stroke; stroke-width: .65; }
+.sd-overview .sd-edge {
+  vector-effect: non-scaling-stroke; stroke-width: .55; marker-start: none; marker-end: none;
+}
+.sd-overview .sd-highlight { stroke-width: 1.25; }
+.sd-filtered .sd-edge { vector-effect: non-scaling-stroke; stroke-width: 1.1; opacity: .78; }
+.sd-filtered .sd-highlight { stroke-width: 1.5; opacity: 1; }
+.sd-filtered.sd-zoomed-out .sd-landmark { display: initial; }
+.sd-filtered.sd-zoomed-out .sd-card-title { display: none; }
+.sd-secondary-landmark rect { stroke: var(--sd-accent); }
+.sd-secondary-landmark text { fill: var(--text); }
+
+#sd-detail {
+  flex: 0 0 23rem; min-width: 0; overflow: auto; padding: 1.1rem 1.3rem 1.6rem;
+  background: var(--surface-card); border-left: 1px solid var(--border-strong);
+}
+.sd-detail-top { display: flex; justify-content: space-between; align-items: first baseline; gap: .5rem; }
+.sd-detail-top p { margin: 0; color: var(--dim); font-size: .72rem; }
+#schema-map .sd-close { color: var(--sd-accent); padding: 0; border: 0; background: transparent; }
+#sd-detail h2 { margin: .55rem 0 .95rem; font: 650 1.06rem var(--font-mono); overflow-wrap: anywhere; }
+.sd-entity-description { margin: 0 0 .95rem; font-size: .85rem; line-height: 1.45; }
+#sd-detail h3 { font-size: .83rem; margin: 1.2rem 0 .4rem; }
+.sd-columns { width: 100%; border-collapse: collapse; text-align: left; table-layout: fixed; font: .72rem var(--font-mono); }
+.sd-columns th, .sd-columns td { padding: .4rem .25rem; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.sd-columns th { color: var(--dim); font: 650 .72rem var(--font-sans); }
+.sd-columns :is(th, td):nth-child(2) { width: 24%; }
+.sd-columns :is(th, td):last-child { width: 18%; color: var(--sd-accent); }
+.sd-reference { border-bottom: 1px solid var(--border); padding: .45rem 0; overflow-wrap: anywhere; }
+#schema-map .sd-reference button { color: var(--sd-accent); background: transparent; border: 0; padding: 0; text-align: left; }
+.sd-reference small { display: block; margin-top: .2rem; color: var(--dim); font: .68rem/1.4 var(--font-mono); }
+.sd-definition { margin-top: 1rem; font-size: .8rem; }
+.sd-definition pre { padding: .65rem; background: var(--surface-inset); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 85rem) { #sd-detail { flex-basis: 19rem; padding-inline: .9rem; } }

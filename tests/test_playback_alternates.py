@@ -1,13 +1,11 @@
-"""Provider replacements retain their evidence and never invent recording equivalence."""
+"""Verified playback replacements belong to their recording."""
 import json
 
 import pytest
 
 
 @pytest.mark.parametrize('difference', ['none', 'version', 'duration', 'artist', 'unknown_duration'])
-def test_only_same_song_alternatives_are_reused_and_accounts_remain_separate(store, difference):
-    first = store.accounts.upsert_account('Main', 'ref', None, True)
-    second = store.accounts.upsert_account('Other', 'other', None, False)
+def test_only_verified_same_recording_uploads_are_preferred(store, difference):
     requested = {'video_id': 'original', 'title': 'Ride (Vince Clarke Remix)',
                  'artist': 'Dubfire & Miss Kittin', 'duration': 326}
     accepted = {**requested, 'video_id': 'playable', 'artist': 'Dubfire'}
@@ -23,15 +21,19 @@ def test_only_same_song_alternatives_are_reused_and_accounts_remain_separate(sto
         store.tracks.upsert_track(track['video_id'], track['title'], track['artist'], '', track['duration'])
     keys = [store.tracks.identity_key_for_video(t['video_id']) for t in (requested, accepted)]
     evidence = {'playlist': 'PL', 'set_video_id': 'occurrence'}
-    store.tracks.remember_playback_alternate(first, requested, accepted, evidence=evidence, now=100)
-    row = store.conn.execute('SELECT * FROM youtube_playback_alternates').fetchone()
-    assert json.loads(row['evidence_json']) == evidence
-    assert bool(row['same_recording']) == (difference == 'none')
-    result = store.tracks.playback_alternate(first, 'original')
+    store.tracks.remember_playback_upload(requested, accepted, evidence=evidence, now=100)
+    result = store.tracks.preferred_playback_uploads(['original']).get('original')
     assert (result['video_id'] if result else None) == ('playable' if difference == 'none' else None)
-    assert store.tracks.playback_alternate(second, 'original') is None
-    assert [store.tracks.identity_key_for_video(t['video_id']) for t in (requested, accepted)] == keys
     if difference == 'none':
-        assert store.tracks.track_detail('original')['playback_alternates'][0]['video_id'] == 'playable'
+        assert store.tracks.identity_key_for_video('playable') == keys[0]
+        audit = store.conn.execute("SELECT h.value->>4 AS evidence FROM track_sources s,json_each(s.association_history) h "
+                                  "WHERE s.video_id='playable' AND h.value->>3='youtube_playback_substitution'").fetchone()
+        assert json.loads(audit['evidence']) == {**evidence, 'requested_video_id': 'original'}
+        assert store.tracks.track_detail('original')['playback_upload']['video_id'] == 'playable'
+        assert store.tracks.preferred_playback_uploads(['playable']) == {}
+        store.tracks.upsert_track('original', requested['title'], requested['artist'], '', 326, available=False)
+        assert store.radio_catalog.launch_seed('original')['video_id'] == 'playable'
         store.tracks.upsert_track('playable', accepted['title'], accepted['artist'], '', 326, available=False)
-        assert store.tracks.playback_alternate(first, 'original') is None
+        assert store.tracks.preferred_playback_uploads(['original']) == {}
+    else:
+        assert [store.tracks.identity_key_for_video(t['video_id']) for t in (requested, accepted)] == keys

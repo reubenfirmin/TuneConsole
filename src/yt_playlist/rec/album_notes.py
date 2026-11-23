@@ -7,12 +7,12 @@ import logging
 from yt_playlist.core.editorial_catalog import EditorialCatalog
 
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded, check_cancellable_work
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
 from yt_playlist.providers import release_notes, album_editorial, wikipedia
 from yt_playlist.rec import album_descriptions
 from yt_playlist.library.album_fetch import fetch_album
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.util.matching import artist_key, recording_title
-from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.util import net
 
 _LOG = logging.getLogger(__name__)
@@ -57,12 +57,11 @@ def _artist_artwork(client, album, catalog=None):
     names = {album['artist'], entry.get('artist', ''), *entry.get('artist_aliases', [])} - {''}
     keys = {artist_key(name) for name in names}
     check_cancellable_work()
-    for row in (client.search(album['artist'], filter='artists') or [])[:5]:
-        if (artist_key(row.get('artist') or '') not in keys
-                or row.get('resultType') not in (None, 'artist')):
+    for row in YouTubeMusicAccess.for_client(client).artist_artwork(album['artist']):
+        if artist_key(row.get('artist') or '') not in keys:
             continue
-        url = release_notes.public_url(best_thumb(row.get('thumbnails')))
-        browse = row.get('browseId') or ''
+        url = release_notes.public_url(row['thumbnail'])
+        browse = row['browse_id'] or ''
         if url and browse.startswith('UC') and url != album.get('thumbnail'):
             return {'url': url, 'source_url': 'https://music.youtube.com/channel/' + browse,
                     'credit': album['artist'] + ' · artist photography', 'kind': 'artist'}
@@ -150,26 +149,33 @@ def prepare_notes(notes, proposals, collection, evidence, editorial_catalog, now
     if cached.get('editorial_version') == 7 and cached.get('retry_at', 0) > now:
         notes.publish(browse, cached, now, expected_request=expected_request)
         return len(queued) > 1
+    metadata = None
+    metadata_failed = False
+    if catalog_metadata is not None and not collection.album_listening_summary([browse])[browse]['complete']:
+        try:
+            metadata = catalog_metadata(album)
+        except (WorkClosing, WorkBudgetExceeded):
+            raise
+        except Exception:
+            metadata_failed = True
+            metadata = {'provider': 'youtube_album', 'status': 'unavailable'}
+            _LOG.debug('Album metadata deferred for %s', browse, exc_info=True)
+        # A successful fetch can revise the canonical inputs for this request.
+        current_album, current_request = notes.next_request()
+        if current_album is None or current_album['browse_id'] != browse or current_request[0] != expected_request[0]:
+            return current_album is not None
+        album, expected_request = current_album, current_request
     result = fetch_release(album)
     description, generation = get_description(album)
     result['evidence'].append({'provider': 'deepseek', 'response': generation})
+    if metadata is not None:
+        result['evidence'].append(metadata)
+    if metadata_failed:
+        result['retry'] = True
     if description:
         result['description'] = description
     elif cached.get('description'):
         result['description'] = cached['description']
-    # Completion is useful for the listening indicator, independently of prose.
-    summary = collection.album_listening_summary([browse])[browse]
-    if catalog_metadata is not None and not summary['complete']:
-        try:
-            metadata = catalog_metadata(album)
-            if metadata:
-                result['evidence'].append(metadata)
-        except (WorkClosing, WorkBudgetExceeded):
-            raise
-        except Exception:
-            result['retry'] = True
-            result['evidence'].append({'provider': 'youtube_album', 'status': 'unavailable'})
-            _LOG.debug('Album metadata deferred for %s', browse, exc_info=True)
     editorial = album_editorial.lookup(album, editorial_catalog.entries())
     result['artwork'] = (editorial or {}).get('artwork') or cached.get('artwork')
     # Upgrade old search-result thumbnails as well as confirmed misses. Keep

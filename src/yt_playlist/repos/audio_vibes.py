@@ -6,25 +6,7 @@ prediction must not read them as track overrides, preferences or propagation
 evidence. Audio measurements and trained-model outputs are separate inputs.
 """
 from yt_playlist.core import audio_annotations, sample_identity
-from yt_playlist.core.audio_annotation_contract import FILE_FORMAT
 from yt_playlist.repos.base import Repo, synchronized
-
-
-def install_sample_files(conn, context=None):
-    """Add capture status without rewriting installed sample rows or files."""
-    columns = {row[1] for row in conn.execute('PRAGMA main.table_info(sample_attributes)')}
-    for name, declaration in (('content_digest', 'TEXT'), ('file_status', "TEXT NOT NULL DEFAULT 'ready'")):
-        if name not in columns:
-            conn.execute(f'ALTER TABLE sample_attributes ADD COLUMN {name} {declaration}')
-
-
-def validate_sample_files(conn):
-    from yt_playlist.core.schema_contract import MigrationError
-    columns = {row[1]: (row[2], row[3], row[4])
-               for row in conn.execute('PRAGMA main.table_info(sample_attributes)')}
-    if (columns.get('content_digest') != ('TEXT', 0, None)
-            or columns.get('file_status') != ('TEXT', 1, "'ready'")):
-        raise MigrationError('Incompatible sample file status')
 
 
 class AudioVibesRepo(Repo):
@@ -36,7 +18,7 @@ class AudioVibesRepo(Repo):
 
     @synchronized
     def playback(self, run_id):
-        row = self.conn.execute('SELECT video_id,title,artist FROM audio_vibe_runs WHERE run_id=?',
+        row = self.conn.execute("SELECT video_id,title,artist FROM audio_annotations WHERE run_key=? AND kind='playback'",
                                 (run_id,)).fetchone()
         if row:
             return dict(row)
@@ -45,12 +27,13 @@ class AudioVibesRepo(Repo):
     @synchronized
     def save_playback(self, run_id, video_id, title, artist, now):
         with self.conn.atomic(join=True):
-            self.conn.execute('UPDATE audio_vibe_runs SET video_id=video_id WHERE 0')
+            self.conn.execute('UPDATE audio_annotations SET video_id=video_id WHERE 0')
             previous = self.playback(run_id)
             if previous and previous['video_id'] != video_id:
                 raise ValueError('The playback run belongs to a different song')
-            self.conn.execute('INSERT OR IGNORE INTO audio_vibe_runs VALUES (?,?,?,?,?)',
-                              (run_id, video_id, title, artist, now))
+            if previous is None:
+                self.conn.execute('INSERT INTO audio_annotations(run_key,kind,video_id,title,artist,created_at) '
+                                  "VALUES (?,'playback',?,?,?,?)", (run_id, video_id, title, artist, now))
 
     @synchronized
     def sample_receipts(self, run_id):
@@ -59,11 +42,8 @@ class AudioVibesRepo(Repo):
 
     @synchronized
     def sample_facts(self, run_id):
-        # At most three sampling points belong to a run. SELECT * also reads
-        # retained layouts before their bounded status-column adoption.
-        rows = [dict(row) for row in self.conn.execute(
-            'SELECT * FROM sample_attributes WHERE run_id=? ORDER BY captured_at,id', (run_id,))]
-        return [row for row in rows if row.get('file_status', 'ready') == 'ready']
+        return [dict(row) for row in self.conn.execute(
+            "SELECT * FROM sample_attributes WHERE run_id=? AND file_status='ready' ORDER BY captured_at,id", (run_id,))]
 
     @synchronized
     def sample_conflicts(self, run_id, sample_id):
@@ -92,94 +72,33 @@ class AudioVibesRepo(Repo):
             retained = self.conn.execute('SELECT * FROM sample_attributes WHERE id=?', (sample_id,)).fetchone()
             row = dict(retained) if retained else None
             if (row is None or row['filename'] != reference['filename']
-                    or row.get('content_digest') != reference.get('content_digest')):
+                    or row['content_digest'] != reference.get('content_digest')):
                 raise ValueError('The reserved sample changed before completion')
-            if row.get('file_status') == 'pending':
+            if row['file_status'] == 'pending':
                 self.conn.execute("UPDATE sample_attributes SET file_status='ready' WHERE id=?", (sample_id,))
 
     @synchronized
     def annotation(self, run_id, *, kind, taxonomy_version):
-        row = audio_annotations.latest(self.conn, run_id, kind=kind, taxonomy_version=taxonomy_version)
-        return self._annotation_facts(row) if row else None
-
-    def _annotation_facts(self, row):
-        return {**row, 'sample_ids': [item[0] for item in self.conn.execute(
-            'SELECT sample_id FROM audio_annotation_samples WHERE annotation_id=? ORDER BY position', (row['id'],))],
-            'vibes': [item[0] for item in self.conn.execute(
-            'SELECT vibe FROM audio_annotation_vibes WHERE annotation_id=? ORDER BY position', (row['id'],))]}
+        return audio_annotations.latest(self.conn, run_id, kind=kind, taxonomy_version=taxonomy_version)
 
     @synchronized
     def latest_feedback_run(self, video_id, *, exclude_run_id, taxonomy_version):
-        row = self.conn.execute('SELECT COALESCE(a.run_id,a.legacy_run_key) run_id FROM audio_annotations a JOIN ('
-            'SELECT run_id FROM audio_vibe_runs WHERE video_id=? UNION '
+        row = self.conn.execute('SELECT a.run_key FROM audio_annotations a JOIN ('
+            "SELECT run_key AS run_id FROM audio_annotations WHERE kind='playback' AND video_id=? UNION "
             'SELECT run_id FROM sample_attributes WHERE video_id=?) runs '
-            'ON runs.run_id=COALESCE(a.run_id,a.legacy_run_key) '
-            "WHERE a.kind='session' AND a.sealed=1 AND a.taxonomy_version=? "
-            'AND COALESCE(a.run_id,a.legacy_run_key)!=? AND NOT EXISTS('
-            'SELECT 1 FROM audio_annotations successor WHERE successor.supersedes_id=a.id AND successor.sealed=1) '
-            'ORDER BY a.created_at DESC,COALESCE(a.run_id,a.legacy_run_key) DESC LIMIT 1',
+            'ON runs.run_id=a.run_key '
+            "WHERE a.kind='session' AND a.taxonomy_version=? AND a.run_key!=? AND " + audio_annotations.HEAD +
+            ' ORDER BY a.created_at DESC,a.run_key DESC LIMIT 1',
             (video_id, video_id, taxonomy_version, exclude_run_id)).fetchone()
-        return row['run_id'] if row else None
+        return row[0] if row else None
 
     @synchronized
     def annotation_heads(self, run_id):
-        rows = self.conn.execute('SELECT a.* FROM audio_annotations a '
-            'WHERE COALESCE(a.run_id,a.legacy_run_key)=? AND a.sealed=1 '
-            'AND NOT EXISTS(SELECT 1 FROM audio_annotations successor '
-            'WHERE successor.supersedes_id=a.id AND successor.sealed=1) '
-            'ORDER BY a.kind,a.created_at,a.taxonomy_version', (run_id,)).fetchall()
-        return [self._annotation_facts(dict(row)) for row in rows]
+        rows = self.conn.execute('SELECT a.* FROM audio_annotations a WHERE a.run_key=? AND ' +
+            audio_annotations.HEAD + ' ORDER BY a.kind,a.created_at,a.taxonomy_version', (run_id,))
+        return [audio_annotations.decode(rows, row) for row in rows]
 
     @synchronized
-    def taxonomy(self, version):
-        known = self.conn.execute('SELECT 1 FROM audio_taxonomies WHERE taxonomy_version=?', (version,)).fetchone()
-        return bool(known), {row[0] for row in self.conn.execute(
-            'SELECT vibe FROM audio_taxonomy_labels WHERE taxonomy_version=?', (version,))}
-
-    @synchronized
-    def sample_owners(self, samples):
-        owners = {}
-        for sample in samples:
-            row = self.conn.execute('SELECT * FROM sample_attributes WHERE id=?', (sample,)).fetchone()
-            if row:
-                row = dict(row)
-                if row.get('file_status', 'ready') == 'ready':
-                    owners[sample] = row['run_id']
-        return owners
-
-    @synchronized
-    def reserve_annotation_file(self, run_id, taxonomy_version, revision, integrity):
-        from yt_playlist.repos import annotation_file_writes
+    def save_annotation(self, run_id, sample_ids, vibes, taxonomy_version, prediction, now):
         with self.conn.atomic():
-            return annotation_file_writes.reserve(self.conn, run_id, taxonomy_version, revision, integrity)
-
-    @synchronized
-    def publish_annotation(self, run_id, sample_ids, vibes, taxonomy_version, now, *, state, revision,
-                           file_id, reference, evaluation, expected):
-        from yt_playlist.repos import annotation_file_writes
-        with self.conn.atomic():
-            self.conn.execute('UPDATE audio_annotations SET sealed=sealed WHERE 0')
-            audio_annotations.resolve_run(self.conn, run_id)
-            previous = audio_annotations.latest(self.conn, run_id, kind='session',
-                                                taxonomy_version=taxonomy_version)
-            if (previous['id'] if previous else None) != expected:
-                raise ValueError('The annotation changed; reload its current judgment')
-            annotation_id = self.conn.execute('INSERT INTO audio_annotations('
-                'run_id,kind,taxonomy_version,revision,state,created_at,supersedes_id,resolution_status,'
-                'model_output_filename,model_output_digest,file_format) VALUES (?,\'session\',?,?,?,?,?,\'resolved\',?,?,?)',
-                (run_id, taxonomy_version, revision, state, now, expected, *reference[:2], FILE_FORMAT)).lastrowid
-            self.conn.executemany('INSERT INTO audio_annotation_samples VALUES (?,?,?)',
-                ((annotation_id, sample, position) for position, sample in enumerate(sample_ids)))
-            self.conn.executemany('INSERT INTO audio_annotation_vibes VALUES (?,?,?,?)',
-                ((annotation_id, taxonomy_version, vibe, position) for position, vibe in enumerate(vibes)))
-            audio_annotations.write_evaluation(self.conn, annotation_id, evaluation)
-            self.conn.execute('UPDATE audio_annotations SET sealed=1 WHERE id=?', (annotation_id,))
-            annotation_file_writes.complete(self.conn, file_id, run_id, taxonomy_version, revision,
-                                           reference, annotation_id)
-            return annotation_id
-
-    @synchronized
-    def resolve_annotations(self, run_id):
-        """Repair legacy history after explicitly admitting its actual playback."""
-        with self.conn.atomic(join=True):
-            audio_annotations.resolve_run(self.conn, run_id)
+            return audio_annotations.save(self.conn, run_id, sample_ids, vibes, taxonomy_version, prediction, now)

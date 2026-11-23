@@ -208,19 +208,11 @@ def test_sparse_rating_capture_keeps_four_useful_visible_analyses(store, live_ap
     # giving this assembled fixture the same ordering as the real calculator.
     payload['rows'].sort(key=lambda row: row[0])
     edition = listening_editions.prepare(payload, Repo(), NOW)
-    repo = store.listening_analytics
     chunks, manifest = listening_analytics.partition({**payload, 'schema': 2, 'built_at': NOW})
     from yt_playlist.core import listening_outputs
-    if store._listening_files:
-        plan = listening_outputs.prepare(chunks, json.dumps(manifest), json.dumps(edition), NOW)
-        with store.conn.atomic():
-            listening_outputs.publish(store.conn, plan)
-    else:
-        repo.publish(json.dumps(edition), NOW, 'listening_edition')
-        repo.publish(json.dumps(manifest), NOW)
-        for key, chunk in chunks.items():
-            repo.publish(chunk, NOW, 'listening_chunk:'+key)
-        store.conn.commit()
+    plan = listening_outputs.prepare(chunks, json.dumps(manifest), json.dumps(edition), NOW)
+    with store.conn.atomic():
+        listening_outputs.publish(store.conn, plan)
     page.set_viewport_size({'width': width, 'height': 1100})
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))

@@ -1,13 +1,26 @@
 """The Home mix controls are temporary, separate from learned taste."""
 from contextlib import contextmanager
+from dataclasses import dataclass
+import json
 
 from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.core.rec_model_policy import SESSION_IDLE_S, session_identity, steering_remaining
+from yt_playlist.core.recommendation_requests import HOME_GENRE, HOME_VIBE
 from yt_playlist.rec import rec_params
 
-TTL_S = 4 * 3600
+TTL_S = SESSION_IDLE_S
 UPDATED_AT_SETTING = "home_mix_tuning_updated_at"
 VIBE_UPDATED_AT_SETTING = 'home_mix_vibe_updated_at'
-VIBE_REQUEST_SETTING = 'home_mix_vibe_request'
+
+PUBLICATION_INPUTS = frozenset({
+    ('taste_axes', 'group:mix_controls'),
+    *(('settings', 'key:' + key) for key in (
+        HOME_GENRE, HOME_VIBE,
+        UPDATED_AT_SETTING, UPDATED_AT_SETTING + '_session',
+        VIBE_UPDATED_AT_SETTING, VIBE_UPDATED_AT_SETTING + '_session',
+        'home_mix_vibe',
+        rec_params.SETTING_PREFIX + 'breadth_bias', rec_params.SETTING_PREFIX + 'erosion_view_cap')),
+})
 
 
 def card_epoch(store):
@@ -46,8 +59,23 @@ def _resume_genres(store, now):
         store.rec_proposals.put_proposals('home_genre_request', {**request, 'epoch': card_epoch(store)}, now)
 
 
-def _left(store, key, now):
-    return clock_left(store.settings.get_setting(key), now)
+def _left(store, key, now, get_session=None):
+    raw = store.settings.get_setting(key)
+    if raw is None:
+        return None
+    from yt_playlist.library.listening_window import active_session, first_steering_session
+    scope = json.loads(store.settings.get_setting(key + '_session') or 'null')
+    session = active_session(store, now) if get_session is None else get_session()
+    return steering_remaining(float(raw), scope, session, now,
+                              lambda at, until: first_steering_session(store, at, until))
+
+
+def _set_clock(store, key, now):
+    from yt_playlist.library.listening_window import active_session
+    store.settings.set_setting(key, str(now))
+    session = active_session(store, now)
+    store.settings.set_setting(key + '_session', json.dumps(session_identity(session)))
+    return session
 
 
 def clock_left(raw, now):
@@ -60,8 +88,8 @@ def expiry_values(ordinary, vibe, now):
             'resume_genres': ordinary != 0, 'has_vibe_clock': vibe is not None}
 
 
-def remaining(store, now) -> float:
-    values = [_left(store, key, now) for key in (UPDATED_AT_SETTING, VIBE_UPDATED_AT_SETTING)]
+def remaining(store, now, *, get_session=None) -> float:
+    values = [_left(store, key, now, get_session) for key in (UPDATED_AT_SETTING, VIBE_UPDATED_AT_SETTING)]
     return min((value for value in values if value is not None), default=0.0)
 
 
@@ -75,29 +103,32 @@ def reset(store, *, keep_vibe=False) -> None:
         if not keep_vibe:
             store.settings.delete_setting("home_mix_vibe")
             store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
-        store.settings.delete_setting(VIBE_REQUEST_SETTING)
+            store.settings.delete_setting(VIBE_UPDATED_AT_SETTING + '_session')
         store.settings.delete_setting(UPDATED_AT_SETTING)
+        store.settings.delete_setting(UPDATED_AT_SETTING + '_session')
 
 
-def expire(store, now) -> bool:
+def expire(store, now, *, reader=None) -> bool:
     # Maintenance readers inherit an already-expired, committed tuning state.
     # They must never try to mutate their pinned read-only snapshot.
     if getattr(store, "_read_only", False) or getattr(store, 'activity_paused', False):
+        return False
+    if reader is not None and not _expiry_due(reader, now):
         return False
     if not store._lock.acquire(blocking=False):
         # A committed, unexpired state needs no writer. Only an expired clock
         # warrants waiting for maintenance, then rechecking a newer adjustment.
         with store.read_view() as reader:
-            if (_left(reader, UPDATED_AT_SETTING, now) != 0
-                    and _left(reader, VIBE_UPDATED_AT_SETTING, now) != 0):
+            if not _expiry_due(reader, now):
                 return False
         store._lock.acquire()
     try:
         changed = False
         # Older saved vibes shared the ordinary deadline. Preserve that deadline
         # until the first explicit vibe change gives them their own clock.
-        decision = expiry_values(store.settings.get_setting(UPDATED_AT_SETTING),
-                                 store.settings.get_setting(VIBE_UPDATED_AT_SETTING), now)
+        ordinary, vibe = (_left(store, key, now) for key in (UPDATED_AT_SETTING, VIBE_UPDATED_AT_SETTING))
+        decision = {'ordinary': ordinary == 0, 'vibe': vibe == 0 or (vibe is None and ordinary == 0),
+                    'resume_genres': ordinary != 0, 'has_vibe_clock': vibe is not None}
         if not decision['ordinary'] and not decision['vibe']:
             return False
         with atomic_write(store):
@@ -105,7 +136,7 @@ def expire(store, now) -> bool:
                 changed = bool(store.settings.get_setting('home_mix_vibe')) or decision['has_vibe_clock']
                 store.settings.delete_setting('home_mix_vibe')
                 store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
-                store.settings.delete_setting(VIBE_REQUEST_SETTING)
+                store.settings.delete_setting(VIBE_UPDATED_AT_SETTING + '_session')
                 if decision['resume_genres']:
                     _resume_genres(store, now)
             if decision['ordinary']:
@@ -116,29 +147,42 @@ def expire(store, now) -> bool:
         store._lock.release()
 
 
+def _expiry_due(reader, now):
+    return any(_left(reader, key, now) == 0 for key in (UPDATED_AT_SETTING, VIBE_UPDATED_AT_SETTING))
+
+
 @contextmanager
 def adjusting(store, now):
-    """Start a new four-hour window only when the user changes a control."""
+    """Bind a deliberate adjustment to playback, or hold it for the next session."""
     with store._lock:
         expire(store, now)
-        yield
-        store.settings.delete_setting(VIBE_REQUEST_SETTING)
-        store.settings.set_setting(UPDATED_AT_SETTING, str(now))
+        with atomic_write(store):
+            yield
+            _set_clock(store, UPDATED_AT_SETTING, now)
+
+
+@dataclass
+class VibeAdjustment:
+    remaining: float = 0.0
 
 
 @contextmanager
 def adjusting_vibe(store, now):
-    """Vibe changes neither reset nor extend the other controls' four-hour window."""
+    """Bind explicit vibe changes to playback independently of other controls."""
+    adjustment = VibeAdjustment()
     with store._lock:
         expire(store, now)
         # Readers must observe the preset, retained genre request and its
         # deadline together. Commit the deliberate adjustment once, including
         # when repository helpers normally finish their individual writes.
         with atomic_write(store):
-            yield
+            yield adjustment
             if store.settings.get_setting('home_mix_vibe'):
                 _hold_genres(store, now)
-                store.settings.set_setting(VIBE_UPDATED_AT_SETTING, str(now))
+                session = _set_clock(store, VIBE_UPDATED_AT_SETTING, now)
+                adjustment.remaining = remaining(store, now, get_session=lambda: session)
             else:
                 _resume_genres(store, now)
                 store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
+                store.settings.delete_setting(VIBE_UPDATED_AT_SETTING + '_session')
+                adjustment.remaining = remaining(store, now)

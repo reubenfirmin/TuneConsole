@@ -21,7 +21,7 @@ def preparation():
     repository.capture_facts.return_value = {
         'library': {'library', 'both'},
         'content': {'library': ('Rock', '2001-05-03'), 'both': ('', 'unknown')},
-        'audio': {'library': {'energy': 0, 'bpm': 120}}, 'previous': {},
+        'audio': {'library': {'mood_relaxed': 0, 'bpm': 120}}, 'previous': {},
     }
     discovery = create_autospec(Discovery, instance=True, spec_set=True)
     discovery.discovered_tracks_by_keys.return_value = {
@@ -39,7 +39,7 @@ def test_builds_explicit_cohorts_and_preserves_pending_order(preparation):
     assert [json.loads(row[2]) for row in rows] == [
         {'library': {'genre': '', 'year': None, 'audio': {}},
          'discovered': {'genre': 'Jazz', 'year': '1999', 'audio': {'bpm': 90}}},
-        {'library': {'genre': 'Rock', 'year': '2001', 'audio': {'bpm': 120, 'energy': 0}}, 'discovered': None},
+        {'library': {'genre': 'Rock', 'year': '2001', 'audio': {'bpm': 120, 'mood_relaxed': 0}}, 'discovered': None},
         {'library': None, 'discovered': {'genre': '', 'year': None, 'audio': {}}},
         {'library': None, 'discovered': None},
     ]

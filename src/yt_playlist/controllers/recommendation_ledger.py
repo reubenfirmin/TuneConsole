@@ -7,7 +7,6 @@ from yt_playlist.rec.scorecard_attribution import Attribution
 
 RESPONSE_RETAIN_DAYS = 90
 RETENTION_BATCH_SIZE = 256
-POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
 
 
 class RecommendationLedger:
@@ -71,8 +70,6 @@ class RecommendationLedger:
         return self.policies.prepare_history(now, limit=limit)
 
     def publish_mix_menu(self, record, context):
-        if not self.repository.mix_choices_available():
-            return record
         plan = mix_choice_policy.menu_plan(record, context)
         self.repository.publish_mix_menu(plan)
         return self._mix_projection(record)
@@ -88,11 +85,8 @@ class RecommendationLedger:
     def policy_retirement_pending(self, now):
         return self.policies.retirement_pending(now - policy_config.GRACE_SECONDS)
 
-    def restart_policy_retirement(self):
-        return self.policies.restart_retirement()
-
-    def prune_policies(self, versions, cursor):
-        return self.policies.prune(versions, cursor)
+    def prune_policies(self, versions):
+        return self.policies.prune(versions)
 
     def mix_descriptor(self, descriptor_id):
         return self.repository.mix_descriptor(descriptor_id)
@@ -109,15 +103,27 @@ class RecommendationLedger:
     def has_served_request(self, request_id):
         return self.repository.has_served_request(request_id)
 
-    def bind_choice_playback(self, account_id, playlist, video, opportunity, option, now, window_s):
-        return self.playback.bind_choice(account_id, playlist, video, opportunity, option, now, window_s)
+    def bind_choice_playback(self, account_id, playlist, video, opportunity, option, now, window_s, *, response_id=None):
+        return self.playback.bind_choice(account_id, playlist, video, opportunity, option, now, window_s,
+                                         response_id=response_id)
 
     def choice_playback(self, account_id, playlist, video, now, window_s):
-        return self.playback.choice(account_id, playlist, video, now, window_s)
+        binding = self.playback.choice(account_id, playlist, video, now, window_s)
+        if binding is not None and (response_id := binding.pop('response_id', None)) is not None:
+            response = self.evidence().get('response', response_id)
+            if response is None:
+                return None
+            binding.update(opportunity_id=response['opportunity_id'], option_id=response['option_id'])
+            if origin := (response.get('details') or {}).get('choice_action_id'):
+                binding['choice_action_id'] = origin
+        return binding
 
     def evidence(self):
-        return self.ledger_factory(library_byte_budget(self.repository.library_recording_count()),
+        return self.ledger_factory(self._evidence_budget,
                                    opportunity_projection=self._mix_projection)
+
+    def _evidence_budget(self):
+        return library_byte_budget(self.repository.library_recording_count())
 
     def _mix_projection(self, record):
         if not record or 'context' not in record:
@@ -141,11 +147,15 @@ class RecommendationLedger:
     def record_prepared_policies(self, rows, bases=()):
         return self.policies.publish(rows, bases, enforce_budget=True)
 
-    def record_recommendation_outcomes(self, event_id, kind, keys, now, generated=False):
+    def record_recommendation_outcomes(self, event_id, kind, keys, now, generated=False, *, prune=True):
         if kind not in {'open', 'start', 'save', 'promotion'}:
             raise ValueError('unsupported recommendation response')
         rows = [(event_id, kind, key, now, int(generated)) for key in set(keys) if key]
         self.repository.insert_recommendation_outcomes(rows)
+        if prune:
+            self.maintain_responses(now)
+
+    def maintain_responses(self, now):
         self._prune_response_batch(now - RESPONSE_RETAIN_DAYS * 86400)
 
     def record_served_impressions(self, request_id, surface, items, now, prune_before=None, *, policies=(), bases=()):
@@ -177,9 +187,8 @@ class RecommendationLedger:
 
     def _prune_policy_batch(self, before):
         with self.guard():
-            versions, cursor = self.policies.retention_candidates(before, limit=RETENTION_BATCH_SIZE,
-                                                                 cursor_key=POLICY_RETENTION_CURSOR)
-            return self.policies.prune(versions, cursor, cursor_key=POLICY_RETENTION_CURSOR)
+            versions, _ = self.policies.retention_candidates(before, limit=RETENTION_BATCH_SIZE)
+            return self.policies.prune(versions)
 
     def lane_impression_counts(self, since=None):
         return self.repository.lane_impression_counts(since)

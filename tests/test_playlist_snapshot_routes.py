@@ -8,12 +8,12 @@ import pytest
 from tests.web_support import _client
 from tests.test_saved_album_snapshot import SnapshotBridge
 from yt_playlist.core.identities import build_client
-from yt_playlist.controllers import playlist_queries
+from yt_playlist.core import playlist_snapshot
 
 
 def test_liked_music_report_without_cached_playlist_selects_explicit_account(store, monkeypatch):
-    main = store.accounts.upsert_account('Main', 'main', None, True)
-    other = store.accounts.upsert_account('Other', 'other', 'brand', False)
+    main = store.accounts.upsert_account('Main', None, True)
+    other = store.accounts.upsert_account('Other', 'brand', False)
     clients = {main: object(), other: object()}
     calls = []
 
@@ -21,7 +21,7 @@ def test_liked_music_report_without_cached_playlist_selects_explicit_account(sto
         calls.append((client, playlist_id))
         return {'ordinary': {'advertised': 51, 'returned': 47}}
 
-    monkeypatch.setattr(playlist_queries, 'playlist_read_report', report)
+    monkeypatch.setattr(playlist_snapshot, 'playlist_read_report', report)
     response = _client(store, lambda: clients).get(f'/liked-music/{other}/snapshot-report')
 
     assert response.status_code == 200
@@ -34,8 +34,8 @@ def test_liked_music_report_without_cached_playlist_selects_explicit_account(sto
 
 @pytest.mark.parametrize('configured,connected', [(False, True), (True, False)])
 def test_liked_music_report_never_falls_back_to_another_account(store, monkeypatch, configured, connected):
-    main = store.accounts.upsert_account('Main', 'main', None, True)
-    other = store.accounts.upsert_account('Other', 'other', 'brand', False) if configured else main + 1
+    main = store.accounts.upsert_account('Main', None, True)
+    other = store.accounts.upsert_account('Other', 'brand', False) if configured else main + 1
     clients = {main: object()}
     if connected:
         clients[other] = object()
@@ -43,7 +43,7 @@ def test_liked_music_report_never_falls_back_to_another_account(store, monkeypat
     def forbidden(*args):
         pytest.fail('An unavailable account must not issue a remote read')
 
-    monkeypatch.setattr(playlist_queries, 'playlist_read_report', forbidden)
+    monkeypatch.setattr(playlist_snapshot, 'playlist_read_report', forbidden)
     response = _client(store, lambda: clients).get(f'/liked-music/{other}/snapshot-report')
 
     assert response.status_code == 409
@@ -52,8 +52,8 @@ def test_liked_music_report_never_falls_back_to_another_account(store, monkeypat
 
 @pytest.mark.parametrize('wrong_context', [False, True])
 def test_saved_deletion_report_uses_owning_account_without_a_local_playlist_or_state_write(store, wrong_context):
-    main = store.accounts.upsert_account('Main', 'main', None, True)
-    other = store.accounts.upsert_account('Other', 'other', 'PRIVATE_BRAND', False)
+    main = store.accounts.upsert_account('Main', None, True)
+    other = store.accounts.upsert_account('Other', 'PRIVATE_BRAND', False)
     header = {'accountName': {'runs': [{'text': 'PRIVATE_NAME'}]},
               'accountPhoto': {'thumbnails': [{'url': 'https://example.test/PRIVATE_PHOTO'}]}}
     menu = {'actions': [{'openPopupAction': {'popup': {'multiPageMenuRenderer': {
@@ -95,8 +95,8 @@ def test_saved_deletion_report_uses_owning_account_without_a_local_playlist_or_s
 
 @pytest.mark.parametrize('entry,connected,expected', [(-1, True, 404), (1, True, 404), (0, False, 409)])
 def test_saved_deletion_report_rejects_invalid_entry_or_disconnected_owner(store, entry, connected, expected):
-    main = store.accounts.upsert_account('Main', 'main', None, True)
-    other = store.accounts.upsert_account('Other', 'other', 'brand', False)
+    main = store.accounts.upsert_account('Main', None, True)
+    other = store.accounts.upsert_account('Other', 'brand', False)
     undo = json.dumps({'deletions': [{'identity': other, 'ytm': 'PL_MISSING'}]})
     aid = store.actions.record_action('gc_generated', '{}', '{}', 'delete_pending', undo, 1)
     clients = {main: object(), **({other: object()} if connected else {})}

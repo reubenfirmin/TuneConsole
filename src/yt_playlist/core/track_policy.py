@@ -1,7 +1,7 @@
 """Recording matching and exact-upload rating decisions."""
 from math import inf, nextafter
 
-from yt_playlist.core.rating_feedback import Rating
+from yt_playlist.core.rating_feedback import observed_rating
 from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.util.thumbnails import is_placeholder_art
 
@@ -77,11 +77,7 @@ def item_rating_changes(account_id, statuses, previous, unbanned, *, source, now
 def combined_ratings(rows):
     result = {}
     for row in rows:
-        status = row['status']
-        if status == 'DISLIKE' and row['unbanned'] and (row['source'] != 'api' or
-                row['unbanned_at'] is not None and row['observed_at'] <= row['unbanned_at']):
-            status = 'INDIFFERENT'
-        candidate = Rating(status, row['observed_at'], 'action' if row['source'] in ('api', 'action') else 'sync')
+        candidate = observed_rating(row)
         key = row['identity_key']
         if key not in result or candidate.priority() > result[key].priority():
             result[key] = candidate

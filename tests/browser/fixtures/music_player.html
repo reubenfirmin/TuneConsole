@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>Music player fixture</title>
-<ytmusic-player></ytmusic-player>
+<ytmusic-player><video loop></video></ytmusic-player>
 <ytmusic-player-bar>
   <span class="title ytmusic-player-bar">First song</span>
   <span class="byline ytmusic-player-bar">Recording artist • Album</span>
@@ -14,7 +14,6 @@
   <span id="play-pause-button"><button>Play or pause</button></span>
   <span class="next-button"><button>Next</button></span>
 </ytmusic-player-bar>
-<video loop src="/fixture.wav"></video>
 <script>
   // Real DOM, MediaSession, media playback, and browser message delivery. Only Music's
   // private player/config APIs and its remote responses are fixtures.
@@ -22,6 +21,7 @@
   const bar = document.querySelector('ytmusic-player-bar');
   const rating = document.querySelector('ytmusic-like-button-renderer');
   const video = document.querySelector('video');
+  video.src = params.get('audible') === 'true' ? '/fixture.wav?audible=true' : '/fixture.wav';
   window.fixture = {
     videoId: params.get('v') || 'first', title: 'First song', playlist: params.get('list') || 'PL_fixture',
     brand: params.get('brand') || 'brand-A', known: params.get('known') !== 'false',

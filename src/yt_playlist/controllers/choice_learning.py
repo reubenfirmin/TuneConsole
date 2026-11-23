@@ -3,8 +3,9 @@ from yt_playlist.rec import choice_bandit, group_learning
 
 
 class ChoiceLearning:
-    def __init__(self, *, expand, parameters, modes, axes):
+    def __init__(self, *, expand, parameters, modes, axes, rating_advances):
         self.expand, self.parameters, self.modes, self.axes = expand, parameters, modes, axes
+        self.rating_advances = rating_advances
 
     def capture(self, offers, responses, now, *, groups=False):
         params = self.parameters()
@@ -13,7 +14,11 @@ class ChoiceLearning:
         decisions = list(choice_bandit.admitted_decisions(offers, responses, now, excluded, params=params))
         admitted = {oid: offer for oid, offer, *_ in decisions}
         expanded = {oid: self.expand(offer['options']) for oid, offer in admitted.items()}
-        observed = list(choice_bandit.observations(decisions, excluded, params=params, expanded_options=expanded))
+        exit_ids = {event['details']['player_event_id'] for event in responses if event['opportunity_id'] in admitted
+                    and event['kind'] == 'experience' and event['details'].get('kind') == 'track_exit'
+                    and 'player_event_id' in event['details']}
+        observed = list(choice_bandit.observations(decisions, excluded, params=params, expanded_options=expanded,
+                                                  rating_advances=self.rating_advances(exit_ids)))
         return observed, params, excluded
 
     def groups(self, offers, responses, now, head):

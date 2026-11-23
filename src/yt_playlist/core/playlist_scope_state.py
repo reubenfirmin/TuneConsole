@@ -6,6 +6,9 @@ scope IDs and never reinterpret one as a provider identifier.
 import math
 
 
+MERGE_DISMISSALS = 'playlist_merge_dismissals'
+
+
 def available(conn):
     return any(row[1] == 'group_name' for row in conn.execute('PRAGMA table_info(playlist_scopes)'))
 

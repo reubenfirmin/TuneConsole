@@ -24,7 +24,8 @@ class PendingDispatch:
                     self.running(False)
                     return
                 self.active(any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION,
-                    Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in batch))
+                    Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH, Job.LIBRARY_TASTE}
+                    for job in batch))
             full, modes = Job.FULL in batch, Job.MODES in batch
             try:
                 self.commands.cleanup(batch)
@@ -99,7 +100,8 @@ class PendingDispatch:
                 if full and modes:
                     self.schedule(full=False, modes=True)
             for job, name in ((Job.TRENDS, 'trends'), (Job.CLEANUP, 'cleanup'),
-                              (Job.ANALYTICS, 'analytics'), (Job.MODEL_HEALTH, 'model_health')):
+                              (Job.ANALYTICS, 'analytics'), (Job.MODEL_HEALTH, 'model_health'),
+                              (Job.LIBRARY_TASTE, 'library_taste')):
                 if job in batch:
                     with self.model_lock:
                         self.commands.projection(name)

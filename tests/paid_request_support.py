@@ -1,11 +1,10 @@
 """Exercise the paid-request controller against migration-test connections."""
-from functools import partial
 from threading import RLock
 from types import SimpleNamespace
 
 from yt_playlist.controllers.album_descriptions import AlbumDescriptions
 from yt_playlist.controllers.policies import Policies
-from yt_playlist.core import album_description_files, policy_documents
+from yt_playlist.core import policy_documents
 from yt_playlist.core.policy_files import PolicyFiles
 from yt_playlist.repos.album_descriptions import AlbumDescriptionsRepo
 from yt_playlist.repos.policies import PolicyRepo
@@ -14,8 +13,7 @@ from yt_playlist.repos.policies import PolicyRepo
 def service(conn):
     database = SimpleNamespace(conn=conn, _lock=RLock(), _db_path=None)
     policy_root = policy_documents.directory(conn)
-    return AlbumDescriptions(AlbumDescriptionsRepo(database), album_description_files.read,
-        partial(album_description_files.publish_reserved, album_description_files.directory(conn)),
+    return AlbumDescriptions(AlbumDescriptionsRepo(database),
         Policies(PolicyRepo(database), PolicyFiles(policy_root, policy_root / 'history'), lambda: database._lock))
 
 

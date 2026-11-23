@@ -41,8 +41,6 @@ def trips():
         return {'revision':'untrusted-file-revision', 'picks':['stale'], 'banned':['stale'], 'pool':[]}
 
     repository.transaction.side_effect = transaction
-    repository.uses_memberships.return_value = True
-    repository.uses_draft_files.return_value = True
     repository.artist_candidates.return_value = set()
     repository.genre_candidates.return_value = set()
     repository.genre_key_exists.return_value = False
@@ -50,7 +48,6 @@ def trips():
     repository.master_account.return_value = 4
     repository.captured_video.return_value = (10, 20)
     repository.save_draft.return_value = True
-    repository.save_legacy_draft.return_value = True
     repository.reserve_draft_file.return_value = 41
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
     files.retained.side_effect = retained
@@ -110,9 +107,11 @@ def test_recipe_contract_rejects_invalid_controls_before_any_write(trips, values
 def test_same_name_artist_candidates_remain_unresolved(trips):
     trips.repository.artist_candidates.side_effect = [{1, 2}, {3}]
     save_recipe(trips, artists=['Ambiguous', '@artist:3'])
-    assert trips.repository.save_recipe.call_args.kwargs['memberships'] == {
-        'artists':[(3, 1)], 'genres':[],
-        'unresolved_artists':[(0, 'Ambiguous', 'unknown_or_ambiguous_artist')], 'unresolved_genres':[]}
+    assert trips.repository.save_recipe.call_args.kwargs['selections'] == {
+        'artists': [{'position': 0, 'artist_id': None, 'label': 'Ambiguous',
+                     'reason': 'unknown_or_ambiguous_artist'},
+                    {'position': 1, 'artist_id': 3, 'label': '@artist:3'}],
+        'genres': []}
 
 
 def test_aliases_of_the_same_artist_cannot_be_selected_twice(trips):
@@ -125,8 +124,9 @@ def test_aliases_of_the_same_artist_cannot_be_selected_twice(trips):
 def test_custom_genre_is_shared_across_roles_but_order_and_role_stay_explicit(trips):
     save_recipe(trips, genres=['New genre'], blacklist_genres=['NEW GENRE'])
     trips.repository.insert_custom_genre.assert_called_once_with('new genre', 'New genre')
-    assert trips.repository.save_recipe.call_args.kwargs['memberships']['genres'] == [
-        ('new genre', 'include', 0), ('new genre', 'exclude', 0)]
+    assert trips.repository.save_recipe.call_args.kwargs['selections']['genres'] == [
+        {'genre_key': 'new genre', 'role': 'include', 'position': 0, 'label': 'New genre'},
+        {'genre_key': 'new genre', 'role': 'exclude', 'position': 0, 'label': 'NEW GENRE'}]
 
 
 @pytest.mark.parametrize('choices', [{1, 2}, set()])
@@ -138,14 +138,6 @@ def test_ambiguous_or_repeated_genre_cannot_modify_the_recipe(trips, choices):
     trips.repository.insert_custom_genre.assert_not_called()
 
 
-def test_legacy_recipe_keeps_its_opaque_lists_without_new_identity_admission(trips):
-    trips.repository.uses_memberships.return_value = False
-    save_recipe(trips, artists=['Unknown', 'Unknown'], genres=['Legacy'])
-    trips.repository.transaction.assert_not_called()
-    assert trips.repository.save_recipe.call_args.kwargs == {}
-    assert trips.repository.save_recipe.call_args.args[1]['familiarity_pct'] == 50
-
-
 def test_draft_publishes_recovery_after_admission_then_supplies_exact_ordered_references(trips):
     state = {'revision':'next', 'building':True, 'picks':['video'], 'banned':['video'],
              'pool':[{'video_id':'video', 'title':'Old'}],
@@ -155,7 +147,7 @@ def test_draft_publishes_recovery_after_admission_then_supplies_exact_ordered_re
         title='Captured', artist='Credit', now=100)
     args = trips.repository.save_draft.call_args.args
     assert args[0] == 2 and args[2:6] == (4, 'next', 'building', ('file', 'digest', 50))
-    assert args[6] == [('picked', 0, 20, 10, 'video'), ('excluded', 0, 20, 10, 'video')]
+    assert args[6] == [('picked', 'video'), ('excluded', 'video')]
     published = trips.recovery.publish_reserved.call_args.args
     assert published[:3] == (41, 'road-trip-draft', args[1])
     assert 'picks' not in published[3] and 'banned' not in published[3]
@@ -215,8 +207,7 @@ def test_sql_choices_and_revision_override_recovery_contents(trips):
         'recipe_id':2, 'state':{'revision':'sql', 'picks':['a'], 'banned':['b'], 'pool':[]}}
 
 
-def test_missing_draft_is_not_recreated_by_a_legacy_worker(trips):
-    trips.repository.uses_draft_files.return_value = False
-    trips.repository.draft_facts.return_value = None
+def test_missing_draft_is_not_recreated_by_a_conditional_replacement(trips):
+    trips.repository.draft_owner.return_value = None
     assert not trips.replace_road_trip_draft(2, {'revision':'next'}, 100, expected_revision='old')
-    trips.repository.save_legacy_draft.assert_not_called()
+    trips.repository.reserve_draft_file.assert_not_called()

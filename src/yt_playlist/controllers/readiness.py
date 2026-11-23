@@ -17,14 +17,14 @@ class Readiness:
         return self.repository.playable_owned(
             exclude_generated=exclude_generated, maximum_duration=self.eligibility.maximum_duration())
 
-    def has_vibe_evidence(self, prefix):
+    def has_vibe_evidence(self, patterns):
         return self.repository.has_vibe_evidence(
-            prefix, sources=criteria.MEASURED_VIBE_SOURCES + criteria.PROXY_VIBE_SOURCES,
+            patterns, sources=criteria.MEASURED_VIBE_SOURCES + criteria.PROXY_VIBE_SOURCES,
             minimum_support=criteria.VIBE_MINIMUM_SUPPORT)
 
-    def vibe_evidence(self, prefix):
+    def vibe_evidence(self, patterns):
         return self.repository.vibe_evidence(
-            prefix, measured_sources=criteria.MEASURED_VIBE_SOURCES,
+            patterns, measured_sources=criteria.MEASURED_VIBE_SOURCES,
             proxy_sources=criteria.PROXY_VIBE_SOURCES, minimum_support=criteria.VIBE_MINIMUM_SUPPORT)
 
     def journey_history(self):

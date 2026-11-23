@@ -1,11 +1,10 @@
-"""AcousticBrainz enrichment: BPM, a derived energy, and danceability, keyed by MusicBrainz
+"""AcousticBrainz enrichment: native descriptors and classifiers, keyed by MusicBrainz
 recording MBID.
 
 AcousticBrainz is a frozen (2022) but still-served CC0 dataset of Essentia acoustic descriptors. It
 has no name-based lookup (every query is by MusicBrainz *recording* MBID) so for a track without a
 stored MBID we resolve one live via the MusicBrainz provider, then query two endpoints:
-low-level (rhythm.bpm) and high-level (mood/danceability classifiers). AcousticBrainz has no native
-"energy" scalar, so we derive one from its mood models (see derive_energy). A 404 means "no data for
+low-level (rhythm.bpm) and high-level (mood/danceability classifiers). A 404 means "no data for
 this MBID" (common, given frozen coverage): a clean miss, not an outage. Failures degrade to Nones.
 """
 import logging
@@ -37,7 +36,7 @@ def tripped() -> bool:
 
 
 def probe(track, store=None, enrich_fn=None, mbid_fn=None) -> EnrichmentResult:
-    """Retain source predictions separately from the legacy typed feature projection."""
+    """Retain source predictions alongside their typed metadata fields."""
     mbid_fn = mbid_fn or (lambda title, artist: musicbrainz.recording_mbid(title, artist, store=store))
     mbid = track.get("mb_recording_id") or mbid_fn(track["title"], track["artist"])
     if not mbid:
@@ -55,8 +54,8 @@ def project(track, mbid, low, high, *, features=None):
     """Detached feature and observation projection, retaining source/model units."""
     feat = _features(low, high) if features is None else features
     fields = {"mb_recording_id": mbid}
-    fields.update({k: v for k, v in feat.items()
-                   if v is not None and k not in {'mood_party', 'mood_aggressive'}})
+    fields.update({k: feat[k] for k in _OBSERVATIONS
+                   if feat.get(k) is not None and k not in {'mood_party', 'mood_aggressive'}})
     match = {'method': 'supplied_recording_mbid' if track.get('mb_recording_id') else 'musicbrainz_lookup',
              'recording_mbid': mbid}
     observations = []
@@ -69,13 +68,6 @@ def project(track, mbid, low, high, *, features=None):
             field=name, value=feat[name], scope='recording', entity_id=mbid, kind=kind, unit=unit,
             source_path=f'{endpoint}:{path}', provider_version=_object(response.get('metadata')).get('version'),
             model_version=model.get('version'), match_evidence=match))
-    if feat.get('energy') is not None:
-        observations.append(MetadataObservation(
-            field='energy', value=feat['energy'], scope='recording', entity_id=mbid, kind='derived',
-            unit='legacy_energy_0_1', provider_version=_object(high.get('metadata')).get('version'),
-            derivation_version='acousticbrainz-energy-v1',
-            dependencies=('mood_party', 'mood_aggressive', 'danceability'),
-            match_evidence=match))
     return EnrichmentResult("acousticbrainz", fields, tuple(observations))
 
 def _get_json(url):
@@ -90,32 +82,6 @@ def _prob(highlevel, model, label):
     except (KeyError, TypeError, ValueError):
         return None
 
-
-# Empirical blend (no external source) mapping AcousticBrainz mood models to a perceived-energy
-# scalar: party drives the bulk of it, aggression adds intensity, danceability a smaller lift.
-_ENERGY_W_PARTY = 0.5
-_ENERGY_W_AGGRESSIVE = 0.3
-_ENERGY_W_DANCEABLE = 0.2
-
-
-def derive_energy(highlevel):
-    """Heuristic energy in [0,1] from AcousticBrainz mood classifiers (no native energy field):
-    a weighted blend of party/aggressive/danceable (see _ENERGY_W_*).
-    Missing components remain unknown; they are not negative classifier results.
-    Retained as a legacy derived field until both consumers use shared intensity.
-    """
-    party = _prob(highlevel, "mood_party", "party")
-    aggressive = _prob(highlevel, "mood_aggressive", "aggressive")
-    danceable = _prob(highlevel, "danceability", "danceable")
-    if any(value is None for value in (party, aggressive, danceable)):
-        return None
-    return round(_ENERGY_W_PARTY * party + _ENERGY_W_AGGRESSIVE * aggressive
-                 + _ENERGY_W_DANCEABLE * danceable, 3)
-
-
-_FIELDS = ("bpm", "energy", "danceability", "mood_party", "mood_aggressive", "music_key", "music_scale", "mood_happy",
-           "mood_sad", "mood_relaxed", "mood_acoustic", "instrumental", "loudness",
-           "dynamic_complexity")
 
 # Keep source descriptor units distinct from normalized profile dimensions
 # and other providers' gain measurements.
@@ -139,7 +105,7 @@ _OBSERVATIONS = {
 
 
 def _empty():
-    return {k: None for k in _FIELDS}
+    return dict.fromkeys(_OBSERVATIONS)
 
 
 def _object(value):
@@ -177,7 +143,6 @@ def _read_endpoint(mbid, endpoint):
 
 def _features(low, high):
     feat = _empty()
-    feat['energy'] = derive_energy(high.get('highlevel', {}))
     for name, (endpoint, path, _kind, _unit) in _OBSERVATIONS.items():
         value = low if endpoint == 'low-level' else high
         parts = path.split('.')

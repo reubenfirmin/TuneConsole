@@ -30,7 +30,7 @@ def _refreshes(r):
 
 
 def test_group_assigns_and_refreshes(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
@@ -43,7 +43,7 @@ def test_group_assigns_and_refreshes(store):
 
 def test_delete_removes_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v1", "S", "X", None, None, 1)])
     fc = FakeClient(tracks={"PLA": [_track("v1", "S", "X")]})
@@ -59,7 +59,7 @@ def test_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
     # CACHED count/thumbnails. Deleting one must refresh that cache so the card's pending-cleanup
     # icons involving the deleted playlist disappear (issue #73).
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 4, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Rock copy", 4, "h", 1.0)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
@@ -78,7 +78,7 @@ def test_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
 
 def test_delete_hides_system_playlist_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # undeletable system playlist
     store.playlists.set_playlist_tracks(lm, [store.tracks.upsert_track("v1", "S", "X", None, None, 1)])
     c = _client(store, lambda: {iid: FakeClient()})
@@ -91,7 +91,7 @@ def test_delete_hides_system_playlist_and_refreshes(store, monkeypatch, tmp_path
 
 def test_copy_creates_playlist_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S0", "X", None, None, 1,
                                                      thumbnail="https://example.com/song.jpg"),
@@ -107,7 +107,7 @@ def test_copy_creates_playlist_and_refreshes(store, monkeypatch, tmp_path):
 
 def test_copy_merge_unions_tracks_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Pop", 2, "h", 1.0)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
@@ -124,7 +124,7 @@ def test_copy_merge_unions_tracks_and_refreshes(store, monkeypatch, tmp_path):
 
 def test_copy_into_appends_union_skipping_dupes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     src = store.playlists.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
     dst = store.playlists.upsert_playlist(iid, "PLB", "Dest", 1, "h", 1.0)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
@@ -141,7 +141,7 @@ def test_copy_into_appends_union_skipping_dupes(store, monkeypatch, tmp_path):
 
 
 def test_copy_into_requires_a_destination(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
@@ -151,7 +151,7 @@ def test_copy_into_requires_a_destination(store):
 
 def test_copy_into_rejects_system_target(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     src = store.playlists.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)   # system playlist
     store.playlists.set_playlist_tracks(src, [store.tracks.upsert_track("v0", "S0", "X", None, None, 1)])
@@ -163,8 +163,8 @@ def test_copy_into_rejects_system_target(store, monkeypatch, tmp_path):
 
 def test_copy_into_rejects_cross_account_target(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    a = store.accounts.upsert_account("main", "cred", None, True)
-    b = store.accounts.upsert_account("alt", "cred2", "BA", False)             # a second account
+    a = store.accounts.upsert_account("main", None, True)
+    b = store.accounts.upsert_account("alt", "BA", False)             # a second account
     src = store.playlists.upsert_playlist(a, "PLA", "Rock", 1, "h", 1.0)         # source on account A
     dst = store.playlists.upsert_playlist(b, "PLB", "Dest", 0, "h", 1.0)         # target on account B
     store.playlists.set_playlist_tracks(src, [store.tracks.upsert_track("v0", "S0", "X", None, None, 1)])
@@ -177,7 +177,7 @@ def test_copy_into_rejects_cross_account_target(store, monkeypatch, tmp_path):
 def test_promote_moves_playlist_out_of_generated(store):
     from yt_playlist.library import playlist_metadata
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid = store.playlists.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
     store.playlists.set_playlist_group("PLG", "Generated")
     store.playlists.mark_generated_playlist('PLG')
@@ -198,7 +198,7 @@ def test_promote_still_works_when_youtube_refuses_the_edit(store):
         def edit_playlist(self, playlistId, **kw):
             raise RuntimeError("nope")
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid = store.playlists.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
     store.playlists.set_playlist_group("PLG", "Generated")
     store.playlists.mark_generated_playlist('PLG')
@@ -215,7 +215,7 @@ def test_playlist_rows_use_song_artwork_when_no_cover_is_available(
     import json
     import re
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     cover = "https://example.com/cover.jpg"
     first = "https://example.com/first.jpg"
     second = "https://example.com/second.jpg"
@@ -224,9 +224,9 @@ def test_playlist_rows_use_song_artwork_when_no_cover_is_available(
     seed_publication_subjects(store, [dict(key=title.lower() + '|artist', video_id=video,
         title=title, artist='Artist') for video, title, _thumbnail in subjects])
     with store.conn:
-        store.conn.executemany('UPDATE youtube_items SET thumbnail=? WHERE video_id=?',
+        store.conn.executemany('UPDATE track_sources SET thumbnail=? WHERE video_id=?',
                                [(thumbnail, video) for video, _title, thumbnail in subjects])
-    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+    entries = dict(store.conn.execute('SELECT video_id,id FROM track_sources'))
     no_art, blank_art, a, b = [entries[video] for video, _title, _thumbnail in subjects]
     playlists = {}
     for ytm, thumbnail in (("new", None), ("generated", ""), ("covered", cover), ("empty", None)):
@@ -263,7 +263,7 @@ def test_playlists_page_carries_generated_created_at(store):
     # which relies on each playlist's actual created_at flowing into the page rows.
     import json
     import re
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.upsert_playlist(iid, "PLold", "Older Gen", 1, "h", 0.0, created_at=100.0)
     store.playlists.upsert_playlist(iid, "PLnew", "Newer Gen", 1, "h", 0.0, created_at=200.0)
     for ytm in ("PLold", "PLnew"):
@@ -282,7 +282,7 @@ def test_generated_sort_recovers_dates_without_claiming_imports_were_created_at_
     import re
     from datetime import datetime
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     cases = [
         ("known", "Renamed generated mix", 100, 100),
         ("recipe", "Cluster mix", None, 200),
@@ -313,7 +313,7 @@ def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
     import re
     now = 2_000_000
     cutoff = now - 7 * 86400
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     for ytm, created_at in (("today", now), ("boundary", cutoff), ("old", cutoff - 1),
                             ("edited", cutoff - 1), ("hidden", now), ("LM", now),
                             ("unknown", None), ("future", now + 1), ("generated", now),
@@ -337,7 +337,7 @@ def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
 
 
 def test_playlists_page_hides_group_view_and_column_without_groups(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 0.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
@@ -348,7 +348,7 @@ def test_playlists_page_hides_group_view_and_column_without_groups(store):
 
 
 def test_generated_only_does_not_show_main_table_group_controls(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.upsert_playlist(iid, "PLG", "Generated playlist", 1, "h", 0.0)
     store.playlists.set_playlist_group("PLG", "Generated")
     store.playlists.mark_generated_playlist('PLG')

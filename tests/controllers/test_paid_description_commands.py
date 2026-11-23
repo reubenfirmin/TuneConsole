@@ -5,9 +5,10 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.album_descriptions import AlbumDescriptions
+from yt_playlist.controllers.description_access import DescriptionAccess
 from yt_playlist.controllers.description_configuration import DescriptionConfiguration
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.rec.album_descriptions import DescriptionAccess, admit
+from yt_playlist.rec.album_descriptions import admit
 
 pytestmark = pytest.mark.usefixtures('no_database')
 

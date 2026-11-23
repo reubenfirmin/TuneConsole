@@ -61,8 +61,7 @@ def record_many(conn, deliveries):
     """Keep a failed admission atomic even if its caller handles the exception."""
     if not conn.in_transaction:
         raise RuntimeError('Metadata delivery admission needs an outer transaction')
-    from . import metadata_locator_contract as metadata_locators
-    if metadata_locators.retired(conn):
+    if not conn.execute('SELECT allowed FROM metadata_delivery_capture_allowed').fetchone()[0]:
         raise ValueError('Installed delivery writes are retired; use runtime metadata')
     conn.execute('SAVEPOINT metadata_delivery_admission')
     try:
@@ -117,7 +116,7 @@ def _record_many(conn, deliveries):
             # A retained historical capture can legitimately describe an entry
             # before reassociation. Its recorded FKs stay intact; it must not be
             # rewritten to today's subject merely to pass current admission.
-            current = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?',
+            current = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?',
                                    (delivery.input_entry_id,)).fetchone()
             if current is None or tuple(current) != (delivery.input_recording_id, delivery.input_video_id):
                 raise ValueError('Metadata input subject changed before delivery admission')
@@ -179,6 +178,26 @@ def response(conn, delivery_id):
             conn.execute('RELEASE metadata_delivery_read')
 
 
+def capture_head(conn, entry_id, provider, slot):
+    return conn.execute('SELECT id,input_recording_id,input_video_id,raw_filename,raw_digest,raw_byte_size,raw_offset '
+                        'FROM metadata_deliveries WHERE input_entry_id=? AND provider=? AND capture_slot=?',
+                        (entry_id, provider, slot)).fetchone()
+
+
+def set_capture_head(conn, entry_id, provider, slot, delivery_id):
+    if not conn.in_transaction:
+        raise RuntimeError('Metadata capture head changes need an outer transaction')
+    current = conn.execute('SELECT capture_slot FROM metadata_deliveries WHERE id=? AND input_entry_id=? AND provider=?',
+                           (delivery_id, entry_id, provider)).fetchone()
+    if current is None or current[0] not in (None, slot):
+        raise sqlite3.IntegrityError('Metadata capture head has a different input, provider or slot')
+    conn.execute('UPDATE metadata_deliveries SET capture_slot=NULL '
+                 'WHERE input_entry_id=? AND provider=? AND capture_slot=? AND id<>?',
+                 (entry_id, provider, slot, delivery_id))
+    if current[0] is None:
+        conn.execute('UPDATE metadata_deliveries SET capture_slot=? WHERE id=?', (slot, delivery_id))
+
+
 def capture_state(conn, entry_id, provider, capture_slot, body, *, now):
     """Capture a changed input state where the producer has no delivery key.
 
@@ -195,23 +214,19 @@ def capture_state(conn, entry_id, provider, capture_slot, body, *, now):
     conn.execute('SAVEPOINT metadata_state_capture')
     try:
         conn.execute('UPDATE metadata_deliveries SET id=id WHERE 0')
-        subject = conn.execute('SELECT recording_id,video_id,source_ref FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+        subject = conn.execute('SELECT recording_id,video_id,source_ref FROM track_sources WHERE id=?', (entry_id,)).fetchone()
         if subject is None:
             raise ValueError('Unknown metadata capture input')
         delivery = Delivery(provider, 'state:' + uuid.uuid4().hex, 'item', subject[1] or subject[2], now,
                             entry_id, subject[0], subject[1], response=body)
         delivery.validate()
-        head = conn.execute('SELECT d.id,d.input_recording_id,d.input_video_id,d.raw_filename,d.raw_digest,'
-            'd.raw_byte_size,d.raw_offset FROM metadata_capture_heads h JOIN metadata_deliveries d ON d.id=h.delivery_id '
-            'WHERE h.entry_id=? AND h.provider=? AND h.capture_slot=?', (entry_id, provider, capture_slot)).fetchone()
+        head = capture_head(conn, entry_id, provider, capture_slot)
         if (head and tuple(head[1:3]) == tuple(subject[:2]) and head[3] is not None
                 and files._read(*head[3:]) == encoded):
             result = head[0]
         else:
             result, = record_many(conn, [delivery])
-            conn.execute('INSERT INTO metadata_capture_heads(entry_id,provider,capture_slot,delivery_id) VALUES (?,?,?,?) '
-                         'ON CONFLICT(entry_id,provider,capture_slot) DO UPDATE SET delivery_id=excluded.delivery_id',
-                         (entry_id, provider, capture_slot, result))
+            set_capture_head(conn, entry_id, provider, capture_slot, result)
     except BaseException:
         conn.execute('ROLLBACK TO metadata_state_capture')
         raise

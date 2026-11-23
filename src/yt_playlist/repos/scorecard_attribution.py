@@ -1,6 +1,7 @@
 """Bounded detached scorecard timelines, with no report transaction."""
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core import served_facts
+from yt_playlist.core.catalog_query import LIBRARY_TRACKS_SQL
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -15,7 +16,7 @@ def _chunks(values):
 class ScorecardFacts(Repo):
     @synchronized
     def owners(self, keys, since, until, *, policy_kind):
-        live = served_facts.expression(self.conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
+        live = served_facts.expression('policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
         rows = []
         for chunk, placeholders in _chunks(keys):
             rows.extend(dict(row) for row in self.conn.execute(
@@ -47,8 +48,8 @@ class ScorecardFacts(Repo):
 
     @synchronized
     def video_owners(self, videos, since, until, *, policy_kind):
-        live = served_facts.expression(self.conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
-        video = served_facts.expression(self.conn, 'video_id', "json_extract(provenance,'$.candidate.video_id')")
+        live = served_facts.expression('policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
+        video = served_facts.expression('video_id', "json_extract(provenance,'$.candidate.video_id')")
         rows = []
         for chunk, placeholders in _chunks(videos):
             rows.extend(dict(row) for row in self.conn.execute(
@@ -59,7 +60,7 @@ class ScorecardFacts(Repo):
 
     @synchronized
     def catalog_keys(self, videos, *, discovered):
-        table = 'discovered_tracks' if discovered else 'tracks'
+        table = 'discovered_tracks' if discovered else f'({LIBRARY_TRACKS_SQL})'
         rows = []
         for chunk, placeholders in _chunks(videos):
             rows.extend(dict(row) for row in self.conn.execute(

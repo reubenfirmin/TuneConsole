@@ -65,18 +65,15 @@ def test_historical_merge_keeps_disabled_choice_on_catalog_refresh(store):
     store.genres.configure_catalog()
     store.genres.add_genre('Custom style')
     store.genres.remove_genre('Synth Pop')
-    # Installed merge state includes archived preferences and a disabled survivor.
+    # The retired key still resolves to a survivor the user disabled.
     with store.conn:
-        store.conn.execute("INSERT INTO genre_redirects VALUES ('custom style','synth pop')")
-        store.conn.execute("INSERT INTO genre_merge_preferences(retired_key,genre_key,enabled,origin,merged_at) "
-                           "VALUES ('custom style','synth pop',1,'user',20),('synth pop','synth pop',0,'user',20)")
-        store.conn.execute("DELETE FROM genre_preferences WHERE genre_key='custom style'")
-    archived = [tuple(row) for row in store.conn.execute('SELECT * FROM genre_merge_preferences ORDER BY id')]
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='synth pop',enabled=0,preference_origin=NULL "
+                           "WHERE key='custom style'")
     store.genres.configure_catalog()
-    assert store.conn.execute("SELECT enabled FROM genre_preferences WHERE genre_key='synth pop'").fetchone()[0] == 0
+    assert tuple(store.conn.execute("SELECT enabled,preference_origin FROM genre_catalog WHERE key='synth pop'")
+                 .fetchone()) == (0, 'user')
     assert genre_identity.resolve(store.conn,'Custom style') == ('synth pop',None)
     assert not {'Synth Pop', 'Custom style'} & set(store.genres.get_genre_whitelist())
-    assert [tuple(row) for row in store.conn.execute('SELECT * FROM genre_merge_preferences ORDER BY id')] == archived
 
 
 def test_alias_edit_does_not_change_existing_selected_key(store):
@@ -141,7 +138,7 @@ def test_detached_family_consumers_use_current_relationships(store):
     month = trend_statistics.compute_months([(1,key,2)],meta,{},genre_axes=axes,
                                            family_adjacency={})[0]
     assert month['families']=={'jazz':2}
-    assert recap_story.energy_axis({key:2},{},meta,genre_axes=axes)==(.3,'genre')
+    assert recap_story.energy_axis({key:2},{},meta,genre_axes=axes)==(.3,0,2)
     assert _is_overlap({'artist':'Other','genre':'Synth Pop','family':'jazz'},
         {'inputs':{'genres':['Jazz']},'genre_families':{g:row[0] for g,row in axes.items()}})
 
@@ -155,9 +152,9 @@ def test_retained_genre_evidence_keeps_captured_identity_after_alias_reassignmen
     entry = store.tracks.upsert_track('retained', 'Original song', 'Artist', None, 200)
     with store.conn:
         metadata.select(store.conn, entry, 'genre', label, 'provider', now=10)
-    recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
+    recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry,)).fetchone()[0]
     original = store.conn.execute(
-        "SELECT o.* FROM recording_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
+        "SELECT o.* FROM current_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
         "WHERE s.recording_id=? AND s.field='genre'", (recording,)).fetchone()
     assert (original['text_value'], original['genre_key']) == (label, 'synth pop')
     original_row = tuple(original)
@@ -170,7 +167,7 @@ def test_retained_genre_evidence_keeps_captured_identity_after_alias_reassignmen
     with store.conn:
         metadata.select(store.conn, fresh_entry, 'genre', label, 'provider', now=20)
     assert store.conn.execute(
-        'SELECT r.genre_key FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id WHERE e.id=?',
+        'SELECT r.genre_key FROM track_sources e JOIN recordings r ON r.id=e.recording_id WHERE e.id=?',
         (fresh_entry,)).fetchone()[0] == 'drum bass'
 
     target_entry, target_recording = entry, recording
@@ -182,14 +179,14 @@ def test_retained_genre_evidence_keeps_captured_identity_after_alias_reassignmen
         # The production transfer boundary receives a verified-equivalent target recording.
         target_entry = store.tracks.upsert_track('equivalent', 'Equivalent song', 'Artist', None, 200)
         target_recording = store.conn.execute(
-            'SELECT recording_id FROM catalog_entries WHERE id=?', (target_entry,)).fetchone()[0]
+            'SELECT recording_id FROM track_sources WHERE id=?', (target_entry,)).fetchone()[0]
         assert target_recording != recording
         with store.conn:
             store.conn.execute('BEGIN')
             metadata.reuse_recording_selections(store.conn, recording, target_recording)
 
     selected = store.conn.execute(
-        "SELECT o.* FROM recording_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
+        "SELECT o.* FROM current_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
         "WHERE s.recording_id=? AND s.field='genre'", (target_recording,)).fetchone()
     assert selected is not None
     assert (selected['text_value'], selected['genre_key']) == (label, 'synth pop')
@@ -217,20 +214,20 @@ def test_retained_genre_evidence_follows_chained_merges_without_rewriting_captur
     entry = store.tracks.upsert_track('merged-genre', 'Original song', 'Artist', None, 200)
     with store.conn:
         metadata.select(store.conn, entry, 'genre', 'Captured original style', 'provider', now=10)
-    recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
+    recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry,)).fetchone()[0]
     original = store.conn.execute(
-        "SELECT o.* FROM recording_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
+        "SELECT o.* FROM current_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
         "WHERE s.recording_id=? AND s.field='genre'", (recording,)).fetchone()
     assert (original['text_value'], original['genre_key']) == ('Captured original style', 'captured original style')
     original_row = tuple(original)
 
     # Installed redirects flatten successive merges without rewriting captures.
     with store.conn:
-        store.conn.execute("INSERT INTO genre_redirects VALUES ('captured original style','merged middle style')")
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='merged middle style' WHERE key='captured original style'")
     assert genre_identity.resolve(store.conn, 'Captured original style') == ('merged middle style', None)
     with store.conn:
-        store.conn.execute("UPDATE genre_redirects SET genre_key='merged final style' WHERE retired_key='captured original style'")
-        store.conn.execute("INSERT INTO genre_redirects VALUES ('merged middle style','merged final style')")
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='merged final style' WHERE key='captured original style'")
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='merged final style' WHERE key='merged middle style'")
         store.conn.execute("UPDATE recordings SET genre_key='merged final style' WHERE id=?", (recording,))
     assert genre_identity.resolve(store.conn, 'Captured original style') == ('merged final style', None)
     target_entry, target_recording = entry, recording
@@ -241,14 +238,14 @@ def test_retained_genre_evidence_follows_chained_merges_without_rewriting_captur
     else:
         target_entry = store.tracks.upsert_track('merged-equivalent', 'Equivalent song', 'Artist', None, 200)
         target_recording = store.conn.execute(
-            'SELECT recording_id FROM catalog_entries WHERE id=?', (target_entry,)).fetchone()[0]
+            'SELECT recording_id FROM track_sources WHERE id=?', (target_entry,)).fetchone()[0]
         assert target_recording != recording
         with store.conn:
             store.conn.execute('BEGIN')
             metadata.reuse_recording_selections(store.conn, recording, target_recording)
 
     selected = store.conn.execute(
-        "SELECT o.* FROM recording_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
+        "SELECT o.* FROM current_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
         "WHERE s.recording_id=? AND s.field='genre'", (target_recording,)).fetchone()
     assert (selected['text_value'], selected['genre_key']) == ('Captured original style', 'captured original style')
     if operation == 'replay':
@@ -273,8 +270,8 @@ def test_retained_unresolved_genre_is_not_reinterpreted_by_a_new_alias(store, op
     with store.conn:
         metadata.select(store.conn, entry, 'genre', label, 'provider', now=10)
     original = store.conn.execute(
-        "SELECT o.* FROM recording_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
-        "JOIN catalog_entries e ON e.recording_id=s.recording_id WHERE e.id=? AND s.field='genre'",
+        "SELECT o.* FROM current_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
+        "JOIN track_sources e ON e.recording_id=s.recording_id WHERE e.id=? AND s.field='genre'",
         (entry,)).fetchone()
     assert original['genre_key'] is None
     assert original['text_value'] == label
@@ -286,7 +283,7 @@ def test_retained_unresolved_genre_is_not_reinterpreted_by_a_new_alias(store, op
     with store.conn:
         metadata.select(store.conn, fresh, 'genre', label, 'provider', now=20)
     assert store.conn.execute(
-        'SELECT r.genre_key FROM recordings r JOIN catalog_entries e ON e.recording_id=r.id WHERE e.id=?',
+        'SELECT r.genre_key FROM recordings r JOIN track_sources e ON e.recording_id=r.id WHERE e.id=?',
         (fresh,)).fetchone()[0] == 'synth pop'
 
     target_entry, target_recording = entry, original['recording_id']
@@ -297,13 +294,13 @@ def test_retained_unresolved_genre_is_not_reinterpreted_by_a_new_alias(store, op
     else:
         target_entry = store.tracks.upsert_track('unresolved-equivalent', 'Equivalent song', 'Artist', None, 200)
         target_recording = store.conn.execute(
-            'SELECT recording_id FROM catalog_entries WHERE id=?', (target_entry,)).fetchone()[0]
+            'SELECT recording_id FROM track_sources WHERE id=?', (target_entry,)).fetchone()[0]
         assert target_recording != original['recording_id']
         with store.conn:
             store.conn.execute('BEGIN')
             metadata.reuse_recording_selections(store.conn, original['recording_id'], target_recording)
     selected = store.conn.execute(
-        "SELECT o.* FROM recording_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
+        "SELECT o.* FROM current_metadata_selections s JOIN metadata_observations o ON o.id=s.observation_id "
         "WHERE s.recording_id=? AND s.field='genre'", (target_recording,)).fetchone()
     assert (selected['text_value'], selected['genre_key'], selected['resolution_reason']) == (
         label, None, original['resolution_reason'])
@@ -317,7 +314,7 @@ def test_retained_unresolved_genre_is_not_reinterpreted_by_a_new_alias(store, op
                                     (original['id'],)).fetchone()) == original_row
     assert tuple(store.conn.execute(
         'SELECT r.genre_key,r.unresolved_genre FROM recordings r '
-        'JOIN catalog_entries e ON e.recording_id=r.id WHERE e.id=?', (target_entry,)).fetchone()) == (None, label)
+        'JOIN track_sources e ON e.recording_id=r.id WHERE e.id=?', (target_entry,)).fetchone()) == (None, label)
     assert store.conn.execute('SELECT genre FROM catalog_tracks WHERE id=?', (target_entry,)).fetchone()[0] == label
 
 
@@ -326,17 +323,16 @@ def test_legacy_unattributed_genre_transfer_preserves_unresolved_label_without_n
     label = 'An unattributed historical style'
     entry = store.tracks.upsert_track('legacy-genre', 'Original song', 'Artist', None, 200)
     target_entry = store.tracks.upsert_track('legacy-equivalent', 'Equivalent song', 'Artist', None, 200)
-    previous = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
-    target = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (target_entry,)).fetchone()[0]
+    previous = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry,)).fetchone()[0]
+    target = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (target_entry,)).fetchone()[0]
     assert previous != target
     # A migrated base value can have known text and no provable supplying observation.
     with store.conn:
         genre_classifications.write(store.conn, 'recordings', previous, label)
-        store.conn.execute('INSERT INTO recording_metadata_selections('
-            'recording_id,field,attribution_status,legacy_source,selected_at) '
-            "VALUES (?,'genre','legacy_unresolved','old_provider',10)", (previous,))
+        store.conn.execute("UPDATE recordings SET metadata_selections=json_object('genre',"
+                           "json_array(NULL,'legacy_unresolved','old_provider',10,NULL)) WHERE id=?", (previous,))
     original = tuple(store.conn.execute(
-        "SELECT * FROM recording_metadata_selections WHERE recording_id=? AND field='genre'", (previous,)).fetchone())
+        "SELECT * FROM current_metadata_selections WHERE recording_id=? AND field='genre'", (previous,)).fetchone())
     with store.conn:
         store.conn.execute("INSERT INTO genre_alias VALUES (?,?,'synth pop','custom')", (label.casefold(), label))
     assert genre_identity.resolve(store.conn, label) == ('synth pop', None)
@@ -347,10 +343,10 @@ def test_legacy_unattributed_genre_transfer_preserves_unresolved_label_without_n
                                     (target,)).fetchone()) == (None, label)
     assert store.conn.execute('SELECT genre FROM catalog_tracks WHERE id=?', (target_entry,)).fetchone()[0] == label
     assert tuple(store.conn.execute('SELECT observation_id,attribution_status,legacy_source,selected_at '
-        "FROM recording_metadata_selections WHERE recording_id=? AND field='genre'", (target,)).fetchone()) == (
+        "FROM current_metadata_selections WHERE recording_id=? AND field='genre'", (target,)).fetchone()) == (
             None, 'legacy_unresolved', 'old_provider', 10)
     assert tuple(store.conn.execute(
-        "SELECT * FROM recording_metadata_selections WHERE recording_id=? AND field='genre'", (previous,)).fetchone()) == original
+        "SELECT * FROM current_metadata_selections WHERE recording_id=? AND field='genre'", (previous,)).fetchone()) == original
     assert tuple(store.conn.execute('SELECT genre_key,unresolved_genre FROM recordings WHERE id=?',
                                     (previous,)).fetchone()) == (None, label)
     assert store.conn.execute("SELECT count(*) FROM metadata_observations WHERE field='genre' "

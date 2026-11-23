@@ -54,8 +54,8 @@ def web_client(store, clients):
 
 
 def test_album_preview_binds_release_and_destination_and_report_deletion_preserves_retry(store):
-    first = store.accounts.upsert_account("First", "first", None, True)
-    second = store.accounts.upsert_account("Destination", "second", None, False)
+    first = store.accounts.upsert_account("First", None, True)
+    second = store.accounts.upsert_account("Destination", None, False)
     clients = {first: AlbumClient(), second: AlbumClient()}
     web = web_client(store, clients)
     token = _prepare_library(web, store, second, payload=album_zip("One"), indices=())
@@ -96,7 +96,7 @@ def test_album_preview_binds_release_and_destination_and_report_deletion_preserv
 
 @pytest.mark.parametrize("choice,action", [("", "save"), ("MPRE-alternate", "save"), ("MPRE-One", "playlist")])
 def test_ambiguous_album_needs_review_and_playlist_override_is_explicit(store, choice, action):
-    iid = store.accounts.upsert_account("Destination", "bridge", None, True)
+    iid = store.accounts.upsert_account("Destination", None, True)
     client = AlbumClient()
     client.results["One Artist"].append({**client.results["One Artist"][0], "browseId": "MPRE-alternate"})
     client._albums["MPRE-alternate"] = {**client._albums["MPRE-One"], "audioPlaylistId": "OLAK-alternate"}

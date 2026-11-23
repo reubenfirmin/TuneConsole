@@ -18,7 +18,7 @@ def test_with_launch_playlist_ignores_an_unknown_or_malformed_id(store):
 
 
 def test_with_launch_playlist_attaches_available_tracks_only(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     track = seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='v1')
     pid = store.playlists.upsert_playlist(iid, 'PL1', 'My Playlist', 1, 'h', 1.0)
     store.playlists.set_playlist_tracks(pid, [track])

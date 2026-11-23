@@ -71,7 +71,3 @@ class Document:
 
 
 ALBUM_FEEDBACK = Document('album_feedback', 'prepared_album_feedback', 'album_feedback')
-ACCOUNT_AUTH = Document('auth_expired_identities', 'prepared_account_auth', 'account_auth_expirations')
-PLAYBACK_BINDINGS = Document('listening_playback_bindings', 'prepared_playback_binding', 'listening_playback_bindings')
-PENDING_ALBUM = Document('listening_album_pending', 'prepared_album_playback', 'album_playback_intents')
-LIBRARY_SYNC = Document('library_sync_state', 'prepared_library_sync', 'sync_attempts', 'library_sync', True)

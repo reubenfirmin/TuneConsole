@@ -3,15 +3,15 @@ from tests.enrichment_support import seed_enrichment
 
 
 def _seed(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200)
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 0.0)
     pl = store.playlists.upsert_playlist(iid, "P1", "Mix", 0, "h", 0.0)
     store.playlists.set_playlist_tracks(pl, [a, b])
     store.playlists.set_playlist_tracks(lm, [a])                     # Alpha is liked (in LM)
-    ka = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (a,)).fetchone()["k"]
-    kb = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (b,)).fetchone()["k"]
+    ka = store.conn.execute("SELECT identity_key k FROM catalog_tracks WHERE id=?", (a,)).fetchone()["k"]
+    kb = store.conn.execute("SELECT identity_key k FROM catalog_tracks WHERE id=?", (b,)).fetchone()["k"]
     store.history.record_history_plays(iid, 1000.0, [ka, ka, kb], source_timezone="UTC")
     store.history.record_history_plays(iid, 86400+1000.0, [ka], source_timezone="UTC")
     return iid, pl
@@ -30,7 +30,7 @@ def test_targeted_playlist_recency_preserves_current_history_and_generated_plays
     other = store.playlists.upsert_playlist(iid, "OTHER", "Other", 0, "", 0)
     track = store.tracks.upsert_track("outside", "Outside", "Artist", "", 180)
     store.playlists.set_playlist_tracks(other, [track])
-    first_key = store.conn.execute("SELECT identity_key FROM tracks WHERE video_id='v1'").fetchone()[0]
+    first_key = store.conn.execute("SELECT identity_key FROM catalog_tracks WHERE video_id='v1'").fetchone()[0]
     store.playlists.mark_generated_playlist("P1")
     # Synced history is projected at canonical day times rather than the raw
     # import timestamp. A generated play must leave that organic evidence alone.
@@ -73,7 +73,7 @@ def test_ticker_artwork_uses_saved_album_cover_and_ignores_empty_thumbnails(stor
 
 
 def test_playlist_ticker_artwork_prefers_cover_and_falls_back_to_track_art(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     track = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 180, thumbnail="/track.png")
     cover = store.playlists.upsert_playlist(iid, "P1", "With cover", 1, "h", 0.0, thumbnail="/playlist.png")
     fallback = store.playlists.upsert_playlist(iid, "P2", "Track art", 1, "h", 0.0)
@@ -120,7 +120,7 @@ def test_listen_stats_and_artist_songs(store):
 
 
 def test_artist_songs_can_disambiguate_same_name_by_browse_id(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     first = store.tracks.upsert_track("v1", "First act", "Shared Name", "One", 180,
                                artist_browse_id="UC_first")
     second = store.tracks.upsert_track("v2", "Second act", "Shared Name", "Two", 180,
@@ -144,7 +144,7 @@ def test_artist_songs_keeps_unidentified_credit_separate_from_provider_identity(
 
 
 def test_playlist_detail_flags_edited_title_artist(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
     t = store.tracks.upsert_track("v1", "Orig Title", "Orig Artist", "Al", 100)
     store.playlists.set_playlist_tracks(p, [t])
@@ -160,7 +160,7 @@ def test_story_songs_favor_recent_listens_including_spotify_and_collapse_uploads
 
     now = 1_800_000_000
     day = 86400
-    iid = store.accounts.upsert_account('me', 'c', None, True)
+    iid = store.accounts.upsert_account('me', None, True)
     keys = {}
     for video, title in [('recent', 'Recent'), ('once', 'Once'), ('old', 'Old favorite'),
                          ('unplayed', 'A new song'), ('wrong', 'Wrong genre')]:
@@ -168,7 +168,7 @@ def test_story_songs_favor_recent_listens_including_spotify_and_collapse_uploads
         seed_enrichment(store, entry, 'Techno' if video=='wrong' else 'Shoegaze', None)
         keys[video] = entry
     store.tracks.upsert_track('second-upload', 'Recent', 'Band', '', 180)
-    recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?',
+    recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?',
                                    (keys['recent'],)).fetchone()[0]
     store.tracks.associate_youtube_item('second-upload', recording, source='verified',
         evidence={'review': 'same recording'}, now=now)
@@ -206,7 +206,7 @@ def test_story_artist_songs_follow_structured_collaboration_credits(store):
 
 
 def test_story_query_keeps_distinct_recordings_in_listening_order(store):
-    iid = store.accounts.upsert_account('me', 'c', None, True)
+    iid = store.accounts.upsert_account('me', None, True)
     for video, title in [('first', 'Wise One'), ('copy', 'Wise One'),
                          ('remaster', 'Wise One (2020 Remaster)'),
                          ('other', 'Giant Steps'), ('live', 'Wise One (Live)')]:
@@ -224,7 +224,7 @@ def test_story_query_keeps_distinct_recordings_in_listening_order(store):
 
 def test_story_activity_requires_recent_listening_and_preserves_collaboration_credits(store):
     now, day = 1_800_000_000, 86400
-    iid = store.accounts.upsert_account('me', 'c', None, True)
+    iid = store.accounts.upsert_account('me', None, True)
     entry = store.tracks.upsert_track('collab', 'Together', 'Band & Guest', '', 180,
         credits=[{'name': 'Band', 'id': 'UC_band'}, {'name': 'Guest', 'id': 'UC_guest'}])
     store.tracks.upsert_track('old', 'Old', 'Old artist', '', 180)

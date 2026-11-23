@@ -14,7 +14,30 @@ class FakeSettings:
 
 class FakeStore:
     def __init__(self, settings=None):
-        self.settings = FakeSettings(settings)
+        prefs = dict(settings or {})
+        checked = prefs.pop('latest_version_checked_at', None)
+        deadline = prefs.pop('latest_version_check_after', None)
+        latest = prefs.pop('latest_version_seen', None)
+        self.settings = FakeSettings(prefs)
+        self.enrichment_state = FakeReleaseState(checked, deadline, latest)
+
+
+class FakeReleaseState:
+    def __init__(self, checked=None, deadline=None, latest=None):
+        self.checked = float(checked) if checked is not None else None
+        self.deadline = float(deadline) if deadline is not None else None
+        self.latest = latest
+
+    def release_check(self):
+        return self.checked, self.deadline, self.latest
+
+    def schedule_release_check(self, deadline):
+        self.deadline = deadline
+
+    def record_release_check(self, now, latest):
+        self.checked = now
+        if latest:
+            self.latest = latest
 
 
 def test_current_version_strips_dev_suffix(monkeypatch):
@@ -151,8 +174,7 @@ def test_check_latest_fetches_and_caches_when_never_checked(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: "0.2.0")
     store = FakeStore()
     uc.check_latest(store, now=1000.0)
-    assert store.settings.get_setting("latest_version_seen") == "0.2.0"
-    assert store.settings.get_setting("latest_version_checked_at") == "1000.0"
+    assert store.enrichment_state.release_check() == (1000., None, '0.2.0')
 
 
 def test_fresh_install_defers_automatic_check_and_preserves_deadline_across_restart(monkeypatch):
@@ -162,14 +184,13 @@ def test_fresh_install_defers_automatic_check_and_preserves_deadline_across_rest
     uc.schedule_first_check(store, 1000)
     uc.check_latest(store, 1000)
     assert calls == []
-    assert store.settings.get_setting("latest_version_checked_at") is None
-    assert store.settings.get_setting("latest_version_seen") is None
+    assert store.enrichment_state.release_check() == (None, 1000 + uc._CHECK_INTERVAL_S, None)
     uc.schedule_first_check(store, 2000)  # a restart must not postpone the deadline
     uc.check_latest(store, 1000 + 4 * 3600 - 1)
     assert calls == []
     uc.check_latest(store, 1000 + 4 * 3600)
     assert calls == [1]
-    assert store.settings.get_setting("latest_version_seen") == "0.2.0"
+    assert store.enrichment_state.release_check()[2] == "0.2.0"
     uc.check_latest(store, 1000 + 4 * 3600 + 1)
     assert calls == [1]
 
@@ -179,7 +200,7 @@ def test_scheduling_first_check_preserves_existing_install_cadence(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: calls.append(1) or "0.3.0")
     store = FakeStore({"latest_version_checked_at": "1000", "latest_version_seen": "0.2.0"})
     uc.schedule_first_check(store, 1000 + 4 * 3600)
-    assert store.settings.get_setting("latest_version_check_after") is None
+    assert store.enrichment_state.release_check()[1] is None
     uc.check_latest(store, 1000 + 4 * 3600)
     assert calls == [1]
 
@@ -190,14 +211,14 @@ def test_check_latest_skips_when_checked_recently(monkeypatch):
     store = FakeStore({"latest_version_checked_at": "1000.0", "latest_version_seen": "0.2.0"})
     uc.check_latest(store, now=1000.0 + 3600)                    # only 1h later
     assert calls == []                                            # not fetched
-    assert store.settings.get_setting("latest_version_seen") == "0.2.0"    # unchanged
+    assert store.enrichment_state.release_check()[2] == "0.2.0"
 
 
 def test_check_latest_refetches_after_interval(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: "0.3.0")
     store = FakeStore({"latest_version_checked_at": "1000.0", "latest_version_seen": "0.2.0"})
     uc.check_latest(store, now=1000.0 + 4 * 3600)                # exactly 4h later
-    assert store.settings.get_setting("latest_version_seen") == "0.3.0"
+    assert store.enrichment_state.release_check()[2] == "0.3.0"
 
 
 def test_check_latest_fail_silent_keeps_cached_value(monkeypatch):
@@ -206,8 +227,7 @@ def test_check_latest_fail_silent_keeps_cached_value(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", boom)
     store = FakeStore({"latest_version_seen": "0.2.0"})
     uc.check_latest(store, now=5000.0)                            # must not raise
-    assert store.settings.get_setting("latest_version_seen") == "0.2.0"   # cached value retained
-    assert store.settings.get_setting("latest_version_checked_at") == "5000.0"  # still stamped (bounds retries)
+    assert store.enrichment_state.release_check() == (5000., None, '0.2.0')
 
 
 def test_maybe_check_update_swallows_errors(monkeypatch):

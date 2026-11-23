@@ -9,12 +9,14 @@ import pytest
 from tests.recommendation_support import seed_compact_group_history
 from tests.repos.test_typed_recommendation_publication import publish, collect
 from tests.store_fixture_support import (
-    _numbered_input, native_sql_calls, reuse_reporting_reader, without_query_timing,
+    _file_consumer_store, native_sql_calls, reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import bundle_plan, policy_config, recommendation_plan, recommendation_revalidations as revalidations
+from yt_playlist.core import bundle_plan, policy_config, recommendation_chunks, recommendation_plan
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core import metadata
+from yt_playlist.core.recommendation_content import FILE_KIND
+from yt_playlist.core.recommendation_files import RecommendationFiles
 from yt_playlist.rec import home_vibe, musical_character, vibe_pools
 from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import recommendation_publication as publication
@@ -24,6 +26,8 @@ from yt_playlist.controllers.recommendation_proposals import RecommendationPropo
 
 pytestmark = pytest.mark.usefixtures('without_query_timing', 'native_sql_calls')
 
+REVALIDATED = 'SELECT count(*) FROM recommendation_surface_pools WHERE revalidated_policy_version IS NOT NULL'
+
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
@@ -31,21 +35,16 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture
-def recommendations(tmp_path, monkeypatch, native_sql_calls):
-    # Publication consumes current catalog inputs, with real groups and files.
-    with _numbered_input(107, tmp_path, monkeypatch, snapshot_guards=True) as (store, _):
-        # Keep real WAL commits and visibility. These disposable fixtures do
-        # not need a checkpoint after every bounded publication write.
-        store.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with store.conn:
-            revalidations.install(store.conn)
+def recommendations(tmp_path, _pristine_current_schema, monkeypatch, native_sql_calls):
+    # Bundle publication starts with the current catalog and real group files.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
         with reuse_reporting_reader(store, monkeypatch):
             seed_compact_group_history(store)
         assert store.taste_groups.head_generation() == 'second'
         assert store.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-        assert store.conn.execute('SELECT count(*) FROM recommendation_heads').fetchone()[0] == 0
-        assert store.conn.execute('SELECT count(*) FROM recommendation_pool_revalidations').fetchone()[0] == 0
+        assert store.conn.execute('SELECT count(*) FROM recommendation_generation_surfaces WHERE selected=1').fetchone()[0] == 0
+        assert store.conn.execute(REVALIDATED).fetchone()[0] == 0
         assert store._snapshot_revisions.conn is store.conn
         yield store
 
@@ -194,7 +193,7 @@ def test_invalid_legacy_inputs_fail_before_ownership_or_file_publication(recomme
         prepare(store, value)
     assert store.conn.total_changes == before
     assert not store.conn.execute('SELECT 1 FROM recommendation_generations').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM prepared_outputs').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM recommendation_chunks').fetchone()
 
 
 def test_conversion_budget_is_checked_before_accumulating_all_slots(recommendations, monkeypatch):
@@ -237,9 +236,14 @@ def test_atomic_import_preserves_current_head_until_publication_and_reuses_compl
     store = recommendations
     prepared = prepare(store, bundle(store))
     original = publish(store, replace(prepared, external_key='original-serving'))
+
     def before_publish(generation):
         assert generation != original.generation_id
         assert store.recommendations.head('home')['id'] == original.generation_id
+        assert store.conn.execute('SELECT count(*) FROM collection_file_writes WHERE kind=? AND owner_id->>1=? '
+                                  "AND file_status='ready' AND chunk_generation_id=?",
+                                  (FILE_KIND, recommendation_chunks.OWNER, generation)).fetchone()[0] == len(prepared.outputs)
+
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         generation = recommendation_import.import_plan(store.conn, prepared, 11, before_publish=before_publish)
@@ -250,7 +254,9 @@ def test_atomic_import_preserves_current_head_until_publication_and_reuses_compl
     assert second != generation
     assert store.recommendations.head('home')['id'] == second
     assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
-    assert not store.conn.execute('SELECT 1 FROM recommendation_builds').fetchone()
+    assert store.recommendations.display('home', 'all', 'wheelhouse', [1]) == {
+        1: {'owner': ['recording', 2], 'reason': 'explanation two'}}
+    assert not store.conn.execute('SELECT 1 FROM recommendation_generations WHERE build_owner IS NOT NULL').fetchone()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -307,7 +313,7 @@ def test_revalidated_publication_reuses_published_or_staged_pools_with_original_
             with pytest.raises(WorkClosing, match='after revalidation'):
                 store.recommendations.stage(next_plan, build)
         assert store.recommendations.head('home') is None
-        assert store.conn.execute('SELECT count(*) FROM recommendation_pool_revalidations').fetchone()[0] == 1
+        assert store.conn.execute(REVALIDATED).fetchone()[0] == 1
         resumed = store.recommendations.claim(next_plan, owner=build.owner)
         store.recommendations.stage(next_plan, resumed)
         store.recommendations.publish(resumed, 12)
@@ -319,15 +325,16 @@ def test_revalidated_publication_reuses_published_or_staged_pools_with_original_
     assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
     assert store.recommendations.framing('home')['musical_generation'] == 'unrelated-profile-input-changed'
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    with pytest.raises(sqlite3.IntegrityError, match='selected owner'), store.conn:
-        store.conn.execute('DELETE FROM recommendation_pool_revalidations WHERE generation_id=?', (second,))
+    with pytest.raises(sqlite3.IntegrityError, match='immutable'), store.conn:
+        store.conn.execute('UPDATE recommendation_surface_pools SET revalidated_policy_version=NULL WHERE generation_id=?',
+                           (second,))
     # Small cleanup turns retain all selected revalidated facts, then release
     # their proofs and policies only after the actual generation roots retire.
     monkeypatch.setattr(publication, 'CLEANUP_ROWS', 2)
     with store.conn:
-        store.conn.execute('UPDATE recommendation_builds SET expires_at=0')
+        store.conn.execute('UPDATE recommendation_generations SET build_expires_at=0 WHERE build_owner IS NOT NULL')
     collect(store)
-    assert not store.conn.execute('SELECT 1 FROM recommendation_builds').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM recommendation_generations WHERE build_owner IS NOT NULL').fetchone()
     assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
     # Intermediate current policies can retire with their selection, without
     # waiting for the still-shared original pool and its policy to disappear.
@@ -337,26 +344,15 @@ def test_revalidated_publication_reuses_published_or_staged_pools_with_original_
     second = publish(store, newest).generation_id
     collect(store)
     with store.conn:
-        assert store.rec_ledger.prune_policies(['new-input-policy'], None)['policies_deleted'] == 1
-        assert store.rec_ledger.prune_policies([prepared.policy_version, 'newest-input-policy'], None)['policies_deleted'] == 0
+        assert store.rec_ledger.prune_policies(['new-input-policy'])['policies_deleted'] == 1
+        assert store.rec_ledger.prune_policies([prepared.policy_version, 'newest-input-policy'])['policies_deleted'] == 0
     assert store.recommendations.page('home', 'all', 'wheelhouse')[0]['pool_policy'] == 'newest-input-policy'
     assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
-    def assert_compaction_ownership(expected):
-        from yt_playlist.core.db_rebuild.build import plan
-        with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-            predicates = plan(reader, now=20)
-            retained = reader.execute('SELECT count(*) FROM recommendation_pool_revalidations s WHERE '
-                                           + predicates['recommendation_pool_revalidations']).fetchone()[0]
-            assert retained == expected
-            assert reader.execute('SELECT count(*) FROM recommendation_pools s WHERE '
-                                       + predicates['recommendation_pools']).fetchone()[0] == (len({
-                slot.pool.content_digest for slot in next_plan.slots}) if expected else 0)
-    assert_compaction_ownership(len(next_plan.slots))
+    assert store.conn.execute(REVALIDATED).fetchone()[0] == len(next_plan.slots)
     with store.conn:
-        store.conn.execute('DELETE FROM recommendation_heads WHERE generation_id=?', (second,))
-    assert_compaction_ownership(0)
+        store.conn.execute('UPDATE recommendation_generation_surfaces SET selected=0 WHERE generation_id=?', (second,))
     collect(store)
-    assert not store.conn.execute('SELECT 1 FROM recommendation_pool_revalidations').fetchone()
+    assert store.conn.execute(REVALIDATED).fetchone()[0] == 0
     assert not store.conn.execute('SELECT 1 FROM recommendation_pools').fetchone()
 
 
@@ -401,11 +397,11 @@ def test_import_preflight_checks_every_canonical_owner_before_publishing_files(r
     store = recommendations
     prepared = prepare(store, bundle(store))
     slot = prepared.slots[0]
-    invalid = pools.prepare(slot.pool.pool_key, slot.pool.policy_version, None, slot.pool.input_fingerprint,
+    invalid = pools.prepare(slot.pool.pool_key, slot.pool.policy_version, slot.pool.input_fingerprint,
                             slot.pool.purpose, [pools.Candidate(999)])
     prepared = replace(prepared, slots=(replace(slot, pool=invalid),), outputs=())
     calls = []
-    monkeypatch.setattr(outputs, 'publish', lambda *args: calls.append(args))
+    monkeypatch.setattr(RecommendationFiles, 'publish_reserved', lambda *args, **kwargs: calls.append(args))
     before = store.conn.total_changes
     with pytest.raises(ValueError, match='unresolved canonical'), store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
@@ -423,7 +419,8 @@ def test_late_import_failure_rolls_back_owners_and_heads_without_deleting_last_g
     original_output = store.recommendations.output(output.surface, output.chunk_key)
     assert original_output is not None
     counts = {table: store.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0]
-              for table in ('recommendation_generations', 'recommendation_candidates', 'prepared_outputs')}
+              for table in ('recommendation_generations', 'recommendation_candidates', 'recommendation_chunks',
+                            'collection_file_writes')}
     original, calls = publication._output, 0
     def interrupted(*args):
         nonlocal calls
@@ -445,12 +442,10 @@ def test_late_import_failure_rolls_back_owners_and_heads_without_deleting_last_g
 def catalog(store):
     with store.conn:
         for recording, key in [(1, 'one'), (2, 'two')]:
-            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,album,duration_s) '
-                               'VALUES (?,?,?,?,?,?)', (key + '-current', recording, key + ' current title',
-                                                      'current artist', 'current album', 180))
-            entry = store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?) RETURNING id',
-                                       (recording, key + '-current')).fetchone()[0]
-            store.conn.execute("INSERT INTO library_memberships VALUES (?,'import',1)", (entry,))
+            entry = store.conn.execute('INSERT INTO track_sources(video_id,recording_id,title,artist,album,duration_s) '
+                'VALUES (?,?,?,?,?,?) RETURNING id', (key + '-current', recording, key + ' current title',
+                                                     'current artist', 'current album', 180)).fetchone()[0]
+            store.conn.execute("UPDATE track_sources SET library_origin='import',library_added_at=1 WHERE id=? AND library_origin IS NULL", (entry,))
             metadata.select(store.conn, entry, 'genre', 'current genre', 'fixture')
             metadata.select(store.conn, entry, 'mb_year', '2001', 'fixture')
 
@@ -472,7 +467,7 @@ def test_serving_hydrates_only_a_rank_page_from_current_canonical_metadata(recom
     assert (track['score'], track['reason'], track['duration'], track['_radio_fresh']) == (
         .9, 'explanation one', 180, False)
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET title='corrected after publication' WHERE video_id='one-current'")
+        store.conn.execute("UPDATE track_sources SET title='corrected after publication' WHERE video_id='one-current'")
     assert store.recommendations.candidate_page('home', 'all', 'wheelhouse', limit=1)['tracks'][0]['title'] == 'corrected after publication'
 
 
@@ -481,7 +476,7 @@ def test_unavailable_upload_does_not_reset_rank_cursor_or_hide_following_candida
     catalog(store)
     publish(store, prepare(store, bundle(store)))
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='one-current'")
+        store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='one-current'")
     first = store.recommendations.candidate_page('home', 'all', 'wheelhouse', limit=1)
     assert first['tracks'] == [] and first['after'] == 0 and not first['exhausted']
     second = store.recommendations.candidate_page('home', 'all', 'wheelhouse', after=first['after'], limit=1)
@@ -509,7 +504,7 @@ def test_vibe_reader_reaches_selected_genre_pool_outside_main_head_without_legac
     catalog(store)
     with store.conn:
         for key, genre in [('one', 'rock'), ('two', 'jazz')]:
-            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (key + '-current',)).fetchone()[0]
+            entry = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?', (key + '-current',)).fetchone()[0]
             metadata.select(store.conn, entry, 'genre', genre, 'fixture')
     value = bundle(store)
     one, two = value['all']['wheelhouse']

@@ -14,7 +14,7 @@ class EmbeddingPreparation:
         for order, subject, space, version, dimensions, vector, built in rows:
             groups.setdefault((space, version, dimensions), []).append((subject, vector, built, order))
         for (space, version, dimensions), values in groups.items():
-            references = self.files.write_legacy(kind, dimensions, values)
+            references = self.files.write(kind, dimensions, values)
             heads = [(subject, None, width, digest, position)
                      for subject, width, digest, position, _, _ in references]
             if [vector for _, vector in self.files.read_many(kind, heads)] != [value[1] for value in values]:

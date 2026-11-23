@@ -1,5 +1,4 @@
 """Continue the onboarding playlist without opening the later Radio destination."""
-import json
 import logging
 import threading
 import time
@@ -7,16 +6,15 @@ from uuid import uuid4
 
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.core.accounts import client_for
-from yt_playlist.rec import home_prepared, onboarding
-from yt_playlist.rec.radio_candidates import eligible_seeds
+from yt_playlist.rec import onboarding
+from yt_playlist.rec.radio_startup import eligible_seeds
 from yt_playlist.web.radio_edits import AppendOperation, RadioEdits
 from yt_playlist.web.radio_mutations import PlaylistTarget, RadioMutations
-from yt_playlist.web.radio_persistence import operation_values
+from yt_playlist.web.radio_persistence import operation_values, restore_append
 from yt_playlist.web.radio_playback import PlaybackRequest, RadioPlayback
-from yt_playlist.web.radio_playlist_io import PendingWrite, PlaylistChanged, PlaylistEdit, RadioPlaylistIO
+from yt_playlist.web.radio_playlist_io import PlaylistChanged, RadioPlaylistIO
 from yt_playlist.web.radio_playlist_tail import TailView
 
-KEY = 'onboard_first_sounds'
 LOOKAHEAD = 3
 log = logging.getLogger(__name__)
 
@@ -47,11 +45,7 @@ class FirstSounds:
         self.playlists = RadioPlaylistIO(ctx.store.playlists)
         self.mutations = RadioMutations(self.playlists, self, ctx.store.tracks, ctx.now_fn,
                                        paused=lambda: self.ctx.store.activity_paused)
-        try:
-            self.state = json.loads(ctx.store.settings.get_setting(KEY) or 'null')
-        except ValueError:
-            log.warning('Invalid First sounds checkpoint', exc_info=True)
-            self.state = None
+        self.state = ctx.store.radio_checkpoints.first_sounds()
 
     def begin(self, result):
         """Adopt only the confirmed, locally retained result of a user's Play action."""
@@ -66,10 +60,10 @@ class FirstSounds:
                 tracks=tracks, rejected=[], refresh=True, stopped=False,
                 **operation_values(None))
             self.edits = RadioEdits()
-            self._save()
+            self._save(new=True)
 
-    def _save(self):
-        self.ctx.store.settings.set_setting(KEY, json.dumps(self.state, sort_keys=True))
+    def _save(self, *, new=False):
+        self.ctx.store.radio_checkpoints.save_first_sounds(self.state, new=new)
 
     def record_edit(self, episode_id, operation):
         """Reuse the playlist transaction journal before sending or accepting a write."""
@@ -105,12 +99,9 @@ class FirstSounds:
             raise
 
     def _candidates(self):
-        """Use prepared suggestions when available, then newly acquired playable music."""
+        """Use newly acquired playable music to continue the starter playlist."""
         store = self.ctx.store
-        payload = home_prepared.peek(store, self.ctx.now_fn(), display_only=True) or {}
-        tracks = [track for menu in payload.get('menus', []) for proto in menu.get('protos', [])
-                  for track in proto.get('tracks', [])]
-        tracks += onboarding.library_sample(store, n=64)
+        tracks = onboarding.library_sample(store, n=64)
         return eligible_seeds(store, tracks, self.ctx.now_fn())
 
     def maintain(self):
@@ -141,12 +132,7 @@ class FirstSounds:
                                 state['episode_id'], threading.Event(), state['identity'])
         edits = self.edits
         if state.get('pending') and edits.active is None:
-            operation = AppendOperation(state['pending'])
-            if state.get('pending_sent'):
-                after = tuple(track['video_id'] for track in tracks) + (operation.track['video_id'],)
-                operation.write = PendingWrite(PlaylistEdit('add', after, track=operation.track),
-                    state.get('pending_started_at'), state.get('pending_result'))
-            edits.begin(operation)
+            edits.begin(restore_append(state))
         candidates = None
         for _ in range(LOOKAHEAD):
             check_stopping()

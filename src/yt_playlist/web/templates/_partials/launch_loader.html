@@ -26,8 +26,9 @@
     <p class="gen-sub" data-loader-detail>{{ loader_detail|default('') }}</p>
     {% if loader_radio|default(false) %}
     <div class="radio-launch-actions" x-show="launchPhase && !busy" x-cloak>
-      <button class="btn btn-primary" type="button" x-show="!launchUncertain" @click="start(recoverySong, recoveryFromPlaylist)">Try this selection again</button>
+      <button class="btn btn-primary" type="button" @click="retryLaunch()">Try this selection again</button>
       <button class="btn" type="button" x-show="launchUncertain" @click="refresh().catch(() => {})">Check playback</button>
+      <button class="btn" type="button" x-show="launchUncertain && launchAttempt" @click="$dispatch('radio-choose-another')">Choose another song</button>
       <a class="btn" :href="recoveryUrl" :target="recoveryFromPlaylist ? '_self' : '_blank'" rel="noopener" x-text="recoveryFromPlaylist ? 'Back to this playlist' : 'Play this song on YouTube Music'"></a>
     </div>
     {% endif %}

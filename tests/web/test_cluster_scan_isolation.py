@@ -20,7 +20,7 @@ from yt_playlist.web.routes import bridge, clusters
 @pytest.fixture(params=['memory', 'file'])
 def database(request, tmp_path, consumer_store):
     store = consumer_store(':memory:' if request.param == 'memory' else tmp_path / 'clusters.db')
-    store.accounts.upsert_account('Listener', 'fixture', None, True)
+    store.accounts.upsert_account('Listener', None, True)
     keys = []
     for i in range(3):
         store.tracks.upsert_track(f'v{i}', f'Track {i}', f'Artist {i}', '', 200)

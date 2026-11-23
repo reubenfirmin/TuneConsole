@@ -69,7 +69,9 @@ def play_subject(key, video, facts):
     return (chosen['identity_key'], chosen['id']) if chosen else (unresolved, None)
 
 
-def repeats_live_event(latest, subject, video, timestamp):
+def repeats_live_event(latest, subject, video, timestamp, *, verified_playlist=None, selected_at=None):
     return bool(latest and latest['identity_key'] == subject
         and (not video or not latest['video_id'] or video == latest['video_id'])
+        and (not verified_playlist or not latest['playlist_ytm_id'] or verified_playlist == latest['playlist_ytm_id'])
+        and (selected_at is None or latest['played_at'] >= selected_at)
         and 0 <= timestamp - latest['played_at'] < LIVE_DEDUP_S and latest['live'])

@@ -16,8 +16,9 @@ from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls,
 )
 from yt_playlist.core import fao, schema_inspection
+from yt_playlist.core.evidence_record_files import EvidenceRecordFiles
 from yt_playlist.core.store import Store
-from yt_playlist.rec import choice_evidence as choices, choice_retention, comparison_storage
+from yt_playlist.rec import choice_evidence as choices, choice_retention
 from yt_playlist.rec.choice_context import checkpoint, learning_context
 from yt_playlist.library.choice_composition import resolve_context
 
@@ -93,8 +94,8 @@ def retention_costs(monkeypatch, record_property):
 
 @pytest.fixture
 def restarting_library(tmp_path, monkeypatch, native_sql_calls):
-    # Retention consumes admitted, unchanged SQL. Schema admission is owned by
-    # tests/core/test_migrations.py and tests/core/test_schema_contract.py.
+    # Retention consumes the current schema. Admission is covered separately
+    # in tests/core/test_current_schema.py.
     # Keep actual startup repair, repository binding and private revision guards
     # when reopening the persisted learning and diagnostic files below.
     from yt_playlist.core import migrations, sqlite_database as store_module
@@ -178,6 +179,30 @@ def test_failed_learning_publication_never_acknowledges_or_releases(store, monke
     assert ledger.get('artifact', offer['context'])
 
 
+def test_warm_retention_reuses_verified_offers_and_checkpoints(store, monkeypatch):
+    offer = captured(store)
+    assert not choices.maintain_storage(store, 200)['deferred']
+    ledger = store.rec_ledger.evidence()
+    saved = checkpoint(ledger, offer['context'])
+    assert saved
+    cached_paths = {ledger._path('opportunity', offer['id']), ledger._path('checkpoint', offer['context'])}
+    read = EvidenceRecordFiles._read_bytes
+
+    def cache_required(files, path):
+        assert path not in cached_paths
+        return read(files, path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(EvidenceRecordFiles, '_read_bytes', cache_required)
+        assert not choices.maintain_storage(store, 200)['deferred']
+
+    new = captured(store, oid='new-menu', at=201)
+    assert checkpoint(ledger, new['context']) is None
+    assert not choices.maintain_storage(store, 204)['deferred']
+    assert checkpoint(ledger, new['context'])
+    assert checkpoint(ledger, offer['context']) == saved
+
+
 @pytest.fixture
 def retention_trial(store, monkeypatch):
     modes(store)
@@ -253,21 +278,3 @@ def test_prepared_context_keeps_its_graph_and_prior_checkpoint_after_retention(s
     choices.maintain_storage(store, 100 * DAY)
     assert resolve_context(store, {'artifact': held['context']}) == held_context
     assert checkpoint(ledger, previous['context'])
-
-
-def test_retained_paired_storage_preserves_context_and_read_limits(monkeypatch):
-    from tests.comparison_support import legacy_projection
-    track = {'key': 'recording', 'score': .123, 'metadata': 'complete' * 1000, 'pool_policy': 'policy-id'}
-    data = {'menus': [{'protos': [{'tracks': [track] * 12}]}] * 12,
-            'context': {'artifact': 'frozen'}, 'tuning': 'current'}
-    payload = legacy_projection(42, data)
-    assert payload['context'] == data['context']
-    from yt_playlist.core.policy_config import references
-    assert 'policy-id' in set(references(payload))
-    assert comparison_storage.decode(payload) == data
-    assert comparison_storage.decode({'run_id': 42, 'data': data}) == data
-    with pytest.raises(ValueError):
-        comparison_storage.decode({**payload, 'expanded_bytes': 10})
-    monkeypatch.setattr(comparison_storage, 'MAX_EXPANDED_BYTES', 100)
-    with pytest.raises(ValueError, match='Unsupported paired serving projection'):
-        comparison_storage.decode(payload)

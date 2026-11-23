@@ -5,7 +5,7 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
-  var SENSOR_REVISION = 15; // Implementation changes can replace a compatible, healthy sensor.
+  var SENSOR_REVISION = 17; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
   if (previous && previous.version === SENSOR_VERSION && Number.isSafeInteger(previous.revision) &&
       previous.revision >= SENSOR_REVISION && !previous.stopped &&
@@ -17,6 +17,12 @@
   var lastTickAt = 0;
   var bindings = [];
   var boundVideo = null;
+  var startedTrack = null;
+
+  function nativeVideo() {
+    return document.querySelector("#movie_player video") ||
+      document.querySelector("ytmusic-player video") || document.querySelector("video");
+  }
 
   function playerInfo() {
     // The URL describes the page being browsed, which can differ from the playing song/queue.
@@ -51,6 +57,7 @@
       if (info.videoId && typeof player.getPlayerResponse === "function") {
         var response = player.getPlayerResponse();
         var details = response && response.videoDetails;
+        if (details?.videoId && details.videoId !== info.videoId) info.bindingConflict = true;
         if (details && details.videoId === info.videoId) {
           var length = details.lengthSeconds;
           var duration = typeof length === "number" ? length :
@@ -89,6 +96,11 @@
       });
       var endpoint = primary?.navigationEndpoint?.watchEndpoint;
       var current = player && player.getVideoData && player.getVideoData();
+      if (info.videoId && primary?.videoId && current?.video_id === info.videoId &&
+          (!correlated || (info.playlist && endpoint?.playlistId &&
+           endpoint.playlistId.replace(/^RDAMPL/, '') !== info.playlist.replace(/^RDAMPL/, '')))) {
+        info.bindingConflict = true;
+      }
       if (info.videoId && info.playlist && correlated && endpoint?.playlistId === info.playlist &&
           current?.video_id === info.videoId && player.getPlaylistId() === info.playlist) {
         info.queueItem = {videoId: primary.videoId, playlist: info.playlist};
@@ -248,7 +260,7 @@
     try {
       var sr = shuffleRepeat();
       var identity = account();
-      var video = document.querySelector("video");
+      var video = nativeVideo();
       var base = { kind: kind, videoId: last.videoId, position: last.position,
                    duration: last.duration, playlist: last.playlist,
                    shuffle: sr.shuffle, repeat: sr.repeat,
@@ -271,6 +283,22 @@
              position: (v && v.currentTime) || 0, duration: (v && v.duration) || 0 };
     return info;
   }
+  function reportStart(v, info, at, source) {
+    if (!v || v.paused || v.muted || v.volume === 0) {
+      startedTrack = null;
+      return;
+    }
+    if (!info.videoId || !info.playlist || info.bindingConflict) return;
+    var key = info.videoId + ":" + info.playlist;
+    if (key === startedTrack || !account().brandKnown) return;
+    startedTrack = key;
+    post("native-playing", {videoId: info.videoId, playlist: info.playlist, playingAt: at, playingSource: source});
+  }
+  function onPlaying(event) {
+    if (!event.isTrusted || poller.stopped || event.target !== nativeVideo()) return;
+    var at = Date.now();
+    reportStart(event.target, playerInfo(), at, "media-event");
+  }
   function unbindVideo() {
     bindings.forEach(function (b) { boundVideo.removeEventListener(b.event, b.handler); });
     bindings = [];
@@ -283,7 +311,7 @@
     boundVideo = v;
     function listen(event, kind, extra) {
       var handler = function () {
-        if (poller.stopped || v !== boundVideo || v !== document.querySelector("video")) return;
+        if (poller.stopped || v !== boundVideo || v !== nativeVideo()) return;
         // YTM's own ended listener can already have advanced its API to the next song. Finish
         // the observed track before a later play event/poll adopts that new identity.
         if (event === "ended" && last.videoId) {
@@ -307,10 +335,14 @@
   function sample(probeId) {
     if (poller.stopped) return;
     try {
-      var v = document.querySelector("video");
+      var v = nativeVideo();
       bindVideo(v);
       var info = observe(v);
       var now = Date.now();
+      // A document-idle sensor can miss the event on a fast navigation.
+      if (!v || v.paused || v.readyState >= 3 && !v.seeking && v.currentTime > 0) {
+        reportStart(v, info, now, "media-sample");
+      }
       if (info.videoId && v && !v.paused && !v.muted && v.volume !== 0 && now - lastTickAt >= TICK_MS) {
         lastTickAt = now;
         post("tick", {});
@@ -325,6 +357,7 @@
                                       metadataVerified: meta.verified,
                                       videoVerified: !!info.videoId,
                                       videoId: info.videoId, playlist: info.playlist, queueItem: info.queueItem,
+                                      bindingConflict: !!info.bindingConflict,
                                       // Each presence heartbeat anchors the app's local progress clock.
                                       position: info.position, duration: info.duration,
                                       playerBar: bar,
@@ -348,12 +381,13 @@
     var button = control.querySelector("button") || control;
     if (control.disabled || button.disabled || control.getAttribute("aria-disabled") === "true" ||
         button.getAttribute("aria-disabled") === "true") return;
-    var v = document.querySelector("video");
+    var v = nativeVideo();
     if (observe(v).videoId) post("next", {});
   }
   var timer = setInterval(sample, 2000);
   window.addEventListener("message", onProbe);
   window.addEventListener("click", onNext, true);
+  window.addEventListener("playing", onPlaying, true);
   // Future updates can replace this sensor without reloading a tab or leaving duplicate listeners.
   // A legacy boolean marker cannot stop its old interval; content.js ignores its unversioned frames.
   var poller = window.__tcNowPoller = { version: SENSOR_VERSION, revision: SENSOR_REVISION,
@@ -362,6 +396,7 @@
     clearInterval(timer);
     window.removeEventListener("message", onProbe);
     window.removeEventListener("click", onNext, true);
+    window.removeEventListener("playing", onPlaying, true);
     unbindVideo();
   } };
   sample(); // Reinjection can prove MAIN health immediately, before its first periodic tick.

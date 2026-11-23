@@ -1,36 +1,29 @@
 """Current and requested model-selection runs retain actual run ownership."""
-from . import control_reads
-KEYS = {'rec_selection_active_run':'active_run_id','rec_selection_display_run':'display_run_id',
-        'rec_selection_live_run':'live_run_id','rec_selection_restore':'restore_run_id'}
+import sqlite3
 
-
-def available(conn):
-    return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='model_selection_heads'").fetchone() is not None
-            or control_reads.installed(conn, 'model-pointers'))
+KEYS = {'rec_selection_active_run': 'is_active_selection',
+        'rec_selection_display_run': 'is_displayed_selection',
+        'rec_selection_restore': 'restore_requested'}
 
 
 def get(conn,key,default=None):
-    revision = control_reads.selected(conn, 'model-pointers')
-    if revision is not None:
-        return control_reads.pointer_read(conn, revision, key, default)
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='model_selection_heads'").fetchone():
-        row = conn.execute('SELECT value FROM main.settings WHERE key=?', (key,)).fetchone()
-        return row[0] if row else default
-    row = conn.execute(f'SELECT {KEYS[key]} FROM model_selection_heads WHERE singleton=1').fetchone()
-    return (str(row[0]) if row[0] is not None else '') if row is not None else default
+    row = conn.execute(f'SELECT id FROM rec_model_selection_runs WHERE {KEYS[key]}=1').fetchone()
+    return str(row[0]) if row is not None else default
 
 
 def put(conn,values):
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='model_selection_heads'").fetchone():
-        return control_reads.retained_write(conn, values)
-    if not values:
-        return
-    conn.execute('INSERT INTO model_selection_heads(singleton) VALUES (1) ON CONFLICT(singleton) DO NOTHING')
-    for key,value in values.items():
-        if value is not None and value!='':
-            if (isinstance(value,bool) or not str(value).isdecimal() or int(value)<1):
+    roles = {}
+    for key, value in values.items():
+        if value not in (None, ''):
+            if isinstance(value, bool) or not str(value).isdecimal() or int(value) < 1:
                 raise ValueError('Model selection requires an exact run ID')
             value = int(value)
+            if conn.execute('SELECT 1 FROM rec_model_selection_runs WHERE id=?', (value,)).fetchone() is None:
+                raise sqlite3.IntegrityError('Model selection requires an existing run')
         else:
             value = None
-        conn.execute(f'UPDATE model_selection_heads SET {KEYS[key]}=? WHERE singleton=1',(value,))
+        roles[KEYS[key]] = value
+    for role, run_id in roles.items():
+        conn.execute(f'UPDATE rec_model_selection_runs SET {role}=0 WHERE {role}=1 AND id IS NOT ?', (run_id,))
+        if run_id is not None:
+            conn.execute(f'UPDATE rec_model_selection_runs SET {role}=1 WHERE id=? AND {role}=0', (run_id,))

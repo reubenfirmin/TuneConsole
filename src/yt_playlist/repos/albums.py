@@ -17,7 +17,7 @@ class AlbumRepo(Repo):
         row = self.conn.execute("SELECT a.* FROM albums a JOIN album_provider_ids p ON p.album_id=a.id "
             "WHERE p.provider='youtube' AND p.provider_id=?", (browse,)).fetchone()
         aid = row['id'] if row else None
-        return {'album': dict(row) if row else {}, 'keyed_genres': genre_classifications.available(self.conn),
+        return {'album': dict(row) if row else {},
                 'genre': genre_classifications.read(self.conn, 'albums', aid) if aid is not None else None,
                 'credits': [dict(credit) for credit in self.conn.execute(
                     'SELECT * FROM album_artists WHERE album_id=? ORDER BY position', (aid,))]}
@@ -43,10 +43,7 @@ class AlbumRepo(Repo):
     @synchronized
     def link_entry(self, aid, entry, source):
         with self.conn.atomic(join=True):
-            if album_tracklists.available(self.conn):
-                album_tracklists.associate(self.conn, aid, entry, source)
-            elif not self.conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND entry_id=?', (aid, entry)).fetchone():
-                self.conn.execute('INSERT INTO album_tracks(album_id,entry_id,is_full,source) VALUES (?,?,0,?)', (aid, entry, source))
+            album_tracklists.associate(self.conn, aid, entry, source)
 
     @lookup_read
     def linked_artist_inputs(self, aid):

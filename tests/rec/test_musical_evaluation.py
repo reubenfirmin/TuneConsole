@@ -21,7 +21,7 @@ def test_collaborating_artists_and_shared_albums_cannot_cross_holdouts():
 def test_missing_evidence_counts_unknown_and_blind_packet_never_supplies_labels():
     rows = [{'key': str(i), 'title': f'Song {i}', 'artist': f'Artist {i}', 'video_id': f'v{i}'}
             for i in range(40)]
-    profiles = {'0': musical_profiles.resolve([], overrides={'energy': .9})}
+    profiles = {'0': musical_profiles.resolve([], overrides={'intensity': .9})}
     report = coverage(profiles, [row['key'] for row in rows])
     assert report['intensity']['known'] == report['intensity']['explicit'] == 1
     assert report['intensity']['unknown'] == 39

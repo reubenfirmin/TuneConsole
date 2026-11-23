@@ -44,7 +44,7 @@ def client_lifecycle(request, monkeypatch):
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fake = FakeClient()
     return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0,
                                        background_work=False),
@@ -138,7 +138,7 @@ def test_uploaded_starter_preserves_existing_browser_handoff(store):
 
 
 def test_generated_starter_hides_radio_until_setup_is_complete(store, monkeypatch):
-    from unittest.mock import Mock
+    from unittest.mock import ANY, Mock
     from yt_playlist.library import playlist_generated
     from yt_playlist.rec.onboarding import SETUP_COMPLETE
 
@@ -148,7 +148,7 @@ def test_generated_starter_hides_radio_until_setup_is_complete(store, monkeypatc
     store.playlists.mark_generated_playlist('starter-generated')
     store.playlists.set_playlist_group('starter-generated', playlist_generated.GENERATED_GROUP)
     playlist_id = store.playlists.upsert_playlist(account, 'starter-generated', 'First mix', 1, None, 1000)
-    track_id = store.conn.execute("SELECT id FROM catalog_entries WHERE video_id='v1'").fetchone()[0]
+    track_id = store.conn.execute("SELECT id FROM track_sources WHERE video_id='v1'").fetchone()[0]
     store.playlists.set_playlist_tracks(playlist_id, [track_id])
     tracks = [{'video_id': 'v1', 'title': 'T', 'artist': 'A'}]
     # Generation has independent playlist owners. This case checks the real
@@ -162,7 +162,7 @@ def test_generated_starter_hides_radio_until_setup_is_complete(store, monkeypatc
     })
     assert response.status_code == 200
     generate.assert_called_once_with(store, 'Something to listen to - January 1 1970',
-                                     tracks, fake, 1000.0, account, recipe=None)
+                                     tracks, fake, 1000.0, account, recipe=None, on_created=ANY)
     playlist = store.playlists.get_playlist(playlist_id)
     assert f'data-generated-playlist="{playlist.provider_playlist_id}"' in response.text
     assert f'window.location.assign("/playlist/{playlist.id}")' in response.text
@@ -175,6 +175,23 @@ def test_generated_starter_hides_radio_until_setup_is_complete(store, monkeypatc
     assert f'href="/?radio_playlist={playlist.id}#radio"' in html
     assert store.settings.get_setting('home_format') is None
     assert store.settings.get_setting('onboard_listening_format') is None
+
+    def fail_after_creation(_store, title, *_args, on_created, **_kwargs):
+        on_created('starter-generated', title)
+        raise RuntimeError('Confirmation unavailable')
+
+    generate.side_effect = fail_after_creation
+    response = client.post('/home/generate', headers={'HX-Request': 'true'}, data={
+        'name': 'Something to listen to - January 1 1970',
+        'tracks': json.dumps(tracks), 'mix_card': '1',
+    })
+    assert response.status_code == 200
+    assert response.headers['X-Mix-Recovery'] == '1'
+    assert 'HX-Redirect' not in response.headers
+    assert response.json()['recovery'] == {
+        'account_id': account, 'playlist': 'starter-generated', 'confirmed': [],
+        'rejected': [], 'unattempted': [], 'uncertain': ['v1'],
+    }
 
 
 @pytest.mark.parametrize('first_sounds', [False, True])
@@ -380,10 +397,11 @@ def test_import_details_remain_available_after_restart(store):
 
 @pytest.mark.parametrize("outcome", ["partial", "skipped", "failed"])
 def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, outcome, home_routes_only):
-    from tests.onboarding_support import publish_personal_mix
+    from tests.onboarding_support import publish_live_mix_inputs
+    from tests.test_growth_journey import early_journey
 
     _, client = _client(store)
-    publish_personal_mix(store, tracks_per_card=1)
+    publish_live_mix_inputs(store, fresh_reserve=early_journey(store))
     store.rec_proposals.put_proposals('listening_choices', {
         'home_format': {'episodes': {'mixes': 1}}}, 1000)
     store.settings.set_setting("last_sync_at", "1000")
@@ -398,10 +416,15 @@ def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, ou
     # A confirmed account problem still has a specific action in Needs attention.
     identity = store.accounts.get_accounts()[0]
     client.app.state.ctx.flag_auth_expired(identity.id, "Main")
+    account_label = client.app.state.ctx.auth_expired[identity.id]
+    notice_title = f"Sign in to YouTube Music ({account_label})"
     html = client.get("/").text
-    notices = html.split('<section class="dash-panel dash-notices"', 1)[1]
+    assert notice_title not in html
+    response = client.get("/?panel=notices&fragment=1")
+    assert response.status_code == 200
+    notices = response.text
     assert 'class="alert-card card card--featured alert-high"' in notices
-    assert "Sign in to YouTube Music (Main)" in notices
+    assert notice_title in notices
     assert 'href="https://music.youtube.com"' in notices
     assert "Open YouTube Music" in notices
 
@@ -476,15 +499,15 @@ def test_partial_sync_with_playable_offers_finishes_setup_without_faking_sync_su
     assert client.get('/home/growth').json()['nodes'][0]['ready']
 
 
-def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(store):
-    from tests.onboarding_support import publish_personal_mix
+def test_live_offer_readiness_agrees_between_home_and_setup_without_modes(store):
+    from tests.onboarding_support import publish_live_mix_inputs
     from tests.test_growth_journey import early_journey
     from yt_playlist.rec import onboarding
 
     _, client = _client(store)
     store.settings.set_setting("last_sync_at", "1000")
-    early_journey(store)
-    publish_personal_mix(store)
+    reserve = early_journey(store)
+    publish_live_mix_inputs(store, fresh_reserve=reserve)
     assert store.modes.list_modes(active_only=True) == []
 
     # A sparse account already has a usable personal mix on a direct Home visit.
@@ -550,7 +573,7 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
         startup.setattr(migrations, 'migrate', admitted)
         startup.setattr(store_module, 'Revisions', lambda connection: None)
         restored.init_schema()
-    admitted.assert_called_once_with(restored.conn, defer_validation=False)
+    admitted.assert_called_once_with(restored.conn)
     with closing(restored.conn), reuse_reporting_reader(restored, monkeypatch):
         with TestClient(create_app(restored, lambda: {}, now_fn=lambda: 1100,
                                   background_work=False), base_url='http://127.0.0.1') as client:
@@ -560,7 +583,7 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
             assert not onboarding.initial_setup_pending(restored, 1100)
             assert not onboarding.onboarding_active(restored, 1100)
             html = client.get('/').text
-            assert 'id="home-feed"' in html
+            assert 'class="home-dashboard"' in html
             assert 'id="onboarding-feed"' not in html
             assert 'data-setup-pending="false"' in html
 
@@ -579,7 +602,8 @@ def test_existing_actual_home_offers_backfill_setup_completion(store, surface, p
     assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
     html = client.get('/').text
     assert 'id="onboarding-feed"' not in html
-    assert 'id="home-feed"' in html
+    assert 'class="home-dashboard"' in html
+    assert 'data-setup-pending="false"' in html
     assert store.settings.get_setting(onboarding.SETUP_COMPLETE) == '1'
 
 

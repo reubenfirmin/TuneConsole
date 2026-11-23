@@ -1,11 +1,11 @@
 /* Force simulation and canvas painting for the directed dependency layout. */
 window.createModelMapRenderer = function(container, data, events) {
   const START_ZOOM = 1.1, d3 = window.d3;
-  const home = {x: 0, y: 0};
+  const home = {x: 0, y: 0, zoom: START_ZOOM};
   let homeFramed = false;
   const colors = window.themePalette({
     bg: '--bg', surface: '--surface-card', text: '--text', dim: '--dim',
-    line: '--border-strong', conditional: '--amber',
+    line: '--border-strong', conditional: '--amber', feedback: '--teal',
   });
   const root = container.closest('#model-map');
   const featureColors = {
@@ -14,13 +14,30 @@ window.createModelMapRenderer = function(container, data, events) {
   };
   const familyColors = new Map([...container.closest('#model-map').querySelectorAll('[data-mm-group]')]
     .map(element => [element.dataset.mmGroup, getComputedStyle(element).color]));
-  const {nodes: models, outgoing, direction, separation, featureBoundary, areas} = window.createModelMapLayout(data);
-  const areaElements = new Map([...container.closest('#model-map').querySelectorAll('[data-mm-feature-area]')]
-    .map(element => [element.dataset.mmFeatureArea, element]));
-  let visible = new Set(), featureRoutes = new Map();
-  let selected = null, related = new Set(), traced = new Set(), resizeFrame = null;
+  const traceColors = [...root.querySelectorAll('.mm-trace-key i')].map(element => getComputedStyle(element).color);
+  const traceWeights = [[1, 3.2], [.86, 2.3], [.68, 1.8], [.35, 1.35]];
+  const {nodes: models, outgoing, direction, separation, featurePlacement, areas, tasteLayers} = window.createModelMapLayout(data);
+  const firstLayer = tasteLayers[0], lastLayer = tasteLayers.at(-1);
+  const layerIndex = new Map(tasteLayers.map((node, index) => [node.id, index]));
+  const layerLeft = firstLayer.x - firstLayer.width / 2, layerRight = lastLayer.x + lastLayer.width / 2;
+  const areaElements = new Map([...root.querySelectorAll('[data-mm-feature-area]')]
+    .map(element => [element.dataset.mmFeatureArea, {element, heading: element.querySelector('h2')}]));
+  let visible = new Set(), linkRoutes = new Map(), tasteInputs = new Map();
+  let selected = null, related = new Set(), traced = new Map(), resizeFrame = null;
   const graph = window.ForceGraph()(container);
   const color = node => node.area === 'feature' ? featureColors[node.feature_type] : familyColors.get(node.group) || colors.dim;
+
+  function drawTasteLayers(ctx) {
+    if (!tasteLayers.every(node => visible.has(node.id))) return;
+    ctx.save();
+    ctx.strokeStyle = color(firstLayer);
+    ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const node of tasteLayers.slice(0, -1)) {
+      const x = node.x + node.width / 2 + 23, y = node.y;
+      ctx.beginPath(); ctx.moveTo(x - 5, y - 6); ctx.lineTo(x + 2, y); ctx.lineTo(x - 5, y + 6); ctx.stroke();
+    }
+    ctx.restore();
+  }
 
   function titleLines(ctx, text, width) {
     const lines = [''];
@@ -49,7 +66,7 @@ window.createModelMapRenderer = function(container, data, events) {
       ctx.lineTo(x + cut, y + height); ctx.lineTo(x, y + height - cut); ctx.lineTo(x, y + cut); ctx.closePath();
     } else ctx.roundRect(x, y, width, height, feature ? height / 2 : 7);
     ctx.fillStyle = feature ? colors.bg : colors.surface; ctx.fill();
-    ctx.strokeStyle = c; ctx.lineWidth = node.id === selected ? 2.5 : feature ? 1.6 : 1.2; ctx.stroke();
+    ctx.strokeStyle = c; ctx.lineWidth = node.id === selected ? 2.5 : feature || node.tasteLayer ? 1.6 : 1.2; ctx.stroke();
     if (node.id === selected && !feature) {
       ctx.globalAlpha *= .12; ctx.fillStyle = c; ctx.fill(); ctx.globalAlpha = 1;
     }
@@ -62,24 +79,84 @@ window.createModelMapRenderer = function(container, data, events) {
     ctx.fillText(backend ? 'BACKEND' : feature ? 'FEATURE' : node.kind.toUpperCase(), node.x, node.y + 21, width - 18);
     ctx.restore();
   }
+  function linkStyle(link, ctx, withinTaste) {
+    const hop = traced.get(link.edgeIndex);
+    if (hop) {
+      const level = Math.min(hop, 4) - 1;
+      ctx.strokeStyle = traceColors[level];
+      [ctx.globalAlpha, ctx.lineWidth] = traceWeights[level];
+    } else {
+      ctx.strokeStyle = link.feedback ? colors.feedback : link.condition ? colors.conditional
+        : withinTaste ? color(firstLayer) : colors.line;
+      ctx.globalAlpha = selected ? .04 : withinTaste ? .55 : link.feedback ? .25 : .22;
+      ctx.lineWidth = withinTaste ? 1.5 : 1;
+    }
+    ctx.fillStyle = ctx.strokeStyle;
+    if (link.feedback) ctx.setLineDash([2, 5]);
+    else if (link.condition) ctx.setLineDash([5, 4]);
+    return hop === 1 ? 11 : hop ? 9 : 7;
+  }
+
   function drawLink(link, ctx) {
     const source = link.source, target = link.target;
     if (!Number.isFinite(source.x) || !Number.isFinite(target.x)) return;
-    const a = {x: source.x + source.width / 2 + 4, y: source.y};
-    const b = {x: target.x - target.width / 2 - 4, y: target.y};
-    const route = featureRoutes.get(target.id), entrance = route ? route[0] : b;
-    const bend = Math.max(35, (entrance.x - a.x) * .45);
-    const active = traced.has(link.edgeIndex);
-    const direct = active && (source.id === selected || target.id === selected);
-    ctx.save(); ctx.globalAlpha = active ? .9 : selected ? .04 : .22;
-    ctx.strokeStyle = active ? link.condition ? colors.conditional : color(models.get(selected)) : colors.line;
-    ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = active ? direct ? 2.2 : 1.8 : 1;
-    if (link.condition) ctx.setLineDash([5, 4]);
+    const withinTaste = source.tasteLayer && target.tasteLayer;
+    ctx.save();
+    const length = linkStyle(link, ctx, withinTaste);
+    if (link.feedback) {
+      const a = {x: source.x - source.width / 2 - 4, y: source.y};
+      const b = {x: target.x + target.width / 2 + 4, y: target.y};
+      const bend = Math.max(35, Math.abs(a.x - b.x) * .45);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y);
+      ctx.bezierCurveTo(a.x - bend, a.y, b.x + bend, b.y, b.x, b.y);
+      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x + length, b.y - length * .5);
+      ctx.lineTo(b.x + length, b.y + length * .5);
+      ctx.closePath(); ctx.fill(); ctx.restore();
+      return;
+    }
+    const aboveTaste = source.tasteLayer && !withinTaste && target.area !== 'feature' && target.x - target.width / 2 < layerRight
+      && target.y + target.height / 2 < source.y - source.height / 2;
+    const a = source.tasteLayer && !aboveTaste ? {x: source.x, y: source.y + source.height / 2 + 4}
+      : {x: source.x + source.width / 2 + 4, y: source.y};
+    const route = linkRoutes.get(link.edgeIndex);
+    const tasteInput = tasteInputs.get(link.edgeIndex);
+    const b = withinTaste ? {x: target.x + 23 + 15 * layerIndex.get(source.id), y: target.y + target.height / 2 + 4}
+      : target.tasteLayer ? tasteInput?.tip ?? {x: target.x, y: target.y - target.height / 2 - 4}
+      : route?.points.at(-1) ?? {x: target.x - target.width / 2 - 4, y: target.y};
     ctx.beginPath(); ctx.moveTo(a.x, a.y);
-    ctx.bezierCurveTo(a.x + bend, a.y, entrance.x - bend, entrance.y, entrance.x, entrance.y);
-    if (route) {
-      for (let index = 1; index < route.length - 1; index++) {
-        const before = route[index - 1], point = route[index], after = route[index + 1];
+    if (withinTaste) {
+      const depth = a.y + 78 + 21 * layerIndex.get(source.id);
+      const corner = 18;
+      ctx.lineTo(a.x, depth - corner);
+      ctx.quadraticCurveTo(a.x, depth, a.x - corner, depth);
+      ctx.lineTo(b.x + corner, depth);
+      ctx.quadraticCurveTo(b.x, depth, b.x, depth - corner);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x - length * .5, b.y + length);
+      ctx.lineTo(b.x + length * .5, b.y + length);
+      ctx.closePath(); ctx.fill(); ctx.restore();
+      return;
+    }
+    // Leave the layer row below the captions and approach its inputs from above.
+    // The short chevrons between its cards show time order only.
+    let start = a, end = route?.points.at(-2) ?? b;
+    if (aboveTaste) {
+      start = {x: a.x + 22, y: source.y - source.height / 2 - 16};
+      ctx.bezierCurveTo(a.x + 16, a.y, start.x, start.y + 20, start.x, start.y);
+    } else if (source.tasteLayer) {
+      start = modelMapTasteExit(source, b.x, tasteLayers);
+      ctx.quadraticCurveTo(a.x, start.y, Math.min(a.x + 21, start.x), start.y);
+      ctx.lineTo(start.x, start.y);
+    }
+    if (target.tasteLayer) end = tasteInput?.lane ?? {x: layerLeft - 20, y: b.y - 30 - layerIndex.get(target.id) * 10};
+    if (route && !route.direct) {
+      const {points} = route;
+      for (let index = 1; index < points.length - 1; index++) {
+        const before = points[index - 1], point = points[index], after = points[index + 1];
         const back = Math.hypot(before.x - point.x, before.y - point.y);
         const forward = Math.hypot(after.x - point.x, after.y - point.y);
         if (!back || !forward) { ctx.lineTo(point.x, point.y); continue; }
@@ -88,14 +165,26 @@ window.createModelMapRenderer = function(container, data, events) {
         ctx.quadraticCurveTo(point.x, point.y,
           point.x + (after.x - point.x) * radius / forward, point.y + (after.y - point.y) * radius / forward);
       }
-      ctx.lineTo(b.x, b.y);
+    } else {
+      const bend = (end.x - start.x) * .45;
+      const control = target.area === 'feature' ? bend : Math.max(35, bend);
+      ctx.bezierCurveTo(start.x + control, start.y, end.x - control, end.y, end.x, end.y);
     }
+    if (target.tasteLayer) {
+      ctx.lineTo(b.x - 21, end.y);
+      ctx.quadraticCurveTo(b.x, end.y, b.x, b.y);
+    }
+    if (route) ctx.lineTo(b.x, b.y);
     ctx.stroke();
     ctx.setLineDash([]);
-    const length = active ? 10 : 7;
     ctx.beginPath(); ctx.moveTo(b.x, b.y);
-    ctx.lineTo(b.x - length, b.y - length * .5);
-    ctx.lineTo(b.x - length, b.y + length * .5);
+    if (target.tasteLayer) {
+      ctx.lineTo(b.x - length * .5, b.y - length);
+      ctx.lineTo(b.x + length * .5, b.y - length);
+    } else {
+      ctx.lineTo(b.x - length, b.y - length * .5);
+      ctx.lineTo(b.x - length, b.y + length * .5);
+    }
     ctx.closePath(); ctx.fill(); ctx.restore();
   }
 
@@ -129,20 +218,31 @@ window.createModelMapRenderer = function(container, data, events) {
     // painter setter after camera/layout changes so clicks use current geometry.
     graph.nodePointerAreaPaint((node, color, ctx) => paintHit(node, color, ctx));
   }
+  function clickAt(event) {
+    // The picking canvas can lag the camera when it settles into the opening view.
+    const bounds = container.getBoundingClientRect();
+    const {x, y} = graph.screen2GraphCoords(event.clientX - bounds.left, event.clientY - bounds.top);
+    const node = graph.graphData().nodes.findLast(node => Math.abs(node.x - x) <= node.width / 2
+      && Math.abs(node.y - y) <= node.height / 2);
+    if (node) events.open(node.id);
+    else events.background();
+  }
   function positionAreas() {
     const zoom = graph.zoom();
     for (const area of areas) {
-      const element = areaElements.get(area.title);
+      const {element, heading} = areaElements.get(area.title);
       const members = area.members.filter(node => visible.has(node.id));
       element.hidden = !members.length;
       if (element.hidden) continue;
       const left = Math.min(...members.map(node => node.x - node.width / 2));
       const right = Math.max(...members.map(node => node.x + node.width / 2));
-      const top = Math.min(...members.map(node => node.y - node.height / 2));
+      const first = members.reduce((above, node) => node.y < above.y ? node : above);
+      const top = first.y - first.height / 2;
       const bottom = Math.max(...members.map(node => node.y + node.height / 2));
       area.x = left - 28; area.y = top - 60;
       area.width = right - left + 56; area.height = bottom - top + 88;
       const point = graph.graph2ScreenCoords(area.x, area.y);
+      heading.style.marginLeft = `${first.x - first.width / 2 - area.x}px`;
       element.style.width = `${area.width}px`; element.style.height = `${area.height}px`;
       element.style.transform = `translate(${point.x}px, ${point.y}px) scale(${zoom})`;
     }
@@ -150,25 +250,33 @@ window.createModelMapRenderer = function(container, data, events) {
   function frameHome({nodes, links}) {
     if (homeFramed || nodes.length !== models.size) return;
     homeFramed = true;
-    const width = graph.width() / START_ZOOM, height = graph.height() / START_ZOOM;
+    const width = graph.width(), height = graph.height();
+    const horizontalPadding = 16, topPadding = 140, bottomPadding = 100;
     const center = graph.centerAt();
-    const atHome = graph.zoom() === START_ZOOM && Math.hypot(center.x - home.x, center.y - home.y) < 1;
-    let nearest = null, distance = Infinity;
+    const atHome = graph.zoom() === home.zoom && Math.hypot(center.x - home.x, center.y - home.y) < 1;
+    let best = null;
     for (const {source, target} of links) {
       if (source.area !== 'model' || target.feature_type !== 'interactive') continue;
-      // Keep both endpoints clear of the toolbar and the controls along the bottom.
-      const minX = target.x + target.width / 2 - width / 2 + 20 / START_ZOOM;
-      const maxX = source.x - source.width / 2 + width / 2 - 20 / START_ZOOM;
-      const minY = Math.max(source.y + source.height / 2, target.y + target.height / 2) - height / 2 + 90 / START_ZOOM;
-      const maxY = Math.min(source.y - source.height / 2, target.y - target.height / 2) + height / 2 - 140 / START_ZOOM;
-      if (maxX < minX || maxY < minY) continue;
+      const left = Math.min(layerLeft, source.x - source.width / 2);
+      const right = Math.max(layerRight, target.x + target.width / 2);
+      const cards = [firstLayer, source, target];
+      const top = Math.min(...cards.map(card => card.y - card.height / 2));
+      const bottom = Math.max(...cards.map(card => card.y + card.height / 2));
+      const zoom = Math.min(START_ZOOM, (width - 2 * horizontalPadding) / (right - left),
+        (height - topPadding - bottomPadding) / (bottom - top));
+      if (zoom < .76) continue;
+      const minX = right - (width / 2 - horizontalPadding) / zoom;
+      const maxX = left + (width / 2 - horizontalPadding) / zoom;
+      const minY = bottom - (height / 2 - bottomPadding) / zoom;
+      const maxY = top + (height / 2 - topPadding) / zoom;
       const x = Math.max(minX, Math.min(home.x, maxX)), y = Math.max(minY, Math.min(home.y, maxY));
       const shift = Math.hypot(x - home.x, y - home.y);
-      if (shift < distance) { nearest = {x, y}; distance = shift; }
+      if (!best || zoom > best.zoom || (zoom === best.zoom && shift < best.shift)) best = {x, y, zoom, shift};
     }
-    if (nearest) {
-      Object.assign(home, nearest);
-      if (atHome && distance > 0) graph.centerAt(home.x, home.y, 0);
+    if (best) {
+      const {x, y, zoom} = best;
+      Object.assign(home, {x, y, zoom});
+      if (atHome) graph.centerAt(x, y, 0).zoom(zoom, 0);
     }
   }
   graph.backgroundColor('transparent').nodeId('id').nodeLabel(() => '').linkLabel(() => '')
@@ -178,27 +286,33 @@ window.createModelMapRenderer = function(container, data, events) {
     .minZoom(.15).maxZoom(3.5).enableNodeDrag(true)
     .warmupTicks(220).cooldownTicks(90).cooldownTime(2500).d3AlphaDecay(.035).d3VelocityDecay(.5)
     .onNodeHover(node => events.hover(node?.id || null))
-    .onNodeClick(node => events.open(node.id))
-    .onBackgroundClick(events.background)
-    .onNodeDrag(() => { featureRoutes = new Map(); })
+    .onNodeClick((_, event) => clickAt(event))
+    .onBackgroundClick(clickAt)
+    .onNodeDrag(node => {
+      if (node.tasteLayer) { node.fx = node.branchX; node.fy = node.branchY; }
+      linkRoutes = new Map(); tasteInputs = new Map();
+    })
     .onZoomEnd(refreshPointer).onNodeDragEnd(refreshPointer)
+    .onRenderFramePre(drawTasteLayers)
     .onRenderFramePost(() => { positionAreas(); events.frame(); })
     .onEngineStop(() => {
       const data = graph.graphData();
-      featureRoutes = window.routeModelMapFeatures(data.nodes);
+      linkRoutes = window.routeModelMapLinks(data.nodes, data.links, tasteLayers);
+      tasteInputs = routeModelMapTasteInputs(data.links, tasteLayers);
       frameHome(data);
       refreshPointer(); container.dataset.settled = 'true';
     });
   graph.d3Force('charge', d3.forceManyBody().strength(-450).distanceMax(700));
   graph.d3Force('center', null);
-  graph.d3Force('collision', collision());
   graph.d3Force('clusters', separation);
   graph.d3Force('direction', direction);
-  graph.d3Force('feature-boundary', featureBoundary);
-  graph.d3Force('depth', d3.forceX(node => node.branchX).strength(node => node.area === 'feature' ? .12 : .025));
-  graph.d3Force('branch', d3.forceY(node => node.branchY).strength(node => node.area === 'feature' ? .1 : .025));
+  graph.d3Force('feature-placement', featurePlacement);
+  graph.d3Force('depth', d3.forceX(node => node.branchX).strength(node => node.area === 'feature' ? 0 : .055));
+  graph.d3Force('branch', d3.forceY(node => node.branchY).strength(node => node.branchStrength ?? (node.area === 'feature' ? 1.1 : .055)));
   graph.d3Force('link').distance(350)
-    .strength(link => link.target.area === 'feature' ? .002 : outgoing.get(link.source.id).length === 1 ? .2 : .06);
+    .strength(link => link.feedback ? 0 : link.target.area === 'feature' ? .002 : outgoing.get(link.source.id).length === 1 ? .2 : .06);
+  // Resolve card spacing after the branch and link forces have moved nodes.
+  graph.d3Force('collision', collision());
 
   function fit(duration = 350) {
     const values = graph.graphData().nodes;
@@ -216,18 +330,16 @@ window.createModelMapRenderer = function(container, data, events) {
     resizeFrame = requestAnimationFrame(() => { resizeFrame = null; size(); });
   });
   resize.observe(container); size();
-  // An explicit zoom also opts out of ForceGraph's node-count-based auto zoom.
-  // Open across the model/feature boundary so consumer cards share the canvas
-  // with their model branches, rather than centering the feature band alone.
-  if (areas.length) {
-    home.x = areas[0].x - graph.width() * .1 / START_ZOOM;
-    home.y = areas[0].y + graph.height() / (2 * START_ZOOM) - 110;
-  }
-  graph.centerAt(home.x, home.y, 0).zoom(START_ZOOM, 0);
+  // Start with the four taste horizons in view. Once the layout settles,
+  // frameHome fits a connected feature alongside them when space allows.
+  home.x = (layerLeft + layerRight) / 2;
+  home.y = firstLayer.y;
+  home.zoom = Math.max(.15, Math.min(START_ZOOM, (graph.width() - 48) / (layerRight - layerLeft)));
+  graph.centerAt(home.x, home.y, 0).zoom(home.zoom, 0);
   return {
     graph,
     update(ids) {
-      visible = ids; featureRoutes = new Map();
+      visible = ids; linkRoutes = new Map(); tasteInputs = new Map();
       container.dataset.settled = 'false';
       graph.graphData({nodes: [...models.values()].filter(node => ids.has(node.id)),
         links: data.edges.flatMap((edge, edgeIndex) => ids.has(edge.source) && ids.has(edge.target) ? [{...edge, edgeIndex}] : [])});
@@ -238,7 +350,7 @@ window.createModelMapRenderer = function(container, data, events) {
       graph.nodeCanvasObjectMode(() => 'replace');
     },
     fit,
-    resetView() { graph.centerAt(home.x, home.y, 350).zoom(START_ZOOM, 350); },
+    resetView() { graph.centerAt(home.x, home.y, 350).zoom(home.zoom, 350); },
     center(id) { const node = models.get(id); if (node) graph.centerAt(node.x, node.y, 350); },
     destroy() { resize.disconnect(); if (resizeFrame !== null) cancelAnimationFrame(resizeFrame); graph._destructor(); container.replaceChildren(); },
   };

@@ -9,6 +9,8 @@ from tests.repos.test_compact_group_publication import database
 from tests.rec.test_group_roots import groups, context, roots, issue
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core.group_preparation_state import ROOTS
+from yt_playlist.core.worker_settings import number
 from yt_playlist.rec import choice_evidence, group_root_backfill, group_roots
 from yt_playlist.rec.choice_context import CORRECTION_CONTRACT
 
@@ -28,7 +30,7 @@ def historical_offer(store, identity='historical-menu', captured=None):
         'observed_at': 10, 'options': [{'id': 'one', 'score': 1}]}, context() if captured is None else captured)
 
 
-def test_small_resumable_batches_cover_offers_responses_checkpoints_and_prepared_comparisons(groups, monkeypatch):
+def test_small_resumable_batches_cover_offers_responses_checkpoints_and_prepared_menus(groups, monkeypatch):
     assert historical_offer(groups) == 'historical-menu'
     ledger = groups.rec_ledger.evidence()
     offer = ledger.get('opportunity', 'historical-menu')
@@ -40,21 +42,17 @@ def test_small_resumable_batches_cover_offers_responses_checkpoints_and_prepared
         'watermark': 'historical-watermark', 'incorporated_at': 12})
     groups.rec_proposals.put_proposals('home_prepared',
         {'choice_context': {'artifact': offer['context']}}, 10)
-    groups.rec_proposals.put_proposals('model_pair:1:incumbent:mixes',
-        {'run_id': 1, 'data': {'context': {'artifact': offer['context']}}}, 10)
     monkeypatch.setattr(group_root_backfill, 'BATCH_ROWS', 1)
     backfill = group_root_backfill.Backfill(groups)
     assert backfill.step()
-    assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
+    assert number(groups.conn, ROOTS) == 0
     # A restart discards only the iterator, retaining exact already imported roots.
     complete(groups)
     assert not roots(groups, 'offer')
     assert not roots(groups, 'response')
     assert not roots(groups, 'checkpoint')
     assert not roots(groups, 'prepared')
-    # This comparison captured only the compact mix context, with no group owner.
-    assert not roots(groups, 'comparison')
-    assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 1
+    assert number(groups.conn, ROOTS) == 1
     assert not groups.conn.execute('PRAGMA foreign_key_check').fetchall()
     assert not group_root_backfill.Backfill(groups).step()
 
@@ -65,10 +63,10 @@ def test_missing_historical_context_and_missing_offer_stay_explicitly_unknown(gr
                                                 'at': 10, 'observed_at': 10})
     ledger.put('response', 'missing-offer', {'id': 'missing-offer', 'opportunity_id': 'unknown-offer', 'at': 11})
     complete(groups)
-    assert [tuple(row) for row in groups.conn.execute('SELECT kind,external_key,source_context,reason '
-        'FROM unresolved_group_contexts ORDER BY kind')] == []
-    assert not groups.conn.execute('SELECT 1 FROM group_evidence_versions').fetchone()
-    assert not groups.conn.execute('SELECT 1 FROM group_evidence_generations').fetchone()
+    assert not groups.conn.execute('SELECT 1 FROM group_evidence_contexts '
+                                   'WHERE unresolved_context_reason IS NOT NULL').fetchone()
+    assert not groups.conn.execute("SELECT 1 FROM retained_group_evidence WHERE reference_kind='resolved_version'").fetchone()
+    assert not groups.conn.execute('SELECT 1 FROM group_evidence_contexts WHERE generation_id IS NOT NULL').fetchone()
 
 
 def test_checkpoint_does_not_recreate_group_roots_after_raw_context_release(groups):
@@ -83,8 +81,9 @@ def test_checkpoint_does_not_recreate_group_roots_after_raw_context_release(grou
     complete(groups)
     assert not roots(groups, 'offer')
     assert not roots(groups, 'checkpoint')
-    assert not groups.conn.execute('SELECT 1 FROM unresolved_group_contexts').fetchone()
-    assert groups.conn.execute('SELECT count(*) FROM group_evidence_versions').fetchone()[0] == 0
+    assert not groups.conn.execute('SELECT 1 FROM group_evidence_contexts '
+                                   'WHERE unresolved_context_reason IS NOT NULL').fetchone()
+    assert groups.conn.execute("SELECT count(*) FROM retained_group_evidence WHERE reference_kind='resolved_version'").fetchone()[0] == 0
 
 
 def test_malformed_file_never_advances_past_the_unprocessed_owner(groups):
@@ -97,14 +96,14 @@ def test_malformed_file_never_advances_past_the_unprocessed_owner(groups):
     for _ in range(2):
         with pytest.raises(ValueError, match='invalid source identity|required content digest'):
             backfill.step()
-        assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
+        assert number(groups.conn, ROOTS) == 0
         assert backfill.pending_path == path
     path.write_bytes(original)
     for _ in range(10):
         if not backfill.step():
             break
     assert not roots(groups, 'offer')
-    assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 1
+    assert number(groups.conn, ROOTS) == 1
 
 
 def test_memory_admission_happens_before_loading_a_historical_record(groups, monkeypatch):
@@ -115,7 +114,7 @@ def test_memory_admission_happens_before_loading_a_historical_record(groups, mon
         backfill.step()
     assert backfill.pending_path is not None
     assert not roots(groups, 'offer')
-    assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
+    assert number(groups.conn, ROOTS) == 0
 
 
 def test_cancelled_batch_replays_rolled_back_owners_before_opening_retention(groups, monkeypatch):
@@ -135,13 +134,13 @@ def test_cancelled_batch_replays_rolled_back_owners_before_opening_retention(gro
     with pytest.raises(WorkBudgetExceeded, match='Interrupted after writing'):
         backfill.step()
     assert not roots(groups, 'offer')
-    assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
+    assert number(groups.conn, ROOTS) == 0
     monkeypatch.setattr(backfill, '_apply', original)
     for _ in range(10):
         if not backfill.step():
             break
     assert not roots(groups, 'offer')
-    assert groups.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 1
+    assert number(groups.conn, ROOTS) == 1
     assert not groups.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 

@@ -1,8 +1,9 @@
 """Canonical artist references, ordered credits, and name lookup for display boundaries."""
 from contextlib import contextmanager
 
-from yt_playlist.core import artist_credits
+from yt_playlist.core import artist_credits, artists
 from yt_playlist.core.artist_keys import canonical_id
+from yt_playlist.core.catalog_query import LIBRARY_RECORDINGS_SQL
 from yt_playlist.repos.base import Repo, lookup_read, synchronized, snapshot_read
 
 
@@ -19,18 +20,15 @@ class ArtistRepo(Repo):
     def reference_rows(self, identities, names):
         """Existing numeric references and exact aliases, queried in bounded batches."""
         references, aliases = {}, {name: set() for name in names}
-        redirected = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='artist_redirects'").fetchone()
-        for values, column, table in ((list(set(identities)), 'id', 'artists'),
-                                      (list(aliases), 'alias', 'artist_aliases')):
-            identity_column = 'id' if table == 'artists' else 'artist_id'
-            identity = f'COALESCE(d.artist_id,a.{identity_column})' if redirected else f'a.{identity_column}'
-            join = f' LEFT JOIN artist_redirects d ON d.retired_id=a.{identity_column}' if redirected else ''
+        for values, column, source in ((list(set(identities)), 'a.id', 'artists a'),
+                                       (list(aliases), 'l.alias', 'artist_aliases l JOIN artists a ON a.id=l.artist_id')):
             for offset in range(0, len(values), 400):
                 batch = values[offset:offset + 400]
                 placeholders = ','.join('?' for _ in batch)
                 for row in self.conn.execute(
-                        f'SELECT a.{column},{identity} FROM {table} a{join} WHERE a.{column} IN ({placeholders})', batch):
-                    if table == 'artists':
+                        f'SELECT {column},COALESCE(a.redirect_artist_id,a.id) FROM {source} '
+                        f'WHERE {column} IN ({placeholders})', batch):
+                    if column == 'a.id':
                         references[row[0]] = row[1]
                     else:
                         aliases[row[0]].add(row[1])
@@ -38,11 +36,9 @@ class ArtistRepo(Repo):
 
     @snapshot_read
     def alias_rows(self):
-        redirected = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='artist_redirects'").fetchone()
-        sql = ('SELECT COALESCE(d.artist_id,a.artist_id) artist_id,a.alias FROM artist_aliases a '
-               'LEFT JOIN artist_redirects d ON d.retired_id=a.artist_id' if redirected else
-               'SELECT artist_id,alias FROM artist_aliases')
-        return [dict(row) for row in self.conn.execute(sql)]
+        return [dict(row) for row in self.conn.execute(
+            'SELECT COALESCE(a.redirect_artist_id,a.id) artist_id,l.alias '
+            'FROM artist_aliases l JOIN artists a ON a.id=l.artist_id')]
 
     @snapshot_read
     def public_key_inputs(self, identities):
@@ -62,9 +58,7 @@ class ArtistRepo(Repo):
 
     @synchronized
     def provisional_id(self, name):
-        redirects = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='artist_redirects'").fetchone()
-        row = self.conn.execute('SELECT id FROM artists WHERE provisional=1 AND name=? ' +
-            ('AND NOT EXISTS(SELECT 1 FROM artist_redirects d WHERE d.retired_id=artists.id) ' if redirects else '') +
+        row = self.conn.execute('SELECT id FROM artists WHERE provisional=1 AND name=? AND redirect_artist_id IS NULL '
             'ORDER BY id LIMIT 1', (name,)).fetchone()
         return row[0] if row else None
 
@@ -88,16 +82,14 @@ class ArtistRepo(Repo):
 
     @synchronized
     def identity_inputs(self, identity):
-        from yt_playlist.core.legacy_evidence import available
-        identity = canonical_id(self.conn, identity)
-        row = self.conn.execute('SELECT provisional FROM artists WHERE id=?', (identity,)).fetchone()
-        ambiguous = (self.conn.execute('SELECT 1 FROM artist_ambiguities WHERE artist_id=?', (identity,)).fetchone()
-                     if available(self.conn) else self.conn.execute(
-                         'SELECT 1 FROM identity_state_archive WHERE kind=? AND source_id=?',
-                         ('ambiguous_album_artist', str(identity))).fetchone())
-        return {'id': identity, 'exists': row is not None, 'provisional': bool(row and row[0]),
-                'identified': self.conn.execute('SELECT 1 FROM artist_provider_ids WHERE artist_id=?', (identity,)).fetchone() is not None,
-                'ambiguous': ambiguous is not None}
+        row = self.conn.execute(
+            'SELECT a.id,a.provisional,a.contextual_credit,'
+            'EXISTS(SELECT 1 FROM artist_provider_ids WHERE artist_id=a.id) '
+            'FROM artists original JOIN artists a ON a.id=COALESCE(original.redirect_artist_id,original.id) '
+            'WHERE original.id=?', (identity,)).fetchone()
+        if row is None:
+            return dict(id=identity, exists=False, provisional=False, identified=False, ambiguous=False)
+        return dict(id=row[0], exists=True, provisional=bool(row[1]), identified=bool(row[3]), ambiguous=bool(row[2]))
 
     @synchronized
     def promote(self, identity):
@@ -124,34 +116,27 @@ class ArtistRepo(Repo):
 
     @synchronized
     def mark_ambiguity(self, identity):
-        from yt_playlist.core.legacy_evidence import mark_artist_ambiguity
         with self.conn.atomic(join=True):
-            mark_artist_ambiguity(self.conn, identity)
+            artists.mark_ambiguity(self.conn, identity)
 
     @synchronized
     def reconcile_identity(self, previous, target, source, now):
         with self.conn.atomic(join=True):
-            self.conn.execute('INSERT INTO artist_redirects VALUES (?,?,?,?)', (previous, target, source, now))
-            self.conn.execute('UPDATE artist_redirects SET artist_id=? WHERE artist_id=?', (target, previous))
+            artists.redirect(self.conn, previous, target, source, now)
             artist_credits.reconcile_current(self.conn, previous, target, source, now)
             self.conn.execute('UPDATE album_artists SET artist_id=? WHERE artist_id=?', (target, previous))
             self.conn.execute('INSERT OR IGNORE INTO artist_aliases SELECT ?,alias,source FROM artist_aliases WHERE artist_id=?',
                               (target, previous))
-            if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='spotify_history_listens'").fetchone():
-                self.conn.execute('UPDATE main.spotify_history_listens SET artist_id=? WHERE artist_id=?', (target, previous))
+            self.conn.execute('UPDATE main.spotify_history_listens SET artist_id=? WHERE artist_id=?', (target, previous))
 
     @snapshot_read
     def credit_inputs(self, entry_id):
-        row = self.conn.execute('SELECT entry_id FROM legacy_track_refs WHERE legacy_id=?', (entry_id,)).fetchone()
-        entry_id = row[0] if row else entry_id
         return {'entry_id': entry_id,
                 'artists': [row[0] for row in self.conn.execute(
                     f'SELECT artist_id FROM {self.entry_artists_table} WHERE entry_id=? ORDER BY position', (entry_id,))]}
 
     @lookup_read
     def credit_observation_inputs(self, entry_id):
-        row = self.conn.execute('SELECT entry_id FROM legacy_track_refs WHERE legacy_id=?', (entry_id,)).fetchone()
-        entry_id = row[0] if row else entry_id
         return {'entry_id': entry_id, 'credits': [dict(row) for row in self.conn.execute(
             f'SELECT * FROM {self.entry_artists_table} WHERE entry_id=? ORDER BY position', (entry_id,))]}
 
@@ -166,7 +151,7 @@ class ArtistRepo(Repo):
 
     @synchronized
     def artist_row(self, identity):
-        row = self.conn.execute('SELECT * FROM artists WHERE id=?', (identity,)).fetchone()
+        row = self.conn.execute('SELECT id,name,provisional FROM artists WHERE id=?', (identity,)).fetchone()
         if row is None:
             return None
         provider_ids = {r['provider']:r['provider_id'] for r in self.conn.execute(
@@ -200,17 +185,19 @@ class ArtistRepo(Repo):
 
     @synchronized
     def track_artist_ids(self, *, library=False, keys=None):
-        keys = list(dict.fromkeys(keys)) if keys is not None else None
-        if keys == []:
+        params = tuple(dict.fromkeys(keys)) if keys is not None else ()
+        if keys is not None and not params:
             return {}
+        membership = f'JOIN ({LIBRARY_RECORDINGS_SQL}) l ON l.recording_id=r.id ' if library else ''
+        requested = ''
+        if params:
+            placeholders = ','.join('?' for _ in params)
+            requested = f'WHERE r.identity_key IN ({placeholders})'
+        rows = self.conn.execute(
+            'SELECT DISTINCT r.identity_key,ta.artist_id FROM recordings r '
+            f'JOIN track_sources e ON e.recording_id=r.id JOIN {self.entry_artists_table} ta ON ta.entry_id=e.id '
+            + membership + requested, params)
         out = {}
-        batches = [None] if keys is None else (keys[offset:offset + 400] for offset in range(0, len(keys), 400))
-        for batch in batches:
-            rows = self.conn.execute(
-                'SELECT DISTINCT r.identity_key,ta.artist_id FROM recordings r '
-            f'JOIN catalog_entries e ON e.recording_id=r.id JOIN {self.entry_artists_table} ta ON ta.entry_id=e.id '+
-            ('JOIN library_memberships m ON m.entry_id=e.id ' if library else '') +
-                ('WHERE r.identity_key IN (' + ','.join('?' for _ in batch) + ')' if batch is not None else ''), batch or [])
-            for key, aid in rows:
-                out.setdefault(key, set()).add(aid)
+        for key, aid in rows:
+            out.setdefault(key, set()).add(aid)
         return out

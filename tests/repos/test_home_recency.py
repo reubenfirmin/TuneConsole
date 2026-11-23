@@ -6,7 +6,7 @@ from yt_playlist.core.albums import observe
 @pytest.mark.parametrize('include_generated', [False, True])
 def test_recency_reads_current_history_and_album_membership(file_backed_store, include_generated):
     store = file_backed_store
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     entry = store.tracks.upsert_track('song', 'Song', 'Artist', '', 180)
     key = store.tracks.identity_key_for_video('song')
     store.collection.add_saved_album({'browse': 'album', 'title': 'Release', 'artist': 'Artist'})

@@ -61,6 +61,7 @@ exe = EXE(
     name="yt-playlist",
     console=False,            # GUI launch: no terminal window
     icon=icon,
+    codesign_identity=os.environ.get("MACOS_SIGNING_IDENTITY") or None,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="yt-playlist")
 

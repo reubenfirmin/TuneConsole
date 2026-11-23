@@ -50,7 +50,6 @@ def test_unexpired_tuning_does_not_wait_for_the_maintenance_writer(file_backed_s
 
 def test_empty_capture_needs_no_writer_or_retained_lifetime(file_backed_store):
     store = file_backed_store
-    assert store._compact_group_files
     changes = store.conn.total_changes
     with busy_writer(store):
         started = time.monotonic()

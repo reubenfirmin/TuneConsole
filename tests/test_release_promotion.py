@@ -1,5 +1,6 @@
 """Release failure boundaries: no live channels until every staged artifact validates."""
 import base64
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -22,6 +23,11 @@ def candidate(tmp_path):
                  "TuneConsole-macos-arm64.dmg", "TuneConsole-macos-x86_64.dmg"):
         (tmp_path / name).write_bytes(b"archive")
     for arch in ("arm64", "x86_64"):
+        (tmp_path / f"macos-notarization-{arch}.json").write_text(json.dumps({
+            "architecture": arch, "team_id": "ABCDEF1234", "status": "Accepted",
+            "submission_id": "35e5054f-8e74-4a64-8533-6069198f4034",
+            "sha256": hashlib.sha256(b"archive").hexdigest(),
+        }))
         (tmp_path / f"appcast-macos-{arch}.xml").write_text(f'''
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item>
 <sparkle:version>{version}</sparkle:version><enclosure
@@ -109,12 +115,26 @@ class FakeBackend:
 
 
 @pytest.mark.parametrize("missing", ["TuneConsole.flatpak", "TuneConsole-macos-x86_64.dmg",
-                                    "appcast-macos-arm64.xml", "container-arm64.json",
+                                    "appcast-macos-arm64.xml", "macos-notarization-x86_64.json", "container-arm64.json",
                                     "flatpak-repo/summary.sig", "flatpak-repo/summary"])
 def test_failed_platform_or_missing_artifact_never_writes_a_public_destination(candidate, missing):
     (candidate / missing).unlink()
     backend = FakeBackend()
     with pytest.raises(ValueError):
+        promotion.promote(candidate, "v1.2.3", IMAGE, backend)
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("change", ["rejected", "different bytes"])
+def test_rejected_or_replaced_dmg_cannot_be_promoted(candidate, change):
+    if change == "rejected":
+        receipt = candidate / "macos-notarization-x86_64.json"
+        receipt.write_text(json.dumps({**json.loads(receipt.read_text()), "status": "Invalid"}))
+    else:
+        # Same length, so the appcast's archive size check cannot detect the swap.
+        (candidate / "TuneConsole-macos-x86_64.dmg").write_bytes(b"changed")
+    backend = FakeBackend()
+    with pytest.raises(ValueError, match="Invalid macOS notarization receipt for x86_64"):
         promotion.promote(candidate, "v1.2.3", IMAGE, backend)
     assert backend.calls == []
 

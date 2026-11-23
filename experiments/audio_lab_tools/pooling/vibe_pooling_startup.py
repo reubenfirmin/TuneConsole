@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.core import vibe_model_files
 from yt_playlist.core.activity import check_stopping
+from yt_playlist.core.migrations.measurement_storage import DELETE_GUARD
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_vibe, vibe_joint_model as model, vibe_joint_preparation as preparation
 from yt_playlist.rec.progressive import Preparation
@@ -156,21 +157,24 @@ def run_cold(output, *, candidate, seconds=300):
     try:
         store = Store(database)
         store.init_schema()
-        raw_tables = ('recordings', 'catalog_entries', 'library_memberships', 'sample_attributes',
+        from yt_playlist.core.catalog_query import PLAYABLE_LIBRARY_SQL
+
+        raw_tables = ('recordings', 'track_sources', 'sample_attributes',
                       'rec_musical_sources', 'rec_musical_links')
         report['retained_inputs'] = {table: store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0]
                                      for table in raw_tables}
         tables = ('recording_vibes', 'prediction_model_generations', 'predictions',
-                  'measurement_samples', 'prediction_measurement_roots', 'measurements',
+                  'measurement_samples', 'measurements',
                   'rec_musical_profiles', 'rec_musical_source_profiles')
         report['removed_cache_rows'] = {table: store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0]
                                         for table in tables}
         with store.conn.atomic():
+            # This private cold-start benchmark explicitly discards the model cache and its inputs.
+            store.conn.execute('DROP TRIGGER measurements_model_input_delete')
             for table in tables:
                 store.conn.execute('DELETE FROM ' + table)
-            for vibe in preparation.VIBES:
-                store.conn.execute('DELETE FROM settings WHERE key IN (?,?)',
-                    (vibe_model_files.STATE_PREFIX + vibe, vibe_model_files.HEAD_PREFIX + vibe))
+            store.conn.execute(DELETE_GUARD)
+            store.conn.execute('UPDATE vibe_definitions SET joint_head=NULL,joint_outcome=NULL')
             store.conn.execute('DELETE FROM rec_content_pending')
             store.conn.execute('INSERT INTO rec_content_pending(identity_key) SELECT identity_key FROM recordings')
             store.conn.execute('INSERT OR IGNORE INTO rec_musical_pending(source_key,revision) '
@@ -205,9 +209,7 @@ def run_cold(output, *, candidate, seconds=300):
                 worker.capture(time.time())
                 first = store.conn.execute('SELECT r.identity_key,v.vibe,v.source FROM recording_vibes v '
                     'JOIN recordings r ON r.id=v.recording_id WHERE EXISTS ('
-                    'SELECT 1 FROM catalog_entries e JOIN library_memberships m ON m.entry_id=e.id '
-                    'JOIN youtube_items y ON y.video_id=e.video_id '
-                    'WHERE e.recording_id=r.id AND COALESCE(y.available,1)<>0) LIMIT 1').fetchone()
+                    f'SELECT 1 FROM ({PLAYABLE_LIBRARY_SQL}) p WHERE p.recording_id=r.id) LIMIT 1').fetchone()
                 if first:
                     report.update(outcome='first-score-ready', first_new_score_seconds=time.monotonic() - started,
                                   first_score=dict(first), turns=turn + 1)

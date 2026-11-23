@@ -15,7 +15,7 @@ pytestmark = pytest.mark.usefixtures('road_trip_vocabulary', 'native_sql_calls')
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
-    with bounded_consumer_schema(GENRES, snapshot_guards=False) as schema:
+    with bounded_consumer_schema(GENRES) as schema:
         yield schema
 
 
@@ -56,9 +56,9 @@ def _assert_blend(state, order, banned):
 @pytest.mark.parametrize('legacy',[False,True],ids=['captured','legacy-draft'])
 def test_current_family_survives_finalize_reload_and_single_slot_reroll(tmp_path,genre,legacy,consumer_store):
     path = tmp_path/'trip.db'
-    store = consumer_store(path, snapshot_guards=False)
+    store = consumer_store(path)
     try:
-        store.accounts.upsert_account('Main','unused.json',None,True)
+        store.accounts.upsert_account('Main',None,True)
         store.genres.configure_catalog()
         for video in ('a','b','c'):
             _song(store,video,genre)
@@ -99,7 +99,7 @@ def test_current_family_survives_finalize_reload_and_single_slot_reroll(tmp_path
 
 
 def test_family_change_after_capture_refreshes_labels_without_redrawing(store):
-    store.accounts.upsert_account('Main','unused.json',None,True)
+    store.accounts.upsert_account('Main',None,True)
     original_family = store.genres.feature_axes(['Synth Pop'])['Synth Pop'][0]
     for video in ('a','b','c'):
         _song(store,video,'Synth Pop')
@@ -122,7 +122,7 @@ def test_family_change_after_capture_refreshes_labels_without_redrawing(store):
 
 
 def test_family_edit_immediately_before_reroll_refreshes_both_groups(store):
-    store.accounts.upsert_account('Main','unused.json',None,True)
+    store.accounts.upsert_account('Main',None,True)
     for video in ('a','b','c'):
         _song(store,video,'Synth Pop')
     recipe_id = store.road_trip.save_road_trip_recipe(None,'Trip',100,[],['Jazz'],15,1000)
@@ -139,7 +139,7 @@ def test_family_edit_immediately_before_reroll_refreshes_both_groups(store):
 
 @pytest.mark.parametrize('size', [20, 6000])
 def test_draft_start_reads_the_full_library_once_and_batches_family_queries(store, monkeypatch, size):
-    store.accounts.upsert_account('Main', 'unused.json', None, True)
+    store.accounts.upsert_account('Main', None, True)
     with store.conn:
         store.conn.execute("UPDATE genre_catalog SET family_key='jazz',family_source='custom' WHERE key='synth pop'")
     songs = [{'key': f'song {i}|artist {i}', 'video_id': f'v{i}', 'title': f'Song {i}',

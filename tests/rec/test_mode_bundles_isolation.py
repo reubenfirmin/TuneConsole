@@ -16,6 +16,7 @@ from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_inputs, mode_surfaces, surfaces
 from tests import model_support
+from tests.group_support import publish_keyed
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, initialize_consumer,
@@ -88,7 +89,7 @@ def ranking_inputs(monkeypatch):
     """
     from yt_playlist import rec
 
-    def pools(reader, now, limit):
+    def pools(reader, now, limit, *, listening):
         library = surfaces.ForYouItem('Song', 'Artist', None, 'video', None, 0,
             'Captured ranking', key='song|artist', genre='House')
         fresh = surfaces.ForYouItem('Fresh', 'New artist', None, 'fresh', None, 0,
@@ -119,6 +120,7 @@ def _seed_model(store):
     store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [["house", 1]],
         "centroid": vectors[0], "size": 1, "rep_keys": keys,
         "space": embed.content_space_id(store)}], retired_ids=[], now=1)
+    store._isolation_group, = set(publish_keyed(store, [('House', keys, .8)]).values())
     return keys
 
 
@@ -142,8 +144,8 @@ def _seed(store):
 def _assert_content_inputs(store, original):
     assert embed.content_space_id(store) == embed.content_space_id(original)
     assert store.rec_model.get_rec_content_vectors() == original.rec_model.get_rec_content_vectors()
-    assert list(map(tuple, store.conn.execute("SELECT * FROM taste_modes ORDER BY mode_id"))) == list(
-        map(tuple, original.conn.execute("SELECT * FROM taste_modes ORDER BY mode_id")))
+    assert list(map(tuple, store.conn.execute("SELECT * FROM legacy_mode_payloads ORDER BY mode_id"))) == list(
+        map(tuple, original.conn.execute("SELECT * FROM legacy_mode_payloads ORDER BY mode_id")))
 
 
 def _saved(store):
@@ -228,19 +230,21 @@ def test_mutation_during_calculation_finishes_and_serving_applies_current_exclus
 def test_bundle_failure_rolls_back_both_surfaces_and_their_policy_rows(database):
     store = database
     policies = [tuple(row) for row in store.conn.execute(
-        'SELECT h.surface,g.policy_version FROM recommendation_heads h '
-        'JOIN recommendation_generations g ON g.id=h.generation_id ORDER BY h.surface')]
+        'SELECT h.surface,g.policy_version FROM recommendation_generation_surfaces h '
+        'JOIN recommendation_generations g ON g.id=h.generation_id WHERE h.selected=1 ORDER BY h.surface')]
+    assert [surface for surface, _ in policies] == ['fresh', 'home']
     with store.conn:
-        store.conn.execute("CREATE TRIGGER reject_fresh BEFORE INSERT ON recommendation_heads "
-            "WHEN NEW.surface='fresh' BEGIN SELECT RAISE(ABORT,'rejected bundles'); END")
+        # Inject the failure on the writer without invalidating its main schema admission.
+        store.conn.execute("CREATE TEMP TRIGGER reject_fresh BEFORE UPDATE OF selected ON main.recommendation_generation_surfaces "
+            "WHEN NEW.selected=1 AND NEW.surface='fresh' BEGIN SELECT RAISE(ABORT,'rejected bundles'); END")
     with pytest.raises(sqlite3.IntegrityError, match="rejected bundles"):
         mode_surfaces.prepare_bundles(store, 100)
     _saved(store)
     # Staged policies can belong to the failed, recoverable build. Neither
     # surface may expose one until their common publication commits.
     assert [tuple(row) for row in store.conn.execute(
-        'SELECT h.surface,g.policy_version FROM recommendation_heads h '
-        'JOIN recommendation_generations g ON g.id=h.generation_id ORDER BY h.surface')] == policies
+        'SELECT h.surface,g.policy_version FROM recommendation_generation_surfaces h '
+        'JOIN recommendation_generations g ON g.id=h.generation_id WHERE h.selected=1 ORDER BY h.surface')] == policies
     assert not store.conn.in_transaction
 
 
@@ -284,13 +288,13 @@ def test_bundle_publication_finishes_despite_home_views_during_calculation_and_s
     assert mode_surfaces.prepare_bundles(database, 100) is not None
     assert database.recommendations.heads() != database._isolation_saved_heads
     policy = database.recommendations.head('home')['policy_version']
-    assert database.rec_ledger.policy_configuration(policy)['modes']['offered'] == {}
+    assert database.rec_ledger.policy_configuration(policy)['models']['groups'] == database.taste_groups.head_generation()
     assert database.modes.impression_counts() == {1: 2}
     assert candidate_refresh.due(database, 101)
 
 
-def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, monkeypatch):
-    account = database.accounts.upsert_account('Radio', 'credentials', None, True)
+def test_radio_and_trend_updates_do_not_discard_prepared_track_group_pools(database, monkeypatch):
+    account = database.accounts.upsert_account('Radio', None, True)
     calculate = mode_inputs._calculate_bundles
 
     def update_playback(reader, now, policies):
@@ -305,11 +309,11 @@ def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, m
 
     monkeypatch.setattr(mode_inputs, "_calculate_bundles", update_playback)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
-    assert database.recommendations.pool('home', '1', 'temporal') is not None
+    assert database.recommendations.pool('home', database._isolation_group, 'temporal') is not None
     assert database.rec_proposals.get_proposals("trend_rollups") == {"updated": 100}
 
 
-def test_changed_home_genres_leave_captured_style_pools_intact_and_next_round_due(database, monkeypatch):
+def test_changed_home_genres_leave_captured_group_pools_intact_and_next_round_due(database, monkeypatch):
     calculate = mode_inputs._calculate_bundles
 
     def change_preferences(reader, now, policies):
@@ -326,9 +330,9 @@ def test_changed_home_genres_leave_captured_style_pools_intact_and_next_round_du
 
 def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypatch):
     with database.conn:
-        database.conn.execute("DELETE FROM recommendation_heads WHERE surface IN ('home','fresh')")
+        database.conn.execute("UPDATE recommendation_generation_surfaces SET selected=0 WHERE surface IN ('home','fresh')")
     entry_id = database.conn.execute(
-        "SELECT id FROM catalog_entries WHERE video_id='video'").fetchone()[0]
+        "SELECT id FROM track_sources WHERE video_id='video'").fetchone()[0]
     calculate = mode_inputs._calculate_bundles
 
     def enrich_and_import(reader, now, policies):
@@ -361,4 +365,4 @@ def test_replacing_model_during_ranking_keeps_the_captured_publication(database,
     monkeypatch.setattr(mode_inputs, '_calculate_bundles', replace_model)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
     assert database.recommendations.heads() != database._isolation_saved_heads
-    assert database.recommendations.pool('home', '1', 'temporal')
+    assert database.recommendations.pool('home', database._isolation_group, 'temporal')

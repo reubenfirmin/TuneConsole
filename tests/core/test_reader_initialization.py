@@ -4,9 +4,19 @@ from contextlib import closing
 
 import pytest
 
+from yt_playlist.core import metadata_runtime_files
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_reads import MAX_READERS
 from yt_playlist.core.store import Store
+from yt_playlist.repos.collection_recovery import CollectionRecovery
+
+
+def deny_schema_access(action, first, second, database, source):
+    if action == sqlite3.SQLITE_READ and first in {'sqlite_schema', 'sqlite_master', 'sqlite_temp_master'}:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_PRAGMA and first in {'table_info', 'table_xinfo', 'table_list', 'schema_version'}:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
 
 
 def test_reader_setup_work_is_bounded_on_a_large_schema(file_backed_store, monkeypatch):
@@ -33,59 +43,71 @@ def test_reader_setup_work_is_bounded_on_a_large_schema(file_backed_store, monke
     monkeypatch.setattr(Store, '_configure_connection', counted_configuration)
     with store.read_view() as reader:
         assert reader.conn.execute('SELECT count(*) FROM accounts').fetchone()[0] == 0
-        assert reader._collection_files == store._collection_files
-        assert reader._compact_group_files == store._compact_group_files
-        assert reader._legacy_files == store._legacy_files
     assert steps < 20000, 'Repeated catalog scans leave no time for the actual read'
 
 
-def test_new_readers_detect_committed_feature_tables_and_ignore_views(tmp_path):
-    store = Store(tmp_path / 'feature-tables.db')
-    try:
-        store.conn.execute('PRAGMA journal_mode=WAL')
-        store.conn.execute('CREATE TABLE probe(value)')
-        store.conn.execute('CREATE VIEW album_feedback AS SELECT value FROM probe')
-        store.conn.commit()
-        store._bind_repositories()
-        with store.read_view() as before:
-            assert not before._collection_files
-            assert not before._legacy_files
-            with closing(sqlite3.connect(store._db_path)) as writer, writer:
-                writer.execute('DROP VIEW album_feedback')
-                writer.execute('CREATE TABLE album_feedback(value)')
-                writer.execute('CREATE TABLE legacy_catalog_evidence(value)')
-            # Feature flags are detected when this reader is opened.
-            assert not before._collection_files and not before._legacy_files
-        with store.read_view() as after:
-            assert after._collection_files and after._legacy_files
-    finally:
-        store.conn.close()
+def test_short_lived_reader_binds_and_reads_without_catalog_queries(file_backed_store, monkeypatch):
+    from yt_playlist.rec import musical_character, vibe_intensity
+    from yt_playlist.rec.stored_radio import score_patterns
+
+    configure = Store._configure_connection
+
+    def guarded_configuration(reader):
+        configure(reader)
+        reader.conn.set_authorizer(deny_schema_access)
+
+    monkeypatch.setattr(Store, '_configure_connection', guarded_configuration)
+    with file_backed_store.read_view() as reader:
+        assert reader.settings.get_setting('reader-layout-probe') is None
+        assert reader.rec_model.recording_state().generation is None
+        assert list(CollectionRecovery(reader.conn).references()) == []
+        path = metadata_runtime_files.reference_path(reader.conn, 'choices', (1,), 1)
+        assert path.name == '1.json'
+        measurement, joint, _ = score_patterns()
+        intensity = (musical_character.VERSION, measurement, joint, vibe_intensity.SOURCES)
+        assert reader.radio_catalog.tuning_ranks(1, 'radio', 'membership', intensity=intensity) == []
 
 
-def test_new_reader_detects_replacement_with_same_schema_version(tmp_path):
-    database = tmp_path / 'replaced.db'
-    store = Store(database)
+@pytest.mark.parametrize('prepared', [False, True], ids=['pending-metadata', 'prepared-metadata'])
+def test_current_track_writes_choices_and_tuning_use_admitted_owners(file_backed_store, prepared):
+    from yt_playlist.core import catalog, metadata, metadata_runtime
+
+    store = file_backed_store
+    store.genres.configure_catalog()
+    conn = store.conn
+    if prepared:
+        with conn:
+            metadata_runtime.activate(conn)
+
+    conn.set_authorizer(deny_schema_access)
     try:
-        store.conn.execute('CREATE TABLE original(value)')
-        store.conn.commit()
-        store._bind_repositories()
-        version = store.conn.execute('PRAGMA schema_version').fetchone()[0]
-        with store.read_view() as before:
-            assert not before._legacy_files
-        store.conn.close()
-        replacement = tmp_path / 'replacement.db'
-        with closing(sqlite3.connect(replacement)) as writer, writer:
-            writer.execute('CREATE TABLE legacy_catalog_evidence(value)')
-            writer.execute(f'PRAGMA schema_version={version}')
-        replacement.replace(database)
-        # The owner still carries the old flags and path. A new connection
-        # must derive its layout from the database it actually opened.
-        assert not store._legacy_files
-        with store.read_view() as after:
-            assert after._repository_schema_version == version
-            assert after._legacy_files
+        old = store.tracks.upsert_track('source', 'Original', 'Artist', None, 200, library=True)
+        target = store.tracks.upsert_track('target', 'Target', 'Artist', None, 210, library=True)
+        recording = store.tracks.catalog_subject(target)['recording_id']
+        store.tracks.associate_youtube_item('source', recording, source='verified',
+                                           evidence={'same': True}, now=1, same_recording=True)
+        assert store.tracks.catalog_subject(old)['recording_id'] == recording
+        assert store.tracks.remove_song_library_membership('source')
+        assert not store.tracks.song_library_membership('source')['owned']
+
+        with conn:
+            recovered = catalog.upsert(conn, 'recovered', 'Recovered', 'Artist',
+                                       album='Release', album_browse_id='release')
+            metadata.select(conn, recovered, 'genre', 'Jazz', 'provider', now=2)
+        store.metadata_choices.choose(recovered, 'genre', 'Rock', now=3)
+        assert metadata.has_choice(conn, recovered, 'genre')
+        store.metadata_choices.choose(recovered, 'genre', withdraw=True, now=4)
+        assert not metadata.has_choice(conn, recovered, 'genre')
+        assert store.tracks.get_track_enrichment(recovered)[0] == 'Jazz'
+        assert conn.execute("SELECT value FROM recording_metadata_history WHERE operation='reset' "
+                            "AND entry_id=? AND field='genre'", (recovered,)).fetchone()[0] == 'Jazz'
     finally:
-        store.conn.close()
+        conn.set_authorizer(None)
+
+    with store.read_view() as reader:
+        reader.conn.set_authorizer(deny_schema_access)
+        ranks = reader.radio_catalog.tuning_ranks(1, 'radio', 'membership', pinned_genre='jazz')
+        assert [(row['video_id'], row['genre']) for row in ranks] == [('recovered', 'Jazz')]
 
 
 @pytest.mark.parametrize('version', [107])
@@ -96,16 +118,13 @@ def test_supported_installed_layouts_keep_private_read_projections(
         _pristine_installed_schema(version).backup(copied)
     store = Store(database)
     try:
-        store.init_schema(defer_metadata=True)
+        store.init_schema()
         store.settings.set_setting('reader-layout-probe', 'current')
         store.tracks.upsert_track('reader-layout-video', 'Reader layout', 'Artist', None, None)
         with store.read_view() as reader:
             assert not reader.conn.in_transaction
-            for name in ('_collection_files', '_compact_group_files', '_recommendation_files',
-                         '_metadata_files', '_legacy_files'):
-                assert getattr(reader, name) == getattr(store, name)
             assert reader.settings.get_setting('reader-layout-probe') == 'current'
-            assert reader.conn.execute('SELECT title FROM tracks WHERE video_id=?',
+            assert reader.conn.execute('SELECT title FROM catalog_tracks WHERE video_id=?',
                                        ('reader-layout-video',)).fetchone()[0] == 'Reader layout'
             assert not reader.conn.in_transaction
     finally:

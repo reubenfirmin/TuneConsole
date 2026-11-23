@@ -13,12 +13,12 @@ from tests.test_mode_cards_route import _client as current_client
 from tests.home_fixture_support import (
     home_control_routes, home_routes_only, prepared_client as _prepared_client, returning_listener,
 )
-from tests.home_fixture_support import publish_cards, seed_menu_cards, without_metadata_providers
+from tests.home_fixture_support import publish_cards, without_metadata_providers
 from tests.rec.test_home_prepared import one_menu_per_attempt
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_library_favorites, seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, file_consumer_store as store, mock_snapshot_coordinator, native_sql_calls,
-    reuse_reporting_reader, use_native_sql_calls, without_query_timing,
+    reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.core.activity import Activity
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
@@ -88,7 +88,7 @@ def test_fresh_card_waits_for_metadata_then_renders_discoveries(metadata_store):
             seed_discovered_enrichment(store, key, "House", None)
         fresh_pool.prepare(store, 250)
         from yt_playlist.rec import home_prepared
-        payload = home_prepared.prepare(store, 250)
+        payload = home_prepared.prepare(store, 1001)
         assert payload is not None
         assert all(any(p['lane'] == 'fresh' for p in menu['protos']) for menu in payload['menus'])
         response = client.get("/home/cards")
@@ -217,7 +217,7 @@ def fresh_template_bytecode(tmp_path_factory):
 def fresh_workflow_home(fresh_workflow_schema, fresh_template_bytecode,
                         without_metadata_providers, monkeypatch, tmp_path):
     with _file_consumer_store(tmp_path, fresh_workflow_schema) as store, reuse_reporting_reader(store, monkeypatch):
-        with _fresh_workflow_client(store, monkeypatch, fresh_template_bytecode) as client:
+        with _fresh_workflow_client(store, fresh_template_bytecode) as client:
             yield store, client
 
 
@@ -229,16 +229,13 @@ def empty_search_home(tmp_path, monkeypatch, fresh_template_bytecode, without_me
                                  snapshot_guards=False) as schema:
         with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
             with mock_snapshot_coordinator(store, monkeypatch):
-                with _fresh_workflow_client(store, monkeypatch, fresh_template_bytecode) as client:
+                with _fresh_workflow_client(store, fresh_template_bytecode) as client:
                     yield store, client
 
 
 @contextmanager
-def _fresh_workflow_client(store, monkeypatch, bytecode):
-    payload = _fresh_workflow_menu(store)
-    selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'}
-                for proto in payload['menus'][0]['protos']]
-    monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
+def _fresh_workflow_client(store, bytecode):
+    _fresh_workflow_menu(store)
     client = prepared_client(store)
     client.app.state.ctx.templates.env.bytecode_cache = bytecode
     with client:
@@ -246,20 +243,30 @@ def _fresh_workflow_client(store, monkeypatch, bytecode):
 
 
 def _fresh_workflow_menu(store):
-    from yt_playlist.rec import home_cards, home_prepared
+    from yt_playlist.rec import home_cards, home_prepared, taste_analysis
 
-    # Seed directly in the case's private file. A prepared source plus another
-    # database copy adds work without adding an input to this three-card menu.
-    with pytest.MonkeyPatch.context() as patch, store._lock:
-        use_native_sql_calls(patch)
-        returning_listener(store, 'mixes', now=1000)
-        options = [{'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}]
-        protos = seed_menu_cards(store, count=3, tracks_per_card=1, genre='Jazz')
-        selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'} for proto in protos]
-        patch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
-        service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__),
-            genre_options=options)
-        return publish_cards(store, service.cards(home_cards.CardsRequest(1000, record=False)), 1000)
+    # Publish usable library pools with room for a Fresh discovery card.
+    returning_listener(store, 'mixes', now=1000)
+    pools = {}
+    for lane in ('wheelhouse', 'explore', 'comfort'):
+        pools[lane] = []
+        for genre in ('Jazz', 'Techno'):
+            for index in range(4):
+                video = f'prepared-{lane}-{genre.lower()}-{index}'
+                title, artist = f'Prepared {lane} {genre} {index}', f'{genre} artist {index}'
+                pools[lane].append({'key': identity_key(title, artist), 'title': title,
+                                    'artist': artist, 'video_id': video, 'genre': genre})
+    seed_publication_subjects(store, [track for pool in pools.values() for track in pool])
+    seed_library_favorites(store, pools['comfort'])
+    publish_bundles(store, {'all': pools, '_meta': {'unmodeled': True, 'full_pools': True}}, now=1000)
+    summary = taste_analysis.prepare_library_summary(store, 1000)
+    assert {option['family'] for option in summary['genre_options']} == {'jazz', 'techno'}
+    with store.read_view() as reader:
+        service = home_cards.HomeCards(reader, home_prepared._NoJobs(), logging.getLogger(__name__),
+                                       genre_options=summary['genre_options'])
+        result = service.cards(home_cards.CardsRequest(1000, record=False))
+    assert {proto['lane'] for proto in result.protos} == {'wheelhouse', 'explore', 'comfort'}
+    publish_cards(store, result, 1000)
 
 
 def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(fresh_workflow_home, monkeypatch):
@@ -378,24 +385,29 @@ def test_loading_and_choosing_genres_do_not_discover_or_rank_a_fresh_pool(fresh_
                      client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]}),
                      client.get("/home/cards"),
                      client.post("/home/breadth", data={"breadth_bias": "0.5"})]:
+        assert response.status_code == 200
         assert 'class="fresh-pool-art"' in response.text
         assert 'aria-busy="false"' in response.text
         assert 'data-title="Prepared ' in response.text
     assert calls == []
 
 
-def test_genre_selection_leaves_other_requests_responsive(store, monkeypatch, prepared_fresh_home):
+def test_genre_selection_leaves_other_requests_responsive(fresh_workflow_home, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
-    from yt_playlist.rec import mode_surfaces
+    from yt_playlist.rec import stored_home
 
-    client = prepared_client(store)
+    _, client = fresh_workflow_home
     started, release = threading.Event(), threading.Event()
-    def assemble(*args, **kwargs):
-        started.set()
-        release.wait(5)
-        return []
-    monkeypatch.setattr(mode_surfaces, "assemble_cards", assemble)
-    with client, ThreadPoolExecutor(max_workers=2) as requests:
+    select_prepared = stored_home.unmodeled_cards
+
+    def select_with_pause(reader, now, **options):
+        if options['include'] == {'jazz', 'techno'}:
+            started.set()
+            assert release.wait(10)
+        return select_prepared(reader, now, **options)
+
+    monkeypatch.setattr(stored_home, "unmodeled_cards", select_with_pause)
+    with ThreadPoolExecutor(max_workers=2) as requests:
         making = requests.submit(client.post, "/home/mix-genres", data={"genres": ["jazz", "techno"]})
         try:
             assert started.wait(2)
@@ -403,7 +415,9 @@ def test_genre_selection_leaves_other_requests_responsive(store, monkeypatch, pr
             assert status.status_code == 200 and not making.done()
         finally:
             release.set()
-        assert making.result(timeout=2).status_code == 200
+        response = making.result(timeout=5)
+        assert response.status_code == 200
+        assert 'data-title="Prepared ' in response.text
 
 
 def test_prepared_fresh_tracks_honor_feedback_and_library_changes(store):
@@ -484,6 +498,8 @@ def test_board_refresh_checks_completed_search_before_declaring_old_slot_empty(f
     parameters = {'include_genres': ['jazz', 'techno'], 'avoid_genres': []}
     job, created = client.app.state.ctx.jobs.create_or_rejoin('fresh_pool', parameters)
     assert created
+    waiting = client.get('/home/cards')
+    assert f'hx-get="/home/fresh-pool/{job.id}"' in waiting.text
     tracks = []
     for index in range(12):
         title, artist = f'Newly published {index}', f'New artist {index}'
@@ -499,11 +515,11 @@ def test_board_refresh_checks_completed_search_before_declaring_old_slot_empty(f
     monkeypatch.setattr(mode_inputs, '_calculate_bundles', ranked)
     assert fresh_pool.prepare(store, 1000) is not None
     job.done = True
-    # The old prepared board is intentionally retained, as happens when its
-    # ordinary poll wins the race against the completed pool's final poll.
-    stale = client.get('/home/cards')
-    assert f'hx-get="/home/fresh-pool/{job.id}"' in stale.text
-    assert 'Not enough matching songs yet' not in stale.text
+    # Refresh the board before the job's final poll. The published result is
+    # already available to the live board, so it should render the new mix.
+    refreshed = client.get('/home/cards')
+    assert 'data-title="Newly published ' in refreshed.text
+    assert 'Not enough matching songs yet' not in refreshed.text
     final = client.get(f'/home/fresh-pool/{job.id}')
     assert final.text.count('class="gen-row"') == 12
     assert 'Save and play this mix' in final.text

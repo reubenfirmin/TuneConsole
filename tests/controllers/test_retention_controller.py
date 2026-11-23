@@ -19,7 +19,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 
 @pytest.fixture
 def retention():
-    database = MaintenanceDatabase(lambda: 'connection', nullcontext(), None, lambda: False)
+    database = MaintenanceDatabase('connection', nullcontext(), None, lambda: False)
     return Retention(database, create_autospec(EnrichmentState, instance=True, spec_set=True),
                      create_autospec(VibeModels, instance=True, spec_set=True),
                      create_autospec(Embeddings, instance=True, spec_set=True),
@@ -55,11 +55,12 @@ def test_shutdown_releases_both_disposable_iterators(retention):
     retention.collections.close.assert_called_once_with()
 
 
-def test_database_context_follows_replaced_connection_and_current_pause_state():
-    current, paused = ['first'], [False]
-    database = MaintenanceDatabase(lambda: current[0], nullcontext(), None, lambda: paused[0])
-    assert database.conn == 'first' and not database.activity_paused
-    current[0], paused[0] = 'replacement', True
-    assert database.conn == 'replacement' and database.activity_paused
+def test_database_context_reflects_current_pause_state():
+    paused = [False]
+    connection = object()
+    database = MaintenanceDatabase(connection, nullcontext(), None, lambda: paused[0])
+    assert database.conn is connection and not database.activity_paused
+    paused[0] = True
+    assert database.activity_paused
     with pytest.raises(AttributeError):
         database.settings

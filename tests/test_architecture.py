@@ -416,7 +416,7 @@ def test_embedding_calculations_stay_detached_from_storage_and_serving():
     graph = modules["yt_playlist.rec.embed"]
     assert not set(_imports(graph)) & {"yt_playlist.rec.embedding_training",
                                       "yt_playlist.rec.content_model"}
-    expansion = next(node for node in graph.body
+    expansion = next(node for node in modules["yt_playlist.rec.cluster_ranking"].body
                      if isinstance(node, ast.FunctionDef) and node.name == "expand_spaces")
     assert not any(isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                    and node.value.id in {"vectors", "rec_params"} for node in ast.walk(expansion))
@@ -427,7 +427,7 @@ def test_refresh_notifications_do_not_write_model_or_serving_state():
     for name in ("yt_playlist.repos.models", "yt_playlist.core.recommendation_settings"):
         assert not _persistence_consumers(modules[name], name), name
     ledger = modules["yt_playlist.repos.rec_refresh"]
-    owned = {"rec_change_queue"}
+    owned = {"settings"}
     for node in ast.walk(ledger):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             match = re.match(r"\s*(?:INSERT (?:OR IGNORE )?INTO|DELETE FROM|UPDATE) (\w+)", node.value)
@@ -468,7 +468,7 @@ def _unguarded_connection_access(method):
             for statement in node.body:
                 admitted = (isinstance(previous, ast.If) and not previous.orelse
                     and ast.unparse(previous.test) == 'not self._lock.acquire(blocking=False)'
-                    and len(previous.body) == 1 and isinstance(previous.body[0], ast.Return)
+                    and previous.body and isinstance(previous.body[-1], ast.Return)
                     and isinstance(statement, ast.Try)
                     and len(statement.finalbody) == 1
                     and ast.unparse(statement.finalbody[0]) == 'self._lock.release()')
@@ -535,6 +535,18 @@ def query(self):
         self._lock.release()
 ''').body[0]
     assert not _unguarded_connection_access(nonblocking)
+    nonblocking_context = ast.parse('''
+@contextmanager
+def try_access(self):
+    if not self._lock.acquire(blocking=False):
+        yield False
+        return
+    try:
+        yield not self.conn.in_transaction
+    finally:
+        self._lock.release()
+''').body[0]
+    assert not _unguarded_connection_access(nonblocking_context)
     for source in (
         'def query(self):\n    self.conn.execute("SELECT 1")',
         'def query(self):\n    with self._lock:\n        pass\n    self.conn.execute("SELECT 1")',

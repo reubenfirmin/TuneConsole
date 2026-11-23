@@ -62,7 +62,7 @@ def test_source_file_precedes_sql_fanout_and_acknowledgement(profiles):
     assert events == ['pending', 'file', 'sql']
     profiles.files.write_reserved.assert_called_once_with([{'raw': b'pack', 'file_id': 257}])
     profiles.repository.publish_source.assert_called_once_with(
-        'source', (2, 0), [7], '{}', 'v', 'digest', 10, 32, references=['reference'])
+        'source', (2, 0), [7], 10, 32, reference='reference')
 
 
 def test_failed_source_file_does_not_acknowledge_pending_work(profiles):
@@ -124,14 +124,9 @@ def test_unchanged_publication_does_not_notify(profiles):
     profiles.repository.publish_recordings.return_value = False
     profiles.publish_recordings([('gone', None, 'v', None)], 10)
     profiles.refresh.publish_notification.assert_not_called()
-
-
-def test_legacy_inline_format_has_no_file_publication(profiles):
-    profiles.repository.publication_owners.return_value = None
-    profiles.publish_recordings([('song', '{}', 'v', 'digest')], 10)
     profiles.files.write_reserved.assert_not_called()
     profiles.repository.publish_recordings.assert_called_once_with(
-        [('song', '{}', 'v', 'digest')], 10, references=[])
+        [('gone', None, 'v', None)], 10, references=[])
 
 
 def test_failed_recording_file_does_not_write_sql_or_notify(profiles):
@@ -185,6 +180,8 @@ def test_empty_provenance_does_not_open_sql_or_files(profiles):
 
 
 def test_readiness_preserves_explicit_page_hash_and_missing_profile_fits(profiles):
+    from yt_playlist.rec.vibe_score_policy import score_patterns
+
     rows = [('song', 'v', 'digest', 'relax', .8, .5, 'provider', 'stamp'),
             ('unprepared', None, None, 'relax', .9, .9, 'provider', 'stamp')]
     profiles.repository.readiness_rows.return_value = rows
@@ -192,4 +189,4 @@ def test_readiness_preserves_explicit_page_hash_and_missing_profile_fits(profile
     assert fingerprint == hashlib.sha256(json.dumps(rows, separators=(',', ':')).encode()).hexdigest()
     assert values['song']['vibes']['fits']['relax']['score'] == .8
     assert values['unprepared']['vibes']['fits'] == {}
-    profiles.repository.readiness_rows.assert_called_once_with(['song', 'unprepared'])
+    profiles.repository.readiness_rows.assert_called_once_with(['song', 'unprepared'], patterns=score_patterns())

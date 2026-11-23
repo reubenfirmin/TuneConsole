@@ -1,4 +1,5 @@
 """Paid-description file publication uses reserved IDs without SQL access."""
+from hashlib import sha256
 import json
 
 import pytest
@@ -15,7 +16,10 @@ def test_identical_paid_copy_keeps_distinct_file_owners_and_exact_original_text(
     second = files.publish_reserved(tmp_path, 258, raw)
     assert first[0] == str(tmp_path / 'by-id/01/257.json')
     assert second[0] != first[0] and second[1:] == first[1:]
-    assert files.describe(raw) == first[1:]
+    for filename, digest, size in (first, second):
+        encoded = fao.read(filename).bytes
+        assert digest == sha256(encoded).hexdigest()
+        assert size == len(encoded)
     assert files.read(*first[:2]) == raw
     assert files.read(*second[:2]) == raw
     fao.write(first[0], files.document(json.dumps({'description': 'Changed'})))

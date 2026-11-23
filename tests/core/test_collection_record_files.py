@@ -43,7 +43,7 @@ def save(store, workflow, value, now):
 def test_collection_interruption_retains_the_prior_checkpoint_and_pending_record_across_restart(
         file_consumer_store, monkeypatch, workflow, failure):
     store = file_consumer_store
-    account = store.accounts.upsert_account('Owner', 'owner.json', None, True)
+    account = store.accounts.upsert_account('Owner', None, True)
     values = {
         'radio': dict(version=2, phase='playing', episode_id='episode', identity=account, tracks=[]),
         'playlist': dict(media='video'),
@@ -69,7 +69,7 @@ def test_collection_interruption_retains_the_prior_checkpoint_and_pending_record
     assert not store.conn.in_transaction
     with closing(sqlite3.connect(store._db_path)) as observer:
         observer.row_factory = sqlite3.Row
-        rows = [dict(row) for row in observer.execute('SELECT * FROM collection_file_writes ORDER BY id')]
+        rows = [dict(row) for row in observer.execute('SELECT * FROM collection_file_writes WHERE id>0 ORDER BY id')]
     assert [row['file_status'] for row in rows] == ['ready', 'pending']
     root = collection_recovery.directory(store.conn)
     pending = root / 'by-id' / f"{rows[-1]['id'] % 256:02x}" / f"{rows[-1]['id']}.json"
@@ -79,7 +79,7 @@ def test_collection_interruption_retains_the_prior_checkpoint_and_pending_record
 
     restarted = Store(store._db_path)
     try:
-        restarted.init_schema(defer_metadata=True)
+        restarted.init_schema()
         assert read(restarted, workflow) == prior
         save(restarted, workflow, second, 30)
         assert read(restarted, workflow)['marker'] == 'second'
@@ -99,18 +99,22 @@ def test_collection_interruption_retains_the_prior_checkpoint_and_pending_record
 def test_collection_backup_restores_record_paths_and_legacy_reads_remain_writable(
         file_consumer_store, tmp_path):
     store = file_consumer_store
-    account = store.accounts.upsert_account('Owner', 'owner.json', None, True)
+    account = store.accounts.upsert_account('Owner', None, True)
     save(store, 'radio', dict(version=2, phase='playing', episode_id='episode', identity=account, tracks=[]), 10)
     save(store, 'playlist', dict(media='video', marker='installed'), 10)
     save(store, 'sync', dict(status='complete', accounts={}, resources={}), 10)
+    trip = store.road_trip.save_road_trip_recipe(None, 'Road Trip', 50, [], [], 60, 10)
+    draft = dict(revision='saved-order', picks=['second', 'first', 'second'], banned=['third'])
+    store.road_trip.save_road_trip_draft(trip, draft, 20)
 
     # Retain an installed hash-named body beside native documents, then make an
     # ordinary controller update. No startup conversion is needed to read it.
-    recipe = store.conn.execute('SELECT id FROM rec_recipes').fetchone()[0]
+    recipe = store.conn.execute("SELECT recipe_id FROM playlist_scopes WHERE id='PLAYLIST'").fetchone()[0]
     installed = collection_recovery.publish(store.conn, 'playlist-recipe', recipe,
                                             dict(media='video', marker='installed'))
     with store.conn.atomic():
-        store.conn.execute('UPDATE rec_recipes SET recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE id=?',
+        store.conn.execute('UPDATE playlist_scopes SET recipe_recovery_filename=?,recipe_recovery_digest=?,'
+                           'recipe_recovery_bytes=? WHERE recipe_id=?',
                            (*installed, recipe))
     assert read(store, 'playlist')['marker'] == 'installed'
     save(store, 'playlist', dict(media='video', marker='updated'), 20)
@@ -129,9 +133,10 @@ def test_collection_backup_restores_record_paths_and_legacy_reads_remain_writabl
         store.conn.backup(destination)
     restored = Store(clone_path)
     try:
-        restored.init_schema(defer_metadata=True)
+        restored.init_schema()
         collection_recovery.restore(restored.conn, manifest)
         assert all(read(restored, name) == read(store, name) for name in ('radio', 'playlist', 'sync'))
+        assert restored.road_trip.get_road_trip_draft(trip) == draft
         for table, identity, _, filename, _, _ in collection_recovery.references(restored.conn):
             assert collection_recovery.record_id(filename) == identities[table, identity]
             assert Path(filename).is_relative_to(collection_recovery.directory(restored.conn))

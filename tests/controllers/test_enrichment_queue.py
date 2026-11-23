@@ -9,17 +9,15 @@ from yt_playlist.controllers.enrichment_queue import EnrichmentQueue
 from yt_playlist.enrich import queue_policy
 from yt_playlist.repos.enrichment_queue import EnrichmentQueueRepo
 from yt_playlist.controllers.enrichment_state import EnrichmentState
-from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
 
 def queue(*, read_only=True):
     repository = create_autospec(EnrichmentQueueRepo, instance=True, spec_set=True)
+    repository.caught_up_at.return_value = None
     state = create_autospec(EnrichmentState, instance=True, spec_set=True)
-    settings = create_autospec(Settings, instance=True, spec_set=True)
-    settings.get_setting.return_value = '100'
-    return EnrichmentQueue(repository, state, settings, read_only=read_only,
+    return EnrichmentQueue(repository, state, read_only=read_only,
         read_snapshot=Mock(), memoized_read=Mock(side_effect=lambda _, calculate: calculate()))
 
 
@@ -56,6 +54,7 @@ def test_fully_deferred_queue_skips_priority_calculation():
     service = queue()
     service.repository.has_candidates.return_value = False
     assert service.next_enrich_batch(40, providers=['deezer'], now=1000) == []
+    service.repository.caught_up_at.assert_not_called()
     service.repository.priority_order.assert_not_called()
     service.memoized_read.assert_not_called()
 
@@ -63,6 +62,7 @@ def test_fully_deferred_queue_skips_priority_calculation():
 def test_ranking_receives_caught_up_boundary_and_respects_pagination():
     service = queue()
     service.repository.has_candidates.return_value = True
+    service.repository.caught_up_at.return_value = 100.0
     service.repository.priority_order.return_value = '[8,2,5]'
     service.repository.select_candidates.return_value = [candidate(2)]
     assert service.next_enrich_batch(1, 1, now=1000)[0]['recording_id'] == 2

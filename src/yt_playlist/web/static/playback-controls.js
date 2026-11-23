@@ -6,6 +6,7 @@
   function command(action) {
     if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command(action);
     const status = window.playbackStatus?.snapshot;
+    if (status?.last_known_player) return false;
     const playing = status?.connected && (status.now_playing || status.resumable_player || status.radio_resume);
     if (!playing?.video_id) return false;
     const resume = !status.now_playing;
@@ -45,14 +46,20 @@
   }
 
   document.addEventListener('keydown', event => {
-    if (event.defaultPrevented || event.repeat || event.isComposing ||
+    if (event.defaultPrevented || event.isComposing ||
         event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     const media = {MediaPlayPause: 'toggle', MediaPlay: 'play', MediaPause: 'pause', MediaTrackNext: 'next'};
     let action = media[event.key];
-    if (!action && (event.code === 'Space' || event.key === ' ')) {
-      // Native Space activation and editing take precedence. Anchors activate
-      // with Enter, so a focused playback link must not swallow this shortcut.
-      if (event.target?.closest?.('input, textarea, select, button, summary, audio, video, '
+    const space = !action && (event.code === 'Space' || event.key === ' ');
+    const onSelectedTab = space && event.target?.closest?.('[role="tab"][aria-selected="true"]');
+    if (event.repeat) {
+      // A repeated keydown can rearm the native button click on keyup.
+      if (onSelectedTab) event.preventDefault();
+      return;
+    }
+    if (space) {
+      // A selected tab can keep focus after navigation. Space can then control playback.
+      if (!onSelectedTab && event.target?.closest?.('input, textarea, select, button, summary, audio, video, '
           + '[contenteditable]:not([contenteditable="false"]), '
           + '[role="button"], [role="textbox"], [role="combobox"], [role="slider"], '
           + '[role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"]')) return;
@@ -71,7 +78,8 @@
       return;
     }
     const status = window.playbackStatus?.snapshot;
-    const playing = status?.connected && (status.now_playing || status.resumable_player || status.radio_resume);
+    const playing = status?.connected && !status.last_known_player &&
+      (status.now_playing || status.resumable_player || status.radio_resume);
     const active = !!playing?.video_id;
     session.playbackState = active && typeof playing.paused === 'boolean' ?
       (playing.paused ? 'paused' : 'playing') : 'none';

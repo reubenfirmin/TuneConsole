@@ -1,5 +1,4 @@
 """Retired metadata layout read contract; retirement work remains explicit."""
-from .metadata_contract import runtime_active
 from .schema_contract import MigrationError, tokens
 
 
@@ -32,8 +31,34 @@ def retired(conn):
     return conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='trigger' AND name=?",(MARKER,)).fetchone() is not None
 
 
-def validate(conn):
-    if not runtime_active(conn):
+def _application_relations(conn):
+    is_retired = retired(conn)
+    locations = ('SELECT id,NULL AS contract_digest,NULL AS raw_filename,NULL AS raw_digest,'
+                 'NULL AS raw_byte_size,NULL AS raw_offset FROM metadata_deliveries WHERE 0' if is_retired else
+                 'SELECT id,contract_digest,raw_filename,raw_digest,raw_byte_size,raw_offset FROM metadata_deliveries')
+    return {
+        'metadata_delivery_locations': 'CREATE VIEW metadata_delivery_locations AS ' + locations,
+        'metadata_delivery_capture_allowed':
+            'CREATE VIEW metadata_delivery_capture_allowed AS SELECT ' + str(int(not is_retired)) + ' AS allowed',
+    }
+
+
+def install_application_relations(conn, context):
+    for sql in _application_relations(conn).values():
+        conn.execute(sql)
+
+
+def validate_application_relations(conn):
+    from .schema_inspection import definitions
+    expected = _application_relations(conn)
+    actual = definitions(conn, expected)
+    for name, sql in expected.items():
+        if name not in actual or tokens(actual[name]) != tokens(sql):
+            raise MigrationError('Incompatible metadata delivery relation: ' + name)
+
+
+def validate(conn, *, active):
+    if not active:
         raise MigrationError('Retired metadata locators require active runtime metadata')
     row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?',(MARKER,)).fetchone()
     if row is None or tokens(row[0])!=tokens(GUARDS[MARKER]):

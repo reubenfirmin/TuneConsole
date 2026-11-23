@@ -1,7 +1,29 @@
 // Exposure belongs to visible discovery tiles and story headings, never a GET or hidden tab.
-// A page's seen set survives fragment polls. Observe the heading rather than a whole article,
-// which can be taller than the viewport on a phone.
+// A page's seen set survives fragment polls. A whole article can exceed the viewport.
 let discoveryExposure = null;
+const STORY_IMPRESSION_LIMIT = 9; // One prepared edition, matching the endpoint's limit.
+
+function scheduleStoryImpressions(state) {
+  if (state.storyFlushPending || !state.storyImpressions.size) return;
+  state.storyFlushPending = true;
+  // Let headings that completed the same dwell arrive together.
+  setTimeout(() => {
+    const batch = Array.from(state.storyImpressions).slice(0, STORY_IMPRESSION_LIMIT);
+    for (const [key] of batch) state.storyImpressions.delete(key);
+    fetch('/home/into-recently/impressions', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, keepalive: true,
+      body: JSON.stringify({subjects: batch.map(([, id]) => id)})
+    }).then(response => {
+      if (!response.ok) throw new Error('Story impressions rejected');
+    }).catch(() => {
+      for (const [key] of batch) state.seen.delete(key);
+    }).finally(() => {
+      state.storyFlushPending = false;
+      scheduleStoryImpressions(state);
+    });
+  }, 16);
+}
+
 function syncDiscoveryExposure() {
   const home = document.getElementById('home');
   if (discoveryExposure?.home !== home) {
@@ -12,7 +34,7 @@ function syncDiscoveryExposure() {
   if (!home || !window.IntersectionObserver) return;
   if (!discoveryExposure) {
     const state = {home, viewId: crypto.randomUUID(), observed: new Set(), seen: new Set(),
-      visible: new Set(), timers: new Map()};
+      visible: new Set(), timers: new Map(), storyImpressions: new Map(), storyFlushPending: false};
     state.observer = new IntersectionObserver(entries => {
       entries.forEach(entry => {
         const tile = entry.target;
@@ -34,9 +56,14 @@ function syncDiscoveryExposure() {
           if (document.hidden || !tile.isConnected || !tile.getClientRects().length ||
               !state.visible.has(tile) || state.seen.has(key)) return;
           state.seen.add(key);
-          fetch(story ? '/home/into-recently/impressions' : '/discovery/impressions', {
+          if (story) {
+            state.storyImpressions.set(key, id);
+            scheduleStoryImpressions(state);
+            return;
+          }
+          fetch('/discovery/impressions', {
             method: 'POST', headers: {'Content-Type': 'application/json'}, keepalive: true,
-            body: JSON.stringify(story ? {subjects: [id]} : {kind, ids: [id], view_id: state.viewId})
+            body: JSON.stringify({kind, ids: [id], view_id: state.viewId})
           }).then(response => {
             if (!response.ok) state.seen.delete(key);
           }).catch(() => state.seen.delete(key));

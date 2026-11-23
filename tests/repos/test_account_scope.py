@@ -6,8 +6,8 @@ from yt_playlist.core.accounts import client_for
 
 
 def test_system_curation_is_per_account_and_survives_membership_removal(store):
-    first = store.accounts.upsert_account('first','c','brand',False)
-    main = store.accounts.upsert_account('main','c',None,True)
+    first = store.accounts.upsert_account('first','brand',False)
+    main = store.accounts.upsert_account('main',None,True)
     a = store.playlists.upsert_playlist(first,'LM','First likes',0,'h',0)
     b = store.playlists.upsert_playlist(main,'LM','Main likes',0,'h',0)
     ar,br = store.playlists.get_playlist(a).playlist_scope_id,store.playlists.get_playlist(b).playlist_scope_id
@@ -28,8 +28,8 @@ def test_system_curation_is_per_account_and_survives_membership_removal(store):
 
 
 def test_shared_curation_survives_each_account_membership_removal(store):
-    first = store.accounts.upsert_account('first','c','brand',False)
-    main = store.accounts.upsert_account('main','c',None,True)
+    first = store.accounts.upsert_account('first','brand',False)
+    main = store.accounts.upsert_account('main',None,True)
     ids = [store.playlists.upsert_playlist(i,'shared','Shared',0,'h',0) for i in (first,main)]
     store.playlists.set_playlist_group('shared','Keep')
     store.overlaps.suppress_overlap('shared','other',1)
@@ -43,8 +43,8 @@ def test_shared_curation_survives_each_account_membership_removal(store):
 
 
 def test_saved_snapshots_and_unlikes_retain_other_accounts_and_unknown_legacy(store):
-    a = store.accounts.upsert_account('first','c','brand',False)
-    b = store.accounts.upsert_account('main','c',None,True)
+    a = store.accounts.upsert_account('first','brand',False)
+    b = store.accounts.upsert_account('main',None,True)
     album = lambda bid:dict(browse=bid,title='Same',artist='Artist')
     store.collection.add_saved_album(album('unknown'))
     store.collection.replace_saved_album_snapshots({a:[album('shared'),album('a')]},now=1)
@@ -59,8 +59,8 @@ def test_saved_snapshots_and_unlikes_retain_other_accounts_and_unknown_legacy(st
 
 
 def test_account_selection_uses_main_explicit_or_owner_and_never_falls_back(store):
-    a = store.accounts.upsert_account('first','c','brand',False)
-    b = store.accounts.upsert_account('main','c',None,True)
+    a = store.accounts.upsert_account('first','brand',False)
+    b = store.accounts.upsert_account('main',None,True)
     other,main = object(),object()
     clients = {a:other,b:main}
     assert client_for(store,clients)==(b,main)
@@ -74,8 +74,8 @@ def test_account_selection_uses_main_explicit_or_owner_and_never_falls_back(stor
 
 
 def test_generated_system_context_does_not_quarantine_another_accounts_likes(store):
-    a = store.accounts.upsert_account('first','c','brand',False)
-    b = store.accounts.upsert_account('main','c',None,True)
+    a = store.accounts.upsert_account('first','brand',False)
+    b = store.accounts.upsert_account('main',None,True)
     for iid in (a,b):
         store.playlists.upsert_playlist(iid,'LM','Likes',0,'h',1)
     store.playlists.set_playlist_provenance('LM',account_id=a,origin='tuneconsole',adopted=False)

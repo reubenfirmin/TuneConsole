@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from yt_playlist.core import collection_recovery as recovery, collection_recovery_epoch
+from yt_playlist.core import action_backup_inventory, collection_recovery as recovery, collection_recovery_epoch
 from yt_playlist.controllers.collection_retention import CollectionCollector
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -42,9 +42,8 @@ def test_scale_schema_has_real_current_action_constraints_and_recovery_epoch(own
 
 @pytest.fixture(scope='module')
 def owner_history(owner_schema, tmp_path_factory):
-    # The collector reads only the owner's primary key and filename. Keep all
-    # 400,000 physical SQLite rows and its real unindexed query, without building
-    # unrelated action execution bodies, constraints and indexes for that read.
+    # Keep the 400,000 unindexed owners with the primary key, recovery filename,
+    # and backup inventory that the collector reads.
     # Native writer/admission and ownership invalidation have full-schema owners.
     store = Store(tmp_path_factory.mktemp('collection-owner-history') / 'installed.db')
     try:
@@ -53,12 +52,13 @@ def owner_history(owner_schema, tmp_path_factory):
         store.conn.execute('PRAGMA synchronous=OFF')
         with store.conn:
             store.conn.execute('DROP TABLE actions')
-            store.conn.execute('CREATE TABLE actions(id INTEGER PRIMARY KEY,recovery_filename TEXT NOT NULL)')
+            store.conn.execute('CREATE TABLE actions(id INTEGER PRIMARY KEY,recovery_filename TEXT NOT NULL,'
+                               f'{action_backup_inventory.DECLARATION})')
             store.conn.execute('''WITH d(x) AS (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)),
                 high(x) AS (VALUES(0),(1),(2),(3)),
                 n(x) AS (SELECT 1+a.x*100000+b.x*10000+c.x*1000+d.x*100+e.x*10+f.x
                     FROM high a CROSS JOIN d b CROSS JOIN d c CROSS JOIN d CROSS JOIN d e CROSS JOIN d f)
-                INSERT INTO actions SELECT x,?||printf('/ab/%064d.json',x) FROM n''',
+                INSERT INTO actions (id,recovery_filename) SELECT x,?||printf('/ab/%064d.json',x) FROM n''',
                 (str(recovery.directory(store.conn)),))
             # Restore the exact production ownership and key-change triggers on
             # the projected owner; unrelated external commits must not restart it.
@@ -85,13 +85,13 @@ def test_completed_scale_input_has_all_400000_private_unindexed_owners(owner_his
 
 def test_native_collector_admission_preserves_the_real_current_owner_epoch(file_backed_store):
     store = file_backed_store
-    revision = store.conn.execute('SELECT revision FROM collection_recovery_epoch').fetchone()[0]
+    revision = collection_recovery_epoch.revision(store.conn)
     writer = Store(store._db_path)
     try:
         writer.init_schema()
         writer.settings.set_setting('accepted after fresh admission', 'keep')
         assert store.settings.get_setting('accepted after fresh admission') == 'keep'
-        assert writer.conn.execute('SELECT revision FROM collection_recovery_epoch').fetchone()[0] == revision
+        assert collection_recovery_epoch.revision(writer.conn) == revision
         collection_recovery_epoch.validate(writer.conn)
         collection_recovery_epoch.validate_keys(writer.conn)
     finally:
@@ -145,8 +145,8 @@ def test_new_reference_invalidates_partial_scan(file_backed_store, monkeypatch, 
 
     def interrupt_after_first_page():
         collector = store.retention.database._collection_orphans
-        if (collector.owners._table_index < len(collector.owners._tables)
-                and collector.owners._tables[collector.owners._table_index][0] == 'rec_recipes'
+        if (collector.owners._table_index < len(collection_retention.FILE_OWNERS)
+                and collection_retention.FILE_OWNERS[collector.owners._table_index][1] == 'recipe_recovery_filename'
                 and collector.owners._after is not None):
             raise WorkBudgetExceeded('Pause after a completed owner page')
         check()
@@ -166,8 +166,8 @@ def test_new_reference_invalidates_partial_scan(file_backed_store, monkeypatch, 
         # Update behind the saved keyset position. Resuming without validating
         # ownership changes would skip this newly published current reference.
         with writer.conn:
-            writer.conn.execute('''UPDATE rec_recipes SET revision=?,
-                recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE id=1''',
+            writer.conn.execute('''UPDATE playlist_scopes SET recipe_revision=?,
+                recipe_recovery_filename=?,recipe_recovery_digest=?,recipe_recovery_bytes=? WHERE recipe_id=1''',
                 ('1' * 32, filename, digest, size))
         for _ in range(100):
             store.retention.collections.maintain()

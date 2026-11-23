@@ -37,9 +37,6 @@ class RecommendationImport:
             check_cancellable_work()
             if families.get(prepared.policy_version) != family:
                 raise ValueError('Recommendation import pool has incompatible policy inputs')
-            if prepared.group_version_id is not None and not self.repository.group_contains(
-                    plan.group_generation_id, prepared.group_version_id):
-                raise ValueError('Recommendation import pool has incompatible group inputs')
             existing = self.repository.pool_owner(prepared.content_digest)
             if existing:
                 if not existing['complete'] or existing['retiring']:
@@ -79,8 +76,10 @@ class RecommendationImport:
             self.repository.attach_pool(build.generation_id, slot, installed[prepared.content_digest])
         for output in plan.outputs:
             check_cancellable_work()
-            file = self.files.publish_original(output.encoded)
-            self.repository.record_output(plan, build.generation_id, output, file)
+            integrity = self.files.describe(output.encoded)
+            identity = self.repository.reserve_output(output, integrity)
+            reference = self.files.publish_reserved(identity, output.encoded, expected=integrity)
+            self.repository.record_output(plan, build.generation_id, output, reference, identity)
         self.repository.ready(plan, build.generation_id)
         if before_publish is not None:
             before_publish(build.generation_id)

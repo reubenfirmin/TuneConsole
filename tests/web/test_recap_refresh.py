@@ -1,4 +1,4 @@
-"""Legacy Wrapped payloads request monthly preparation without article work."""
+"""Stale recap payloads request monthly preparation without article work."""
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -70,6 +70,31 @@ def test_cached_recap_still_renders_when_worker_cannot_accept(_client, availabil
         assert response.text.count('class="slide slide-new_this_month"') == 3
         assert store.rec_proposals.get_proposals('trend_rollups')['story'] == story
         assert not worker.jobs.pending
+    finally:
+        worker.shutdown()
+        worker.join(1)
+
+
+def test_cached_recap_requests_energy_evidence_without_showing_old_claim(_client, monkeypatch):
+    story = deepcopy(_STORY)
+    personality = next(beat for beat in story['beats'] if beat['kind'] == 'personality')
+    personality.pop('audio_plays')
+    personality['blurb'] = 'High-energy comfort listening on your own clock.'
+
+    def configure(worker):
+        monkeypatch.setattr(worker, '_start_loop', lambda: None)
+        return True
+
+    state = bind_worker(monkeypatch, configure)
+    client, store = _client(story, snapshot_guards=True)
+    worker = state['worker']
+    try:
+        response = client.get('/trends/story/2026-06')
+        assert response.status_code == 200
+        assert personality['name'] in response.text
+        assert personality['blurb'] not in response.text
+        assert worker.jobs.has(Job.TRENDS)
+        assert store.rec_proposals.get_proposals('trend_rollups')['story'] == story
     finally:
         worker.shutdown()
         worker.join(1)

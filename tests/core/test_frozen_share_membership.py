@@ -1,53 +1,26 @@
-"""Current and installed frozen captures reject appends, replacements and reordering."""
-from contextlib import closing, contextmanager
-import sqlite3
-
+"""The last cached share retains exact provider order independently of tracklists."""
 import pytest
 
-from yt_playlist.core import albums, album_tracklists, schema_inspection
-from yt_playlist.core.migrations import current, migrate, registry, regular, Migration, MigrationError
-from yt_playlist.core.migrations import runner
-from yt_playlist.core.store import Store
-from tests.historical_support import upgrade_fixture
-from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input, native_sql_calls, without_query_timing
+from yt_playlist.core import album_tracklists, albums
 
 
-pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_exact_share_and_album_fallback_preserve_order_and_empty_captures(store):
+    with store.conn:
+        album = albums.observe(store.conn, 'release', title='Release', artist='Artist')
+        for browse in ('alias', 'no-share'):
+            store.conn.execute(
+                "INSERT INTO album_provider_ids(provider,provider_id,album_id,is_primary,equivalence_digest,verified_at) "
+                "VALUES ('youtube',?,?,0,?,1)", (browse, album, 'a' * 64))
+        album_tracklists.freeze(store.conn, album, 'release', 'Exact', ['one', 'two', 'one'])
+        album_tracklists.freeze(store.conn, album, 'alias', 'Empty', [])
 
-
-def capture(conn, *, legacy=False):
-    with conn:
-        aid = albums.observe(conn,'release',title='Release',artist='Artist',rank=1)
-        snapshot = album_tracklists.freeze(conn,aid,'release','Frozen',['one','missing','one'],now=10,legacy=legacy)
-        empty = album_tracklists.freeze(conn,aid,'release','Empty',[],now=11)
-    return aid,snapshot,empty
-
-
-def assert_frozen(conn, snapshot):
-    before = list(map(tuple,conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))
-    for operation in ('append','replace','update','delete'):
-        with pytest.raises(sqlite3.IntegrityError):
-            with conn:
-                if operation in ('append','replace'):
-                    conn.execute('INSERT OR REPLACE INTO album_share_items '
-                        'SELECT snapshot_id,?,tracklist_id,occurrence_id,entry_id,raw_source_ref '
-                        'FROM album_share_items WHERE snapshot_id=? AND position=0',
-                        (3 if operation=='append' else 0,snapshot))
-                elif operation=='update':
-                    conn.execute("UPDATE album_share_items SET raw_source_ref='changed' WHERE snapshot_id=?",(snapshot,))
-                else:
-                    conn.execute('DELETE FROM album_share_items WHERE snapshot_id=?',(snapshot,))
-        assert list(map(tuple,conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))==before
-    assert not conn.execute('PRAGMA foreign_key_check').fetchall()
-
-
-def test_fresh_share_constructor_and_rollback_leave_no_mutable_prefix(store):
-    _,snapshot,_ = capture(store.conn)
-    assert_frozen(store.conn,snapshot)
-    before = store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]
-    with pytest.raises(RuntimeError):
+    assert album_tracklists.cached_share(store.conn, album, 'release') == {
+        'title': 'Exact', 'video_ids': ['one', 'two', 'one']}
+    assert album_tracklists.cached_share(store.conn, album, 'no-share') == {
+        'title': 'Empty', 'video_ids': []}
+    with pytest.raises(RuntimeError, match='abort'):
         with store.conn:
-            album_tracklists.freeze(store.conn,albums.lookup(store.conn,'release'),'release','Rollback',['a','a'],now=12)
-            raise RuntimeError('abort capture')
-    assert store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]==before
+            album_tracklists.freeze(store.conn, album, 'release', 'Replacement', ['new'])
+            raise RuntimeError('abort')
+    assert album_tracklists.cached_share(store.conn, album, 'release')['video_ids'] == ['one', 'two', 'one']
+    assert not store.conn.execute('SELECT 1 FROM album_tracklists').fetchone()

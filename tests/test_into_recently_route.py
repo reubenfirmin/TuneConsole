@@ -23,10 +23,10 @@ NOW = 1_800_000_000
 @pytest.fixture(autouse=True)
 def story_routes(monkeypatch):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home
+    from yt_playlist.web.routes import app_update, audio_vibes, home
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, home)])
+        for module in (app_update, audio_vibes, home)])
 
 
 @pytest.fixture
@@ -58,7 +58,7 @@ def _fragment_client(store):
 
 
 def _heard(store, *videos):
-    listener = store.accounts.upsert_account('story-listener', 'channel', None, True)
+    listener = store.accounts.upsert_account('story-listener', None, True)
     events = [(store.tracks.identity_key_for_video(video), None, NOW - 86400) for video in videos]
     store.history.import_listening_events(listener, events, source='spotify_export', source_timezone='UTC')
 
@@ -111,6 +111,91 @@ def test_card_renders_from_fetched_summary(store, monkeypatch):
     assert '>Read more</a>' in html
     assert '<p>The second paragraph finishes here.</p>' in html
     assert 'aria-label="Read more about shoegaze on Wikipedia"' in html
+
+
+@pytest.mark.parametrize(('candidates', 'genre', 'expected'), [
+    (('british', 'american'), 'Grunge', 'american'),
+    (('american', 'british'), 'Grunge', 'american'),
+    (('british',), 'Grunge', None),
+    (('british', 'american'), 'Rock', None),
+])
+def test_nirvana_story_resolves_the_recordings_and_replaces_a_cached_homonym(
+        store, monkeypatch, candidates, genre, expected):
+    from io import BytesIO
+    import json
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, unquote, urlsplit
+
+    from tests.conftest import seed_catalog_track
+    from yt_playlist.controllers.charts import Charts
+    from yt_playlist.integrations.wikipedia import WikipediaIAO
+
+    songs = ('Floyd The Barber (Live In Del Mar, California/1991)',
+             'About A Girl (Live In Amsterdam, Netherlands/1991)')
+    for i, title in enumerate(songs):
+        seed_catalog_track(store, f'grunge{i}', title, 'Nirvana', video_id=f'grunge{i}', genre=genre)
+    _heard(store, 'grunge0', 'grunge1')
+    monkeypatch.setattr(Charts, 'top_artists', lambda *a, **kw: [])
+    monkeypatch.setattr(into_recently.transient, 'facet_leans', lambda *a: {'artist:Nirvana': 1})
+
+    articles = {
+        'british': {'title': 'Nirvana (British band)',
+                    'extract': 'Nirvana formed in London in 1966 and played psychedelic pop. '
+                               'Its members later sued the American grunge band with the same name.',
+                    'thumbnail': 'https://upload.wikimedia.org/british.jpg',
+                    'url': 'https://en.wikipedia.org/wiki/Nirvana_(British_band)'},
+        'american': {'title': 'Nirvana (band)',
+                     'extract': 'Nirvana was a rock band from Aberdeen, Washington, founded in 1987.',
+                     'thumbnail': 'https://upload.wikimedia.org/american.jpg',
+                     'url': 'https://en.wikipedia.org/wiki/Nirvana_(band)'},
+    }
+    british = articles['british']
+    store.wiki.put('artist:Nirvana', 'artist', 'Nirvana', british, NOW)
+    store.rec_proposals.put_proposals(into_recently.SURFACE, {
+        'schema': into_recently.SCHEMA - 1, 'built_at': NOW, 'pending': False,
+        'cards': [{**british, 'display': 'Nirvana', 'kind': 'artist', 'subject': 'artist:Nirvana',
+                   'color': 'red', 'seed': 'Nirvana', 'genre': None, 'depth': 2}],
+    }, NOW)
+    assert into_recently.load(store, NOW) == ([], True)
+
+    category_requests = []
+
+    def response(url):
+        parts = urlsplit(url)
+        params = parse_qs(parts.query)
+        if params.get('list') == ['search']:
+            return {'query': {'search': [{'title': articles[key]['title']} for key in candidates]}}
+        if params.get('prop') == ['categories']:
+            titles = params['titles'][0].split('|')
+            category_requests.append(titles)
+            labels = {'british': 'English psychedelic pop music groups', 'american': 'American grunge groups'}
+            return {'query': {'pages': {str(i): {'title': articles[key]['title'],
+                'categories': [{'title': 'Category:' + labels[key]}]} for i, key in enumerate(candidates)}}}
+        title = unquote(parts.path.rsplit('/', 1)[1]).replace('_', ' ')
+        article = next(article for article in articles.values() if article['title'] == title)
+        return {'type': 'standard', 'title': title, 'extract': article['extract'],
+                'thumbnail': {'source': article['thumbnail']}, 'content_urls': {'desktop': {'page': article['url']}}}
+
+    def fetch(request, *, timeout):
+        return BytesIO(json.dumps(response(request.full_url)).encode())
+
+    monkeypatch.setattr(wikipedia, '_iao', WikipediaIAO(open_fn=fetch, pacer=SimpleNamespace(wait=lambda: None)))
+    assert not into_recently.prepare(store, NOW)
+    assert category_requests == ([[articles[key]['title'] for key in candidates]] if genre == 'Grunge' else [])
+    cached = store.wiki.get('artist:Nirvana')
+    fragment = _fragment_client(store).get('/test/story-fragment')
+    assert british['thumbnail'] not in fragment.text and british['url'] not in fragment.text
+    if expected is None:
+        assert cached['found'] == 0
+        assert into_recently.load(store, NOW) == ([], False)
+        return
+
+    article = articles[expected]
+    assert cached['matched_genres'] == ['grunge']
+    assert all(cached[field] == value for field, value in article.items())
+    assert all(article[field] in fragment.text for field in ('extract', 'thumbnail', 'url'))
+    card, = fragment.context['cards']
+    assert {song['title'] for song in card['songs']} == set(songs)
 
 
 def test_genre_without_article_image_has_text_layout_instead_of_album_art(store, monkeypatch):
@@ -457,7 +542,7 @@ def test_artist_card_uses_local_thumbnail_color_and_cta(store, monkeypatch):
     into_recently.prepare(store, NOW)
     html = _fragment_client(store).get('/test/story-fragment').text
     assert "http://local/k.jpg" in html                 # fell back to the local thumbnail
-    assert "wiki-subject" in html and "--subj" in html  # coloured/glowing heading
+    assert 'class="into-subject"' in html and "--subj" in html
     assert "/clusters?seed=Khruangbin" in html and "depth=2" in html  # explore CTA deep-link
     assert "label=Khruangbin" in html                   # names the new canvas (switcher badge)
 
@@ -528,22 +613,27 @@ def test_worker_drains_small_story_batches_without_rebuilding_home_or_models(sto
     import logging
     from types import SimpleNamespace
     from yt_playlist.core.activity import Activity
-    from yt_playlist.rec import home_prepared
-    from yt_playlist.rec.rec_worker import RecWorker
+    from yt_playlist.rec import home_prepared, rec_worker
+    from yt_playlist.rec.worker_queue import Job
 
     subjects = [{"kind": "artist", "subject": f"artist:Band {i}", "display": f"Band {i}"}
                 for i in range(9)]
     monkeypatch.setattr(StoryPreparation, 'ranked', lambda *a: subjects)
     calls = []
+    now, monotonic = NOW, 100
+    previous = None
 
     def fetch(kind, display):
         calls.append(display)
         assert not store.conn.in_transaction
+        if previous is not None:
+            assert store.rec_proposals.get_proposals(into_recently.SURFACE) == previous
         return {"extract": "About the band.", "thumbnail": "http://img", "url": "http://wiki/" + display}
 
     monkeypatch.setattr(wikipedia, "fetch_summary", fetch)
-    worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
-                                       now_fn=lambda: NOW), debounce_s=0)
+    monkeypatch.setattr(rec_worker, 'time', SimpleNamespace(monotonic=lambda: monotonic))
+    worker = rec_worker.RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
+                                                 now_fn=lambda: now), debounce_s=0)
     launches = []
     monkeypatch.setattr(worker, "_start_loop", lambda: launches.append(True))
 
@@ -552,15 +642,34 @@ def test_worker_drains_small_story_batches_without_rebuilding_home_or_models(sto
 
     monkeypatch.setattr(home_prepared, "prepare", forbidden)
     monkeypatch.setattr(worker, "_do_rebuild", forbidden)
+    worker._poll_stories()
     for _ in range(10):
         worker.trigger_story_refresh()
-    assert launches == [True] and worker.jobs.has('stories')
+    assert launches == [True] and worker.jobs.has(Job.STORIES)
     try:
         worker._run_pending()
         cards, pending = into_recently.load(store, NOW)
         assert len(cards) == 9 and not pending
         assert calls == [subject["display"] for subject in subjects]
         assert not worker.busy
+        previous = store.rec_proposals.get_proposals(into_recently.SURFACE)
+
+        interval = rec_worker.STORY_CHECK_INTERVAL_S
+        monotonic += interval
+        now += interval
+        worker._poll_stories()
+        assert not worker.jobs
+
+        subjects.insert(0, {'kind': 'artist', 'subject': 'artist:New band', 'display': 'New band'})
+        monotonic += into_recently.MAX_AGE_S
+        now += into_recently.MAX_AGE_S
+        worker._poll_stories()
+        assert launches == [True, True] and worker.jobs.has(Job.STORIES)
+        assert store.rec_proposals.get_proposals(into_recently.SURFACE) == previous
+        worker._run_pending()
+        cards, pending = into_recently.load(store, now)
+        assert len(cards) == 9 and cards[0]['display'] == 'New band' and not pending
+        assert calls[-1] == 'New band'
     finally:
         worker.shutdown()
 

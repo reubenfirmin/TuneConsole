@@ -31,6 +31,11 @@ def experiment_report(store, start, end, now):
     return experiment_facts(inputs, shadows, start, end, now)
 
 
+def _experiment_label(trace):
+    experiment = trace.get('experiment') or {}
+    return (experiment.get('cohort') or 'unknown') + ':' + (trace.get('ranker') or 'unknown')
+
+
 def experiment_facts(inputs, shadows, start, end, now):
     """Interpret captured mature assignments without querying the evidence ledger."""
     mature_end = min(end, now - 24 * 3600)
@@ -41,7 +46,7 @@ def experiment_facts(inputs, shadows, start, end, now):
     for row in inputs[0]:
         trace = json.loads(row['provenance'])
         experiment = trace.get('experiment') or {}
-        label = experiment.get('cohort', 'unknown') + ':' + trace.get('ranker', 'unknown')
+        label = _experiment_label(trace)
         evidence = provenance.setdefault(label, {'controlled': 0, 'uncontrolled': 0, 'legacy_cache': 0})
         probability = trace.get('propensity')
         controlled = (experiment.get('ranker_controlled') is True
@@ -219,9 +224,7 @@ def summarize(inputs, start, end, outcome_window_h=24, min_impressions=100):
         "by_lane": breakdown(lambda r: r["lane"]),
         "by_mode": breakdown(lambda r: str(r["mode_id"]) if r["mode_id"] is not None else "unknown"),
         "by_ranker": breakdown(lambda r: json.loads(r["provenance"]).get("ranker")),
-        "by_experiment": breakdown(lambda r:
-            ((json.loads(r["provenance"]).get("experiment") or {}).get("cohort", "unknown") + ":" +
-             json.loads(r["provenance"]).get("ranker", "unknown"))),
+        "by_experiment": breakdown(lambda r: _experiment_label(json.loads(r["provenance"]))),
         "by_ownership": breakdown(lambda r: candidates[r["id"]].get("ownership")),
         "by_metadata": {axis: breakdown(lambda r, axis=axis:
             ("present" if candidates[r["id"]]["coverage"].get(axis) else "missing")

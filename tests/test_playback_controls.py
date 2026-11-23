@@ -51,8 +51,10 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   Object.assign(prevented,{key:' ',code:'Space'}); prevented.preventDefault();
   document.dispatchEvent(prevented); assert.equal(calls.length,1);
   // Each interactive target uses its own native action (including a nested editable element).
-  for (const selector of ['input','button','[contenteditable]','[role="slider"]','[role="checkbox"]']) {
-    const target = new EventTarget(); target.closest = filter => {assert(filter.includes(selector)); return target;};
+  for (const selector of ['input', 'button', '[contenteditable]:not([contenteditable="false"])',
+      '[role="slider"]', '[role="checkbox"]', '[role="tab"]']) {
+    const target = new EventTarget();
+    target.closest = filter => filter.split(',').some(part => part.trim() === selector) ? target : null;
     const event = new Event('keydown',{cancelable:true}); Object.assign(event,{key:' ',code:'Space'});
     Object.defineProperty(event,'target',{value:target}); document.dispatchEvent(event);
     assert(!event.defaultPrevented);

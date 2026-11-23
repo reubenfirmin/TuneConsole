@@ -172,27 +172,25 @@ def retain(conn, kind, source_id, payload, reason, *, domain=None):
 
 def original(conn, domain, kind, source_id):
     from . import legacy_journals
-    if legacy_journals.available(conn):
-        saved = legacy_journals.read(conn,domain,kind,source_id)
-        if saved is not None:
-            return saved.get('payload')
-        if not conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(DOMAINS[domain],)).fetchone():
-            return None
-    with policy_documents.retained_reader(directory(conn)):
-        row = conn.execute(f'SELECT filename,content_digest,byte_size,file_offset FROM {DOMAINS[domain]} '
-                           'WHERE kind=? AND source_id=?', (kind, source_id)).fetchone()
-        return _read(domain, *row)[1] if row else None
-
-
-def mark_artist_ambiguity(conn, artist_id):
-    if available(conn):
-        conn.execute('INSERT OR IGNORE INTO artist_ambiguities(artist_id,reason) VALUES (?,?)',
-                     (artist_id, 'contextual_release_credit'))
-    else:
-        # The oldest supported layout stores the guard key here. No recovery
-        # payload is needed to prevent a later global identity guess.
-        conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
-                     ('ambiguous_album_artist', str(artist_id), '{}', 'contextual_release_credit'))
+    # A batch can move a receipt into its journal, and cutover can move the
+    # journal pointer into settings. Read all possible owners on one snapshot.
+    with (policy_documents.retained_reader(legacy_journals.directory(conn)),
+          policy_documents.retained_reader(directory(conn))):
+        borrowed = conn.in_transaction
+        if not borrowed:
+            conn.execute('BEGIN')
+        try:
+            saved = legacy_journals.read(conn, domain, kind, source_id)
+            if saved is not None:
+                return saved.get('payload')
+            if not conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?', (DOMAINS[domain],)).fetchone():
+                return None
+            row = conn.execute(f'SELECT filename,content_digest,byte_size,file_offset FROM {DOMAINS[domain]} '
+                               'WHERE kind=? AND source_id=?', (kind, source_id)).fetchone()
+            return _read(domain, *row)[1] if row else None
+        finally:
+            if not borrowed:
+                conn.rollback()
 
 
 def _owners(conn):
@@ -293,13 +291,17 @@ def restore(conn, manifest):
                                'VALUES (?,?,?,?,?,?,?)', (*entry[:6], source))
         conn.execute('BEGIN IMMEDIATE')
         try:
+            from .schema_inspection import objects
+
+            installed = objects(conn, DOMAINS.values())
             for domain, table in DOMAINS.items():
                 expected = iter(staged.execute('SELECT kind,source_id,digest,size FROM owners '
                                               'WHERE domain=? ORDER BY kind,source_id', (domain,)))
-                for actual in conn.execute(f'SELECT kind,source_id,content_digest,byte_size FROM {table} '
-                                           'ORDER BY kind,source_id'):
-                    if tuple(actual) != next(expected, None):
-                        raise ValueError('Retained backup differs from its database owner')
+                if table in installed:
+                    for actual in conn.execute(f'SELECT kind,source_id,content_digest,byte_size FROM {table} '
+                                               'ORDER BY kind,source_id'):
+                        if tuple(actual) != next(expected, None):
+                            raise ValueError('Retained backup differs from its database owner')
                 if next(expected, None) is not None:
                     raise ValueError('Retained backup has an extra database owner')
             for domain in DOMAINS:
@@ -320,7 +322,7 @@ def restore(conn, manifest):
                                        (reference[0], reference[3], domain, row[0], row[1]))
                     after = batch[-1][5], batch[-1][4], *batch[-1][:2]
             for domain, table in DOMAINS.items():
-                if not conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone():
+                if table not in installed:
                     continue
                 for kind, source_id, filename, offset in staged.execute('SELECT kind,source_id,target,target_offset '
                                                                        'FROM owners WHERE domain=?', (domain,)):

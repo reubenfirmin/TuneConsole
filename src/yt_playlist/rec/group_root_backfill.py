@@ -13,8 +13,6 @@ def Backfill(store):
 
 def maintain(store):
     store = group_roots.source(store)
-    if not group_roots.enabled(store):
-        return False
     if not hasattr(store, '_group_root_backfill'):
         store._group_root_backfill = Backfill(store)
     return store._group_root_backfill.step()

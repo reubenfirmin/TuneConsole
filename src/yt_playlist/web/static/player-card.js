@@ -29,6 +29,7 @@ function playerStatus() {
   return {
     connected: false,
     nowPlaying: null,
+    statusPending: false,
     resumeMode: null,
     timing: {position: null, duration: null},
     metadataOverrides: {},
@@ -87,16 +88,19 @@ function playerStatus() {
     apply(d) {
       this.connected = !!d.connected;
       const live = this.connected && d.now_playing;
+      const lastKnown = this.connected && d.last_known_player;
       const paused = this.connected && d.resumable_player;
-      const player = live || paused || d.radio_resume;
-      this.resumeMode = live ? null : paused ? 'player' : player ? 'radio' : null;
+      const player = live || lastKnown || paused || d.radio_resume;
+      this.statusPending = !live && !!lastKnown;
+      this.resumeMode = live || lastKnown ? null : paused ? 'player' : player ? 'radio' : null;
       const next = player ? { ...player } : null;
       if (next) Object.assign(next, this.metadataOverrides[next.video_id]);
-      if (next && !this.pendingRating) this.confirmedRatings[next.video_id] = next.likeStatus;
+      if (next && !this.statusPending && !this.pendingRating) this.confirmedRatings[next.video_id] = next.likeStatus;
       const pending = this.pendingRating;
       if (pending) {
         if (!this.connected || !next || next.video_id !== pending.videoId ||
-            (pending.settled && (next.likeStatus === pending.likeStatus || Date.now() >= pending.expires))) {
+            (!this.statusPending && pending.settled &&
+             (next.likeStatus === pending.likeStatus || Date.now() >= pending.expires))) {
           this.pendingRating = null;
         } else {
           // A status request can finish before the rating API write. Keep both hearts on the
@@ -109,21 +113,22 @@ function playerStatus() {
       const icon = document.querySelector('link[rel="icon"][data-playing-href]');
       if (icon) {
         icon.dataset.idleHref ||= icon.getAttribute('href');
-        const playing = this.connected && next?.paused === false && !!next.video_id;
+        const playing = live?.paused === false && !!live.video_id;
         const href = playing ? icon.dataset.playingHref : icon.dataset.idleHref;
         if (icon.getAttribute('href') !== href) icon.setAttribute('href', href);
       }
-      this.publishLike();
+      if (!this.statusPending) this.publishLike();
     },
     requestLike(event) {
       const { videoId, liked } = event.detail;
       if (!this.connected || !this.nowPlaying || this.nowPlaying.video_id !== videoId) return;
       // Share the backend rating action with the sidebar so both hearts update together.
       event.preventDefault();
+      if (this.statusPending) return;
       this.rate('like', liked ? 'LIKE' : 'INDIFFERENT');
     },
     rate(action, desiredStatus = null) {
-      if (!this.nowPlaying || this.skipping) return;
+      if (!this.nowPlaying || this.statusPending || this.skipping) return;
       const want = action === 'like' ? 'LIKE' : 'DISLIKE';
       const previous = this.nowPlaying.likeStatus;
       const videoId = this.nowPlaying.video_id;
@@ -177,7 +182,7 @@ function playerStatus() {
       return task;
     },
     async next() {
-      if (!this.connected || this.resumeMode || !this.nowPlaying?.video_id || this.skipping) return;
+      if (!this.connected || this.statusPending || this.resumeMode || !this.nowPlaying?.video_id || this.skipping) return;
       if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command('next');
       const videoId = this.nowPlaying.video_id;
       this.skipping = true;
@@ -193,7 +198,7 @@ function playerStatus() {
       }
     },
     async toggle() {
-      if (!this.connected || !this.nowPlaying || this.toggling) return;
+      if (!this.connected || this.statusPending || !this.nowPlaying || this.toggling) return;
       if (window.tvPlaybackControls?.active()) return window.tvPlaybackControls.command('toggle');
       if (!this.nowPlaying.video_id) {
         window.tcPlaybackError('The playing song is still loading. Try again in a moment.');
@@ -209,6 +214,11 @@ function playerStatus() {
         const radio = this.resumeMode === 'radio';
         const params = new URLSearchParams({action, videoId, confirm: 'true'});
         if (this.resumeMode === 'player') params.set('resume', 'true');
+        if (!radio && action === 'play' && this.nowPlaying.playlist_ytm_id) {
+          params.set('playlist', this.nowPlaying.playlist_ytm_id);
+          const index = this.nowPlaying.queue_item?.index;
+          if (Number.isSafeInteger(index)) params.set('queueIndex', index);
+        }
         const options = {method: 'POST', signal: controller.signal};
         if (radio) {
           options.headers = {'Content-Type': 'application/json'};

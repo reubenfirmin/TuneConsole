@@ -10,7 +10,7 @@ from yt_playlist.web.app import create_app
 def test_alternate_failure_keeps_diagnostics_internal_and_preserves_playlist(
         store, monkeypatch, fault, caplog):
     diagnostic = 'internal-diagnostic-879-alternates: invalid stored account document'
-    identity = store.accounts.upsert_account('Main', 'credential', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     playlist = store.playlists.upsert_playlist(identity, 'QUIET-ALTERNATES', 'Keep this mix', 1, '', 1)
     track = store.tracks.upsert_track('quiet-original', 'Original song', 'Artist', 'Album', 200, 1)
     store.playlists.set_playlist_tracks(playlist, [track])

@@ -23,7 +23,7 @@ def test_ingestion_preserves_useful_art_when_new_art_is_unavailable(store, incom
 
 @pytest.mark.parametrize("placeholder", [_YT_TRACK_PH, _YT_ALBUM_PH])
 def test_provider_recovery_survives_repeated_full_and_single_playlist_syncs(store, placeholder):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = FakeClient(playlists=[{"playlistId": "PL", "title": "Library"}], tracks={"PL": [
         {**_track("video", "Song", "Artist"), "thumbnails": [{"url": placeholder}]}]})
     sync_identity(store, iid, client, now=100)
@@ -71,7 +71,7 @@ def test_explicit_artwork_choice_survives_ingestion_and_provider_fallback(store,
     store.tracks.upsert_track("video", "Song", "Artist", "Album", 200, thumbnail=_REAL)
     store.tracks.set_track_art(entry, _DEEZER)
     assert _art(store, entry) == choice
-    assert store.conn.execute("SELECT thumbnail FROM youtube_items WHERE video_id='video'").fetchone()[0] == _YT_TRACK_PH
+    assert store.conn.execute("SELECT thumbnail FROM track_sources WHERE video_id='video'").fetchone()[0] == _YT_TRACK_PH
 
 
 @pytest.mark.parametrize("incoming", [_YT_TRACK_PH, _YT_ALBUM_PH])

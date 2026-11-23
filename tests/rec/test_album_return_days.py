@@ -28,7 +28,7 @@ def test_confirmed_return_dates_union_only_after_verified_alias_mapping(requests
         at = 1_700_000_000 + day * 86400
         for index, alias in enumerate(aliases):
             identity = f'return-{day}-{index}'
-            offers[identity] = {'id': identity, 'format': 'albums',
+            offers[identity] = {'id': identity, 'format': 'albums', 'at': at,
                                 'options': [{'id': alias, 'tracks': deepcopy(tracks)}]}
             responses.extend([
                 {'id': identity + ':choice', 'opportunity_id': identity, 'option_id': alias,

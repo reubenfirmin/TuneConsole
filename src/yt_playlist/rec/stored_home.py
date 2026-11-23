@@ -1,17 +1,11 @@
-"""Home card selection over complete typed pools with bounded Python memory.
-
-The private scratch database holds ordering keys, never a copied bundle or
-catalog document. SQLite can spill sorts to disk; only rank pages and the
-selected card are hydrated. No global cutoff can hide a rare family's tail.
-"""
+"""Home card selection over complete typed pools and a private ordering database."""
 from contextlib import contextmanager
 import hashlib
 import json
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.library import listening_composition as layers
 from yt_playlist.rec import (experiments, group_roots, home_themes, mode_eval,
-                             negative, rec_params, transient, artist_variety)
+                             rec_params, scoring, artist_variety)
 from yt_playlist.rec.eligibility import home_exclusions
 from yt_playlist.controllers.home_selection import HomeSelection
 from yt_playlist.rec.home_selection_policy import CandidateFilter
@@ -61,37 +55,28 @@ class Selection:
             for slot in reader.recommendations.selections('home', lane, generation=generation):
                 self.slots[slot['mode_key'], lane] = slot['id']
         self.muted = reader.rec_model.muted_artists()
-        self.steering = negative.Steering(reader)
 
     def load(self, mode, lane):
         pool = self.slots.get((str(mode), lane))
         if pool is None or pool in self.loaded:
             return pool
         self.owners[pool] = str(mode), lane
-        after = -1
-        while True:
-            check_cancellable_work()
-            page = self.reader.recommendations.candidate_page('home', str(mode), lane,
-                generation=self.generation, after=after, limit=128)
-            if self.inputs is not None:
-                tracks, blocked = self.inputs.resolve(self.reader, page['tracks'], self.now)
-            else:
-                tracks = home_themes.resolved_genres(self.reader, page['tracks'])
-                blocked = home_exclusions(self.reader, [track['key'] for track in tracks], self.now)
-            keys = [track['key'] for track in tracks]
-            deltas = self.steering.for_keys(keys)
-            # Every row belongs to this pinned reader. Resolve exact labels once
-            # per bounded page; a later request still sees current taxonomy.
-            axes = self.reader.genres.feature_axes({track.get('genre') for track in tracks})
-            self.ordering.add_candidates([
-                (pool, track['pool_rank'], track['key'], track.get('artist') or '', track.get('album') or '',
-                 axes.get(track.get('genre'), ('', None))[0], bool(track.get('genre')), track.get('year'),
-                 1.0 + self.leans.get('genre:' + (track.get('genre') or ''), 0.0),
-                 deltas.get(track['key'], 0.0), track['key'] not in blocked and track.get('artist') not in self.muted)
-                for track in tracks])
-            after = page['after']
-            if page['exhausted']:
-                break
+        check_cancellable_work()
+        source = ('home', self.generation, str(mode), lane)
+        candidates, _ = self.reader.recommendations.complete_candidates([source])
+        tracks = candidates.get(source, [])
+        if self.inputs is not None:
+            tracks, blocked = self.inputs.resolve(self.reader, tracks, self.now)
+        else:
+            tracks = home_themes.resolved_genres(self.reader, tracks)
+            blocked = home_exclusions(self.reader, [track['key'] for track in tracks], self.now)
+        axes = self.reader.genres.feature_axes({track.get('genre') for track in tracks})
+        self.ordering.add_candidates([
+            (pool, track['pool_rank'], track['key'], track.get('artist') or '', track.get('album') or '',
+             axes.get(track.get('genre'), ('', None))[0], bool(track.get('genre')), track.get('year'),
+             1.0 + self.leans.get('genre:' + (track.get('genre') or ''), 0.0),
+             track['key'] not in blocked and track.get('artist') not in self.muted)
+            for track in tracks])
         self.loaded.add(pool)
         return pool
 
@@ -101,25 +86,18 @@ class Selection:
             return self.ppr_counts[mode]
         pool = self.reader.recommendations.pool('radio', mode, 'ppr', generation=self.generation)
         self.ppr_counts[mode] = pool['eligible_count'] if pool else 0
-        after = -1
-        while pool:
+        if pool:
             check_cancellable_work()
-            rows = self.reader.recommendations.page('radio', mode, 'ppr', generation=self.generation,
-                                                     after=after, limit=128)
+            rows = self.reader.recommendations.complete_ranks([('radio', self.generation, mode, 'ppr')])
             self.ordering.add_ppr([(mode, row['key'], row['rank']) for row in rows])
-            if len(rows) < 128:
-                break
-            after = rows[-1]['rank']
         return self.ppr_counts[mode]
 
     def diverse(self, rows, artist_cap, album_cap, initial=()):
-        rows = self.reader.artists.credited_pages(rows)
+        rows = self.reader.artists.credited_rows(rows)
         return artist_variety.select(rows, artist_cap, album_cap, limit=12, initial=initial)
 
     def select(self, mode, ranker, selected, caps, *, family=None, initial=()):
-        scale = (max(1, self.ppr_counts[str(mode)]) if
-                 self.ordering.has_negative_ordering() else 1)
-        rows = self.ordering.ranked(selected, mode=mode, ranker=ranker, family=family, scale=scale)
+        rows = self.ordering.ranked(selected, mode=mode, ranker=ranker, family=family)
         return self.diverse(rows, *caps, initial=initial)
 
     def hydrate(self, rows, lane, ranker, mode):
@@ -142,28 +120,20 @@ class Selection:
             tracks.append({**track, 'serving_context': {**track['serving_context'],
                 'score_kind': 'candidate_fit', 'source_ranker': lane, 'ordering_ranker': ranker,
                 'ppr_position': position if ranker == 'ppr' else None,
-                'facet_tilt': row['tilt'], 'vibe': '', 'negative_delta': row['delta'], 'vibe_affinity': .5}})
+                'facet_tilt': row['tilt'], 'vibe': '', 'vibe_affinity': .5}})
         return tracks
 
     def experiment(self, card, policy, share, caps, leans, epoch, mode):
         """Hash the exact complete opportunity without constructing its key list."""
         fingerprint = hashlib.sha256(b'[')
-        cohort = hashlib.sha256()
-        # Match the established json.dumps(sort_keys=True) evidence encoding.
-        cohort.update(('{"caps": ' + json.dumps(list(caps)) + ', "leans": ' +
-                       json.dumps(leans, sort_keys=True) + ', "negative": {').encode())
-        count, negatives = 0, 0
+        count = 0
         for row in self.ordering.considered_rows(card):
             fingerprint.update(((', ' if count else '') + json.dumps(row['key'])).encode())
             count += 1
-            if row['delta']:
-                cohort.update(((', ' if negatives else '') + json.dumps(row['key']) + ': ' +
-                               json.dumps(row['delta'])).encode())
-                negatives += 1
         fingerprint.update(b']')
         cohort_policy = {key: value for key, value in policy.items() if key != 'built_at'}
-        cohort.update(('}, "policy": ' + json.dumps(cohort_policy, sort_keys=True) +
-                       ', "share": ' + json.dumps(share) + ', "vibe": ""}').encode())
+        cohort = hashlib.sha256(json.dumps({'caps': caps, 'leans': leans, 'policy': cohort_policy,
+                                           'share': share, 'vibe': ''}, sort_keys=True).encode())
         return {'schema': 1, 'name': 'ppr-cosine-v1', 'cohort': cohort.hexdigest()[:16],
                 'cluster': f'{epoch}:{mode}', 'share': share,
                 'state': 'shadow' if share == 0 else 'retained' if share == 1 else 'live',
@@ -190,8 +160,15 @@ def assemble(store, now, epoch, *, avoid_genres=(), include_genres=(), mode_orde
             close()
 
 
-def unmodeled_cards(store, now, *, card_builder, include=(), avoid=(), preparation=None):
+def unmodeled_slots(generation):
+    return [('home', generation, 'all', lane) for lane in ('wheelhouse', 'explore', 'comfort')]
+
+
+def unmodeled_cards(store, now, *, card_builder, include=(), avoid=(), preparation=None, batch=None):
     """Offer bounded cached library selections while the first modes are pending."""
+    if batch is not None:
+        return (_unmodeled_cards(store, batch.home_generation, now, include, avoid, preparation,
+                                 card_builder, batch.candidates) if batch.home_generation is not None else [])
     if not getattr(store, '_read_only', False):
         with store.read_view() as reader:
             return unmodeled_cards(reader, now, card_builder=card_builder,
@@ -209,28 +186,22 @@ def unmodeled_cards(store, now, *, card_builder, include=(), avoid=(), preparati
             close()
 
 
-def _unmodeled_cards(reader, generation, now, include, avoid, preparation, card_builder):
+def _unmodeled_cards(reader, generation, now, include, avoid, preparation, card_builder, mix_candidates=None):
     from yt_playlist.rec.mode_selection import CARD_LABELS, ROTATION_POOL
-    framing = reader.recommendations.framing('home', generation=generation) or {}
-    if not framing.get('unmodeled') and reader.modes.list_modes(active_only=True):
-        return []
     muted, protos = reader.rec_model.muted_artists(), []
-    for lane in ('wheelhouse', 'explore', 'comfort'):
+    slots = unmodeled_slots(generation)
+    ranked = (mix_candidates.candidates(slots) if mix_candidates is not None
+              else reader.recommendations.complete_candidates(slots)[0])
+    for source in slots:
+        lane = source[-1]
         used = {track['key'] for proto in protos for track in proto['tracks']} if lane == 'explore' else set()
-        tracks, after = [], -1
-        while len(tracks) < ROTATION_POOL:
-            check_cancellable_work()
-            page = reader.recommendations.candidate_page('home', 'all', lane,
-                generation=generation, after=after, limit=128)
-            eligible = home_themes.matching_genres(reader, page['tracks'], include=include, avoid=avoid)
-            blocked = home_exclusions(reader, [track['key'] for track in eligible], now)
-            tracks.extend(track for track in eligible if track['key'] not in blocked
-                          and track['key'] not in used and track.get('artist') not in muted)
-            del tracks[ROTATION_POOL:]
-            after = page['after']
-            if page['exhausted']:
-                break
+        eligible = home_themes.matching_genres(reader, ranked.get(source, ()), include=include, avoid=avoid)
+        blocked = home_exclusions(reader, [track['key'] for track in eligible], now)
+        tracks = [track for track in eligible if track['key'] not in blocked
+                  and track['key'] not in used and track.get('artist') not in muted][:ROTATION_POOL]
         if len(tracks) >= 4:
+            if mix_candidates is None:
+                reader.recommendations.explain_candidates(source, tracks)
             proto = card_builder(reader, lane, CARD_LABELS[lane], tracks, now, preparation)
             if len(proto['tracks']) >= 4:
                 protos.append(proto)
@@ -244,15 +215,20 @@ def _assemble(reader, generation, now, epoch, avoid, include, mode_order, prepar
     modes = reader.modes.list_modes(active_only=True)
     if not modes:
         return []
-    leans = preparation['leans'] if preparation is not None else transient.facet_leans(reader, now)
+    prepared = preparation or {}
+    facets, leans = prepared.get('preferences'), prepared.get('leans', {})
+    if facets is None and (mode_order is None or leans is None):
+        facets = scoring.facet_preferences(reader, now, recent=leans)
+    if facets is not None:
+        leans = facets.recent
     with HomeSelectionRepo.open() as repository:
         ordering = HomeSelection(repository)
-        selection = Selection(reader, generation, now, leans, ordering,
-                              (preparation or {}).get('metadata_inputs'))
-        return _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order)
+        selection = Selection(reader, generation, now, leans, ordering, prepared.get('metadata_inputs'))
+        return _cards(selection, modes, framing, facets, epoch, avoid, include, mode_order)
 
 
-def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
+def _cards(selection, modes, framing, facets, epoch, avoid, include, mode_order):
+    from yt_playlist.library import mix_listening
     from yt_playlist.rec import mode_selection
     reader, now, ordering = selection.reader, selection.now, selection.ordering
     caps = (int(rec_params.get_param(reader, 'modes_artist_cap')), int(rec_params.get_param(reader, 'modes_album_cap')))
@@ -281,11 +257,10 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
     n = max(4, int(rec_params.get_param(reader, 'modes_menu_size')))
     if mode_order is None:
         evidence_before = reader.modes.epoch_started_at(epoch)
-        now_posterior = layers.now_mode_posterior(reader, now)
-        chosen = mode_selection.select_modes(modes, leans, epoch, n=n,
+        chosen = mode_selection.select_modes(modes, facets.recent, epoch, n=n,
             stats=mode_eval.mode_bandit_stats(reader, before=evidence_before, now=now),
-            now_posterior=now_posterior,
-            now_gain=rec_params.get_param(reader, 'now_gain') if now_posterior else None)
+            preferences=scoring.mode_preferences(reader, modes, now, facets,
+                                                 prior=mix_listening.mode_prior(reader, now)))
     else:
         available = {mode['mode_id'] for mode in modes}
         chosen = [mode for mode in mode_order if mode in available][:n]
@@ -336,7 +311,7 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
             if replay:
                 policy = (reader.recommendations.output('home', 'ranking-evidence', generation=selection.generation) or
                           {}).get('ppr_policy', {'algorithm': 'unknown-legacy-cache'})
-                card['experiment'] = selection.experiment(opportunity, policy, share, caps, leans, epoch, mode)
+                card['experiment'] = selection.experiment(opportunity, policy, share, caps, selection.leans, epoch, mode)
                 card['counterfactual'] = {'ranker': other, 'tracks': replay['tracks']}
         ordering.mark_seen(predicate(mode, lane), [track['key'] for track in card['tracks']])
         cards.append(card)

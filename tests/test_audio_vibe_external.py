@@ -4,13 +4,15 @@ import json
 
 import pytest
 
+from tests.audio_model_support import disable_models
+from tests.test_audio_vibe_cruise import samples as measured_samples
 from tests.test_audio_vibe_embeddings import with_embedding
 from tests.test_audio_vibe_model import excerpts
 from tests.rec.test_vibe_prediction import drain, fits, track
 from yt_playlist.core import audio_embedding, features
 from experiments.audio_lab_tools.legacy import audio_vibe_external as external
 from experiments.audio_lab_tools.legacy import audio_vibe_model as model, audio_vibe_prediction as predictor
-from yt_playlist.rec import vibe_preparation
+from yt_playlist.rec import audio_vibe_relax, vibe_joint_state, vibe_preparation
 
 
 def bundled():
@@ -45,18 +47,14 @@ def test_two_stages_clip_before_normalization_and_preserve_raw_evidence(tmp_path
     enable(value, tmp_path, monkeypatch)
     baseline = predictor.predict(samples, use_model=False)
     prediction = predictor.predict(samples, metadata={'genre': 'Unknown', 'bpm': 300})
-    # The first excerpt clips the native emotion to zero, the other two to
-    # one. Temporal scoring happens after each calibrated excerpt, so the
-    # first observed Release peak survives and Relax retains its lower fit.
-    expected = dict(zip(external.LABELS, (
-        .1 / 2, .2 / 2.9, .3 / 2.9,
-        .4 / 2.9 - .25 * (.4 / 2 - .4 / 2.9),
-        1e-8 / 2.9 - .25 * (1e-8 / 2 - 1e-8 / 2.9), 1 / 2), strict=True))
+    # Average the three excerpts before either stage. The native emotion
+    # clips to one, and calibration ties Relax and Release before normalization.
+    expected = dict(zip(external.LABELS, (1., .2, .3, .4, 1e-8, 1.), strict=True))
     total = sum(expected.values())
     assert {r['vibe']: r['score'] for r in prediction['ranking']} == pytest.approx(
         {key: n / total for key, n in expected.items()})
     assert prediction['selection_method'] == 'top_ranked'
-    assert prediction['vibe'] == 'release'
+    assert prediction['vibe'] == 'relax', 'Ties follow the evaluated target order'
     assert prediction['model']['sha256'] == model.identity()
     assert prediction['model']['trained_labels'] == sorted(external.LABELS)
     assert prediction['arc'] == baseline['arc']
@@ -126,32 +124,41 @@ def test_incompatible_capture_falls_back_without_losing_raw_arc(tmp_path, monkey
 def test_retired_model_configuration_cannot_publish_or_replace_measurements(store, tmp_path, monkeypatch):
     _tid, measured = track(store, 'observed_song')
     _tid, neighbour = track(store, 'neighbour')
-    samples = [with_embedding(s, 3.) for s in excerpts()]
+    samples = measured_samples()
     value = controlled(samples)
     path = enable(value, tmp_path, monkeypatch)
+    disable_models(monkeypatch)
+    monkeypatch.setattr(vibe_joint_state, 'QUALIFICATIONS', {})
     # Startup and incomplete captures remain useful without manufacturing evidence.
-    drain(store)
-    assert fits(store, measured)['relax']['source'] == 'heuristic'
+    drain(store).close()
+    assert not fits(store, measured)
     for i, sample in enumerate(samples[:2]):
         store.audio_vibes.save_sample(sample, i + 1)
-    drain(store)
-    assert fits(store, measured)['relax']['source'] == 'heuristic'
+    drain(store).close()
+    assert not fits(store, measured)
     store.audio_vibes.save_sample(samples[2], 3)
     store.audio_vibes.save_feedback(samples[0]['run_id'], [], ['cruise'], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(samples[0]['run_id'])
-    drain(store)
-    before = fits(store, measured)['relax']['score']
-    assert fits(store, measured)['relax']['source'] == 'heuristic'
-    assert fits(store, neighbour)['relax']['source'] == 'heuristic'
+    drain(store).close()
+    assert not fits(store, measured) and not fits(store, neighbour)
+    assert not store.conn.execute('SELECT 1 FROM measurements').fetchone()
+    monkeypatch.setenv(audio_vibe_relax.ENVIRONMENT_KEY, str(audio_vibe_relax.DEFAULT_PATH))
+    monkeypatch.setenv(audio_vibe_relax.MODE_KEY, 'active')
+    drain(store).close()
+    before = fits(store, measured)
+    assert before['relax']['source'] == 'audio_measurement' and before['relax']['support'] == 1
+    history = list(store.conn.execute('SELECT id FROM measurements ORDER BY id'))
+    assert history
     stamp = vibe_preparation.version()
     value['calibration']['intercept'][0] = -2.
     path.write_text(json.dumps(value))
     assert vibe_preparation.version() == stamp
     statements = []
     store.conn.set_trace_callback(statements.append)
-    drain(store)
+    drain(store).close()
     store.conn.set_trace_callback(None)
-    assert fits(store, measured)['relax']['score'] == before
-    assert fits(store, neighbour)['relax']['source'] == 'heuristic'
+    assert fits(store, measured) == before
+    assert list(store.conn.execute('SELECT id FROM measurements ORDER BY id')) == history
+    assert not fits(store, neighbour)
     assert store.audio_vibes.feedback(samples[0]['run_id']) == feedback
     assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)

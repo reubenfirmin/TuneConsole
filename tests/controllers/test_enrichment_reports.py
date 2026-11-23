@@ -23,11 +23,13 @@ def conflict(*, field='genre', current='Jazz', candidates=(), **facts):
             'current': current, 'selected_source': None, 'findings': [], 'overridden': False, **facts}
 
 
-@pytest.mark.parametrize('current,values', [
-    ('Jazz', [' jazz ', 'JAZZ']), (0.5, ['0.500', 0.5]), (None, ['', None]),
+@pytest.mark.parametrize('field,current,values', [
+    ('genre', 'Jazz', [' jazz ', 'JAZZ']),
+    ('danceability', 0.5, ['0.500', 0.5]),
+    ('genre', None, ['', None]),
 ])
-def test_choices_merge_equivalent_values_and_preserve_all_sources(reports, current, values):
-    row = conflict(field='energy' if current == .5 else 'genre', current=current,
+def test_choices_merge_equivalent_values_and_preserve_all_sources(reports, field, current, values):
+    row = conflict(field=field, current=current,
         candidates=[{'provider': 'one', 'value': values[0]}, {'provider': 'two', 'value': values[1]}])
     reports.repository.enrichment_conflict_detail.return_value = row
     result = reports.enrichment_conflict_detail(1, row['field'])

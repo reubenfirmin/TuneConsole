@@ -9,6 +9,7 @@ from threading import Lock, BoundedSemaphore
 import time
 
 from yt_playlist.core.accounts import catalog_client
+from yt_playlist.rec import artist_model
 from yt_playlist.util.matching import identity_key
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.music_catalog import ARTIST_ID as _BROWSE_ID, artist, thumbnail
@@ -202,16 +203,37 @@ class ArtistCatalog:
         return self._read(('artist', browse_id), lambda client: client.get_artist(browse_id))
 
     def related(self, store):
+        choices = store.discovery.starter_artists()
+        excluded = {choice['browse_id'] for choice in choices}
         groups = []
-        for choice in store.discovery.starter_artists()[:2]:
-            page = self.page(choice['browse_id'])
-            group = []
-            for row in ((page.get('related') or {}).get('results') or [])[:8]:
-                suggestion = artist(row)
-                if suggestion and suggestion['browse_id'] != choice['browse_id']:
-                    group.append({**suggestion, 'because': choice['name']})
-            groups.append(group)
-        return [group[index] for index in range(8) for group in groups if len(group) > index]
+        for choice in choices[:2]:
+            try:
+                page = self.page(choice['browse_id'])
+            except (CatalogUnavailable, TimeoutError):
+                page = None
+            groups.append(self._related_choices(store, choice, page, excluded))
+        result, seen = [], set(excluded)
+        for index in range(8):
+            for group in groups:
+                if index < len(group) and group[index]['browse_id'] not in seen:
+                    result.append(group[index])
+                    seen.add(group[index]['browse_id'])
+        return result
+
+    def _related_choices(self, store, choice, page, excluded):
+        browse = choice['browse_id']
+        neighbors = artist_model.ranked_artist_neighbors(store,
+            [artist_model.youtube_artist_key(store.artists, browse)],
+            youtube=artist_model.youtube_neighbors(page),
+            exclude=[artist_model.youtube_artist_key(store.artists, item) for item in excluded], topn=50)
+        result = []
+        for neighbor in neighbors:
+            suggestion = artist_model.neighbor_reference(store.artists, neighbor)
+            if suggestion and suggestion['browse_id'] and suggestion['browse_id'] not in excluded:
+                result.append({**suggestion, 'because': choice['name'], 'sources': neighbor.sources})
+                if len(result) == 8:
+                    break
+        return result
 
     def select(self, store, browse_id, selected, now):
         existing = next((row for row in store.discovery.starter_artists()
@@ -236,11 +258,8 @@ class ArtistCatalog:
                 thumbnail(song.get('thumbnails')), None, None, 'artist:' + browse_id, now,
                 credits=credits,
                 duration_s=song.get('duration_seconds') or parse_duration(song.get('duration')))
-        result = []
-        for row in ((page.get('related') or {}).get('results') or [])[:8]:
-            related = artist(row)
-            if related and related['browse_id'] != browse_id:
-                result.append({**related, 'because': choice['name']})
+        result = self._related_choices(store, choice, page,
+            {row['browse_id'] for row in store.discovery.starter_artists()})
         if self.trigger_refresh:
             self.trigger_refresh()
         return result

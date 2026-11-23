@@ -1,4 +1,4 @@
-"""Cold admission and real rebuild parity have separate durable owners."""
+"""Fresh bootstrap and reopen use the shipped current schema."""
 from contextlib import closing
 from pathlib import Path
 import runpy
@@ -9,10 +9,9 @@ import sys
 
 import pytest
 
-from tests.core.test_current_schema import _forbid_historical_schema, connect, objects
+from tests.core.test_current_schema import _forbid_historical_schema, assert_fresh_settings, connect, objects
 from tests.genre_catalog_support import bound_catalog
-from yt_playlist.core import vibe_versions
-from yt_playlist.core.db_rebuild import destination
+from yt_playlist.core import credit_retention, vibe_versions
 from yt_playlist.core.migrations import current, migrate, registry
 
 
@@ -51,7 +50,8 @@ import pytest
 from tests.core.test_current_schema import _forbid_historical_schema
 from tests.genre_catalog_support import bound_catalog
 from yt_playlist.core.store import Store
-from yt_playlist.core import destination_schema, schema_definition
+from yt_playlist.core import destination_schema
+from yt_playlist.core.migrations import schema_definition
 with pytest.MonkeyPatch.context() as patch:
     bound_catalog(patch, entries=(('rock','Rock'),('jazz','Jazz'),('techno','Techno')))
     _forbid_historical_schema(patch)
@@ -68,14 +68,14 @@ with pytest.MonkeyPatch.context() as patch:
                 assert expected['listening_days'][0] == 'view'
             elif command == 'admit':
                 store = Store(home / 'current.db')
-                store.init_schema(defer_metadata=True)
+                store.init_schema()
                 if sys.argv[3] == 'reopen':
                     assert store.settings.get_setting('cold-current') == 'persisted é'
                 store.settings.set_setting('cold-current', 'persisted é')
                 assert store.settings.get_setting('cold-current') == 'persisted é'
                 before = list(store.conn.iterdump())
             elif command == 'readmit':
-                store.init_schema(defer_metadata=True)
+                store.init_schema()
                 assert list(store.conn.iterdump()) == before
             elif command == 'close':
                 break
@@ -129,7 +129,7 @@ class TestColdAdmission:
 
 
 def test_maintained_current_export_is_text_only_and_matches_checked_in_sources(monkeypatch):
-    from yt_playlist.core import schema_definition
+    from yt_playlist.core.migrations import schema_definition
 
     exporter = runpy.run_path(Path(__file__).parents[2] / 'scripts/export-current-schema.py')
     monkeypatch.setattr(sqlite3, 'connect', lambda *a, **kw: pytest.fail('Exporter opened a database'))
@@ -149,10 +149,10 @@ def fresh(tmp_path_factory):
 
 def test_real_bootstrap_has_all_seeds_programs_and_normalized_versions(fresh):
     conn, _ = fresh
-    assert dict(conn.execute('SELECT key,value FROM settings')) == current.SEED_SETTINGS
-    assert tuple(conn.execute('SELECT * FROM rec_preparation').fetchone()) == (1, 0, 0)
-    assert tuple(conn.execute('SELECT * FROM rec_group_clock').fetchone()) == (1, 0)
-    assert tuple(conn.execute('SELECT position,group_key,revision,cursor FROM rec_vibe_pending').fetchone()) == (1, '*', 2, '')
+    assert_fresh_settings(conn)
+    assert credit_retention.state(conn) == dict(enabled=0, cursor=0, completed=0, next_scan_at=0.0)
+    assert tuple(conn.execute('SELECT position,group_key,revision,cursor FROM rec_vibe_pending WHERE position>0'
+                              ).fetchone()) == (1, '*', 2, '')
     assert conn.execute("SELECT 1 FROM genre_catalog WHERE name='Techno'").fetchone()
     for kind, name in [('index', 'ix_genre_catalog_name'), ('view', 'listening_days'),
             ('trigger', 'playlists_scope_insert')]:
@@ -160,70 +160,26 @@ def test_real_bootstrap_has_all_seeds_programs_and_normalized_versions(fresh):
     assert vibe_versions.normalized(conn)
 
 
-@pytest.fixture(scope='module')
-def candidate():
-    with closing(connect()) as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        with pytest.MonkeyPatch.context() as patch:
-            _forbid_historical_schema(patch)
-            destination.initialize(conn)
-        yield conn
 
 
-def test_real_rebuild_initializer_has_empty_retained_source_provenance(candidate):
-    for name in ('database_rebuild_source_history', 'database_rebuild_source_changes'):
-        assert candidate.execute('SELECT type FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0] == 'table'
-        assert not candidate.execute('SELECT 1 FROM '+name).fetchall()
 
 
-@pytest.fixture(scope='module')
-def indexed(candidate):
-    with pytest.MonkeyPatch.context() as patch:
-        _forbid_historical_schema(patch)
-        cursor = None
-        while True:
-            batch = destination.indexes(candidate, candidate, cursor, 128)
-            if batch.done:
-                break
-            cursor = batch.cursor
-    return candidate
 
 
-def test_real_rebuild_indexes_complete_without_historical_callbacks(indexed):
-    assert indexed.execute("SELECT 1 FROM sqlite_schema WHERE name='ix_genre_catalog_name'").fetchone()
 
 
-@pytest.fixture(scope='module')
-def finished(indexed):
-    with pytest.MonkeyPatch.context() as patch:
-        _forbid_historical_schema(patch)
-        assert destination.finish(indexed, indexed, None, 10000).done
-    return indexed
 
 
-def test_real_rebuild_finish_matches_every_bootstrap_object(finished, fresh):
-    candidate_objects = objects(finished)
-    for name in ('database_rebuild_source_history', 'database_rebuild_source_changes'):
-        assert candidate_objects.pop(name)[0] == 'table'
-    assert candidate_objects == objects(fresh[0])
-    assert not finished.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_real_rebuild_matches_every_bootstrap_row(finished, fresh):
-    for table, (kind, _) in objects(fresh[0]).items():
-        if kind != 'table':
-            continue
-        columns = 'version,name' if table in ('schema_migrations', 'schema_changes') else '*'
-        assert sorted(map(tuple, finished.execute('SELECT '+columns+' FROM "'+table+'"')), key=repr) == sorted(
-            map(tuple, fresh[0].execute('SELECT '+columns+' FROM "'+table+'"')), key=repr), table
 
 
 def test_current_constraints_reject_invalid_calendar_confirmation_and_rollback(fresh):
     conn, _ = fresh
     before = list(conn.iterdump())
-    conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'Main','test',1)")
+    conn.execute("INSERT INTO accounts(id,label,is_master) VALUES (1,'Main',1)")
     with pytest.raises(sqlite3.IntegrityError, match='CHECK constraint failed'):
-        conn.execute("INSERT INTO listening_calendars(account_id,timezone,confirmed) VALUES (1,'UTC',2)")
+        conn.execute("UPDATE accounts SET listening_timezone='UTC',listening_timezone_confirmed=2 WHERE id=1")
     conn.rollback()
     assert list(conn.iterdump()) == before
 

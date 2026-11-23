@@ -65,10 +65,9 @@ def retry_insertions(store, playlist_id, client, now, *, attempts=3):
             with ExitStack() as stack:
                 stack.enter_context(claim_deletion_target(store,pl.account_id,pl.provider_playlist_id))
                 store.actions.require_known_remote_outcome(pl.account_id,pl.provider_playlist_id)
-                if store.actions.has_durable_targets():
-                    claims = store.actions.claim_forward_targets(action.id,'placement',now)
-                    for claim in claims:
-                        stack.callback(store.actions.release_deletion,claim)
+                claims = store.actions.claim_forward_targets(action.id,'placement',now)
+                for claim in claims:
+                    stack.callback(store.actions.release_deletion,claim)
                 with_retry(move_if_pending, attempts=attempts,
                            base_delay=0.1, operation=f"place alternate versions in {pl.title!r}")
                 with store._lock:

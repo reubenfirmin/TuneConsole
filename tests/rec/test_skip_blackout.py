@@ -10,6 +10,7 @@ import pytest
 
 from tests.test_radio_catalog import catalog_track
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from yt_playlist.core import playback_feedback
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events
@@ -34,7 +35,7 @@ def _pristine_current_schema():
 
 @pytest.fixture
 def listener(store):
-    return store.accounts.upsert_account('Main', 'credential', None, True)
+    return store.accounts.upsert_account('Main', None, True)
 
 
 def exit_event(store, listener, track, at, *, kind='track_exit', position=20, duration=200):
@@ -107,6 +108,27 @@ def test_exit_goodbye_and_next_for_one_playback_do_not_escalate(store, listener)
     assert store.player_events.skip_blackouts(200) == {track['key']: 200 + 2 * DAY}
 
 
+def test_thumbs_down_advance_is_retained_without_learning_a_skip(store, listener):
+    from yt_playlist.controllers.radio_inputs import inputs_for
+
+    track, _ = catalog_track(store, 'rating-advance')
+    playback_feedback.record_next(store, listener, track['video_id'], 20, 200, 'PL', 100,
+                                  rating_advance=True)
+    automatic = exit_event(store, listener, track, 102, position=22)
+    exit_event(store, listener, track, 103, kind='bye', position=22)
+    assert len(store.player_events.player_events_since(0)) == 3
+    assert not store.player_events.skip_blackouts(103)
+    assert store.player_events.recent_skips_with_ts(0) == []
+    assert inputs_for(store).feedback(100, 103)['exits'] == []
+
+    # A separate playback of the same track can still be a genuine skip.
+    manual = exit_event(store, listener, track, 139, position=20)
+    assert store.player_events.rating_advance_exit_ids({automatic, manual}) == {automatic}
+    assert store.player_events.skip_blackouts(139) == {track['key']: 139 + DAY}
+    assert store.player_events.recent_skips_with_ts(0) == [(track['key'], 139.)]
+    assert len(inputs_for(store).feedback(100, 139)['exits']) == 1
+
+
 @pytest.mark.parametrize('position', [20, None])
 def test_a_delayed_exit_deduplicates_an_explicit_request_without_a_duration(store, listener, position):
     track, _ = catalog_track(store, 'missing-clock')
@@ -163,7 +185,7 @@ def test_uploads_share_a_recording_break_and_unknown_uploads_can_be_resolved_lat
 def test_a_file_backed_restart_retains_the_break(tmp_path, consumer_store):
     path = tmp_path / 'library.db'
     store = consumer_store(path)
-    iid = store.accounts.upsert_account('Main', 'credential', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     track, _ = catalog_track(store, 'restart')
     exit_event(store, iid, track, 100)
     store.conn.close()
@@ -185,7 +207,7 @@ def test_live_skip_removes_a_cached_radio_choice_and_cannot_return_on_refill(sto
         seed_publication_subjects(store, [{**track, 'year': '2001', 'duration_s': 200}
                                          for track in tracks])
         for entry, artist in store.conn.execute(
-                'SELECT c.id,y.artist FROM catalog_entries c JOIN youtube_items y ON y.video_id=c.video_id'):
+                'SELECT id,artist FROM track_sources WHERE video_id IS NOT NULL'):
             store.artists.observe(entry, artist, source='fixture')
     publish_bundles(store, {'all': {'wheelhouse': tracks}})
     candidates = RadioCandidates(store, 100, {**radio_tuning.DEFAULTS, 'energy': energy})
@@ -202,7 +224,7 @@ def test_live_skip_removes_a_cached_radio_choice_and_cannot_return_on_refill(sto
     directions.blocked = set(update.blocked)
     assert update.changed
     assert RadioPolicy.invalid(view, history, rejected)
-    selected = policy.pick(view)
+    selected = policy.next_track(view)
     assert selected is not None and selected['key'] != rejected['key']
     candidates.refresh_exclusions(111)
     future = candidates.next_track([tracks[0]], target=rejected)

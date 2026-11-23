@@ -233,7 +233,7 @@ def test_worker_caches_complete_tracklist_for_familiarity_without_filler_copy_or
     # Library completeness deliberately excludes fetched, unsaved catalog entries.
     assert not store.collection.is_album_tracklist_complete('MPREb_x')
     assert not store.collection.saved_album_ids()
-    assert store.conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == 0
+    assert store.conn.execute('SELECT COUNT(*) FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)').fetchone()[0] == 0
     assert calls == ['MPREb_x']
     evidence = store.rec_ledger.evidence().get('artifact', note['evidence'])
     assert any(row['provider'] == 'youtube_album' for row in evidence['sources'])
@@ -249,7 +249,7 @@ def test_catalog_metadata_rejects_wrong_editions_artists_and_partial_tracklists(
     release = {'title': album['title'], 'artists': [{'name': album['artist']}],
                'trackCount': 1, 'tracks': [{'title': 'One', 'videoId': 'v1'}], **changed}
     assert album_notes._catalog_metadata(SimpleNamespace(get_album=lambda browse: release), album, store) is None
-    assert not store.collection.cached_album_tracklist_ids()
+    assert not store.collection.has_published_album_tracklist(album['browse_id'])
 
 
 @pytest.mark.parametrize('credits', [
@@ -289,7 +289,7 @@ def test_joint_release_validation_preserves_identity_order_edition_and_completen
     release = {'title': album['title'], 'artists': credits, 'trackCount': 1,
                'tracks': [{'title': 'Opener', 'videoId': 'joint-track'}], **changed}
     assert album_notes._catalog_metadata(SimpleNamespace(get_album=lambda _: release), album, store) is None
-    assert not store.collection.cached_album_tracklist_ids()
+    assert not store.collection.has_published_album_tracklist(album['browse_id'])
 
 
 def test_unresolved_combined_credit_and_discovered_primary_can_gain_structured_collaborators(store):
@@ -404,7 +404,8 @@ def test_refreshed_menu_discards_old_queue_without_paying_for_hidden_records(sto
     assert not album_notes.prepare(store, 3, [ALBUM])
     assert successful_copy == [deepseek.album_fields(ALBUM)]
     assert not album_notes.read(store, old)['description']
-    assert store.conn.execute('SELECT count(*) FROM provider_usage').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(*) FROM album_description_requests '
+                              'WHERE usage_id IS NOT NULL').fetchone()[0] == 1
     # The discarded record has no fresh negative cache to suppress it later.
     assert not album_notes.prepare(store, 4, [old])
     assert successful_copy == [deepseek.album_fields(ALBUM), deepseek.album_fields(old)]

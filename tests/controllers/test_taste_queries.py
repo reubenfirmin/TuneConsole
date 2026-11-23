@@ -20,7 +20,7 @@ def query():
         discovery=Mock(spec_set=['discovered_tracks_by_keys']), proposals=Mock(spec_set=['get_proposals']),
         modes=Mock(spec_set=['list_modes']), evidence=Mock(spec_set=['rec_baskets']),
         history=Mock(spec_set=['spotify_history_stats']), settings=Mock(spec_set=['get_setting']),
-        readings=Mock(spec_set=['mix_choices', 'overview', 'group_view', 'group_checkpoint', 'group_progress',
+        readings=Mock(spec_set=['mix_choices', 'overview', 'group_view', 'groups_published', 'group_progress',
             'group_policy', 'engine', 'maintenance', 'selection', 'autotune', 'album_feedback', 'transparency']),
         breadth=Mock(), ranked=Mock(), tuning=Mock())
     controller = TasteQueries(ports.model, ports.tracks, ports.discovery, ports.proposals, ports.modes,
@@ -62,7 +62,7 @@ def test_health_joins_kpis_and_selection_without_loading_listening_models():
 @pytest.mark.parametrize('adaptive', [False, True])
 def test_profile_bounds_metadata_to_representatives_and_skips_legacy_modes_when_adaptive(adaptive):
     controller, ports = query()
-    ports.readings.group_checkpoint.return_value = adaptive
+    ports.readings.groups_published.return_value = adaptive
     ports.modes.list_modes.return_value = [{'label': 'Jazz', 'size': 20, 'first_seen': 90,
                                            'rep_keys': ['known', 'unknown']}]
     ports.tracks.tracks_by_keys.return_value = {'known': {'title': 'Known'}}
@@ -95,7 +95,7 @@ def test_recommendations_expose_saved_and_effective_weights_without_mutating_rec
     ports.model.get_weights.return_value = {'genre:jazz': 1.1}
     records = {'genre:jazz': {'weight': 1.5, 'updated_at': 86400}}
     ports.model.weight_records.return_value = records
-    ports.readings.group_checkpoint.return_value = True
+    ports.readings.groups_published.return_value = True
     result = controller.panel('recommendations', 2 * 86400)
     assert result['genres'][0] == {'family': 'jazz', 'share': .7, 'weight': 1.1, 'saved_weight': 1.5,
                                     'age_days': 1., 'has_record': True}

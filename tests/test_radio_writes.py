@@ -168,13 +168,99 @@ def test_add_receipt_handles_video_and_artist_substitution(poc, replacement, res
     assert remote.adds == [["v4"]] and not remote.removes
     assert c.session.pending is None and c.session.replacement is None
     assert c.status()["tracks"][-1]["video_id"] == "v31"
-    assert c.status()["tracks"][-1]["key"] != requested["key"]
+    assert c.status()["tracks"][-1]["key"] == requested["key"]
     assert c.session.phase == Phase.PLAYING and c.status()["error"] is None
     assert "v4" in c.session.rejected
     assert c.session.directions.feedback == {}
     play(c, "v31")
     assert remote.adds == [["v4"], ["v5"]]
     assert c.status()["ahead"] == 1
+
+
+@pytest.mark.parametrize('tail', ['owned', 'receipt_only', 'readback_only', 'saved_conflict', 'lost_cleanup_read',
+                                 'unrelated', 'prefix_handle', 'no_saved_id', 'conflicting_saved_ids'])
+def test_duplicate_playable_append_preserves_prefix_and_resumes_only_when_owned(poc, caplog, tail):
+    from yt_playlist.web.radio_state import Phase
+
+    c, remote, *_ = poc
+    assert c.start()['ok']
+    read, add = remote.get_playlist, remote.add_playlist_items
+    handle = 'set-v2' if tail == 'prefix_handle' else 'set-new'
+    receipt_handle = 'set-other' if tail == 'unrelated' else handle
+    saved_id = None if tail in {'receipt_only', 'no_saved_id', 'saved_conflict', 'lost_cleanup_read'} else 'v4'
+    if tail == 'conflicting_saved_ids':
+        saved_id = 'v42'
+    removed = []
+
+    def readback(playlist, limit=None):
+        detail = read(playlist, limit)
+        rows = detail['tracks']
+        if len(rows) > 3 and rows[3]['videoId'] == 'v2':
+            rows[3]['setVideoId'] = handle
+            if saved_id:
+                rows[3]['playlistVideoId'] = saved_id
+        return detail
+
+    def append(playlist, videos):
+        if videos != ['v4']:
+            return add(playlist, videos)
+        remote.adds.append(videos)
+        remote.ids.append('v2')
+        remote.fail_read = tail == 'saved_conflict'
+        receipt = {'setVideoId': receipt_handle}
+        if tail not in {'readback_only', 'no_saved_id'}:
+            receipt['videoId'] = 'v4'
+        return {'status': 'STATUS_SUCCEEDED', 'playlistEditResults': [receipt]}
+
+    def remove(playlist, rows):
+        assert playlist == 'PLSESSION' and len(rows) == 1
+        assert rows[0]['videoId'] == 'v4' and rows[0]['setVideoId'] == 'set-new'
+        removed.append(rows[0])
+        assert remote.ids.pop() == 'v2'
+        if tail == 'lost_cleanup_read':
+            remote.fail_read = True
+            raise RuntimeError('Cleanup response lost')
+        return 'STATUS_SUCCEEDED'
+
+    remote.get_playlist, remote.add_playlist_items, remote.remove_playlist_items = readback, append, remove
+    if tail in {'unrelated', 'prefix_handle', 'no_saved_id', 'conflicting_saved_ids'}:
+        with caplog.at_level('INFO'), pytest.raises(PlaylistPending):
+            play(c, 'v3')
+        c.session.edits.conflict_at -= 31
+        with pytest.raises(PlaylistChanged):
+            play(c, 'v3')
+        assert remote.ids == ['v1', 'v2', 'v3', 'v2']
+        assert [row['video_id'] for row in c.status()['tracks']] == remote.ids[:-1]
+        assert remote.adds == [['v4']] and not removed
+        assert 'playlistVideoId' in caplog.text and repr(('v2', saved_id, handle)) in caplog.text
+        assert not c._recover(c.session)
+        return
+
+    if tail in {'saved_conflict', 'lost_cleanup_read'}:
+        with pytest.raises(RuntimeError, match='Read response lost'):
+            play(c, 'v3')
+        saved = c.persistence.load()
+        if tail == 'saved_conflict':
+            saved.update(phase=Phase.CONFLICT, halted=True)
+            with c.ctx.store.conn:
+                radio_storage.save(c.ctx.store.conn, saved, expected=c.persistence.revision)
+        else:
+            assert saved['pending_remove'] == {'videoId': 'v4', 'setVideoId': 'set-new'}
+        c = PlaylistRadio(c.ctx)
+        c.join()
+        if tail == 'saved_conflict':
+            assert c.session.halted and c._recover(c.session)
+    play(c, 'v3', position=299)
+    assert remote.ids == ['v1', 'v2', 'v3', 'v5']
+    assert c.ctx.bridge.native_ids == remote.ids
+    assert [row['video_id'] for row in c.status()['tracks']] == remote.ids
+    assert [row['video_id'] for row in c.ctx.store.charts.playlist_tracks_detail(
+        c.session.local_id)] == remote.ids
+    assert remote.adds == [['v4'], ['v5']] and len(removed) == 1
+    assert c.session.pending is None and c.status()['ahead'] == 1
+    assert c.status()['error'] is None and c.session.directions.feedback == {}
+    play(c, 'v5')
+    assert remote.ids[-1] == 'v6' and c.status()['ahead'] == 1
 
 
 @pytest.mark.parametrize("replacement", [False, True], ids=["append", "direction"])

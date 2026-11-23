@@ -38,31 +38,36 @@ def test_utc_hour_counts_keep_empty_buckets_and_skip_invalid_instants(trends):
     trends.repository.play_hour_rows.assert_called_once_with(100, 200, False, calendar=False)
 
 
-def test_rollup_persists_first_play_before_publishing_output(trends):
-    calls = Mock()
-    calls.attach_mock(trends.repository, 'repository')
-    calls.attach_mock(trends.proposals, 'proposals')
-    trends.publish_rollup({'track': [1]}, '{"story":null}', 100, 'import')
-    assert [call[0] for call in calls.mock_calls] == ['repository.publish_first_play', 'proposals.put_encoded']
-    trends.repository.publish_first_play.assert_called_once_with({'track': [1]}, 'import')
+def test_rollup_publishes_only_the_output(trends):
+    trends.publish_rollup('{"story":null}', 100)
+    assert not trends.repository.mock_calls
     trends.proposals.put_encoded.assert_called_once_with('trend_rollups', '{"story":null}', 100)
 
 
-def test_failed_first_play_write_does_not_publish_new_output(trends):
-    trends.repository.publish_first_play.side_effect = ValueError('failed write')
-    with pytest.raises(ValueError, match='failed write'):
-        trends.publish_rollup({}, '{}', 100, None)
-    trends.proposals.put_encoded.assert_not_called()
+def test_recap_uses_observed_intensity_when_a_prediction_scores_higher(monkeypatch):
+    source = Mock()
+    source.trends.ledger_track_plays.return_value = {'mixed': 3, 'pooled': 2}
+    measured = {'score': .4, 'support': .8, 'source': 'audio_measurement'}
+    pooled = {'score': .9, 'support': .4, 'source': 'artist_genre'}
+    profiles = {'mixed': {'vibes': {'intensity_fits': {'energize': measured, 'release': pooled}}},
+                'pooled': {'vibes': {'intensity_fits': {'release': pooled}}}}
+    month = {'month': '2026-04'}
+    personality = Mock()
+    monkeypatch.setattr(trend_preparation, 'review', lambda *args, **kwargs: month)
+    monkeypatch.setattr(trend_preparation.musical_character, 'load', lambda *_: profiles)
+    monkeypatch.setattr(trend_preparation.recap_story, 'personality', personality)
+    monkeypatch.setattr(trend_preparation.recap_story, 'build_story', Mock())
+    monkeypatch.setattr(trend_preparation.recap_details, 'screens', Mock())
+
+    trend_preparation.assemble(source, 100, [], {}, [month])
+
+    assert personality.call_args.kwargs['audio'] == {'mixed': {'energy': .4}}
 
 
 @pytest.mark.parametrize('current', [False, True])
 def test_pipeline_checks_generation_and_closes_reader_before_ordered_writes(monkeypatch, current):
-    snapshot = Mock(spec_set=['trends', 'settings', 'is_current', 'release_reader', 'publish_ordered'])
-    snapshot.trends = Mock(spec_set=['prepare_first_play'])
-    snapshot.settings = Mock(spec_set=['get_setting'])
+    snapshot = Mock(spec_set=['is_current', 'release_reader', 'publish_ordered'])
     snapshot.is_current.return_value = current
-    snapshot.trends.prepare_first_play.return_value = {'track': [1]}
-    snapshot.settings.get_setting.return_value = None
     writer = Mock(spec_set=['publish_rollup'])
     calculate = Mock(return_value={'story': None})
     monkeypatch.setattr(trend_preparation, 'calculate', calculate)

@@ -1,7 +1,10 @@
 """Background sampling, completed-song cards and durable click-to-label judgments."""
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
+from threading import Thread
 from uuid import uuid4
 
 from playwright.sync_api import expect
@@ -30,15 +33,19 @@ def playback_route(route, state):
 
 
 def fake_result():
+    from tests.test_audio_vibe_cruise import samples
+
     value = sample(electronic=.95, House=.9, dance=.8)
+    compatible = samples()[0]
     return {'analysis_location': 'youtube_tab', 'audio_transferred_to_app': False,
         'audio_attributes': value['audio_attributes'], 'source_position_at_start': 30,
         'song_position_at_start': 30,
         'raw_audio_retained': False,
         'prediction': {'scores': value['tags'], 'analysed_seconds': 8.992,
-            'model': value['model'], 'model_version': value['model_version'],
-            'bundle': {'files': []}, 'moods': {'traits': value['traits'],
-                'models': {key: {'version': version} for key, version in value['mood_versions'].items()}}}}
+            'model': compatible['model'], 'model_version': compatible['model_version'],
+            'embedding': compatible['embedding'],
+            'bundle': {'files': [{'path': path, 'sha256': digest}
+                                 for path, digest in compatible['artifact_hashes'].items()]}}}
 
 
 def fake_extension(page, fail_capture=False, result=None, initially_stale=False):
@@ -90,7 +97,7 @@ def fake_extension(page, fail_capture=False, result=None, initially_stale=False)
       const sourceConnect=chrome.runtime.connect;
       let observerConnected=false;
       const storageKey='fixture.extension.audio-storage';
-      const capture={previewOpen:false,allowed:()=>true,onCollectionChanged(){},
+      const capture={allowed:()=>true,
         openCollection(receive){const source=sourceConnect();source.onMessage.addListener(receive);
           queueMicrotask(()=>receive({type:'ready'}));return source;}};
       const storage={get:async()=>JSON.parse(localStorage.getItem(storageKey)||'{}'),
@@ -218,19 +225,11 @@ def assert_quiet_audio_card(page):
     expect(page.get_by_role('alertdialog')).to_have_count(0)
 
 
+def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(
+        vibes_enabled, live_app, page, store, monkeypatch, request):
+    from tests.audio_model_support import enable_models
 
-
-
-
-
-
-
-
-
-
-
-
-def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_enabled, live_app, page, store):
+    enable_models(monkeypatch)
     state = {'position': 0, 'duration': 240}
     page.set_viewport_size({'width': 1400, 'height': 900})
     page.route('**/bridge/status', lambda route: playback_route(route, state))
@@ -250,10 +249,12 @@ def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_ena
         if index < 3:
             expect(banner).to_be_visible()
             expect(visible_card(page).locator('[data-vibe-checks] [data-complete="true"]')).to_have_count(index)
+            expect(visible_card(page).locator('[data-vibe-prediction]')).to_have_text('Prediction so far: Cruise')
     card = visible_card(page)
-    expect(card.locator('[data-vibe-prediction]')).to_have_text('Independent listening-purpose scores')
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction: Cruise')
     expect(card.locator('[data-vibe-specialist]')).to_have_count(6)
-    expect(card.locator('[data-vibe-specialist] output')).to_have_text(['—'] * 6)
+    assert all(re.fullmatch(r'\d\.\d{2}', text)
+               for text in card.locator('[data-vibe-specialist] output').all_text_contents())
     expect(card.locator('[data-vibe-choice]')).to_have_count(6)
     assert banner.get_by_role('button', name='Save labels', exact=True).count() == 0
     assert banner.locator('[data-vibe-held-status], progress').count() == 0
@@ -269,11 +270,35 @@ def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_ena
         page.screenshot(path=f'/tmp/tuneconsole-882-card-{width}-{height}.png')
     assert page.evaluate('vibeCaptures.length') == 3
     run_id = page.evaluate('JSON.parse(localStorage.getItem(' + json.dumps(RUN) + ')).id')
+    saved = store.audio_vibes.samples(run_id)
+    assert len(saved) == 3
+    assert all('traits' not in value and 'mood_versions' not in value and value['embedding'] for value in saved)
     card.get_by_role('button', name=DESCRIPTIONS['release'], exact=True).click()
     card.get_by_role('button', name=DESCRIPTIONS['energize'], exact=True).click()
     expect(card.locator('[data-vibe-feedback-status]')).to_have_text('Saved')
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction: Cruise')
     assert set(store.audio_vibes.feedback(run_id)['vibes']) == {'release', 'energize'}
     assert len(store.audio_vibes.feedback(run_id)['sample_ids']) == 3
+    card.get_by_role('button', name='Audio details', exact=True).click()
+    dialog = page.get_by_role('dialog', name='Song audio details')
+    expect(dialog.get_by_role('table').first.locator('thead th')).to_have_count(5)
+    expect(dialog.locator('[data-vibe-score]')).to_have_count(6)
+    expect(dialog.locator('[data-vibe-score="release"]')).to_contain_text('Highest excerpt score')
+    expect(dialog.locator('[data-vibe-score="relax"]')).to_contain_text('Lowest excerpt score')
+    expect(dialog.locator('[data-vibe-score="energize"]')).to_contain_text('first-to-last drop')
+    prediction = store.audio_vibes.feedback(run_id)['prediction']
+    for key, model in prediction['individual_models'].items():
+        scores = dialog.locator(f'[data-vibe-score="{key}"] td').all_text_contents()
+        assert [float(value) for value in scores] == pytest.approx(
+            [model['score'], *(item['score'] for item in model['excerpts'])], abs=.0001)
+    expect(dialog.get_by_text('Mood model outputs')).to_have_count(0)
+    for width, height in ((800, 450), (1400, 900)):
+        page.set_viewport_size({'width': width, 'height': height})
+        cells = dialog.locator('[data-vibe-score] td')
+        assert cells.evaluate_all('cells => cells.every(cell => getComputedStyle(cell).whiteSpace === "nowrap")')
+        assert dialog.evaluate('node => node.scrollWidth <= node.clientWidth')
+        page.screenshot(path=Path(request.config.getoption('output')) / f'audio-details-{width}.png')
+    dialog.get_by_role('button', name='Close audio details').click()
     assert store.settings.get_setting(home_vibe.SETTING) is None
     page.reload()
     card = visible_card(page)
@@ -305,6 +330,143 @@ def test_normal_app_collects_then_shows_one_compact_card_and_autosaves(vibes_ena
     assert errors == []
 
 
+def test_sampling_finalizes_the_prediction_when_the_last_eligible_check_is_missed(
+        vibes_enabled, live_app, page, monkeypatch, request):
+    from tests.audio_model_support import enable_models
+
+    enable_models(monkeypatch)
+    state = {'position': 0, 'duration': 240}
+    page.set_viewport_size({'width': 1400, 'height': 900})
+    page.route('**/bridge/status', lambda route: playback_route(route, state))
+    fake_extension(page)
+    page.goto(live_app + '/#directions')
+    dismiss_welcome(page)
+    for index, position in enumerate((30, 120), start=1):
+        state['position'] = position
+        page.evaluate('playbackStatus.refresh()')
+        wait_samples(page, index)
+    card = visible_card(page)
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction so far: Cruise')
+    state['position'] = 190
+    page.evaluate('playbackStatus.refresh()')
+    expect(card.get_by_role('img', name='Two-thirds: skipped')).to_be_visible()
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction: Cruise')
+    expect(card.locator('[data-vibe-checks] [data-complete="true"]')).to_have_count(2)
+    expect(card.locator('[data-vibe-specialist]')).to_have_count(6)
+    expect(card.locator('[data-vibe-choice][aria-pressed="true"]')).to_have_count(0)
+    page.screenshot(path=Path(request.config.getoption('output')) / 'prediction-after-skipped-check.png')
+
+
+def test_previous_song_prediction_waits_for_captured_check_delivery(
+        vibes_enabled, live_app, page, monkeypatch, request):
+    from tests.audio_model_support import enable_models
+
+    enable_models(monkeypatch)
+    state = {'position': 0, 'duration': 240}
+    blocked = True
+
+    def deliver(route):
+        sample = route.request.post_data_json
+        if blocked and sample['video_id'] == 'vibe_song' and sample['point'] == 'two_thirds':
+            route.fulfill(status=503, json={})
+        else:
+            route.continue_()
+
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.route('**/bridge/status', lambda route: playback_route(route, state))
+    page.route('**/audio-vibes/samples', deliver)
+    fake_extension(page)
+    page.goto(live_app + '/#directions')
+    dismiss_welcome(page)
+    for index, position in enumerate((30, 120), start=1):
+        state['position'] = position
+        page.evaluate('playbackStatus.refresh()')
+        wait_samples(page, index)
+    card = visible_card(page)
+    choice = card.get_by_role('button', name=DESCRIPTIONS['release'], exact=True)
+    choice.click()
+    expect(card.locator('[data-vibe-feedback-status]')).to_have_text('Saved')
+    state['position'] = 160
+    with page.expect_response(lambda res: res.url.endswith('/audio-vibes/samples') and res.status == 503):
+        page.evaluate('playbackStatus.refresh()')
+    state.update(video_id='next_song', title='Next playback', position=0)
+    page.evaluate('playbackStatus.refresh()')
+    page.wait_for_function('''key => JSON.parse(localStorage.getItem(key))?.video_id === 'next_song' ''', arg=RUN)
+
+    def check_pending():
+        expect(card.locator('[data-vibe-track]')).to_have_text('Song for a vibe check')
+        expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction so far: Cruise')
+        expect(card.get_by_role('img', name='Two-thirds: pending')).to_be_visible()
+        expect(card.locator('[data-vibe-specialist] output')).to_have_count(6)
+        expect(choice).to_have_attribute('aria-pressed', 'true')
+
+    check_pending()
+    output = Path(request.config.getoption('output'))
+    page.screenshot(path=output / 'prediction-before-delivery.png')
+    page.reload()
+    check_pending()
+    blocked = False
+    expect(card.get_by_role('img', name='Two-thirds: complete')).to_be_visible(timeout=25000)
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction: Cruise')
+    expect(choice).to_have_attribute('aria-pressed', 'true')
+    expect(card.locator('[data-vibe-specialist] output')).to_have_count(6)
+    page.screenshot(path=output / 'prediction-after-delivery.png')
+
+
+def test_prepared_audio_worker_supplies_production_specialist_inputs(page, tmp_path, monkeypatch):
+    from scripts.audio_model.bundle import prepare
+    from tests.audio_model_support import enable_models
+    from yt_playlist.rec import audio_vibe_prediction
+    from yt_playlist.rec.audio_vibe_specialists import SPECIALISTS
+    from yt_playlist.web.routes.audio_vibes import Sample
+
+    if not (EXT / 'audio_model/vendor/bundle.json').is_file():
+        pytest.skip('Prepare the optional local audio model assets to exercise the real worker')
+    stage = tmp_path / 'model'
+    prepare(destination=stage)
+    with ThreadingHTTPServer(('127.0.0.1', 0), partial(SimpleHTTPRequestHandler, directory=stage)) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            page.goto(f'http://127.0.0.1:{server.server_port}/')
+            result = page.evaluate('''async () => {
+              const worker = new Worker('/model_worker.js');
+              const signal = rate => Float32Array.from({length: rate * 10}, (_, i) =>
+                .2 * Math.sin(2 * Math.PI * 220 * i / rate) * (.5 + .5 * Math.sin(2 * Math.PI * 2 * i / rate))
+                + .1 * Math.sin(2 * Math.PI * 440 * i / rate));
+              try {
+                return await new Promise((resolve, reject) => {
+                  const timer = setTimeout(() => reject(new Error('Audio worker timed out')), 30000);
+                  worker.onmessage = ({data}) => {clearTimeout(timer); resolve(data);};
+                  worker.onerror = error => {clearTimeout(timer); reject(new Error(error.message));};
+                  worker.postMessage({id: 'prepared-worker', rate: 16000, samples: signal(16000),
+                    measurement_left: signal(44100), measurement_rate: 44100});
+                });
+              } finally { worker.terminate(); }
+            }''')
+        finally:
+            server.shutdown()
+            thread.join()
+
+    assert 'error' not in result, result
+    inference = result['prediction']
+    assert inference['status'] == 'native_tags_only'
+    assert 'moods' not in inference and 'mood_heads' not in inference['bundle']
+    excerpt = sample()
+    del excerpt['traits'], excerpt['mood_versions']
+    excerpt.update(tags=inference['scores'], embedding=inference['embedding'], model=inference['model'],
+                   model_version=inference['model_version'], analysed_seconds=inference['analysed_seconds'],
+                   audio_attributes=result['audio_attributes'], artifact_hashes={
+                       row['path']: row['sha256'] for row in inference['bundle']['files']})
+    assert excerpt['audio_attributes']['values']['integrated_lufs'] is not None
+    saved = Sample.model_validate_json(json.dumps(excerpt)).model_dump(mode='json', exclude_none=True)
+    enable_models(monkeypatch)
+    prediction = audio_vibe_prediction.predict([saved], require_complete=False)
+    assert set(prediction['suitability']) == {vibe for vibe, _ in SPECIALISTS}
+    assert all(model['excerpts'][0]['sample_id'] == saved['id']
+               for model in prediction['individual_models'].values())
+
+
 def test_popup_shows_independent_scores_and_isolates_a_disabled_specialist(
         vibes_enabled, live_app, page, store, monkeypatch):
     from tests.audio_model_support import enable_models
@@ -322,7 +484,7 @@ def test_popup_shows_independent_scores_and_isolates_a_disabled_specialist(
     page.goto(live_app)
     dismiss_welcome(page)
     card = visible_card(page)
-    expect(card.locator('[data-vibe-prediction]')).to_have_text('Independent listening-purpose scores')
+    expect(card.locator('[data-vibe-prediction]')).to_have_text('Prediction: Cruise')
     for vibe, score in expected['suitability'].items():
         expect(card.locator(f'[data-vibe-specialist="{vibe}"] output')).to_have_text(f'{score:.2f}')
     expect(page.locator('[data-audio-vibe-banner]')).to_have_css('opacity', '1')

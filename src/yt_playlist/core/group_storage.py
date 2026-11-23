@@ -1,92 +1,15 @@
-"""Exact content reuse for compact groups; callers own the writer transaction."""
+"""Version and membership writes for the group publisher."""
 import hashlib
 
 from . import group_content as content, group_documents, policy_documents
+from .activity import WorkBudgetExceeded
 from .evidence_ledger import canonical
 
 
 def _writer(conn):
     if not conn.in_transaction:
         raise ValueError('Musical group import requires an outer transaction')
-    conn.execute('UPDATE settings SET value=value WHERE 0')
-
-
-def _owner(key, resolve):
-    recording_id = resolve(key)
-    if recording_id is not None and (type(recording_id) is not int or recording_id < 1):
-        raise ValueError('Invalid canonical recording in musical group inputs')
-    return ('recording', recording_id) if recording_id is not None else ('unresolved', key)
-
-
-def manifest_rows(conn, manifest_id):
-    for recording_id, digest in conn.execute('SELECT m.recording_id,i.input_digest '
-            'FROM group_manifest_inputs m JOIN group_recording_inputs i ON i.id=m.input_id '
-            'WHERE m.manifest_id=? ORDER BY m.recording_id', (manifest_id,)):
-        yield canonical([['recording', recording_id], digest])
-    for raw_key, digest in conn.execute('SELECT raw_key,input_digest FROM unresolved_group_manifest_inputs '
-                                       'WHERE manifest_id=? ORDER BY raw_key', (manifest_id,)):
-        yield canonical([['unresolved', raw_key], digest])
-
-
-def manifest_remainder_matches(conn, manifest_id, inputs):
-    """Verify every surviving row of an unowned, partially collected manifest."""
-    expected = iter(canonical([owner, value]) for owner, value in inputs)
-    for retained in manifest_rows(conn, manifest_id):
-        if not any(row == retained for row in expected):
-            return False
-    return True
-
-
-def install_manifest(conn, inputs, resolve):
-    _writer(conn)
-    rows = normalized_inputs(inputs, resolve)
-    digest = content.digest(canonical([owner, value]) for owner, value in rows)
-    existing = conn.execute('SELECT id FROM group_input_manifests WHERE content_digest=?', (digest,)).fetchone()
-    if existing is not None:
-        if not conn.execute('SELECT complete FROM group_input_manifests WHERE id=?', (existing[0],)).fetchone()[0]:
-            raise ValueError('Musical group input manifest is still being built')
-        if not content.equal(manifest_rows(conn, existing[0]),
-                             (canonical([owner, value]) for owner, value in rows)):
-            raise ValueError('Musical group input digest collision')
-        return existing[0]
-    manifest_id = conn.execute('INSERT INTO group_input_manifests(content_digest) VALUES (?) RETURNING id',
-                               (digest,)).fetchone()[0]
-    insert_inputs(conn, manifest_id, rows)
-    conn.execute('UPDATE group_input_manifests SET complete=1 WHERE id=?', (manifest_id,))
-    return manifest_id
-
-
-def normalized_inputs(inputs, resolve):
-    content.input_manifest(inputs)
-    normalized = {}
-    for key, digest in inputs.items():
-        owner = _owner(key, resolve)
-        if owner in normalized:
-            raise ValueError('Duplicate canonical musical group input owner')
-        normalized[owner] = digest
-    return sorted(normalized.items())
-
-
-def insert_inputs(conn, manifest_id, rows):
-    for (kind, owner), value in rows:
-        if kind == 'recording':
-            conn.execute('INSERT INTO group_recording_inputs(recording_id,input_digest) VALUES (?,?) '
-                         'ON CONFLICT(recording_id,input_digest) DO NOTHING', (owner, value))
-            input_id = conn.execute('SELECT id FROM group_recording_inputs WHERE recording_id=? '
-                                    'AND input_digest=?', (owner, value)).fetchone()[0]
-            conn.execute('INSERT INTO group_manifest_inputs VALUES (?,?,?)', (manifest_id, owner, input_id))
-        else:
-            conn.execute("INSERT INTO unresolved_group_manifest_inputs VALUES (?,?,?,'missing_recording')",
-                         (manifest_id, owner, value))
-
-
-def inputs_for(conn, manifest_id):
-    values = {key: digest for key, digest in conn.execute('SELECT r.identity_key,i.input_digest '
-        'FROM group_manifest_inputs m JOIN recordings r ON r.id=m.recording_id '
-        'JOIN group_recording_inputs i ON i.id=m.input_id WHERE m.manifest_id=?', (manifest_id,))}
-    values.update(conn.execute('SELECT raw_key,input_digest FROM unresolved_group_manifest_inputs '
-                               'WHERE manifest_id=?', (manifest_id,)))
-    return values
+    conn.execute('UPDATE group_versions SET id=id WHERE 0')
 
 
 def version_rows(conn, version_id):
@@ -111,12 +34,11 @@ def version_facts(conn, version_id):
     if row is None:
         raise ValueError('Missing canonical musical group version')
     members = [tuple(value) for value in conn.execute(
-            'SELECT m.recording_id,m.similarity,m.support,i.input_digest FROM group_members m '
-            'LEFT JOIN group_recording_inputs i ON i.id=m.input_id '
-            'WHERE m.group_version_id=? ORDER BY m.recording_id', (version_id,))]
+            'SELECT m.recording_id,m.similarity,m.support,m.input_digest FROM group_members m '
+            'WHERE m.group_version_id=? AND m.recording_id IS NOT NULL ORDER BY m.recording_id', (version_id,))]
     unresolved = [tuple(value) for value in conn.execute(
-            'SELECT raw_key,similarity,support,input_digest FROM unresolved_group_members '
-            'WHERE group_version_id=? ORDER BY raw_key', (version_id,))]
+            'SELECT raw_key,similarity,support,input_digest FROM group_members '
+            'WHERE group_version_id=? AND raw_key IS NOT NULL ORDER BY raw_key', (version_id,))]
     return {'version': dict(row), 'members': members, 'unresolved': unresolved}
 
 
@@ -142,7 +64,7 @@ def definition_fields(value, members=None):
     return tuple(result)
 
 
-def create_version(conn, prepared, group, generation_id, group_id, digest, fields, file):
+def create_version(conn, prepared, group, generation_id, group_id, position, digest, fields, file):
     generation = conn.execute('SELECT policy_version FROM group_generations WHERE id=?',
                                (generation_id,)).fetchone()
     if generation is None:
@@ -153,10 +75,19 @@ def create_version(conn, prepared, group, generation_id, group_id, digest, field
         raise ValueError('Musical group parent must belong to the same generation')
     parent_id = (conn.execute('SELECT id FROM taste_groups WHERE external_key=?', (parent_key,)).fetchone()[0]
                  if parent_key is not None else None)
+    origin = conn.execute('SELECT v.group_id,v.content_digest,g.is_published FROM group_versions v '
+                          'JOIN group_generations g ON g.id=v.generation_id '
+                          'WHERE v.external_version=? AND v.is_origin=1', (group['version'],)).fetchone()
+    if origin is not None and not origin[2]:
+        raise WorkBudgetExceeded('Musical group version is leased by another unpublished build')
+    if origin is not None and tuple(origin)[:2] != (group_id, digest):
+        raise ValueError('External musical group version changed its immutable meaning')
     return conn.execute('INSERT INTO group_versions(group_id,parent_group_id,content_digest,policy_version,'
         'created_at,definition_filename,definition_digest,definition_bytes,definition_offset,'
-        'leaf,legacy,membership_known,depth,size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
-        (group_id, parent_id, digest, *generation, prepared['at'], *file, *fields)).fetchone()[0]
+        'leaf,legacy,membership_known,depth,size,generation_id,position,external_version,is_origin,complete) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) RETURNING id',
+        (group_id, parent_id, digest, *generation, prepared['at'], *file, *fields,
+         generation_id, position, group['version'], int(origin is None))).fetchone()[0]
 
 
 def insert_members(conn, version_id, rows, resolve, inputs):
@@ -164,33 +95,13 @@ def insert_members(conn, version_id, rows, resolve, inputs):
         recording_id = resolve(key)
         digest = inputs.get(key)
         if recording_id is not None:
-            row = conn.execute('SELECT id FROM group_recording_inputs WHERE recording_id=? AND input_digest=?',
-                               (recording_id, digest)).fetchone() if digest is not None else None
-            if digest is not None and row is None:
-                raise ValueError('Musical group member input has not been installed')
-            conn.execute('INSERT INTO group_members VALUES (?,?,?,?,?)',
-                         (version_id, recording_id, content.score(similarity), content.score(support), row[0] if row else None))
+            conn.execute('INSERT INTO group_members(group_version_id,recording_id,similarity,support,input_digest) '
+                         'VALUES (?,?,?,?,?)',
+                         (version_id, recording_id, content.score(similarity), content.score(support), digest))
         else:
-            conn.execute("INSERT INTO unresolved_group_members VALUES (?,?,?,?,'missing_recording',?)",
+            conn.execute('INSERT INTO group_members(group_version_id,raw_key,similarity,support,input_digest) '
+                         'VALUES (?,?,?,?,?)',
                          (version_id, key, content.score(similarity), content.score(support), digest))
-
-
-def insert_representatives(conn, version_id, rows, resolve):
-    for index, key in rows:
-        recording_id = resolve(key)
-        conn.execute('INSERT INTO group_representatives VALUES (?,?,?,?)',
-                     (version_id, index, recording_id, key if recording_id is None else None))
-
-
-def _link(conn, generation_id, group_id, version_id, position, external_version):
-    previous = conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?',
-                            (external_version,)).fetchone()
-    if previous is not None and previous[0] != version_id:
-        raise ValueError('External musical group version changed its immutable meaning')
-    conn.execute('INSERT INTO group_version_aliases VALUES (?,?,?) ON CONFLICT(external_version) DO NOTHING',
-                 (external_version, version_id, generation_id))
-    conn.execute('INSERT INTO generation_groups VALUES (?,?,?,?,?)',
-                 (generation_id, group_id, version_id, position, external_version))
 
 
 def policy_version(raw):
@@ -198,18 +109,10 @@ def policy_version(raw):
     return 'group-policy:' + hashlib.sha256(canonical(value)).hexdigest()
 
 
-def install_header(conn, prepared, policy, metadata, manifest_id):
-    _writer(conn)
-    version = policy_version(prepared['policy'])
-    policy_documents.install(conn, [(version, canonical(policy).decode(), prepared['at'])])
-    file = next(group_documents.publish_many(group_documents.directory(conn), [('generation', metadata)]))
-    return install_header_reference(conn, prepared, version, file, manifest_id)
-
-
-def install_header_reference(conn, prepared, version, file, manifest_id):
+def install_header_reference(conn, prepared, version, file):
     _writer(conn)
     return conn.execute('INSERT INTO group_generations(external_key,policy_version,input_fingerprint,'
-        'input_manifest_id,input_serial,created_at,metadata_filename,metadata_digest,metadata_bytes,metadata_offset) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id',
-        (prepared['generation'], version, prepared['fingerprint'], manifest_id, prepared['serial'],
+        'input_serial,created_at,metadata_filename,metadata_digest,metadata_bytes,metadata_offset) '
+        'VALUES (?,?,?,?,?,?,?,?,?) RETURNING id',
+        (prepared['generation'], version, prepared['fingerprint'], prepared['serial'],
          prepared['at'], *file)).fetchone()[0]

@@ -1,5 +1,4 @@
 """Synchronize authentication notices with the account owner's confirmed state."""
-from yt_playlist.core.account_auth_state import KEY
 
 
 class AuthSessions:
@@ -10,15 +9,12 @@ class AuthSessions:
         try:
             self.current.update(self.accounts.auth_expirations())
         except (ValueError, TypeError):
-            self.logger.warning('ignoring unreadable %s setting', KEY)
+            self.logger.warning('Unable to read expired account sessions')
 
     def _persist(self, **options):
-        result = self.accounts.update_auth_expiration(**options)
-        if result is None:
+        current = self.accounts.update_auth_expiration(**options)
+        if current is None:
             return
-        current, invalid = result
-        if invalid:
-            self.logger.warning('ignoring unreadable %s setting', KEY)
         self.current.clear()
         self.current.update(current)
 

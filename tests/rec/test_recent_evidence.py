@@ -1,37 +1,47 @@
-"""Recent layer cost follows its window, independent of lifetime history."""
+"""NOW and TODAY read bounded evidence regardless of lifetime history."""
 import numpy as np
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.group_support import publish_keyed
 from yt_playlist.library import listening_composition as layers
 from yt_playlist.rec import embedding_vectors, rec_params, taste_viz
 
 
-@pytest.mark.parametrize('consumer,window_h', [
-    (layers.now_mode_mix, 6), (layers.session_mode_mix, 24),
-    (layers.evidence_coverage, 24), (taste_viz.mode_layers, 24),
+@pytest.mark.parametrize('consumer', [
+    layers.now_mode_mix, layers.session_mode_mix, layers.evidence_coverage, taste_viz.mode_layers,
 ])
 @pytest.mark.parametrize('quiet', [False, True])
-def test_recent_layers_read_and_decode_only_window_keys_once(store, monkeypatch, consumer, window_h, quiet):
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
-    now = 10_000_000
+def test_recent_layers_read_and_decode_only_window_keys_once(store, monkeypatch, consumer, quiet):
+    monkeypatch.setenv('TZ', 'UTC')
+    iid = store.accounts.upsert_account('Main', None, True)
+    midnight = 116 * 86400
+    now = midnight + 20 * 60
     old = [(f'old{i}|artist', f'old{i}', now - 30 * 86400 - i) for i in range(3)]
-    recent = [] if quiet else [
-        ('now1|artist', 'now1', now - 60),
-        ('now2|artist', 'now2', now - 120),
-        ('session|artist', 'session', now - 12 * 3600),
-        ('now1|artist', 'now1', now - 3600),
+    old.append(('earlier|artist', 'earlier', midnight - 3600))
+    live = [] if quiet else [
+        ('now1|artist', 'now1', midnight - 600),
+        ('now2|artist', 'now2', midnight + 60),
+        ('now2|artist', 'now2', now - 60),
     ]
-    store.history.import_play_events(iid, old + recent)
-    for key, video in dict.fromkeys((key, video) for key, video, _ in old + recent):
+    imported = [] if quiet else [
+        ('yesterday|artist', 'yesterday', midnight - 300),
+        ('today|artist', 'today', midnight + 300),
+    ]
+    store.history.import_listening_events(iid, old + imported, source_timezone='UTC')
+    for key, video, at in live:
+        store.history.record_play_event(iid, key, video, at, source_timezone='UTC')
+    track_keys = dict.fromkeys((key, video) for key, video, _ in old + imported + live)
+    for key, video in track_keys:
         seed_catalog_track(store, key, video, 'Artist', video_id=video)
-    rec_params.set_param(store, 'now_window_h', 6)
+    if consumer is taste_viz.mode_layers:
+        publish_keyed(store, [('Jazz', [key for key, _video in track_keys], .5)])
     rec_params.set_param(store, 'now_min_events', 2)
     store.rec_model.replace_rec_content_vectors([
         (key, np.array([1., 0.], dtype=np.float32).tobytes())
-        for key in dict.fromkeys(r[0] for r in old + recent)])
+        for key, _video in track_keys])
     store.modes.replace_modes([{'mode_id': 1, 'label': 'A', 'families': [['house', 1]],
-        'centroid': np.array([1., 0.], dtype=np.float32), 'size': len(old) + len(recent), 'rep_keys': []}],
+        'centroid': np.array([1., 0.], dtype=np.float32), 'size': len(track_keys), 'rep_keys': []}],
         retired_ids=[], now=now)
     history, generations, decoded = [], [], []
     read_plays = store.history.play_events_since
@@ -56,11 +66,14 @@ def test_recent_layers_read_and_decode_only_window_keys_once(store, monkeypatch,
     monkeypatch.setattr(store.rec_model, 'content_generation', content)
     monkeypatch.setattr(embedding_vectors, 'load_content_vectors', vectors)
     result = consumer(store, now)
-    expected = {key for key, _video, ts in recent if ts >= now - window_h * 3600}
-    assert history == [(now - window_h * 3600, sum(ts >= now - window_h * 3600 for _, _, ts in recent))]
-    assert generations == [expected]
-    assert decoded == [len(expected)]
+    expected = set() if quiet else {'now1|artist', 'now2|artist', 'today|artist'}
+    expected_read = (midnight, 0) if quiet else (midnight - 600, 5)
+    assert history == [expected_read]
     if consumer is taste_viz.mode_layers:
+        assert generations == decoded == []
         assert result['now']['n'] == (0 if quiet else 2)
-        assert result['session']['n'] == (0 if quiet else 3)
-        assert result['evidence']['session']['total'] == (0 if quiet else 3)
+        assert result['session']['n'] == (0 if quiet else 2)
+        assert result['evidence']['session']['total'] == (0 if quiet else 2)
+    else:
+        assert generations == [expected]
+        assert decoded == [len(expected)]

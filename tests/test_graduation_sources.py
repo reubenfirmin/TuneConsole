@@ -17,7 +17,7 @@ def _store_with_play_history(s, genre="Techno", n=10, now=1000.0, w_play=0.5):
     """Seed the private store with n recent tracks of one genre (a dominant family), with
     source_w_play raised so a handful of daily exposures crosses theme_threshold (the 0.08 default
     would need ~18 days, too slow for a unit test). Returns (store, now, axis)."""
-    iid = s.accounts.upsert_account("me", "cred", None, True)
+    iid = s.accounts.upsert_account("me", None, True)
     keys = []
     for i in range(n):
         tid = s.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
@@ -111,7 +111,7 @@ def test_radio_only_listening_day_graduates_nothing(store):
     # the exclusion, radio's own picks would graduate transient leans into standing taste day after
     # day - the slow-burn arm of the feedback loop.
     s = store
-    iid = s.accounts.upsert_account("me", "cred", None, True)
+    iid = s.accounts.upsert_account("me", None, True)
     with s.conn:
         radio_provenance.remember(s.conn,'PLRADIO',iid)
     now = 100 * 86400 + 1000.0

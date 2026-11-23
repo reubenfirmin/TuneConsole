@@ -25,11 +25,11 @@ IDs and describe different styles. Primary genre names take precedence over old 
 aliases are discarded. No substring or fuzzy matching merges identities. Afrobeat/Afrobeats,
 Metal/Heavy Metal, Electronic/Electro/Electronica and Minimal/Minimal Techno remain distinct.
 
-The SQLite tables separate `genre_catalog`, `genre_alias`, `genre_external_id` and `genre_family`.
-Aliases and family assignments retain their sources. `genre_whitelist` holds enabled canonical
-names for compatibility with existing callers. Disabling a genre disables all its labels without
-allowing a fallback to an older broad alias. Provider artist caches retain raw metadata so edits
-take effect without another network request. Track tags and learned taste keys are not migrated.
+The SQLite tables are `genre_catalog`, `genre_alias` and `genre_family`. Each catalog row
+holds its preference and any redirect from a retired key. MusicBrainz IDs are in the bundled
+source data. Aliases and family assignments retain their sources. Disabling a genre disables
+all its labels. Provider artist caches retain raw metadata so edits take effect without
+another network request. Track tags and learned taste keys keep their captured identities.
 Derived recommendation content vectors refresh once after a catalog revision so both library
 and discovered tracks use the updated families and aliases.
 

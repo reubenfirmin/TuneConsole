@@ -10,7 +10,6 @@ import subprocess
 import sys
 import time
 
-from .capture import verify_tree
 from .manager import ROOT, command, save
 
 WORKER = '''
@@ -189,13 +188,13 @@ def verify(manager, report, *, refresh=False):
             result['interruptions'] = [interrupted_run(manager, baseline['id'], report, sig)
                                        for sig in (signal.SIGINT, signal.SIGKILL)]
             assert all(run['path'].is_dir() for run in runs), 'Cleanup removed an active workspace'
-            if refresh:
-                replacement = manager.prepare(baseline['source'], refresh=True)
-                assert replacement['id'] != baseline['id']
-                assert all(run['baseline']['id'] == baseline['id'] for run in runs)
-                assert manager.resolve()['id'] == replacement['id']
-                result['refreshed_baseline'] = replacement['id']
-        assert verify_tree(manager.volume / 'baselines' / baseline['id']) == baseline['verification']
+        assert manager.resolve()['id'] == baseline['id']
+        if refresh:
+            replacement = manager.prepare(baseline['source'], refresh=True)
+            assert replacement['id'] != baseline['id']
+            assert not (manager.volume / 'baselines' / baseline['id']).exists()
+            assert manager.resolve()['id'] == replacement['id']
+            result['refreshed_baseline'] = replacement['id']
         assert not list((manager.volume / 'runs').glob('*.json'))
         result['success'] = True
         return result

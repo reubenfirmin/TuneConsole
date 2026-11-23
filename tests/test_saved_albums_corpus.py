@@ -24,7 +24,7 @@ class _AlbumClient(FakeClient):
 
 
 def test_saved_album_tracks_folded_in_once(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = _AlbumClient()
 
     sync.sync_all(store, {iid: fc}, now=1.0)
@@ -39,22 +39,22 @@ def test_saved_album_tracks_folded_in_once(store):
 
 
 def test_incidental_album_track_does_not_prevent_full_materialization(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "So What", "Miles Davis", "Kind of Blue", 100,
                        album_browse_id="MPREb_X")
     client = _AlbumClient()
     sync.sync_all(store, {iid: client}, now=1.0)
     assert client.album_calls == 1
     assert identity_key("Freddie Freeloader", "Miles Davis") in store.rec_query.library_keys()
-    assert store.collection.cached_album_tracklist_ids() == {"MPREb_X"}
+    assert store.collection.has_published_album_tracklist("MPREb_X")
 
 
 def test_browsing_an_unsaved_album_does_not_prevent_later_library_materialization(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = _AlbumClient()
     remember_album(store, "MPREb_X", client.get_album("MPREb_X"),
                    {"title": "Kind of Blue", "artist": "Miles Davis"})
-    assert store.collection.cached_album_tracklist_ids() == {"MPREb_X"}
+    assert store.collection.has_published_album_tracklist("MPREb_X")
     assert store.collection.complete_album_tracklist_ids() == set()
     sync.sync_all(store, {iid: client}, now=1.0)
     assert client.album_calls == 2
@@ -63,7 +63,7 @@ def test_browsing_an_unsaved_album_does_not_prevent_later_library_materializatio
 
 @pytest.mark.parametrize("incomplete", [(), ("album-3",), tuple(f"album-{i}" for i in range(8))])
 def test_materialization_enumerates_complete_albums_once_and_preserves_failures(store, monkeypatch, incomplete):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     saved = {f"album-{i}": {"title": f"Album {i}", "artist": "Artist", "thumbnail": None}
              for i in range(8)}
     albums = {bid: {"title": meta["title"], "artists": [{"name": "Artist"}],

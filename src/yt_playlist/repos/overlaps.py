@@ -2,17 +2,27 @@
 playlists, kept pairs, plus the category-scoped cleanup ignores (per-playlist empty/tiny dismissals
 and per-merge dismissals)."""
 import json
-from yt_playlist.core.playlist_scopes import ensure
 from yt_playlist.core import playlist_scope_state as scope_state
-
+from yt_playlist.core.playlist_scopes import ensure
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import CleanupPreferences
 
 
+_SUPPRESS = '''INSERT INTO playlist_overlap_decisions
+    (first_playlist_scope_id,second_playlist_scope_id,suppressed_at) VALUES (?,?,?)
+    ON CONFLICT(first_playlist_scope_id,second_playlist_scope_id) DO UPDATE
+    SET is_suppressed=1,suppressed_at=excluded.suppressed_at WHERE is_suppressed=0'''
+_PAIR = 'first_playlist_scope_id=? AND second_playlist_scope_id=?'
+_DISMISSAL_TIMES = "json_group_object(key,CASE WHEN value IS NOT NULL THEN json(printf('%!.26g',value)) END)"
+
+
 class OverlapRepo(Repo):
+    def _scope_pair(self, first, second):
+        return tuple(sorted((ensure(self.conn, first), ensure(self.conn, second))))
+
     @synchronized
     def cleanup_preferences(self) -> CleanupPreferences:
-        """Read each preference table once; callers can pin first_playlist_scope_id shared snapshot."""
+        """Read preferences for a cleanup calculation on the caller's snapshot."""
         return CleanupPreferences(
             self.get_cleanup_ignored(), self.get_suppressed_overlaps(),
             self.get_overlap_ignored(), self.get_overlap_kept_pairs(),
@@ -20,11 +30,8 @@ class OverlapRepo(Repo):
 
     @synchronized
     def suppress_overlap(self, ytm_a, ytm_b, now) -> None:
-        ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
-        first_playlist_scope_id, second_playlist_scope_id = sorted((ytm_a, ytm_b))  # normalize order so the pair is unordered
-        self.conn.execute('INSERT OR IGNORE INTO suppressed_overlaps(first_playlist_scope_id,second_playlist_scope_id,created_at) VALUES (?,?,?)',
-                          (first_playlist_scope_id, second_playlist_scope_id, now))
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(_SUPPRESS, (*self._scope_pair(ytm_a, ytm_b), now))
 
     @synchronized
     def suppress_overlaps(self, pairs, now) -> None:
@@ -38,28 +45,28 @@ class OverlapRepo(Repo):
             return
         with self.conn:
             refs = {ref: ensure(self.conn, ref) for ref in sorted({ref for pair in pairs for ref in pair})}
-            normalized = {tuple(sorted((refs[first_playlist_scope_id], refs[second_playlist_scope_id]))) for first_playlist_scope_id, second_playlist_scope_id in pairs}
-            self.conn.executemany(
-                'INSERT OR IGNORE INTO suppressed_overlaps(first_playlist_scope_id,second_playlist_scope_id,created_at) VALUES (?,?,?)',
-                [(first_playlist_scope_id, second_playlist_scope_id, now) for first_playlist_scope_id, second_playlist_scope_id in sorted(normalized)])
+            normalized = {tuple(sorted((refs[first], refs[second]))) for first, second in pairs}
+            self.conn.executemany(_SUPPRESS, [(*pair, now) for pair in sorted(normalized)])
 
     @synchronized
     def unsuppress_overlap(self, ytm_a, ytm_b) -> None:
-        ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
-        first_playlist_scope_id, second_playlist_scope_id = sorted((ytm_a, ytm_b))
-        self.conn.execute('DELETE FROM suppressed_overlaps WHERE first_playlist_scope_id=? AND second_playlist_scope_id=?', (first_playlist_scope_id, second_playlist_scope_id))
-        self.conn.commit()
+        with self.conn:
+            pair = self._scope_pair(ytm_a, ytm_b)
+            self.conn.execute(f'DELETE FROM playlist_overlap_decisions WHERE {_PAIR} AND is_kept=0', pair)
+            self.conn.execute('UPDATE playlist_overlap_decisions SET is_suppressed=0,suppressed_at=NULL '
+                              f'WHERE {_PAIR} AND is_suppressed=1', pair)
 
     @synchronized
     def get_suppressed_overlap_pairs(self) -> set:
-        rows = self.conn.execute("SELECT first_playlist_scope_id,second_playlist_scope_id FROM suppressed_overlaps").fetchall()
-        return {frozenset((r["first_playlist_scope_id"], r["second_playlist_scope_id"])) for r in rows}
+        rows = self.conn.execute('SELECT first_playlist_scope_id,second_playlist_scope_id '
+                                 'FROM playlist_overlap_decisions WHERE is_suppressed=1')
+        return {frozenset(row) for row in rows}
 
     @synchronized
     def get_suppressed_overlaps(self) -> list[tuple]:
-        rows = self.conn.execute(
-            "SELECT first_playlist_scope_id,second_playlist_scope_id,created_at FROM suppressed_overlaps ORDER BY created_at DESC").fetchall()
-        return [(r["first_playlist_scope_id"], r["second_playlist_scope_id"], r["created_at"]) for r in rows]
+        rows = self.conn.execute('SELECT first_playlist_scope_id,second_playlist_scope_id,suppressed_at '
+                                 'FROM playlist_overlap_decisions WHERE is_suppressed=1 ORDER BY suppressed_at DESC')
+        return [tuple(row) for row in rows]
 
     @synchronized
     def ignore_overlap_playlist(self, ytm, now) -> None:
@@ -67,10 +74,7 @@ class OverlapRepo(Repo):
             if not self.conn.in_transaction:
                 self.conn.execute('BEGIN IMMEDIATE')
             ytm = ensure(self.conn,ytm)
-            if scope_state.available(self.conn):
-                scope_state.ignore_overlap(self.conn, ytm, now)
-            else:
-                self.conn.execute("INSERT OR IGNORE INTO overlap_ignored(ytm,created_at) VALUES (?,?)", (ytm, now))
+            scope_state.ignore_overlap(self.conn, ytm, now)
 
     @synchronized
     def unignore_overlap_playlist(self, ytm) -> None:
@@ -78,80 +82,98 @@ class OverlapRepo(Repo):
             if not self.conn.in_transaction:
                 self.conn.execute('BEGIN IMMEDIATE')
             ytm = ensure(self.conn,ytm)
-            if scope_state.available(self.conn):
-                scope_state.unignore_overlap(self.conn, ytm)
-            else:
-                self.conn.execute("DELETE FROM overlap_ignored WHERE ytm=?", (ytm,))
+            scope_state.unignore_overlap(self.conn, ytm)
 
     @synchronized
     def get_overlap_ignored(self) -> set:
-        if scope_state.available(self.conn):
-            return scope_state.overlap_ignored(self.conn)
-        return {r["ytm"] for r in self.conn.execute("SELECT ytm FROM overlap_ignored").fetchall()}
+        return scope_state.overlap_ignored(self.conn)
 
     @synchronized
     def keep_overlap_pair(self, ytm_a, ytm_b, now) -> None:
-        ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
-        first_playlist_scope_id, second_playlist_scope_id = sorted((ytm_a, ytm_b))   # pair the user wants to keep visible despite ignoring first_playlist_scope_id playlist
-        self.conn.execute('INSERT OR IGNORE INTO overlap_kept(first_playlist_scope_id,second_playlist_scope_id,created_at) VALUES (?,?,?)', (first_playlist_scope_id, second_playlist_scope_id, now))
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute('''INSERT INTO playlist_overlap_decisions
+                (first_playlist_scope_id,second_playlist_scope_id,is_suppressed,is_kept,kept_at) VALUES (?,?,0,1,?)
+                ON CONFLICT(first_playlist_scope_id,second_playlist_scope_id) DO UPDATE
+                SET is_kept=1,kept_at=excluded.kept_at WHERE is_kept=0''',
+                (*self._scope_pair(ytm_a, ytm_b), now))
 
     @synchronized
     def get_overlap_kept_pairs(self) -> set:
-        rows = self.conn.execute("SELECT first_playlist_scope_id,second_playlist_scope_id FROM overlap_kept").fetchall()
-        return {frozenset((r["first_playlist_scope_id"], r["second_playlist_scope_id"])) for r in rows}
+        rows = self.conn.execute('SELECT first_playlist_scope_id,second_playlist_scope_id '
+                                 'FROM playlist_overlap_decisions WHERE is_kept=1')
+        return {frozenset(row) for row in rows}
 
     # --- category-scoped per-playlist ignores (Empty / Tiny sections) ---------------------------
     @synchronized
     def ignore_cleanup(self, ytm, category, now) -> None:
         """Dismiss one playlist from ONE cleanup category (e.g. 'this is empty, stop suggesting it').
         Scoped: it stays eligible in every other category."""
-        ytm = ensure(self.conn,ytm)
-        self.conn.execute('INSERT OR IGNORE INTO cleanup_ignored(playlist_scope_id,category,created_at) VALUES (?,?,?)',
-                          (ytm, category, now))
-        self.conn.commit()
+        with self.conn:
+            scope = ensure(self.conn, ytm)
+            self.conn.execute(f'''UPDATE playlist_scopes SET cleanup_dismissals=(
+                SELECT {_DISMISSAL_TIMES} FROM (
+                    SELECT key,value FROM json_each(cleanup_dismissals)
+                    UNION ALL SELECT CAST(? AS TEXT),?
+                )
+            ) WHERE id=? AND ? IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM json_each(cleanup_dismissals) WHERE key=CAST(? AS TEXT))''',
+                (category, now, scope, category, category))
 
     @synchronized
     def unignore_cleanup(self, ytm, category) -> None:
-        ytm = ensure(self.conn,ytm)
-        self.conn.execute('DELETE FROM cleanup_ignored WHERE playlist_scope_id=? AND category=?', (ytm, category))
-        self.conn.commit()
+        with self.conn:
+            scope = ensure(self.conn, ytm)
+            self.conn.execute(f'''UPDATE playlist_scopes SET cleanup_dismissals=(
+                SELECT {_DISMISSAL_TIMES} FROM json_each(cleanup_dismissals) WHERE key<>CAST(? AS TEXT)
+            ) WHERE id=? AND EXISTS (SELECT 1 FROM json_each(cleanup_dismissals) WHERE key=CAST(? AS TEXT))''',
+                (category, scope, category))
 
     @synchronized
     def get_cleanup_ignored(self) -> dict:
         """{category: set(ytm)} of per-playlist cleanup dismissals."""
         out: dict = {}
-        for r in self.conn.execute("SELECT playlist_scope_id,category FROM cleanup_ignored"):
-            out.setdefault(r["category"], set()).add(r["playlist_scope_id"])
+        for scope, category in self.conn.execute(
+                'SELECT p.id,d.key FROM playlist_scopes p JOIN json_each(p.cleanup_dismissals) d'):
+            out.setdefault(category, set()).add(scope)
         return out
 
     # --- per-merge ignores (Exact / Near-duplicate groups) ---------------------------------------
-    # A merge suggestion is the relationship between first_playlist_scope_id SET of playlists, so it's dismissed by the
-    # group's canonical member signature, not by ignoring the individual playlists. If the cluster's
-    # membership later changes, the signature changes and the (now genuinely different) merge returns.
+    # A changed member set has a new signature and produces a new suggestion.
+    def _merge_dismissals(self):
+        row = self.conn.execute('SELECT value FROM settings WHERE key=?', (scope_state.MERGE_DISMISSALS,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def _save_merge_dismissals(self, dismissals):
+        self.conn.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE '
+                          'SET value=excluded.value', (scope_state.MERGE_DISMISSALS, json.dumps(dismissals)))
+
     @synchronized
     def ignore_merge(self, signature, members, now) -> None:
-        members = sorted({ensure(self.conn,m) for m in members})
-        signature = '|'.join(members)
-        self.conn.execute(
-            "INSERT OR IGNORE INTO ignored_merges(signature,members,created_at) VALUES (?,?,?)",
-            (signature, json.dumps(list(members)), now))
-        self.conn.executemany('INSERT OR IGNORE INTO main.ignored_merge_members VALUES (?,?)', [(signature,m) for m in members])
-        self.conn.commit()
+        with self.conn.atomic(join=True):
+            members = sorted({ensure(self.conn, member) for member in members})
+            signature = '|'.join(members)
+            dismissals = self._merge_dismissals()
+            if signature not in dismissals:
+                dismissals[signature] = {'members': members, 'created_at': now}
+                self._save_merge_dismissals(dismissals)
 
     @synchronized
     def unignore_merge(self, signature) -> None:
-        self.conn.execute("DELETE FROM ignored_merges WHERE signature=?", (signature,))
-        self.conn.commit()
+        with self.conn.atomic(join=True):
+            dismissals = self._merge_dismissals()
+            if signature in dismissals:
+                del dismissals[signature]
+                self._save_merge_dismissals(dismissals)
 
     @synchronized
     def get_ignored_merge_sigs(self) -> set:
         """Just the signatures, for filtering groups out of the cleanup view and the home count."""
-        return {r["signature"] for r in self.conn.execute("SELECT signature FROM ignored_merges")}
+        return set(self._merge_dismissals())
 
     @synchronized
     def get_ignored_merges(self) -> list:
         """[{signature, members:[ytm]}] newest-first, for the 'Ignored cleanups' display + un-ignore."""
-        return [{"signature": r["signature"], "members": json.loads(r["members"])}
-                for r in self.conn.execute(
-                    "SELECT signature, members FROM ignored_merges ORDER BY created_at DESC")]
+        dismissals = self._merge_dismissals()
+        signatures = sorted(dismissals, key=lambda signature: (
+            dismissals[signature]['created_at'] is not None, dismissals[signature]['created_at']), reverse=True)
+        return [{'signature': signature, 'members': dismissals[signature]['members']} for signature in signatures]

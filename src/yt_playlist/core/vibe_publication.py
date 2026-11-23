@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from . import fao, vibe_model_files
+from .audio_vibe_contract import ACOUSTICBRAINZ_ESTIMATE, POOLED_SOURCES
 from .evidence_ledger import canonical
 
 
@@ -21,6 +22,10 @@ class PreparedVibes:
     roots: list = field(default_factory=list)
     generations: list = field(default_factory=list)
     file_records: list = field(default_factory=list)
+    classifier_inputs: list = field(default_factory=list)
+    deleted_inputs: list = field(default_factory=list)
+    estimates: list = field(default_factory=list)
+    deleted_estimates: list = field(default_factory=list)
 
     def close(self):
         for publication in self.staged:
@@ -31,9 +36,7 @@ def _same_inputs(facts, pid, inputs):
     saved = facts.get(pid)
     if saved is None:
         return False
-    fingerprint, state, _generation, legacy = saved
-    if fingerprint is None:
-        return set(legacy) == inputs
+    fingerprint, state, _generation = saved
     if state != 'ready':
         raise fao.CorruptFile('Current calculation provenance expired while referenced')
     return fingerprint == hashlib.sha256(canonical(sorted(inputs))).digest()
@@ -73,16 +76,32 @@ def prepare(tracks, resolved, touched, now, facts, genre_axes):
         if rid is None:
             continue
         previous = previous_rows.get(rid, {})
-        plan.deleted.extend((rid, vibe) for vibe in previous.keys() - resolved.get(key, {}).keys())
+        previous_input = facts.get('classifier_inputs', {}).get(rid)
+        classifier_input = track.get('acousticbrainz_input') if track else None
+        if classifier_input != previous_input:
+            if classifier_input is None:
+                plan.deleted_inputs.append((rid,))
+            else:
+                plan.classifier_inputs.append((rid, *classifier_input))
+        previous_estimates = facts.get('estimates', {}).get(rid, {})
+        fits = resolved.get(key, {})
+        estimate_vibes = {vibe for vibe, fit in fits.items() if fit['source'] == ACOUSTICBRAINZ_ESTIMATE}
+        plan.deleted.extend((rid, vibe) for vibe in previous.keys() & estimate_vibes | (previous.keys() - fits.keys()))
+        plan.deleted_estimates.extend((rid, vibe) for vibe in previous_estimates.keys() - estimate_vibes)
         if track is None:
             continue
         if track['genre'] and genre_axes.get(track['genre'], (None, None))[1] != track['genre']:
             raise ValueError('Prediction conditioning requires a canonical specific genre key')
-        for vibe, fit in resolved.get(key, {}).items():
+        for vibe, fit in fits.items():
             if fit.get('retain'):
                 continue
             source, mid, pid = fit['source'], mids.get((key, vibe)), None
-            if source in ('artist_genre', 'artist', 'genre'):
+            if source == ACOUSTICBRAINZ_ESTIMATE:
+                estimate = fit['score'], fit['inputs_version']
+                if classifier_input != previous_input or estimate != previous_estimates.get(vibe):
+                    plan.estimates.append((rid, vibe, *estimate))
+                continue
+            if source in POOLED_SOURCES:
                 model, old = fit.get('generation'), previous.get(vibe)
                 if model:
                     artists = json.loads(track['artist'] or '[]')

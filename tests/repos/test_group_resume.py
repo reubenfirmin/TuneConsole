@@ -74,8 +74,8 @@ def interrupt(monkeypatch, *, member_batches=1, error=WorkBudgetExceeded):
             yield conn
         # Header/input batches precede membership in the compact protocol.
         # Interrupt a committed membership prefix, independent of those steps.
-        pending = repo.conn.execute('SELECT g.external_key FROM group_generations g '
-            'JOIN group_builds b ON b.generation_id=g.id WHERE b.ready=0').fetchall()
+        pending = repo.conn.execute('SELECT external_key FROM group_generations '
+            'WHERE build_owner IS NOT NULL AND build_ready=0').fetchall()
         if any(len(members(repo._store, row[0])) >= member_batches * group_publication.BATCH_ROWS
                for row in pending):
             raise error('Controlled interruption after a committed membership batch')
@@ -85,14 +85,11 @@ def interrupt(monkeypatch, *, member_batches=1, error=WorkBudgetExceeded):
 
 
 def members(store, generation):
-    return [tuple(row) for row in store.conn.execute('WITH selected AS ('
-        'SELECT generation_id,group_version_id,external_version FROM generation_groups UNION '
-        'SELECT generation_id,group_version_id,external_version FROM group_build_versions), '
-        'members AS (SELECT m.group_version_id,r.identity_key,m.similarity,m.support '
-        'FROM group_members m JOIN recordings r ON r.id=m.recording_id UNION ALL '
-        'SELECT group_version_id,raw_key,similarity,support FROM unresolved_group_members) '
-        'SELECT s.external_version,m.identity_key,m.similarity,m.support FROM selected s '
-        'JOIN group_generations g ON g.id=s.generation_id JOIN members m USING(group_version_id) '
+    return [tuple(row) for row in store.conn.execute('WITH '
+        'members AS (SELECT m.group_version_id,COALESCE(r.identity_key,m.raw_key) identity_key,m.similarity,m.support '
+        'FROM group_members m LEFT JOIN recordings r ON r.id=m.recording_id) '
+        'SELECT s.external_version,m.identity_key,m.similarity,m.support FROM group_versions s '
+        'JOIN group_generations g ON g.id=s.generation_id JOIN members m ON m.group_version_id=s.id '
         'WHERE g.external_key=? ORDER BY s.external_version,m.identity_key', (generation,))]
 
 
@@ -147,8 +144,7 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(
         # is a controlled fixture; the independent actual-library audit waits
         # the production interval and lease in real wall time.
         with database.conn:
-            database.conn.execute('UPDATE group_builds SET expires_at=0 WHERE generation_id='
-                '(SELECT id FROM group_generations WHERE external_key=?)', (generation,))
+            database.conn.execute('UPDATE group_generations SET build_expires_at=0 WHERE external_key=?', (generation,))
         path = database._db_path
         database.conn.close()
         database = Store(path)
@@ -159,9 +155,6 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(
             # This case restarts the repository worker on already admitted SQL.
             # Rebind real owners and connection-local guards without repeating
             # application migrations, repairs and installed-format validation.
-            database._schema_compatibility = False
-            database._rebuild_source_version = None
-            database._schema_recovery_pending = False
             database._bind_repositories()
             database._snapshot_revisions = _pristine_current_schema.bind_revisions(database.conn)
         worker = group_preparation.Preparation(database)
@@ -174,9 +167,7 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(
         assert database.taste_groups.head()['created_at'] == 2000
         assert members(database, generation) == sorted((group['version'], *member)
             for group in plan['groups'] for member in group['members'])
-        assert sum(database.conn.execute(f'SELECT COUNT(*) FROM {table} WHERE generation_id='
-            '(SELECT id FROM group_generations WHERE external_key=?)', (generation,)).fetchone()[0]
-            for table in ('group_graph', 'unresolved_group_graph')) == len(plan['edges'])
+        assert database.taste_groups.head()['payload']['counts']['edges'] == len(plan['edges'])
         assert legacy_version in database.taste_groups.legacy_versions()
         assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']
         assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -199,8 +190,8 @@ def test_foreign_live_lease_cannot_be_adopted(database, monkeypatch):
     with pytest.raises(WorkBudgetExceeded, match='leased by another worker'):
         database.taste_groups.stage(other)
     assert members(database, plan['generation']) == prefix
-    assert database.conn.execute('SELECT b.owner FROM group_builds b JOIN group_generations g '
-        'ON g.id=b.generation_id WHERE g.external_key=?', (plan['generation'],)).fetchone()[0] == owner
+    assert database.conn.execute('SELECT build_owner FROM group_generations WHERE external_key=?',
+                                 (plan['generation'],)).fetchone()[0] == owner
     finish(database, plan, database.taste_groups.stage(plan))
     assert database.taste_groups.head_generation() == plan['generation']
 
@@ -216,18 +207,17 @@ def test_cleanup_prefix_is_finished_before_rebuilding_same_generation(database, 
     prefix = members(database, plan['generation'])
     assert len(prefix) == 8
     version_ids = [row[0] for row in database.conn.execute(
-        'SELECT group_version_id FROM group_build_versions WHERE generation_id='
+        'SELECT id FROM group_versions WHERE generation_id='
         '(SELECT id FROM group_generations WHERE external_key=?)', (plan['generation'],))]
 
     def payload_size():
-        return sum(database.conn.execute(f'SELECT COUNT(*) FROM {table} WHERE group_version_id=?',
-            (version,)).fetchone()[0] for table in ('group_members', 'unresolved_group_members')
-            for version in version_ids)
+        return sum(database.conn.execute('SELECT COUNT(*) FROM group_members WHERE group_version_id=?',
+                   (version,)).fetchone()[0] for version in version_ids)
 
     assert payload_size() == 8
     monkeypatch.setattr(group_publication, '_write', original)
     with database.conn:
-        database.conn.execute('UPDATE group_builds SET expires_at=0')
+        database.conn.execute('UPDATE group_generations SET build_expires_at=0 WHERE build_owner IS NOT NULL')
     # Compact cleanup detaches build aliases before deleting payload batches.
     # Check the physical prefix, including while it is no longer selectable.
     for _ in range(32):
@@ -277,16 +267,16 @@ def test_unpublished_legacy_collision_waits_then_cleans_expired_owner(database, 
     monkeypatch.setattr(group_publication, '_write', original)
     with pytest.raises(WorkBudgetExceeded, match='leased by another unpublished build'):
         database.taste_groups.stage(new)
-    assert database.conn.execute('SELECT g.external_key FROM group_build_versions b '
-        'JOIN group_generations g ON g.id=b.generation_id WHERE b.external_version=?',
+    assert database.conn.execute('SELECT g.external_key FROM group_versions v '
+        'JOIN group_generations g ON g.id=v.generation_id WHERE v.external_version=? AND v.is_origin=1',
         (version,)).fetchone()[0] == old['generation']
     assert database.taste_groups.head(members=True) == first
     with database.conn:
-        database.conn.execute('UPDATE group_builds SET expires_at=0 WHERE generation_id='
-            '(SELECT id FROM group_generations WHERE external_key=?)', (old['generation'],))
+        database.conn.execute('UPDATE group_generations SET build_expires_at=0 WHERE external_key=?',
+                              (old['generation'],))
     finish(database, new, database.taste_groups.stage(new))
-    assert database.conn.execute('SELECT g.external_key FROM group_version_aliases a '
-        'JOIN group_generations g ON g.id=a.first_generation_id WHERE a.external_version=?',
+    assert database.conn.execute('SELECT g.external_key FROM group_versions v '
+        'JOIN group_generations g ON g.id=v.generation_id WHERE v.external_version=? AND v.is_origin=1',
         (version,)).fetchone()[0] == new['generation']
     assert not database.conn.execute('SELECT 1 FROM group_generations WHERE external_key=?',
                                      (old['generation'],)).fetchone()
@@ -329,11 +319,9 @@ def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypa
     elif change == 'unrelated-setting':
         database.settings.set_setting('foreground-setting', 'new')
     elif change == 'fit-checkpoint':
-        checkpoint = 'SELECT generation_id,unresolved_generation,input_serial,checkpoint_at '
-        checkpoint += 'FROM group_preparation_state WHERE singleton=1'
-        before = tuple(database.conn.execute(checkpoint).fetchone())
+        before = database.settings.get_setting('rec_group_shadow_checkpoint')
         database.settings.set_setting('rec_mode_fit_inputs', 'unrelated-content-fit')
-        assert tuple(database.conn.execute(checkpoint).fetchone()) == before
+        assert database.settings.get_setting('rec_group_shadow_checkpoint') == before
     else:
         with closing(sqlite3.connect(database._db_path)) as other, other:
             other.execute("INSERT INTO settings VALUES ('external-setting','new')")

@@ -79,16 +79,19 @@ def select(rows):
 
 
 def freeze(conn, output):
+    from yt_playlist.core.catalog_query import ENRICHMENT_RECORDINGS_SQL
+
     if (output / 'sample.json').exists():
         raise ValueError('Pinned sample already exists; use a new output directory')
-    rows = [dict(row) for row in conn.execute('''SELECT c.id AS entry_id,c.recording_id,c.identity_key AS key,
+    energy = 'c.energy' if any(row[1] == 'energy' for row in conn.execute('PRAGMA table_info(catalog_tracks)')) else 'NULL'
+    rows = [dict(row) for row in conn.execute(f'''SELECT c.id AS entry_id,c.recording_id,c.identity_key AS key,
         c.title,c.artist,c.album,c.mb_year,c.video_id,c.duration_s,c.genre,c.mb_recording_id,
-        c.bpm,c.energy,c.danceability,c.instrumental,c.mood_acoustic,
-        EXISTS(SELECT 1 FROM library_memberships l WHERE l.entry_id=c.id) AS library,
-        EXISTS(SELECT 1 FROM discovery_memberships d WHERE d.recording_id=c.recording_id) AS discovery,
+        c.bpm,{energy} AS energy,c.danceability,c.instrumental,c.mood_acoustic,
+        s.in_library AS library,s.in_discovery AS discovery,
         EXISTS(SELECT 1 FROM metadata_conflicts m WHERE (m.recording_id=c.recording_id OR m.entry_id=c.id)
             AND m.status='unresolved') AS has_conflict
-        FROM catalog_tracks c WHERE c.available IS NOT 0 AND c.video_id IS NOT NULL
+        FROM catalog_tracks c JOIN ({ENRICHMENT_RECORDINGS_SQL}) s ON s.recording_id=c.recording_id
+        WHERE c.available IS NOT 0 AND c.video_id IS NOT NULL
         AND length(c.title)>=3 AND length(c.artist)>=3 ORDER BY c.id''')]
     # Collapse alternate playable items before sampling. Prefer duration-known items.
     unique = {}

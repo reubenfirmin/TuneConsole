@@ -16,7 +16,8 @@ from tests.test_onboarding_routes import _client
 from yt_playlist.core import catalog
 from yt_playlist.core.store import Store
 from yt_playlist.rec import account_growth, rec_params
-from yt_playlist.rec.radio_candidates import RadioCandidates, eligible_seeds
+from yt_playlist.rec.radio_candidates import RadioCandidates
+from yt_playlist.rec.radio_startup import eligible_seeds
 from yt_playlist.web.radio_launch import RadioLaunch
 
 
@@ -57,9 +58,9 @@ def seeds(store):
 def invalidate(store, tracks, condition):
     with store.conn:
         for track in tracks:
-            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (track['video_id'],)).fetchone()[0]
+            entry = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?', (track['video_id'],)).fetchone()[0]
             if condition == 'unavailable':
-                store.conn.execute('UPDATE youtube_items SET available=0 WHERE video_id=?', (track['video_id'],))
+                store.conn.execute('UPDATE track_sources SET available=0 WHERE video_id=?', (track['video_id'],))
             elif condition == 'overlong':
                 catalog.choose_field(store.conn, entry, 'duration_s', 9000)
             elif condition == 'feedback':
@@ -79,7 +80,7 @@ def test_cached_radio_offer_agrees_across_http_bootstrap_and_direct_growth(store
     # have independent owners in test_growth_readiness/test_growth_destinations.
     from yt_playlist.rec import growth_readiness, onboarding_outputs, tv
 
-    monkeypatch.setattr(onboarding_outputs, 'prepared_mixes_ready', lambda *a, **kw: True)
+    monkeypatch.setattr(onboarding_outputs, 'mixes_ready', lambda _store, _now: True)
     for name in ('foundation', 'albums', 'discover'):
         monkeypatch.setattr(growth_readiness, name, lambda *a, **kw: True)
     monkeypatch.setattr(tv, 'queue', lambda *a, **kw: [{} for _ in range(tv.QUEUE_SIZE)])
@@ -88,7 +89,7 @@ def test_cached_radio_offer_agrees_across_http_bootstrap_and_direct_growth(store
     # First sounds remains playable when every old offer becomes ineligible.
     # Its admission must not accidentally become the reason Radio is blocked.
     seed_catalog_track(store, 'keeper|artist', 'Keeper', 'Artist', video_id='keeper', duration_s=180)
-    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)')], 1000)
     offer = {'menu_id': 'original-radio-menu', 'tracks': tracks}
     encoded = json.dumps(offer)
     store.settings.set_setting('radio_seed_offer', encoded)
@@ -104,7 +105,8 @@ def test_cached_radio_offer_agrees_across_http_bootstrap_and_direct_growth(store
     direct = account_growth.view(store, 1000)
     node = next(node for node in state['nodes'] if node['id'] == 'radio')
     assert not node['usable'] and not state['ready_formats']['radio']
-    assert not direct['ready_formats']['radio'] and not state['ready_areas']['tv']
+    assert not direct['ready_formats']['radio']
+    assert not state['ready_areas']['tv'] and not direct['ready_areas']['tv']
     assert controller.bootstrap()['seeds'] == []
     assert controller.bootstrap()['seedMenu'] == offer['menu_id']
     assert store.settings.get_setting('radio_seed_offer') == encoded
@@ -127,14 +129,14 @@ def test_cached_radio_offer_applies_current_exclusions_and_requires_source_ident
 @pytest.mark.parametrize('evidence', ['radio_start', 'generated_play', 'calendar', 'adopted', 'unknown'])
 def test_cached_offer_refreshes_novelty_without_replacing_issued_choices(store, evidence):
     tracks = seeds(store)
-    account = store.accounts.upsert_account('listener', 'credential', None, True)
+    account = store.accounts.upsert_account('listener', None, True)
     with store.conn:
-        store.conn.execute('DELETE FROM library_memberships')
-    candidates = RadioCandidates(store, 1000, comparison=None)
+        store.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE library_origin IS NOT NULL')
+    candidates = RadioCandidates(store, 1000)
     offered = [{**track, '_radio_fresh': True, '_radio_rotation': 'new'} for track in tracks]
     candidates.retain(offered)
     assert all(track['_radio_fresh'] for track in offered)
-    entry = store.conn.execute('SELECT id,recording_id FROM catalog_entries WHERE video_id=?',
+    entry = store.conn.execute('SELECT id,recording_id FROM track_sources WHERE video_id=?',
                                (tracks[0]['video_id'],)).fetchone()
     if evidence == 'radio_start':
         store.rec_ledger.record_recommendation_outcomes('radio-start', 'start', [tracks[0]['key']], 1001, generated=True)
@@ -150,7 +152,7 @@ def test_cached_offer_refreshes_novelty_without_replacing_issued_choices(store, 
                 (account, tracks[0]['key'], entry['recording_id']))
     elif evidence == 'adopted':
         with store.conn:
-            store.conn.execute("INSERT INTO library_memberships VALUES (?,'adopted',1001)", (entry['id'],))
+            store.conn.execute("UPDATE track_sources SET library_origin='adopted',library_added_at=1001 WHERE id=? AND library_origin IS NULL", (entry['id'],))
     else:
         offered[0]['key'] = 'missing-current-identity'
     try:
@@ -173,9 +175,9 @@ def test_cached_offer_refreshes_novelty_without_replacing_issued_choices(store, 
 @pytest.mark.parametrize('condition', ['eligible', 'unavailable', 'overlong'])
 @pytest.mark.parametrize('cached', [False, True])
 def test_requested_seed_rechecks_current_eligibility_even_when_already_loaded(store, condition, cached):
-    identity = store.accounts.upsert_account('Main', 'unused', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     tracks = seeds(store)
-    candidates = RadioCandidates(store, 1000, comparison=None)
+    candidates = RadioCandidates(store, 1000)
     try:
         if not cached:
             candidates.by_video.pop(tracks[0]['video_id'], None)

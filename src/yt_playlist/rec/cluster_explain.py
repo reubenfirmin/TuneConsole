@@ -22,7 +22,7 @@ def connection_reasons(evidence: ConnectionEvidence, *, max_artists=3) -> list[d
     out = []
     if evidence.same_artist is not None:
         out.append({'kind': 'same_artist',
-                    'text': f'Same artist ({evidence.same_artist}) as elsewhere on this branch.'})
+                    'text': f'Shares an artist credit with this branch ({evidence.same_artist}).'})
     if evidence.playlists:
         artists = []
         for neighbor in evidence.playlists:

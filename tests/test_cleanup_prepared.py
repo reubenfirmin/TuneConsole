@@ -80,7 +80,7 @@ def test_sparse_disjoint_memberships_have_no_candidate_pairs():
 def test_memberships_preferences_and_upload_kinds_share_a_snapshot(file_backed_store, monkeypatch):
     store = file_backed_store
     try:
-        iid = store.accounts.upsert_account('main', 'cred', None, True)
+        iid = store.accounts.upsert_account('main', None, True)
         a = store.playlists.upsert_playlist(iid, 'A', 'A', 1, '', 1)
         b = store.playlists.upsert_playlist(iid, 'B', 'B', 1, '', 1)
         track = store.tracks.upsert_track('v', 'Song', 'Artist', None, 100)
@@ -89,13 +89,12 @@ def test_memberships_preferences_and_upload_kinds_share_a_snapshot(file_backed_s
         # Two uploads of one recording: unique key counts, mixed upload kinds.
         other = store.tracks.upsert_track('v-other', 'Song', 'Artist', None, 100)
         with store.conn:
-            recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (track,)).fetchone()[0]
-            store.conn.execute('UPDATE catalog_entries SET recording_id=? WHERE id=?', (recording, other))
-            store.conn.execute('UPDATE youtube_items SET recording_id=? WHERE video_id=?', (recording, 'v-other'))
-            store.conn.execute("UPDATE youtube_items SET video_type='MUSIC_VIDEO_TYPE_ATV' WHERE video_id IN "
-                               "(SELECT video_id FROM catalog_entries WHERE id=?)", (track,))
-            store.conn.execute("UPDATE youtube_items SET video_type='MUSIC_VIDEO_TYPE_OMV' WHERE video_id IN "
-                               "(SELECT video_id FROM catalog_entries WHERE id=?)", (other,))
+            recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (track,)).fetchone()[0]
+            store.conn.execute('UPDATE track_sources SET recording_id=? WHERE id=?', (recording, other))
+            store.conn.execute("UPDATE track_sources SET video_type='MUSIC_VIDEO_TYPE_ATV' WHERE video_id IN "
+                               "(SELECT video_id FROM track_sources WHERE id=?)", (track,))
+            store.conn.execute("UPDATE track_sources SET video_type='MUSIC_VIDEO_TYPE_OMV' WHERE video_id IN "
+                               "(SELECT video_id FROM track_sources WHERE id=?)", (other,))
         store.playlists.set_playlist_tracks(a, [track, other])
         original = type(store.overlaps).cleanup_preferences
 
@@ -117,7 +116,7 @@ def test_memberships_preferences_and_upload_kinds_share_a_snapshot(file_backed_s
 
 
 def test_page_and_home_summary_share_one_analysis(store, monkeypatch):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     track = store.tracks.upsert_track('v', 'Song', 'Artist', None, 100)
     for i in range(10):
         pid = store.playlists.upsert_playlist(iid, f'P{i}', f'Playlist {i}', 1, '', 1)

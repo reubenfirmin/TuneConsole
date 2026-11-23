@@ -21,6 +21,7 @@ def associations():
     repo.association_subjects.return_value = dict(previous=7, target=12, previous_key='old', target_key='target', remaining=None)
     repo.rating_rows.return_value = []
     repo.rating_feedback_rows.return_value = []
+    repo.has_upload_rating.return_value = False
     repo.record_association.return_value = 20
     repo.association_work.return_value = None
     repo.redirect_recording.return_value = ['alias']
@@ -35,13 +36,18 @@ def associations():
 
 
 @pytest.mark.parametrize('equivalent', [False, True])
-def test_only_explicit_equivalence_copies_metadata(associations, equivalent):
+def test_only_explicit_equivalence_merges_the_last_uploads_recording(associations, equivalent):
     associations.associate('video', 10, source='review', evidence={'matched': True}, now=100, same_recording=equivalent)
     if equivalent:
         associations.metadata.reuse_recording_selections.assert_called_once_with(7, 12)
+        associations.keys.finish_reassociation.assert_called_once()
+        associations.repository.redirect_recording.assert_called_once()
     else:
         associations.metadata.reuse_recording_selections.assert_not_called()
-    associations.repository.assign_recording.assert_called_once_with('video', 7, 12, 'target', association=20)
+        associations.keys.prepare_reassociation.assert_not_called()
+        associations.keys.finish_reassociation.assert_not_called()
+        associations.repository.redirect_recording.assert_not_called()
+    associations.repository.assign_recording.assert_called_once_with('video', 7, 12, association=20)
     associations.calendar.reconcile_recordings.assert_called_once_with({7, 12})
     associations.model.reassociate_rating_feedback.assert_called_once_with({}, {'old': [], 'target': []}, association=20)
 
@@ -54,7 +60,7 @@ def test_file_preparation_finishes_before_changing_the_upload(associations):
         order.attach_mock(action, name)
     associations.keys.prepare_reassociation.side_effect = OSError('full')
     with pytest.raises(OSError, match='full'):
-        associations.associate('video', 12, source='review', evidence={'matched': True}, now=100)
+        associations.associate('video', 12, source='review', evidence={'matched': True}, now=100, same_recording=True)
     assert [call[0] for call in order.mock_calls] == ['discovery', 'documents']
     associations.repository.redirect_recording.assert_not_called()
     associations.model.reassociate_rating_feedback.assert_not_called()

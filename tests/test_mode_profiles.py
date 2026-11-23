@@ -4,12 +4,13 @@ from tests.enrichment_support import seed_audio
 import numpy as np
 
 from yt_playlist.rec import embedding_vectors as embed, taste_viz
+from yt_playlist.core.model_state import RecordingModelUpdate
 
 
 def _groups(store):
     model = {"cat": {"fam:house": 0, "dec:2010": 1, "dec:2020": 2},
-             "ncat": 3, "cont": [["bpm", 120, 10], ["energy", .5, .2]]}
-    store.settings.set_setting("rec_content_model", json.dumps(model))
+             "ncat": 3, "cont": [["bpm", 120, 10], ["danceability", .5, .2]]}
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder=json.dumps(model)))
     space = embed.content_space_id(store)
     centers = np.eye(5, dtype=np.float32)[:2]
     vectors, modes = [], []
@@ -22,7 +23,7 @@ def _groups(store):
             store.tracks.set_track_genre(tid, genre)
             store.tracks.set_track_year(tid, 2023 if group else 2013)
             if group and i < 8:
-                seed_audio(store, tid, bpm=128, energy=.9)
+                seed_audio(store, tid, bpm=128, danceability=.9)
             key = f"{title.lower()}|artist"
             keys.append(key)
             vectors.append((key, centers[group].tobytes()))
@@ -46,7 +47,7 @@ def test_descriptions_leave_feedback_and_the_choice_model_unchanged(store):
     assert [row['profile']['size'] for row in enriched['rows']] == [10, 10]
     assert enriched['rows'][1]['profile']['sound'] == [
         {'text': '128 BPM median', 'measured': 8, 'total': 10},
-        {'text': 'Higher energy', 'measured': 8, 'total': 10}]
+        {'text': 'More danceable', 'measured': 8, 'total': 10}]
     for row in enriched["rows"]:
         del row["profile"]
     assert enriched == before == choice_evidence(store)

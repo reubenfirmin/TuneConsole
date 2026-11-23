@@ -15,15 +15,9 @@ CALL_IDENTIFIER = re.compile(
 # A boundary names the actual non-asset operation and its narrow owner. Adding
 # another raw file operation elsewhere requires an explicit inventory decision.
 BOUNDARIES = {
- 'offline whole-root custody, with application handles drained': {
-  'core/db_rebuild/files.py': ('_move',),
- },
  'native SQLite custody': {
-  'core/db_rebuild/files.py': ('source_identity',),
-  'core/db_rebuild/build.py': ('construct','build'),
-  'core/db_rebuild/install.py': ('digest','sync','_rollback','replace','owner'),
-  'core/db_rebuild/job.py': ('run',),
   'core/repair.py': ('_publish_backup',),
+  'core/playback_inbox_upgrade.py': ('_retire',),
  },
  'TOML configuration or credentials': {
   'core/config_files.py': ('ConfigFiles.read', 'ConfigFiles.stage',
@@ -36,17 +30,15 @@ BOUNDARIES = {
   'rec/audio_vibe_runtime.py': ('configured',),
  },
  'SQL/code definition, never runtime JSON': {
-  'core/db_rebuild/destination.py': ('signature',),
   # Bundled schema sources never open account-owned runtime assets.
   'core/destination_schema.py': ('definition',),
-  'core/schema_definition.py': ('_read_statements',),
+  'core/migrations/schema_definition.py': ('_read_statements',),
+  'rec/acousticbrainz_vibes.py': ('bundled',),
  },
  'lock or fixed coordination counter': {
-  'core/db_handles.py': ('lease',),
   'core/evidence_ledger.py': ('EvidenceLedger._budget','EvidenceLedger.generation',
       'EvidenceLedger._advance_generation','EvidenceLedger._maintain'),
-  'core/playback_inbox.py': ('Inbox.admission',),
-  'core/playback_observation_files.py': ('ObservationFiles.admission',),
+  'core/playback_inbox_file.py': ('fence',),
   'core/album_feedback_outbox.py': ('fence',),
   'library/action_claim.py': ('_claim',),
   'core/pending_lifetimes.py': ('Marker.close', 'PendingLifetimes.reserve',
@@ -57,7 +49,7 @@ BOUNDARIES = {
  },
  'repository-owned SQL reader lifetime, no raw file body': {
   'rec/album_choices.py': ('_stored_companions',),
-  'rec/stored_groups.py': ('selection_reader',),
+  'rec/stored_groups.py': ('selection_reader', 'Selection.tracks'),
   'rec/stored_home.py': ('preparation_inputs','_assemble'),
  },
  'external network, zip, package metadata, OS or developer log': {

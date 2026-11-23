@@ -3,8 +3,8 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.db_revisions import keyed_reads
 from contextlib import nullcontext
 
-from yt_playlist.core import listening_outputs
-from yt_playlist.repos.base import Repo, lookup_read, synchronized, snapshot_read
+from yt_playlist.core import listening_outputs, rating_actions, recommendation_impressions
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 from . import recommendation_file_writes
 
 BATCH_SIZE = 256
@@ -43,21 +43,23 @@ class ListeningAnalyticsRepo(Repo):
             genre = genre_classifications.read_expression(self.conn, 'r', 'recordings')
             artists = self.entry_artists_table
         return self._batches(f'SELECT r.identity_key,r.title,r.artist,{genre} AS genre,'
-            f'(SELECT ta.artist_id FROM catalog_entries e JOIN {artists} ta ON ta.entry_id=e.id '
+            f'(SELECT ta.artist_id FROM track_sources e JOIN {artists} ta ON ta.entry_id=e.id '
             'WHERE e.recording_id=r.id ORDER BY ta.position,e.id LIMIT 1) artist_id,'
-            '(SELECT y.video_id FROM youtube_items y WHERE y.recording_id=r.id '
+            '(SELECT y.video_id FROM track_sources y WHERE y.recording_id=r.id AND y.video_id IS NOT NULL '
             'ORDER BY y.thumbnail IS NULL,y.video_id LIMIT 1) video_id,'
-            '(SELECT y.thumbnail FROM youtube_items y WHERE y.recording_id=r.id '
+            '(SELECT y.thumbnail FROM track_sources y WHERE y.recording_id=r.id AND y.video_id IS NOT NULL '
             "AND y.thumbnail IS NOT NULL ORDER BY y.video_id LIMIT 1) thumbnail FROM recordings r")
 
     def rating_actions(self, now):
-        return self._batches('SELECT a.*,r.identity_key FROM listening_rating_actions a '
-            'LEFT JOIN youtube_items y ON y.video_id=a.video_id '
-            'LEFT JOIN recordings r ON r.id=y.recording_id WHERE at<=? ORDER BY at,id', (now,))
+        with keyed_reads(self._store, 'player_events', (rating_actions.KIND,)):
+            yield from self._batches(f'SELECT a.*,r.identity_key FROM {rating_actions.VIEW} a '
+                'LEFT JOIN track_sources y ON y.video_id=a.video_id '
+                'LEFT JOIN recordings r ON r.id=y.recording_id WHERE at<=? ORDER BY at,id', (now,))
 
+    @snapshot_read
     def impressions(self):
-        return {r['item_key']: r['last_shown'] for batch in self._batches(
-            "SELECT item_key,last_shown FROM rec_impressions WHERE surface='listening_editorial'") for r in batch}
+        values = recommendation_impressions.counts(self.conn, recommendation_impressions.EDITORIAL)
+        return {signature: at for signature, (_, at) in values.items()}
 
     def plays(self, now):
         return self._batches('SELECT id,account_id,identity_key,video_id,playlist_ytm_id,played_at '
@@ -85,22 +87,13 @@ class ListeningAnalyticsRepo(Repo):
         return {str(row['id']): row['name'] for batch in self._batches('SELECT id,name FROM artists') for row in batch}
 
     def mix_playlist_ids(self):
-        from yt_playlist.core import playlist_scope_state
-        with self._lock:
-            current = playlist_scope_state.available(self.conn)
-        query = ("SELECT DISTINCT provider_playlist_id FROM playlist_scopes WHERE origin='tuneconsole'" if current else
-                 "SELECT DISTINCT s.provider_playlist_id FROM playlist_provenance p JOIN playlist_scopes s ON s.id=p.ytm "
-                 "WHERE p.origin='tuneconsole'")
+        query = "SELECT DISTINCT provider_playlist_id FROM playlist_scopes WHERE origin='tuneconsole'"
         return {row['provider_playlist_id'] for batch in self._batches(query) for row in batch}
 
     def video_keys(self):
         return {row['video_id']: row['identity_key'] for batch in self._batches(
-            'SELECT y.video_id,r.identity_key FROM youtube_items y JOIN recordings r ON r.id=y.recording_id')
+            'SELECT y.video_id,r.identity_key FROM track_sources y JOIN recordings r ON r.id=y.recording_id WHERE y.video_id IS NOT NULL')
             for row in batch}
-
-    @lookup_read
-    def uses_files(self):
-        return listening_outputs.available(self.conn)
 
     @synchronized
     def publish_files(self, publication, durable, *, keep_previous, timezone=None, file_ids):
@@ -115,36 +108,13 @@ class ListeningAnalyticsRepo(Repo):
                 self.conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('listening_timezone',?)", (timezone,))
             return identity
 
-    @synchronized
-    def publish_legacy(self, documents, *, retained_surfaces=None, timezone=None):
-        with nullcontext() if self.conn.in_transaction else self.conn.atomic():
-            self.conn.executemany('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
-                'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at', documents)
-            if retained_surfaces:
-                self.conn.execute("DELETE FROM rec_proposals WHERE surface LIKE 'listening_chunk:%' "
-                    'AND surface NOT IN (' + ','.join('?' for _ in retained_surfaces) + ')', retained_surfaces)
-            elif retained_surfaces is not None:
-                self.conn.execute("DELETE FROM rec_proposals WHERE surface LIKE 'listening_chunk:%'")
-            if timezone is not None:
-                self.conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('listening_timezone',?)", (timezone,))
-
     @snapshot_read
-    def output(self, surface, file_surface, chunk_key):
-        if self._store._listening_files:
-            row = self.conn.execute('SELECT f.filename,f.content_digest,f.byte_size FROM listening_output_heads h '
-                'JOIN listening_output_files f ON f.publication_id=h.publication_id '
-                'WHERE f.surface=? AND f.chunk_key=? ' +
-                ("AND h.slot='current' " if not chunk_key else '') + 'ORDER BY h.slot LIMIT 1',
-                (file_surface, chunk_key)).fetchone()
-            return {'source': 'file', 'reference': tuple(row) if row is not None else None}
-        row = self.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
-        return {'source': 'legacy', 'raw': row[0] if row else None}
+    def output_reference(self, surface, chunk_key):
+        row = listening_outputs.reference(self.conn, surface, chunk_key)
+        return tuple(row) if row is not None else None
 
     @synchronized
     def record_impressions(self, signatures, now, *, last_shown_before):
-        with self.conn:
-            self.conn.executemany("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
-                "VALUES ('listening_editorial',?,1,?) ON CONFLICT(surface,item_key) DO UPDATE "
-                'SET views=rec_impressions.views+1,last_shown=excluded.last_shown '
-                'WHERE rec_impressions.last_shown<?',
-                [(signature, now, last_shown_before) for signature in signatures])
+        with self.conn.atomic(join=True):
+            recommendation_impressions.advance(self.conn, recommendation_impressions.EDITORIAL, signatures, now,
+                                              eligible=lambda at: at < last_shown_before)

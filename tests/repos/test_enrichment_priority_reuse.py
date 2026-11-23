@@ -15,7 +15,7 @@ from yt_playlist.core.store import Store
 @pytest.fixture
 def queue(file_backed_store, monkeypatch):
     store = file_backed_store
-    store.settings.set_setting('enrich_caught_up_at', '100')
+    store.enrichment_queue.save_caught_up_at(100)
     store.enrichment_state.reconcile_provider_configuration({
         'deezer': {'fingerprint': 'original', 'status': 'available'}})
     first = store.tracks.upsert_track('first', 'First', 'A', None, 200, created_at=1)
@@ -51,7 +51,7 @@ def test_reused_priority_changes_with_its_real_inputs(queue, change):
     store, first, second, anchor, calculations = queue
     if change == 'boundary':
         with store.conn:
-            store.conn.execute('UPDATE recordings SET created_at=50 WHERE id=(SELECT recording_id FROM catalog_entries WHERE id=?)',
+            store.conn.execute('UPDATE recordings SET created_at=50 WHERE id=(SELECT recording_id FROM track_sources WHERE id=?)',
                                (second,))
         _play(store, 'first|a', 1)
     assert names(store) == ['First', 'Second']
@@ -62,7 +62,7 @@ def test_reused_priority_changes_with_its_real_inputs(queue, change):
     if change == 'plays':
         _play(store, 'second|b', 3)
     elif change == 'playlist':
-        account = store.accounts.upsert_account('main', 'cred', None, True)
+        account = store.accounts.upsert_account('main', None, True)
         playlist = store.playlists.upsert_playlist(account, 'PL', 'Mix', 2, 'h', 1)
         store.playlists.set_playlist_tracks(playlist, [anchor, second])
     elif change == 'album':
@@ -75,10 +75,10 @@ def test_reused_priority_changes_with_its_real_inputs(queue, change):
                                                None, None, None, 'radio:s', 300)
         expected = ['Arrival', 'First', 'Second']
     elif change == 'boundary':
-        store.settings.set_setting('enrich_caught_up_at', '10')
+        store.enrichment_queue.save_caught_up_at(10)
     elif change == 'removed':
         with store.conn:
-            store.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (first,))
+            store.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?', (first,))
         expected = ['Second']
     assert names(store) == expected
     assert names(store) == expected
@@ -129,7 +129,7 @@ def test_external_writer_and_restart_cannot_reuse_obsolete_order(queue):
     store, first, second, anchor, calculations = queue
     assert names(store) == ['First', 'Second']
     with closing(sqlite3.connect(store._db_path)) as external, external:
-        external.execute('UPDATE recordings SET created_at=300 WHERE id=(SELECT recording_id FROM catalog_entries WHERE id=?)',
+        external.execute('UPDATE recordings SET created_at=300 WHERE id=(SELECT recording_id FROM track_sources WHERE id=?)',
                          (second,))
     assert names(store) == ['Second', 'First']
     assert len(calculations) == 2
@@ -166,7 +166,7 @@ def test_cancelled_calculation_never_supplies_a_partial_order(queue, monkeypatch
 @pytest.mark.parametrize('installed', [107], indirect=True)
 def test_priority_and_continuing_writes_use_the_selected_installed_relations(installed):
     store, _ = installed
-    store.settings.set_setting('enrich_caught_up_at', '100')
+    store.enrichment_queue.save_caught_up_at(100)
     store.enrichment_state.reconcile_provider_configuration({
         'deezer': {'fingerprint': 'installed', 'status': 'available'}})
     first = store.tracks.upsert_track('first', 'First', 'A', None, 200, created_at=1)

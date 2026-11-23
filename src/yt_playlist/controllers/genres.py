@@ -41,29 +41,22 @@ class Genres:
         families = genre_catalog.family_labels()
         with self.repository.transaction():
             current = self.repository.get_genre_whitelist()
-            target, canonical, defaults, upgrading = genre_policy.configuration(
+            target, _, defaults, upgrading = genre_policy.configuration(
                 current, self.repository.configuration_settings(), reset=reset)
             if upgrading:
                 self.repository.seed_catalog(records, labels, families)
-            if self.repository.uses_keyed_preferences():
-                matches = self.repository.axis_matches(
-                    [(name, genre_catalog.normalize(name)) for name in target])
-                keys = set()
-                for name in target:
-                    genre_policy.validate_name(name, custom=True)
-                    choices = matches[name]
-                    if len(choices) == 1:
-                        keys.add(next(iter(choices)))
-                    else:
-                        keys.add(self._admit(name))
-                self.repository.configure_preferences(
-                    [(key, 'default' if key in records else 'custom') for key in keys], list(records))
-            else:
-                for key, name in canonical.items():
-                    if key not in records:
-                        self.repository.insert_legacy_custom(key, name)
-                if target != current:
-                    self.repository.replace_legacy_whitelist(target)
+            matches = self.repository.axis_matches(
+                [(name, genre_catalog.normalize(name)) for name in target])
+            keys = set()
+            for name in target:
+                genre_policy.validate_name(name, custom=True)
+                choices = matches[name]
+                if len(choices) == 1:
+                    keys.add(next(iter(choices)))
+                else:
+                    keys.add(self._admit(name))
+            self.repository.configure_preferences(
+                [(key, 'default' if key in records else 'custom') for key in keys], list(records))
             self.repository.save_configuration({
                 'genres_seeded': '1', 'genre_catalog_revision': genre_catalog.REVISION,
                 'genre_defaults': json.dumps(defaults),
@@ -72,28 +65,19 @@ class Genres:
     def set_genres(self, names):
         names = list(names)
         with self.repository.transaction():
-            if self.repository.uses_keyed_preferences():
-                self.repository.replace_preferences({self._admit(name) for name in names}, origin='user')
-            else:
-                self.repository.replace_legacy_whitelist(names)
+            self.repository.replace_preferences({self._admit(name) for name in names}, origin='user')
 
     def add_genre(self, name):
         with self.repository.transaction():
-            if self.repository.uses_keyed_preferences():
-                self.repository.save_preference(self._admit(name), enabled=True, origin='user')
-            else:
-                self.repository.add_legacy_genre(name)
+            self.repository.save_preference(self._admit(name), enabled=True, origin='user')
 
     def remove_genre(self, name):
         with self.repository.transaction():
-            if self.repository.uses_keyed_preferences():
-                key, reason = self.resolve(name)
-                if reason == 'ambiguous_genre':
-                    raise ValueError('Ambiguous genre label: ' + name)
-                if key is not None:
-                    self.repository.save_preference(key, enabled=False, origin='user')
-            else:
-                self.repository.remove_legacy_genre(name)
+            key, reason = self.resolve(name)
+            if reason == 'ambiguous_genre':
+                raise ValueError('Ambiguous genre label: ' + name)
+            if key is not None:
+                self.repository.save_preference(key, enabled=False, origin='user')
 
     def feature_axes(self, labels):
         labels = list(dict.fromkeys(label for label in labels if label))

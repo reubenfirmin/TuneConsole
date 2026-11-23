@@ -7,7 +7,8 @@ import sqlite3
 import pytest
 
 from tests.file_custody_support import expire_file
-from yt_playlist.core import account_auth_state, album_feedback_storage, albums, collection_recovery, genre_identity, model_state, radio_storage, sync_state
+from yt_playlist.core import album_feedback_storage, albums, collection_recovery, genre_identity, radio_storage, sync_state
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.library.retention_composition import collect_collections
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.store import Store
@@ -20,7 +21,7 @@ def test_independent_feedback_and_withdrawal_keep_lineage(tmp_path):
     path = tmp_path/'feedback.db'
     store = Store(path)
     store.init_schema()
-    store.accounts.upsert_account('Main','main.json',None,True)
+    store.accounts.upsert_account('Main',None,True)
     def respond(browse):
         other = Store(path)
         other._bind_repositories()
@@ -38,17 +39,16 @@ def test_independent_feedback_and_withdrawal_keep_lineage(tmp_path):
 
 
 def test_scoped_feedback_does_not_withdraw_another_accounts_legacy_fallback(store):
-    first = store.accounts.upsert_account('First','first.json',None,True)
-    second = store.accounts.upsert_account('Second','second.json',None,False)
+    first = store.accounts.upsert_account('First',None,True)
+    second = store.accounts.upsert_account('Second',None,False)
     with store.conn:
         album = albums.observe(store.conn, 'release')
         store.conn.execute('INSERT INTO album_feedback(album_id,source_browse_id,response,created_at,'
             'legacy_author_unknown) VALUES (?,\'release\',\'more\',1,1)', (album,))
-        album_feedback_storage.replace(store.conn,'release','reject',2,account_id=first)
+    album_feedback.set_feedback(store,'release','reject',2,account_id=first)
     assert [row['response'] for row in album_feedback_storage.rows(store.conn,account_id=first)]==['reject']
     assert [row['response'] for row in album_feedback_storage.rows(store.conn,account_id=second)]==['more']
-    with store.conn:
-        album_feedback_storage.replace(store.conn,'release','clear',3,account_id=first)
+    album_feedback.set_feedback(store,'release','clear',3,account_id=first)
     assert album_feedback_storage.rows(store.conn,account_id=first)==[]
     assert [row['response'] for row in album_feedback_storage.rows(store.conn,account_id=second)]==['more']
     assert tuple(store.conn.execute('SELECT account_id,withdrawn_at FROM album_feedback WHERE account_id IS NULL').fetchone())==(None,None)
@@ -61,7 +61,7 @@ def test_draft_revision_fences_other_connection_and_requires_account(tmp_path):
     recipe = store.road_trip.save_road_trip_recipe(None,'Trip',50,[],[],60,1)
     with pytest.raises(ValueError,match='account'):
         store.road_trip.save_road_trip_draft(recipe,{'revision':'first'},2)
-    store.accounts.upsert_account('Main','main.json',None,True)
+    store.accounts.upsert_account('Main',None,True)
     store.road_trip.save_road_trip_draft(recipe,{'revision':'first','picks':['one'],'banned':[]},3)
     other = Store(path)
     other._bind_repositories()
@@ -74,7 +74,7 @@ def test_draft_revision_fences_other_connection_and_requires_account(tmp_path):
 
 
 def test_radio_stale_worker_cannot_overwrite_stop_or_replay_pending_write(store):
-    account = store.accounts.upsert_account('Main','main.json',None,True)
+    account = store.accounts.upsert_account('Main',None,True)
     state = {'version':2,'episode_id':'episode','identity':account,'phase':'appending','playlist':'RADIO',
              'tracks':[{'video_id':'one','title':'One','artist':'Artist'}],'pending':{'video_id':'two'},
              'pending_sent':True,'pending_started_at':10,'position':0}
@@ -93,7 +93,7 @@ def test_radio_stale_worker_cannot_overwrite_stop_or_replay_pending_write(store)
 
 
 def test_sync_interruption_and_superseded_completion(store):
-    account = store.accounts.upsert_account('Main','main.json',None,True)
+    account = store.accounts.upsert_account('Main',None,True)
     first = sync_outcomes.begin_attempt(store,100)
     result = {'status':'failed','accounts':{str(account):{'status':'failed','resources':{
               'history':{'status':'failed','message':'offline'}}}},'resources':{}}
@@ -104,16 +104,16 @@ def test_sync_interruption_and_superseded_completion(store):
     third = sync_outcomes.begin_attempt(store,201)
     with pytest.raises(ValueError,match='superseded'):
         sync_outcomes.finish_attempt(store,result,202,expected_revision=second)
-    assert store.conn.execute('SELECT revision,phase FROM sync_attempts').fetchone()[:]==(third,'running')
+    attempt = sync_state.head(store.conn)
+    assert (attempt['revision'], attempt['phase']) == (third, 'running')
 
 
 def test_collection_backup_exact_coverage_and_reader_fenced_cleanup(store,tmp_path):
-    store.accounts.upsert_account('Main','main.json',None,True)
+    store.accounts.upsert_account('Main',None,True)
     recipe = store.road_trip.save_road_trip_recipe(None,'Trip',50,[],[],60,1)
     state = {'revision':'held','picks':['one'],'banned':[],'seed':7}
     store.road_trip.save_road_trip_draft(recipe,state,2)
-    with store.conn:
-        model_state.put(store.conn,{'rec_content_model':'{"ncat":0,"cont":[]}'})
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder='{"ncat":0,"cont":[]}'))
     store.conn.execute('BEGIN')
     manifest = collection_recovery.export(store.conn,tmp_path/'export')
     store.conn.rollback()
@@ -129,7 +129,7 @@ def test_collection_backup_exact_coverage_and_reader_fenced_cleanup(store,tmp_pa
         assert collect_collections(store.conn)==0
         assert all(path.is_file() for path in filenames)
     assert collect_collections(store.conn)>=1
-    assert store.settings.get_setting('rec_content_model')=='{"ncat":0,"cont":[]}'
+    assert store.rec_model.recording_encoder() == '{"ncat":0,"cont":[]}'
     with pytest.raises(ValueError,match='owners'):
         collection_recovery.restore(store.conn,manifest)
 
@@ -146,18 +146,17 @@ def test_temporary_genre_choices_keep_identity_after_alias_edit_and_merge(store)
         store.conn.execute("UPDATE genre_catalog SET name='A new display name' WHERE key='synth pop'")
     assert album_tuning.state(store,102)['genres']==['An unknown historical style','synth pop']
     with store.conn:
-        store.conn.execute("INSERT INTO genre_redirects VALUES ('synth pop','drum bass')")
-        store.conn.execute("UPDATE album_menu_control_genres SET genre_key='drum bass' WHERE genre_key='synth pop'")
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='drum bass' WHERE key='synth pop'")
     assert album_tuning.state(store,103)['genres']==['An unknown historical style','drum bass']
     assert album_tuning.state(store,100+album_tuning.DURATION_S)['remaining']==0
     album_tuning.reset(store)
-    assert not store.conn.execute('SELECT 1 FROM album_menu_control_genres').fetchone()
+    assert store.settings.get_setting('album_menu_tuning') is None
 
 
 def test_account_auth_updates_and_clears_do_not_replace_other_context(store):
     from yt_playlist.web.context import Ctx
-    first = store.accounts.upsert_account('First','first.json',None,True)
-    second = store.accounts.upsert_account('Second','second.json',None,False)
+    first = store.accounts.upsert_account('First',None,True)
+    second = store.accounts.upsert_account('Second',None,False)
     def context():
         return Ctx(store=store,client_provider=lambda:{},now_fn=lambda:1,templates=None,jobs=None)
     earlier,later = context(),context()
@@ -166,28 +165,27 @@ def test_account_auth_updates_and_clears_do_not_replace_other_context(store):
     assert context().auth_expired=={first:'First',second:'Second'}
     earlier.clear_auth_expired(first)
     assert context().auth_expired=={second:'Second'}
-    with pytest.raises(ValueError,match='recorded account'),store.conn:
-        account_auth_state.flag(store.conn,999,'Unknown')
+    with pytest.raises(ValueError, match='recorded account'):
+        store.accounts.repository.flag_auth_expiration(999, 'Unknown')
     assert not store.conn.execute("SELECT 1 FROM settings WHERE key='auth_expired_identities'").fetchone()
 
 
-def test_collection_sql_rejects_cross_account_scope_and_wrong_recording(store):
+def test_collection_sql_rejects_cross_account_scope_and_incomplete_draft(store):
     from yt_playlist.core import album_playback_context, playlist_scopes
-    first = store.accounts.upsert_account('First','first.json',None,True)
-    second = store.accounts.upsert_account('Second','second.json',None,False)
-    entry = store.tracks.upsert_track('first-video','First song','Artist',None,100)
-    other = store.tracks.upsert_track('other-video','Other song','Artist',None,100)
+    first = store.accounts.upsert_account('First',None,True)
+    second = store.accounts.upsert_account('Second',None,False)
     recipe = store.road_trip.save_road_trip_recipe(None,'Trip',50,[],[],60,1)
     store.road_trip.save_road_trip_draft(recipe,{'revision':'held','picks':['first-video']},2)
-    wrong_recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?',(other,)).fetchone()[0]
-    with pytest.raises(sqlite3.IntegrityError,match='another recording'),store.conn:
-        store.conn.execute('UPDATE road_trip_draft_entries SET recording_id=?',(wrong_recording,))
+    with pytest.raises(sqlite3.IntegrityError,match='CHECK constraint'),store.conn:
+        store.conn.execute('UPDATE road_trip_recipes SET draft_selections=NULL WHERE id=?',(recipe,))
+    assert store.road_trip.get_road_trip_draft(recipe)['picks']==['first-video']
     with store.conn:
         album_playback_context.put(store.conn,{'opportunity_id':'choice','browse':'release','playlist':'LM',
                                               'identity_id':first,'at':3,'videos':['first-video','first-video']})
         wrong_scope = playlist_scopes.ensure(store.conn,'LM',second)
     with pytest.raises(sqlite3.IntegrityError,match='another account'),store.conn:
-        store.conn.execute('UPDATE album_playback_intents SET playlist_scope_id=?',(wrong_scope,))
+        store.conn.execute('UPDATE albums SET playback_playlist_scope_id=? WHERE playback_revision IS NOT NULL',
+                           (wrong_scope,))
     assert album_playback_context.load(store.conn)['videos']==['first-video','first-video']
     with pytest.raises(sqlite3.IntegrityError,match='domain owner'),store.conn:
         store.conn.execute("INSERT INTO settings VALUES ('radio_current_session','{}')")

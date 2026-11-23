@@ -10,14 +10,14 @@
          x-show="nowPlaying && (nowPlaying.title || nowPlaying.artist)" x-cloak>
   <div class="hs-main">
     <template x-if="nowPlaying && (nowPlaying.title || nowPlaying.artist)">
-      <div class="hs-now" :class="{ paused: nowPlaying.paused }">
+      <div class="hs-now" :class="{ paused: !statusPending && nowPlaying.paused }">
         <span class="hs-cover">
           <img class="hs-art" x-show="nowPlaying.thumbnail && artworkFailed !== nowPlaying.thumbnail" :src="nowPlaying.thumbnail" alt=""
                @error="artworkFailed = nowPlaying.thumbnail" referrerpolicy="no-referrer">
           <svg class="hs-art-placeholder" x-show="!nowPlaying.thumbnail || artworkFailed === nowPlaying.thumbnail" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M9 18V5l12-2v13M9 8l12-2"/><ellipse cx="6" cy="18" rx="3" ry="2.5"/><ellipse cx="18" cy="16" rx="3" ry="2.5"/>
           </svg>
-          <span class="hs-eq" x-show="!nowPlaying.paused" x-cloak aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="hs-eq" x-show="!statusPending && !nowPlaying.paused" x-cloak aria-hidden="true"><i></i><i></i><i></i></span>
         </span>
         <span class="hs-now-text">
           <a class="hs-now-title" :href="trackUrl(nowPlaying)" x-text="nowPlaying.title || ''" :title="nowPlaying.title || ''"></a>

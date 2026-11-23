@@ -15,6 +15,17 @@ from yt_playlist.core import repair
 from yt_playlist.core.db_revisions import Revisions
 
 
+def install_file_receipts(conn):
+    from yt_playlist.core.destination_schema import statements
+
+    for sql in statements():
+        if sql.startswith(('CREATE TABLE collection_file_writes ', 'CREATE TABLE "collection_file_writes" ',
+                           'CREATE UNIQUE INDEX ix_collection_file_address ',
+                           'CREATE UNIQUE INDEX ix_collection_selected_', 'CREATE INDEX ix_collection_metadata_subject ',
+                           'CREATE TRIGGER collection_file_contract_')):
+            conn.execute(sql)
+
+
 @pytest.fixture
 def without_query_timing(monkeypatch):
     """Keep real SQL, handle admission and locking below ordinary consumers.
@@ -86,7 +97,7 @@ def publication_schema_inspections(request):
     Validators still check live SQL and refresh after external commits. Keep
     reader and artifact leases entirely under each test's control.
     """
-    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed', 'numbered_store')
+    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed')
                     if name in request.fixturenames), None)
     if fixture is None:
         yield
@@ -105,7 +116,7 @@ def publication_preparation_input(request, monkeypatch):
     Admission owners and explicit Store startup retain real base validation.
     Publication keeps its preparation tables, SQL, files and custody checks.
     """
-    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed', 'numbered_store')
+    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed')
                     if name in request.fixturenames), None)
     if fixture is None:
         return
@@ -131,31 +142,6 @@ def mock_preparation_schema(monkeypatch, job, conn):
             return validate(worker, target)
 
     monkeypatch.setattr(type(job), 'validate', admitted)
-
-
-def mock_regular_numbered_input(monkeypatch, conn, *, same_database=False):
-    """Admit the fixed numbered input once below a regular-DDL consumer.
-
-    Every regular history check, change and owner validator remains real. Use
-    only after numbered upgrades finish. A maintenance worker can opt in to the
-    same fixed input on its separate connection, which is admitted once too.
-    """
-    from yt_playlist.core.migrations import registry, regular
-
-    validate = regular.validate_version
-    validate(conn, regular.history(conn, registry.MIGRATIONS), foreign_keys=False, data=False)
-    admitted_connections = {conn}
-    path = conn.execute('PRAGMA database_list').fetchone()[2] if same_database else None
-
-    def admitted(target, *args, **kwargs):
-        if target in admitted_connections:
-            return
-        result = validate(target, *args, **kwargs)
-        if path and target.execute('PRAGMA database_list').fetchone()[2] == path:
-            admitted_connections.add(target)
-        return result
-
-    monkeypatch.setattr(regular, 'validate_version', admitted)
 
 
 @pytest.fixture
@@ -241,23 +227,13 @@ def consumer_schema(*, entries=None, snapshot_guards=True):
     """
     import pytest
     from tests.genre_catalog_support import bound_catalog
-    from yt_playlist.core import destination_schema, genre_identity, schema_bootstrap
-    from yt_playlist.core.migrations import registry, regular
 
     with closing(sqlite3.connect(':memory:', factory=PristineSchema)) as schema:
         schema.execute('PRAGMA foreign_keys=ON')
-        document = destination_schema.definition()
-        with pytest.MonkeyPatch.context() as patch, schema:
+        with pytest.MonkeyPatch.context() as patch:
             if entries is not None:
-                seeds = [sql for sql in document['destination_seeds'] if not sql.startswith(
-                    ('INSERT INTO "genre_alias"', 'INSERT INTO "genre_catalog"', 'INSERT INTO "genre_family"'))]
                 bound_catalog(patch, entries=entries)
-                patch.setattr(destination_schema, 'definition', lambda: {**document, 'destination_seeds': seeds})
-            schema.execute('BEGIN')
-            schema_bootstrap.bootstrap(schema, registry.MIGRATIONS, regular.CHANGES,
-                                       1., validation=lambda conn: None)
-            if entries is not None:
-                genre_identity.seed_catalog(schema)
+            _bootstrap_consumer_schema(schema, use_active_catalog=entries is not None)
         if snapshot_guards:
             # Revisions owns the transaction that batches these TEMP guards.
             schema.capture_revisions(Revisions(schema))
@@ -265,70 +241,38 @@ def consumer_schema(*, entries=None, snapshot_guards=True):
         yield schema
 
 
+def _bootstrap_consumer_schema(conn, *, use_active_catalog):
+    import pytest
+    from yt_playlist.core import destination_schema, genre_identity, schema_bootstrap
+    from yt_playlist.core.migrations import registry, regular
+
+    with pytest.MonkeyPatch.context() as patch, conn:
+        if use_active_catalog:
+            document = destination_schema.definition()
+            seeds = [sql for sql in document['destination_seeds'] if not sql.startswith(
+                ('INSERT INTO "genre_alias"', 'INSERT INTO "genre_catalog"', 'INSERT INTO "genre_family"'))]
+            patch.setattr(destination_schema, 'definition', lambda: {**document, 'destination_seeds': seeds})
+        conn.execute('BEGIN')
+        schema_bootstrap.bootstrap(conn, registry.MIGRATIONS, regular.CHANGES, 1., validation=lambda conn: None)
+        if use_active_catalog:
+            genre_identity.seed_catalog(conn)
+
+
 def bounded_consumer_schema(entries, *, snapshot_guards=True):
     return consumer_schema(entries=entries, snapshot_guards=snapshot_guards)
 
 
-def initialize_consumer(store, pristine, *, snapshot_guards=True, compatibility=False):
+def initialize_consumer(store, pristine, *, snapshot_guards=True, repair_on_bind=True):
     assert pristine.execute('PRAGMA query_only').fetchone()[0] == 1
     pristine.backup(store.conn)
-    store._schema_compatibility = compatibility
-    store._rebuild_source_version = None
-    store._schema_recovery_pending = False
     store._bind_repositories()
-    if not compatibility:
+    if repair_on_bind:
         repair.run_once(store)
     if store._db_path is not None:
         mode = store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
         assert mode.lower() == 'wal'
     if snapshot_guards:
         store._snapshot_revisions = pristine.bind_revisions(store.conn)
-
-
-@pytest.fixture
-def numbered_store(request, tmp_path, monkeypatch):
-    """Build shipped predecessor SQL without running application startup.
-
-    Registered upgrades still admit and convert their actual populated input.
-    Consumers needing snapshots use guarded_numbered_store instead.
-    """
-    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
-        yield value
-
-
-@pytest.fixture
-def guarded_numbered_store(request, tmp_path, monkeypatch):
-    """Private predecessor SQL with real revision guards and WAL snapshots."""
-    with _numbered_input(request.param, tmp_path, monkeypatch, snapshot_guards=True) as value:
-        yield value
-
-
-@pytest.fixture
-def preparation_ddl_connection(request, monkeypatch):
-    """A real SQLite DDL worker beside the preparation's live Store.
-
-    These tests own migration progress alongside incomplete preparation. SQL
-    diagnostics and numbered-layout admission have independent owners. Keep
-    every regular change, its validation, ledger and real transaction live.
-    """
-    fixture = next(name for name in ('installed', 'unadmitted_installed', 'guarded_installed', 'numbered_store')
-                   if name in request.fixturenames)
-    store, _ = request.getfixturevalue(fixture)
-    with preparation_connection(store) as conn:
-        from yt_playlist.core.migrations import regular
-
-        validate = regular.validate_version
-
-        def admitted(target, *args, **kwargs):
-            if target is not conn:
-                return validate(target, *args, **kwargs)
-
-        # The DDL worker consumes the installed fixture's completed numbered
-        # layout. Other connections, including explicit startup/upgrade checks,
-        # still perform actual admission. The runner still checks both live
-        # histories and validates every regular owner before and after DDL.
-        monkeypatch.setattr(regular, 'validate_version', admitted)
-        yield conn
 
 
 @contextmanager
@@ -349,64 +293,14 @@ def preparation_connection(store):
 @contextmanager
 def _numbered_input(version, tmp_path, monkeypatch, *, snapshot_guards=False):
     from tests.genre_catalog_support import bound_catalog
-    from yt_playlist.core import schema_inspection
-    from yt_playlist.core.store import Store
+    from yt_playlist.core.migrations.runner import RELEASE_VERSION
 
+    assert version == RELEASE_VERSION, 'Pre-release schemas are reset rather than converted'
     bound_catalog(monkeypatch)
-    database = Store(tmp_path / 'numbered-input.db')
-    with closing(database.conn):
-        # Preparation keeps real SQL transactions and files. Power-loss
-        # durability of this disposable input is outside those tests.
-        database.conn.execute('PRAGMA synchronous=OFF')
-        # This fixture owns one private file. Construct its fixed SQL there
-        # directly instead of building and then copying an unused second DB.
-        install_numbered_input(database.conn, version)
-        database._fixture_numbered_input_version = version
-        database.conn.execute('PRAGMA journal_mode=WAL')
-        database._schema_compatibility = version < 103
-        database._rebuild_source_version = None
-        database._schema_recovery_pending = False
-        database._bind_repositories()
-        if snapshot_guards:
-            # Revisions completes its own connection-local guard transaction.
-            database._snapshot_revisions = Revisions(database.conn)
-        with schema_inspection.reuse_tables(database.conn):
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz')), snapshot_guards=snapshot_guards) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=snapshot_guards) as database:
             yield database, version
 
-
-
-def install_numbered_input(conn, version, *, regular_owners=None):
-    """Completed numbered SQL below an upgrade or publication test boundary.
-
-    Real migration runners still own the edge under test. This supplies their
-    exact empty predecessor contract without replaying every earlier conversion.
-    Callers choose their genre vocabulary and any completed regular owners.
-    """
-    from yt_playlist.core import schema_definition
-    from yt_playlist.core.migrations import registry, regular
-
-    assert version == 107, 'Pre-release schemas are reset rather than converted'
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys=ON')
-    with conn:
-        conn.execute('BEGIN')
-        schema_definition.bootstrap(conn, registry.MIGRATIONS, 1.)
-        install_regular_input(conn, regular.CHANGES if regular_owners is None else regular_owners)
-
-
-def install_regular_input(conn, changes):
-    """Supply completed lower regular owners before the real edge under test.
-
-    The caller owns the transaction. The runner being tested still validates
-    this predecessor and owns the next change's commit, rollback and ledger.
-    """
-    from yt_playlist.core.migrations import regular
-    from yt_playlist.core.migrations.runner import Context
-
-    conn.execute(regular.HISTORY_SQL)
-    for change in changes:
-        change.apply(conn, Context(1.))
-        conn.execute('INSERT INTO schema_changes VALUES (?,?,1)', (change.version, change.name))
 
 
 @contextmanager
@@ -427,25 +321,24 @@ def mock_snapshot_coordinator(store, monkeypatch):
         def snapshot(**kwargs):
             if getattr(store, '_snapshot_revisions', None) is None:
                 store._snapshot_revisions = Revisions(store.conn)
-            store._snapshot_revisions.refresh()
             changes = store.conn.total_changes
-            schema = store.conn.execute('PRAGMA main.schema_version').fetchone()[0]
+            revisions = store._snapshot_revisions
             version = store.conn.execute('PRAGMA data_version').fetchone()[0]
 
             def is_current(*, allow_stale_tables=frozenset()):
-                if (store.conn.execute('PRAGMA main.schema_version').fetchone()[0] != schema
+                if (store._snapshot_revisions is not revisions
                         or store.conn.execute('PRAGMA data_version').fetchone()[0] != version):
                     return False
                 # File admission reserves output paths without changing any
                 # consumed catalog facts, as in the real guarded snapshots.
                 return not any(revision > changes for (table, _), revision
                                in store._snapshot_revisions.capture().items()
-                               if table not in allow_stale_tables | {'recommendation_file_writes'})
+                               if table not in allow_stale_tables | {'collection_file_writes'})
 
             return nullcontext(SimpleNamespace(
                 store=reader, release_reader=lambda: None, publish=publish,
                 publish_ordered=publish, is_current=is_current,
-                _changes=changes, _schema=schema))
+                _changes=changes, _schema=revisions.schema_version))
 
         monkeypatch.setattr(store, 'read_snapshot', snapshot)
         yield
@@ -459,14 +352,23 @@ def reuse_reporting_reader(store, monkeypatch):
     Reader-pool admission and time budgets have separate owners.
     """
     from yt_playlist.core import schema_inspection
+    from yt_playlist.library.application_lifecycle import ApplicationLifecycle
 
     assert store._db_path is not None
+    production_view = store.read_view
     with store._retained_readers():
         reader = store._make_reader()
         try:
             assert reader._read_only
             with monkeypatch.context() as patch, schema_inspection.reuse_tables(reader.conn):
-                patch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
+                def read_view(**kwargs):
+                    # Preparation caches are reused across actual admissions.
+                    if kwargs.get('preparation'):
+                        return production_view(**kwargs)
+                    ApplicationLifecycle.attach_reader(store, reader)
+                    return nullcontext(reader)
+
+                patch.setattr(store, 'read_view', read_view)
                 yield reader
         finally:
             reader.conn.close()

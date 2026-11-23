@@ -109,6 +109,13 @@ class StoryPreparation:
             familiar = reader.familiar(now)
             groups = reader.connected(rules._variety_order(ranked, appearances, now), familiar, now)
             subjects = reader.fetch_plan(groups)
+            pending = any(self.wiki.should_refresh(s['subject'], rules._matching_summary(
+                s, reader.wiki.get(s['subject']), taxonomy=reader.taxonomy), now)
+                          for s in subjects)
+            if pending and not previous.get('pending'):
+                available, _, _ = rules.load(previous, now, taxonomy=reader.taxonomy)
+                if available:
+                    return subjects, pending
             cards, seen = [], set()
             for group in groups:
                 ready, pages = [], set()
@@ -122,7 +129,9 @@ class StoryPreparation:
                     if page in seen or page in pages:
                         continue
                     extras = reader.decorate(subject)
-                    thumbnail = row['thumbnail'] or (extras['thumbnail'] if subject['kind'] == 'artist' else None)
+                    thumbnail = row['thumbnail']
+                    if not thumbnail and subject['kind'] == 'artist' and not row.get('matched_genres'):
+                        thumbnail = extras['thumbnail']
                     if not thumbnail and subject['kind'] == 'artist':
                         continue
                     shown = appearances.get(subject['subject'], {}).get('last_shown')
@@ -141,9 +150,6 @@ class StoryPreparation:
                         seen.add(card['url'] or card['subject'])
                 if len(cards) == rules.PREWARM_POOL:
                     break
-            pending = any(self.wiki.should_refresh(s['subject'], rules._matching_summary(
-                s, reader.wiki.get(s['subject']), taxonomy=reader.taxonomy), now)
-                          for s in subjects)
             payload = {'schema': rules.SCHEMA, 'built_at': now, 'edition_at': edition_at,
                 'appearances': {s['subject']: appearances[s['subject']] for s in ranked if s['subject'] in appearances},
                 'cards': cards, 'pending': pending}
@@ -167,12 +173,18 @@ class StoryPreparation:
             result = self.publish_pool(now)
         return result is None or result[1]
 
-    def load(self, now, epoch=0, schedule=lambda: None):
+    def _edition(self, now, epoch=0):
         try:
             payload = self.rec_proposals.get_proposals(rules.SURFACE)
         except (TypeError, ValueError):
             payload = None
-        cards, pending, refresh = rules.load(payload, now, epoch, taxonomy=self.taxonomy)
+        return rules.load(payload, now, epoch, taxonomy=self.taxonomy)
+
+    def refresh_due(self, now):
+        return self._edition(now)[2]
+
+    def load(self, now, epoch=0, schedule=lambda: None):
+        cards, pending, refresh = self._edition(now, epoch)
         if refresh:
             schedule()
         return cards, pending

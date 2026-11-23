@@ -8,18 +8,64 @@ import tempfile
 import time
 from contextlib import contextmanager
 
-from . import policy_documents, fao, file_collection
+from . import policy_documents, publication_files, fao, file_collection, recommendation_chunks
 from .activity import check_cancellable_work
+from . import worker_settings
 from .evidence_ledger import canonical, _sync_directory
 from .recommendation_content import (
-    FORMAT, MAX_BYTES, decode as _decode, decode_json, encode, read,
+    FILE_IDENTITY, FILE_KIND, FORMAT, MAX_BYTES, decode as _decode, decode_json, encode, read,
     read_encoded as _read, record_id, record_path,
 )
 
 BACKUP_FORMAT = 'prepared-recommendation-backup-1'
 MANIFEST_BYTES = 8 * 1024 * 1024
-OUTPUT_OWNERS = ('prepared_outputs', 'album_note_outputs', 'listening_output_files', 'home_display_files',
-                 'recommendation_report_files', 'model_pair_files', 'radio_seed_output', 'model_autotune_output')
+REPORT_OWNER = 'recommendation_report_files'
+REPORT_PARTS = 'recommendation_report_parts'
+AUTOTUNE_OWNER = 'model_autotune_output'
+AUTOTUNE_SURFACE = 'rec_autotune_result'
+AUTOTUNE_SETTING = 'rec_autotune_reference'
+RADIO_SEED_OWNER = 'radio_seed_output'
+RADIO_SEED_SURFACE = 'radio_seed_offer'
+RADIO_SEED_SETTING = 'radio_seed_reference'
+SAVED_OUTPUTS = {
+    RADIO_SEED_OWNER: (RADIO_SEED_SETTING, RADIO_SEED_SURFACE),
+    AUTOTUNE_OWNER: (AUTOTUNE_SETTING, AUTOTUNE_SURFACE),
+}
+OUTPUT_OWNERS = (recommendation_chunks.OWNER, 'listening_output_files', 'home_display_files',
+                 REPORT_OWNER, *SAVED_OUTPUTS)
+PUBLICATION_TABLES = {**publication_files.OWNERS, REPORT_OWNER: publication_files.REPORT_TABLE}
+
+
+def saved_reference(conn, owner):
+    raw = worker_settings.read(conn, SAVED_OUTPUTS[owner][0])
+    return json.loads(raw) if raw is not None else None
+
+
+def autotune_reference(conn):
+    return saved_reference(conn, AUTOTUNE_OWNER)
+
+
+def _report_relation(conn):
+    # File export and relocation can open the source of an upgrade offline.
+    exists = conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?', (REPORT_PARTS,)).fetchone()
+    return REPORT_PARTS if exists else REPORT_OWNER
+
+
+def _has_relation(conn, relation):
+    return conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?', (relation,)).fetchone() is not None
+
+
+def _relation(conn, owner):
+    if owner == REPORT_OWNER:
+        return _report_relation(conn)
+    if owner == recommendation_chunks.OWNER and _has_relation(conn, recommendation_chunks.VIEW):
+        return recommendation_chunks.VIEW
+    return owner
+
+
+def _has_manifest(conn, table):
+    return not publication_files.installed_table(conn, table) or conn.execute(
+        "SELECT 1 FROM pragma_table_info(?) WHERE name='files'", (table,)).fetchone() is not None
 
 
 def root_for_database(path, memory_key):
@@ -45,10 +91,24 @@ def publish(root, encoded, *, age=None):
 
 def references(conn):
     for owner in OUTPUT_OWNERS:
-        if conn.execute('SELECT 1 FROM sqlite_schema WHERE type=\'table\' AND name=?', (owner,)).fetchone():
-            fields = "'album_notes',browse_id" if owner == 'album_note_outputs' else 'surface,chunk_key'
-            for row in conn.execute(f'SELECT id,{fields},filename,content_digest,byte_size FROM {owner} ORDER BY id'):
+        relation = _relation(conn, owner)
+        if _has_relation(conn, relation):
+            for row in conn.execute(
+                    f'SELECT id,surface,chunk_key,filename,content_digest,byte_size FROM {relation} ORDER BY id'):
                 yield owner, *row
+        elif owner in SAVED_OUTPUTS and _has_settings(conn):
+            reference = saved_reference(conn, owner)
+            if reference is not None:
+                yield owner, 1, SAVED_OUTPUTS[owner][1], '', reference['filename'], reference['content_digest'], reference['byte_size']
+        elif owner in PUBLICATION_TABLES and _has_settings(conn):
+            table = PUBLICATION_TABLES[owner]
+            if _has_manifest(conn, table):
+                for row in publication_files.references(conn, table):
+                    yield owner, *row
+
+
+def _has_settings(conn):
+    return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='settings'").fetchone() is not None
 
 
 def _manifest(root, value):
@@ -108,8 +168,33 @@ def restore(conn, manifest):
 
 
 def _relocate(conn, files):
+    manifests = {}
     for (owner, identity), filename in files.items():
-        conn.execute(f'UPDATE {owner} SET filename=? WHERE id=?', (filename, identity))
+        relation = _relation(conn, owner)
+        if owner in (*PUBLICATION_TABLES, *SAVED_OUTPUTS) and not _has_relation(conn, relation):
+            if owner in SAVED_OUTPUTS:
+                conn.execute("UPDATE settings SET value=json_set(value,'$.filename',?) WHERE key=?",
+                             (filename, SAVED_OUTPUTS[owner][0]))
+            else:
+                table = PUBLICATION_TABLES[owner]
+                manifests.setdefault(table, {})[identity] = filename
+        elif relation == recommendation_chunks.VIEW:
+            recommendation_chunks.relocate(conn, identity, filename)
+        else:
+            conn.execute(f'UPDATE {relation} SET filename=? WHERE id=?', (filename, identity))
+    with policy_documents.coordinate_updates(conn, manifests):
+        for table, replacements in manifests.items():
+            publication_files.relocate(conn, table, replacements)
+
+
+def _file_receipt(conn, identity):
+    # Offline recovery also reads databases before migration has run.
+    if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_file_writes'").fetchone():
+        return conn.execute('SELECT output_owner,surface,chunk_key,content_digest,byte_size,file_status '
+                            'FROM recommendation_file_writes WHERE id=?', (identity,)).fetchone()
+    return conn.execute('SELECT owner_id->>1,owner_id->>2,owner_id->>3,content_digest,byte_size,file_status '
+                        f"FROM collection_file_writes WHERE kind='{FILE_KIND}' AND {FILE_IDENTITY}=?",
+                        (identity,)).fetchone()
 
 
 def _restore(conn, manifest, *, directory, references, owners, relocate):
@@ -131,14 +216,13 @@ def _restore(conn, manifest, *, directory, references, owners, relocate):
                 raise ValueError('Invalid prepared output backup owner')
             # Earlier manifests contain only prepared_outputs, before note files
             # joined this file domain. Their owner is unambiguous.
-            owner = entry.get('owner', 'prepared_outputs')
+            owner = entry.get('owner', recommendation_chunks.OWNER)
             identity = (owner, entry.get('id'))
             if (set(entry) - {'owner'} != {'id', 'surface', 'chunk_key', 'digest',
                     'byte_size', 'relative_filename'} or owner not in owners
                     or type(entry['id']) is not int or entry['id'] < 1
                     or identity in entries or not isinstance(entry['surface'], str) or not entry['surface']
                     or not isinstance(entry['chunk_key'], str) or not _digest(entry['digest'])
-                    or owner == 'album_note_outputs' and entry['surface'] != 'album_notes'
                     or type(entry['byte_size']) is not int or not 0 < entry['byte_size'] <= MAX_BYTES
                     or entry['relative_filename'] != entry['digest'][:2] + '/' + entry['digest'] + '.json'):
                 raise ValueError('Invalid prepared output backup owner')
@@ -161,8 +245,7 @@ def _restore(conn, manifest, *, directory, references, owners, relocate):
         for owner, identity, surface, key, filename, digest, size in retained:
             file_id = record_id(filename)
             if file_id is not None:
-                row = conn.execute('SELECT output_owner,surface,chunk_key,content_digest,byte_size,file_status '
-                    'FROM recommendation_file_writes WHERE id=?', (file_id,)).fetchone()
+                row = _file_receipt(conn, file_id)
                 if row is None or tuple(row) != (owner, surface, key, digest, size, 'ready'):
                     raise ValueError('Prepared output backup has an inconsistent file identity')
                 identities[owner, identity] = file_id
@@ -292,12 +375,24 @@ class OrphanCollector:
                     marks = ','.join('?' for _ in names)
                     for owner, column in self.owners:
                         check_cancellable_work()
-                        if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?", (owner,)).fetchone():
+                        relation = _relation(conn, owner)
+                        if _has_relation(conn, relation):
                             owned.update(row[0] for row in conn.execute(
-                                f'SELECT DISTINCT {column} FROM {owner} WHERE {column} IN ({marks})', names))
+                                f'SELECT DISTINCT {column} FROM {relation} WHERE {column} IN ({marks})', names))
+                        elif owner in SAVED_OUTPUTS and _has_settings(conn):
+                            owned.update(protected_saved(conn, owner, names))
+                        elif owner in PUBLICATION_TABLES and _has_settings(conn):
+                            table = PUBLICATION_TABLES[owner]
+                            if _has_manifest(conn, table):
+                                owned.update(publication_files.protected(conn, table, names))
                 return self.remove_unowned(owned)
         finally:
             conn.rollback()
+
+
+def protected_saved(conn, owner, names):
+    reference = saved_reference(conn, owner)
+    return {reference['filename']} if reference and reference['filename'] in names else set()
 
 
 def collect_orphans(conn):

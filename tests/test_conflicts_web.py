@@ -21,14 +21,14 @@ def _pristine_current_schema():
 @pytest.fixture(autouse=True)
 def conflict_routes(monkeypatch):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import album, app_update, audio_preview, playlists
+    from yt_playlist.web.routes import album, app_update, audio_vibes, playlists
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (album, app_update, audio_preview, playlists)])
+        module.build(ctx) for module in (album, app_update, audio_vibes, playlists)])
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -65,7 +65,7 @@ def test_resolve_overwrites_column_and_clears_conflict(store):
     r = c.post(f"/playlist/{a}/conflicts/resolve", data={f"{tid}:genre": "Art Pop"})
     assert r.status_code == 200
     # canonical column overwritten with the user's pick...
-    assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (tid,)).fetchone()["genre"] == "Art Pop"
+    assert store.conn.execute("SELECT genre FROM catalog_tracks WHERE id=?", (tid,)).fetchone()["genre"] == "Art Pop"
     # ...and the conflict no longer counts
     assert store.enrichment_reports.conflict_count_for_playlist(a) == 0
     assert "Nothing left to resolve" in r.text

@@ -1,4 +1,5 @@
 """Revision and publication facts for explicitly supplied summary dependencies."""
+from yt_playlist.core import home_outputs, library_taste_summary, listening_outputs, recommendation_reports
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -7,14 +8,10 @@ class SummaryInputsRepo(Repo):
     def capture(self, dependencies, surfaces):
         revisions = self._store._snapshot_revisions.capture(dependencies)
         external = self.conn.execute('PRAGMA data_version').fetchone()[0]
-        present = {row[0] for row in self.conn.execute(
-            'SELECT surface FROM rec_proposals WHERE surface IN (' + ','.join('?' for _ in surfaces) + ')', surfaces)}
-        if self._store._home_display_files:
-            present.update(row[0] for row in self.conn.execute('SELECT surface FROM home_display_heads'))
-        if self._store._recommendation_reports:
-            present.update(row[0] for row in self.conn.execute('SELECT surface FROM recommendation_report_heads'))
-        if self._store._listening_files and self.conn.execute('SELECT 1 FROM listening_output_heads h '
-                'JOIN listening_output_files f ON f.publication_id=h.publication_id '
-                "WHERE h.slot='current' AND f.surface='listening_analytics'").fetchone():
+        present = {surface for owner in (home_outputs, recommendation_reports) for surface in surfaces
+                   if surface in owner.SURFACES and owner.present(self.conn, surface)}
+        if library_taste_summary.KEY in surfaces and library_taste_summary.present(self.conn):
+            present.add(library_taste_summary.KEY)
+        if 'listening_analytics' in surfaces and listening_outputs.reference(self.conn, 'listening_analytics', ''):
             present.add('listening_analytics')
         return revisions, external, present

@@ -5,6 +5,7 @@ admitted per worker step. Completed predictions survive a restart; no reader or
 WAL snapshot remains open while fitting. Serving changes only after a complete
 comparison and a separately guarded fit on current inputs.
 """
+from collections import Counter
 import hashlib
 import json
 import math
@@ -14,6 +15,7 @@ import numpy as np
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_stopping
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import embeddings
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.rec import embedding_training as training, model_refresh, model_setup, progressive
 from yt_playlist.rec.vector_math import rank_by_context
 from yt_playlist.core.rec_model_policy import VectorChanges
@@ -25,12 +27,12 @@ MIN_ACTIVE_DAYS = 7
 MIN_FRESH_TRACKS = 30
 STEP_SECONDS = 20
 SCHEDULE = 'daily_model_schedule'
-POLICY = 'all-prior-30-day-holdout-v2'
+POLICY = 'all-prior-30-day-holdout-v3'
 
 
 def due(store, now):
     if (store.settings.get_setting('rec_selection_paused') == '1'
-            or store.settings.get_setting('rec_selection_restore')):
+            or store.model_selection.restore_pending()):
         return False
     return now >= store.model_selection.next_daily_at()
 
@@ -53,7 +55,7 @@ def _readiness(reader, now):
                    total=minimum_days, unit='days'),
               dict(label='Modeled tracks', value=min(tracks, model_setup.MIN_TRACKS),
                    total=model_setup.MIN_TRACKS, unit='tracks')]
-    if reader.settings.get_setting('rec_selection_restore'):
+    if reader.model_selection.restore_pending():
         return dict(state='restoring', reason='Restoring the previous model.', checks=checks)
     if reader.settings.get_setting('rec_selection_paused') == '1':
         return dict(state='paused', reason='Automatic selection is paused. Regular training continues.', checks=checks)
@@ -69,7 +71,7 @@ def _readiness(reader, now):
     # An insufficient attempt has not completed a comparison. Let newly
     # sufficient holdout activity admit the first fit after the daily delay.
     if last and last['status'] not in ('failed', 'insufficient'):
-        fresh = reader.model_selection.comparison_activity(last['evidence_end'], now)
+        fresh = {key for _, key, _, _ in reader.rec_evidence.evaluation_listening(now, start=last['evidence_end'])}
         checks.append(dict(label='Fresh listening since the last comparison', value=min(len(fresh), MIN_FRESH_TRACKS),
                            total=MIN_FRESH_TRACKS, unit='distinct tracks'))
         if len(fresh) < MIN_FRESH_TRACKS:
@@ -80,19 +82,22 @@ def _readiness(reader, now):
 
 def _capture(reader, end):
     cutoff = end - HOLDOUT_DAYS * DAY
+    sessions = {(f'{account}:{day}', key) for account, key, day, _ in reader.rec_evidence.evaluation_listening(cutoff)}
+    counts = Counter(key for _, key in sessions)
+    before = set(counts)
     # Playlist timestamps are inclusive in the reconstruction API; the split
     # here is strictly before the first held-out timestamp.
-    baskets, coverage = reader.rec_evidence.rec_baskets_as_of(math.nextafter(cutoff, -math.inf))
+    baskets, coverage = reader.rec_evidence.rec_baskets_as_of(math.nextafter(cutoff, -math.inf),
+                                                               session_memberships=sessions)
     baskets = training.canonical_baskets(baskets)
     keys = {key for basket in baskets for key in basket}
-    before = reader.history.history_keys_before(cutoff)
-    activity = reader.model_selection.comparison_activity(cutoff, end)
-    generated = reader.rec_evidence.generated_only_keys_between(cutoff, end)
+    activity = {}
+    for _, key, _, day in reader.rec_evidence.evaluation_listening(end, start=cutoff):
+        activity[key] = min(activity.get(key, day), day)
+    generated = reader.rec_evidence.generated_only_keys_between(cutoff, end) - activity.keys()
     eligible = keys - before
-    held = {key: int(at // DAY) for key, at in activity.items()
-            if key in eligible and key not in generated}
-    weights = (training.cooc_weights(reader.history.play_counts_before(cutoff))
-               if reader.settings.get_setting('rec_cooc_weighting') == '1' else None)
+    held = {key: day for key, day in activity.items() if key in eligible}
+    weights = training.cooc_weights(counts) if reader.settings.get_setting('rec_cooc_weighting') == '1' else None
     captured = dict(baskets=baskets, context=sorted(before & keys), eligible=sorted(eligible),
                     held=held, weights=weights, cutoff=cutoff, end=end, coverage=coverage,
                     generated_excluded=len(eligible & generated),
@@ -125,7 +130,7 @@ def _compare(baseline, candidate, captured, alpha):
     wins = sum(delta > 0 for delta in by_day.values())
     losses = sum(delta < 0 for delta in by_day.values())
     discordant = wins + losses
-    # One vote per active UTC day, rather than treating a listening binge as
+    # One vote per active date, rather than treating a listening binge as
     # many independent successes. This sign test assumes comparable day units;
     # it does not establish causality or eliminate changes in listening habits.
     p = sum(math.comb(discordant, j) for j in range(wins, discordant + 1)) / 2 ** discordant if discordant else 1.
@@ -137,16 +142,6 @@ def _compare(baseline, candidate, captured, alpha):
                 previous_hits=old_hits, selected_hits=new_hits, previous_score=old_hits / n if n else None,
                 score=new_hits / n if n else None, p=p, alpha=alpha, confidence_scope='comparison',
                 reason='Clear prediction improvement' if promote else 'No supported prediction improvement')
-
-
-def _retire_product_trial(store, now):
-    """End new legacy assignments while keeping held projections and evidence."""
-    from yt_playlist.rec import product_comparison
-    current = product_comparison.state(store)
-    if current.get('phase') not in ('preparing', 'observing'):
-        return
-    reason = 'Replaced by daily prediction comparisons with a 30-day holdout.'
-    store.model_selection.retire_product_trial(now, reason)
 
 
 def _finish(store, run, now, *, status, reason):
@@ -193,7 +188,7 @@ def _publish_fit(store, snapshot, run, now):
         store.model_selection.publish_selection(run['id'], encoded, rows if applied else None, selected)
         if not applied:
             store.rec_model.publish_training_generation(changes)
-        store.settings.publish_values({'rec_fit_inputs': fit_inputs})
+        store.rec_model.publish_model_state(recording=RecordingModelUpdate(fit_fingerprint=fit_inputs))
         store.model_selection.retire_model_display()
         store.model_selection.schedule_daily(run['ran_at'] + DAY, now)
     if not snapshot.publish_ordered(publish):
@@ -204,7 +199,6 @@ def _publish_fit(store, snapshot, run, now):
 def maintain(store, now, *, checkpoint=None):
     if not due(store, now):
         return None
-    _retire_product_trial(store, now)
     run = store.model_selection.latest_daily_selection()
     if not run or run['status'] != 'running':
         state = readiness(store, now)
@@ -226,7 +220,7 @@ def maintain(store, now, *, checkpoint=None):
             if model_setup.current_setup(reader) != run['previous']:
                 return _finish(store, run, now, status='retained', reason='The serving setup changed during comparison.')
             if (reader.settings.get_setting('rec_selection_paused') == '1'
-                    or reader.settings.get_setting('rec_selection_restore')):
+                    or reader.model_selection.restore_pending()):
                 return _finish(store, run, now, status='retained', reason='Automatic selection was paused.')
             captured, fingerprint = _capture(reader, run['evidence_end'])
             run['training_cutoff'] = captured['cutoff']

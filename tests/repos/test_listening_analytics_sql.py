@@ -3,7 +3,7 @@ import hashlib
 import json
 import pytest
 
-from yt_playlist.core import recommendation_outputs as files
+from yt_playlist.core import recommendation_impressions, recommendation_outputs as files
 
 
 def bundle(label='one'):
@@ -33,11 +33,9 @@ def test_impression_counter_only_advances_after_the_supplied_cutoff(store):
     repository = store.listening_analytics.repository
     repository.record_impressions(['story'], 100, last_shown_before=0)
     repository.record_impressions(['story'], 200, last_shown_before=100)
-    row = store.conn.execute("SELECT views,last_shown FROM rec_impressions WHERE item_key='story'").fetchone()
-    assert tuple(row) == (1, 100)
+    assert recommendation_impressions.counts(store.conn, recommendation_impressions.EDITORIAL)['story'] == [1, 100]
     repository.record_impressions(['story'], 300, last_shown_before=101)
-    row = store.conn.execute("SELECT views,last_shown FROM rec_impressions WHERE item_key='story'").fetchone()
-    assert tuple(row) == (2, 300)
+    assert recommendation_impressions.counts(store.conn, recommendation_impressions.EDITORIAL)['story'] == [2, 300]
 
 
 def test_native_generation_performs_file_work_before_guarded_sql(store, monkeypatch):
@@ -63,5 +61,6 @@ def test_native_generation_performs_file_work_before_guarded_sql(store, monkeypa
         monkeypatch.setattr(store.listening_analytics.files, 'publish_reserved', forbidden)
         monkeypatch.setattr(files, 'read', forbidden)
         assert snapshot.publish(lambda: store.listening_analytics.publish_generation(generation, 'UTC'))
-    assert store.conn.execute('SELECT count(*) FROM listening_output_files').fetchone()[0] == 3
+    assert store.conn.execute("SELECT json_array_length(value,'$.files') FROM prepared_display_manifests "
+                              "WHERE key='prepared_listening:current'").fetchone()[0] == 3
     assert store.settings.get_setting('listening_timezone') == 'UTC'

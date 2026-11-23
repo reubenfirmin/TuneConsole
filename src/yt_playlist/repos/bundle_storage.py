@@ -8,11 +8,6 @@ class BundleInputs:
         self.conn = conn
         self._lock = RLock() if lock is None else lock
 
-    def supports_pool_revalidation(self):
-        with self._lock:
-            return bool(self.conn.execute(
-                "SELECT 1 FROM sqlite_schema WHERE name='recommendation_pool_revalidations' AND type='table'").fetchone())
-
     def recording_ids(self, keys):
         with self._lock:
             result = {}
@@ -37,11 +32,11 @@ class BundleInputs:
             previous = {}
             for row in self.conn.execute(
                     'SELECT m.surface,m.mode_key,m.purpose,p.id,p.pool_key,p.policy_version,'
-                    'p.group_version_id,p.input_fingerprint,p.purpose,p.eligible_count,p.content_digest '
+                    'p.input_fingerprint,p.purpose,p.eligible_count,p.content_digest '
                     "FROM (SELECT id FROM recommendation_generations WHERE status!='retiring' ORDER BY id DESC LIMIT ?) g "
                     'JOIN recommendation_surface_pools m ON m.generation_id=g.id '
                     'JOIN recommendation_pools p ON p.id=m.pool_id WHERE p.complete=1 '
-                    'AND NOT EXISTS(SELECT 1 FROM recommendation_pool_retirements r WHERE r.pool_id=p.id) '
+                    'AND p.retiring=0 '
                     'ORDER BY g.id DESC LIMIT ?', (generations, limit)):
                 previous.setdefault(tuple(row[:3]), []).append(tuple(row[3:]))
             return previous

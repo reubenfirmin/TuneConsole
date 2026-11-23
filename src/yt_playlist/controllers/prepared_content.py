@@ -12,14 +12,17 @@ class PreparedContent:
         self.refresh = refresh
 
     def capture(self, pending, *, mask_numeric=False):
+        return self.capture_with_previous(pending, mask_numeric=mask_numeric)[0]
+
+    def capture_with_previous(self, pending, *, mask_numeric=False):
         pending = list(pending)
         keys = [key for key, _revision in pending]
         if not keys:
-            return []
+            return [], {}
         with self.repository.capture_reads(keys):
             facts = self.repository.capture_facts(keys, mask_numeric=mask_numeric)
             discovered = self.discovery.discovered_tracks_by_keys(keys, metadata_only=mask_numeric)
-        return prepared_content_inputs.capture(pending, facts, discovered)
+        return prepared_content_inputs.capture(pending, facts, discovered), facts['previous']
 
     def pending(self, limit=32):
         return self.repository.pending(limit)

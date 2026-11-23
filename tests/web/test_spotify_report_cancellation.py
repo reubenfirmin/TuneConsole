@@ -44,7 +44,7 @@ def report_routes(monkeypatch, without_metadata_providers):
 @pytest.mark.parametrize('operation', ['find-album-candidates', 'resolve-album'])
 @pytest.mark.parametrize('failed', [False, True], ids=['success', 'provider-failure'])
 def test_cancelled_album_request_keeps_owner_through_publication(store, operation, failed):
-    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     entered, release = threading.Event(), threading.Event()
 
     class HeldClient(AlbumClient):

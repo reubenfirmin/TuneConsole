@@ -77,7 +77,7 @@
     {% elif b.kind == 'personality' %}
       <div class="pers-aura">{{ aura(b.aura, 'p') }}</div>
       <h1 class="slide-h1 slide-name">{{ b.name }}</h1>
-      <p class="slide-sub">{{ b.blurb }}.</p>
+      {% if b.audio_plays is defined %}<p class="slide-sub">{{ b.blurb }}</p>{% endif %}
       <div class="axes">
         <div class="axis"><span>Calm</span><i class="axis-bar" style="--v: {{ b.axes.energy }}"></i><span>Charged</span></div>
         <div class="axis"><span>Loyalist</span><i class="axis-bar" style="--v: {{ b.axes.exploration }}"></i><span>Explorer</span></div>

@@ -3,6 +3,7 @@ from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library import sync as sync_mod
 from yt_playlist.controllers import library_synchronization as sync_acquisition
 from yt_playlist.library import playlist_generated
+from yt_playlist.core.catalog_query import PLAYABLE_LIBRARY_SQL
 from tests.conftest import FakeClient, _track
 from tests.store_fixture_support import bounded_consumer_schema
 
@@ -54,7 +55,7 @@ def test_sync_identity_soft_skips_on_bridge_disconnect(store, monkeypatch):
     waits = []
     monkeypatch.setattr(sync_acquisition, 'with_retry', lambda fn, **kwargs:
                         with_retry(fn, sleep=waits.append, **kwargs))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
 
     class _DisconnectedClient(FakeClient):
         def get_library_playlists(self, limit=25):
@@ -69,7 +70,7 @@ def test_sync_identity_soft_skips_on_bridge_disconnect(store, monkeypatch):
 
 
 def test_sync_all_records_last_sync_at(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
                         tracks={"PL1": [{**_track("v1", "A", "X"), "likeStatus": "INDIFFERENT"}]})
     sync_all(store, {iid: client}, now=1234.0)
@@ -94,7 +95,7 @@ def test_content_hash_is_order_independent():
 
 
 def test_sync_saves_cover_from_playlist_detail_when_library_listing_omits_it(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
 
     class CoverClient(FakeClient):
         def get_playlist(self, playlistId, limit=100):
@@ -108,7 +109,7 @@ def test_sync_saves_cover_from_playlist_detail_when_library_listing_omits_it(sto
 
 
 def test_refresh_saves_initial_artwork_then_replaces_it_with_youtube_cover(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
 
     class CoverClient(FakeClient):
         cover = None
@@ -129,7 +130,7 @@ def test_refresh_saves_initial_artwork_then_replaces_it_with_youtube_cover(store
 
 
 def test_sync_identity_populates_store(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Mix", "count": 2}],
         tracks={"PL1": [_track("v1", "Song A", "Artist"), _track("v2", "Song B", "Artist")]},
@@ -150,7 +151,7 @@ def test_sync_identity_populates_store(store):
 def test_history_sync_uses_browser_timezone_across_utc_and_local_midnight(store):
     import datetime
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = FakeClient(history=[{**_track("v1", "Song", "Artist"), "played": "Today"}])
     client.history_timezone = "America/Costa_Rica"
     first = datetime.datetime(2026, 10, 20, 23, 30, tzinfo=datetime.timezone.utc).timestamp()
@@ -166,7 +167,7 @@ def test_history_sync_uses_browser_timezone_across_utc_and_local_midnight(store)
 def test_sync_identity_no_truncation_beyond_defaults(store, monkeypatch):
     """Regression: sync_identity must pass limit=None so >25 playlists and >100 tracks are
     not silently truncated by ytmusicapi's defaults."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
 
     # Cross both real API defaults without multiplying the large track list.
     playlists = [{"playlistId": f"PL{i}", "title": f"Playlist {i}", "count": 101 if i == 0 else 1}
@@ -184,10 +185,8 @@ def test_sync_identity_no_truncation_beyond_defaults(store, monkeypatch):
     with store.conn:
         store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
             [(entries[t['videoId']], t['videoId'] + '|artist', t['title'], 'Artist') for t in subjects])
-        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
-            [(t['videoId'], entries[t['videoId']], t['title'], 'Artist') for t in subjects])
-        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-            [(entry, entry, video) for video, entry in entries.items()])
+        store.conn.executemany('INSERT INTO track_sources(id,recording_id,video_id,title,artist) VALUES (?,?,?,?,?)',
+            [(entries[t['videoId']], entries[t['videoId']], t['videoId'], t['title'], 'Artist') for t in subjects])
     monkeypatch.setattr(store.tracks, 'upsert_track', lambda video, *args, **kwargs: entries[video])
 
     client = FakeClient(playlists=playlists, tracks=tracks_per_pl, history=[])
@@ -206,7 +205,7 @@ def test_sync_identity_no_truncation_beyond_defaults(store, monkeypatch):
 def test_sync_prunes_playlists_gone_from_remote(store):
     import yt_playlist.library.sync as sync
     from tests.conftest import FakeClient, _track
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # stale row in the store that the remote library no longer lists
     ghost = store.playlists.upsert_playlist(iid, "GHOST", "Deleted Already", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(ghost, [store.tracks.upsert_track("vx", "Old", "X", None, 1)])
@@ -222,7 +221,7 @@ def test_sync_prunes_playlists_gone_from_remote(store):
 def test_sync_preserves_generated_playlist_created_during_library_fetch(store):
     from yt_playlist.library import executor
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.upsert_playlist(iid, "DELETED", "Deleted playlist", 0, "h", 1)
     same_title = "Fresh songs - October 20 2026 #1"
 
@@ -257,7 +256,7 @@ def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(
     # Exercise all retry attempts without waiting for backoff in this test.
     monkeypatch.setattr(sync_acquisition, "with_retry", lambda fn, **kwargs:
                         with_retry(fn, sleep=lambda _: None, **kwargs))
-    iid = store.accounts.upsert_account("brand", "cred", "brand-id", True)
+    iid = store.accounts.upsert_account("brand", "brand-id", True)
     cached = store.playlists.upsert_playlist(iid, "PL_BAD", "Unavailable", 1, "old-hash", 100)
     old_track = store.tracks.upsert_track("old-video", "Old song", "Artist", None, 120)
     store.playlists.set_playlist_tracks(cached, [old_track])
@@ -299,7 +298,7 @@ def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(stor
 
     monkeypatch.setattr(sync_acquisition, "with_retry", lambda fn, **kwargs:
                         with_retry(fn, sleep=lambda _: None, **kwargs))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     listing = [{"playlistId": "LM", "title": "Liked Music", "count": 400},
                {"playlistId": "BAD", "title": "Unreadable mix"},
                {"playlistId": "LARGE", "title": "Large", "count": 300},
@@ -333,7 +332,7 @@ def test_first_sync_prioritizes_small_seed_without_certifying_partial_reads(stor
     assert resources["playlists"]["items"]["BAD"]["status"] == "failed"
     assert result["status"] == "partial"
     assert store.settings.get_setting("last_sync_at") is None
-    assert {row["video_id"] for row in store.conn.execute("SELECT video_id FROM playable_library_tracks")} == {
+    assert {row["video_id"] for row in store.conn.execute(f"SELECT video_id FROM ({PLAYABLE_LIBRARY_SQL})")} == {
         "seed", "large"}
     assert not sync_due(store, 1001, 86400)
     assert sync_due(store, 1300, 86400)

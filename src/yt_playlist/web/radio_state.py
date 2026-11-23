@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
 
+from yt_playlist.library.radio_launch_publication import RadioLaunchPublication
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_policy import CandidateView, FeedbackContext, FeedbackUpdate, PlaybackHistory
@@ -33,6 +34,26 @@ _TRANSITIONS = {
 
 
 @dataclass
+class LaunchAdmission:
+    launch_id: str | None
+    requested_at: float | None = None
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+    replay: bool = False
+    recover_seeded: bool = False
+    recover_navigation: bool = False
+    trace: bool = False
+
+
+@dataclass
+class PlaybackRecovery:
+    video: str
+    ready_at: float
+    retried: bool = False
+    successors: set[str] = field(default_factory=set)
+
+
+@dataclass
 class Session:
     client: object
     candidates: RadioCandidates
@@ -50,6 +71,12 @@ class Session:
     edits: RadioEdits = field(default_factory=RadioEdits)
     initial_tracks: list = field(default_factory=list)
     initial_handles: dict = field(default_factory=dict)
+    initial_readback: dict | None = None
+    initial_queue_maximum: float | None = None
+    seeded_launch: bool = False
+    initial_publication: RadioLaunchPublication | None = None
+    trace_launch_id: str | None = None
+    save_effects: tuple[str, ...] = ()
     error: str | None = None
     selection_error: str | None = None
     exhausted: bool = False
@@ -77,6 +104,7 @@ class Session:
     preparation_seen_at: float = 0
     playback_confirmed: bool = False
     playback_intent: int | None = None
+    playback_recovery: PlaybackRecovery | None = None
     launch_sent: bool = False
     launch_id: str | None = None
     metadata_checked_at: float = 0

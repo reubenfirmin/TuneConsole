@@ -3,7 +3,7 @@ import pytest
 
 @pytest.fixture
 def store(store):
-    store.accounts.upsert_account("me", "c", None, True)   # identity id=1, referenced by history/playlist FKs
+    store.accounts.upsert_account("me", None, True)   # identity id=1, referenced by history/playlist FKs
     return store
 
 
@@ -30,7 +30,7 @@ def test_play_day_counts_and_meta(store):
 
 def test_track_cards_and_month_track_plays(store):
     _track(store, "k1", "A1", "house")               # ensure the tracks row carries title/thumbnail
-    store.conn.execute("UPDATE youtube_items SET thumbnail='http://x/1.jpg', album_browse_id='MPRE1' "
+    store.conn.execute("UPDATE track_sources SET thumbnail='http://x/1.jpg', album_browse_id='MPRE1' "
                        "WHERE video_id='vk1'")
     store.conn.commit()
     _snap(store, 2, ["k1"]); _snap(store, 5, ["k1"])

@@ -42,7 +42,7 @@ def pick(store, now, parameters, exclude_keys=()):
     if parameters['lane'] == 'comfort':
         from yt_playlist.rec.eligibility import comfort_tracks
         tracks = comfort_tracks(store, tracks, now)
-    tracks = list(store.artists.credited_pages(tracks))
+    tracks = list(store.artists.credited_rows(tracks))
     axes = store.genres.feature_axes(t.get('genre') for t in tracks)
     cuts = mode_surfaces.bundle_metadata(store).get('year_cuts') if parameters['lane'] == 'temporal' else None
     return pool_selection.library_values(tracks, owned, blocked, muted, weights, axes, parameters, cuts,

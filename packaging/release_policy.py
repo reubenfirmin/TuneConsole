@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import sys
 
 
 @dataclass(frozen=True)
@@ -33,12 +34,27 @@ def classify(tag):
     return Release(tag, version, channel)
 
 
+def next_patch(tags):
+    latest = (0, 0, 0)
+    for tag in tags:
+        try:
+            release = classify(tag.strip())
+        except ValueError:
+            continue
+        if release.channel == "stable":
+            latest = max(latest, tuple(map(int, release.version.split("."))))
+    major, minor, patch = latest
+    return f"v{major}.{minor}.{patch + 1}"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tag")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("tag", nargs="?")
+    mode.add_argument("--next-patch", action="store_true", help="Read reachable tags from standard input")
     args = parser.parse_args()
     try:
-        release = classify(args.tag)
+        release = classify(next_patch(sys.stdin) if args.next_patch else args.tag)
     except ValueError as exc:
         parser.error(str(exc))
     output = "".join(f"{key}={value}\n" for key, value in release.outputs().items())

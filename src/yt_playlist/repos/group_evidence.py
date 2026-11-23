@@ -2,7 +2,9 @@
 from yt_playlist.core import group_evidence, mix_choices, recommendation_custody, recommendation_references
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.group_admission import writer
+from yt_playlist.core.group_preparation_state import ROOTS
 from yt_playlist.core.prepared_references import PREPARED
+from yt_playlist.core.worker_settings import number, save
 from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
 
 
@@ -22,8 +24,7 @@ class GroupEvidenceRepo(Repo):
     def release(self, kind, identity):
         with writer(self._store) as conn:
             group_evidence.release(conn, kind, identity)
-            if recommendation_references.enabled(self._store):
-                recommendation_custody.release(conn, kind, identity)
+            recommendation_custody.release(conn, kind, identity)
 
     def retire(self, kind, identities, *, mixes):
         with writer(self._store) as conn:
@@ -31,8 +32,7 @@ class GroupEvidenceRepo(Repo):
                 mix_choices.retire(conn, identities)
             for identity in identities:
                 group_evidence.release(conn, kind, identity)
-                if recommendation_references.enabled(self._store):
-                    recommendation_custody.release(conn, kind, identity)
+                recommendation_custody.release(conn, kind, identity)
 
     def collect_mix_dictionary(self):
         with writer(self._store) as conn:
@@ -40,8 +40,6 @@ class GroupEvidenceRepo(Repo):
 
     @lookup_read
     def mix_menu_ids(self, after, limit):
-        if not mix_choices.available(self.conn):
-            return []
         return [row[0] for row in self.conn.execute('SELECT opportunity_id FROM mix_choice_menus '
             'WHERE opportunity_id>? ORDER BY opportunity_id LIMIT ?', (after, limit))]
 
@@ -53,33 +51,40 @@ class GroupEvidenceRepo(Repo):
 
     @snapshot_read
     def protected_output_files(self, names, owners):
+        from yt_playlist.core import publication_files, recommendation_chunks, recommendation_outputs
+
         if self.conn.in_transaction:
             raise ValueError('Prepared output collection requires an idle connection')
         owned = set()
         if names:
             marks = ','.join('?' for _ in names)
             for owner, column in owners:
-                if self.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?", (owner,)).fetchone():
-                    owned.update(row[0] for row in self.conn.execute(
-                        f'SELECT DISTINCT {column} FROM {owner} WHERE {column} IN ({marks})', names))
+                if owner in recommendation_outputs.SAVED_OUTPUTS:
+                    owned.update(recommendation_outputs.protected_saved(self.conn, owner, names))
+                    continue
+                if owner in recommendation_outputs.PUBLICATION_TABLES:
+                    prefix = publication_files.PREFIXES[recommendation_outputs.PUBLICATION_TABLES[owner]]
+                    owned.update(publication_files.protected_parts(self.conn, prefix, names))
+                    continue
+                if owner == recommendation_chunks.OWNER:
+                    owner = recommendation_chunks.VIEW
+                owned.update(row[0] for row in self.conn.execute(
+                    f'SELECT DISTINCT {column} FROM {owner} WHERE {column} IN ({marks})', names))
         return owned
 
     @lookup_read
     def has_owner(self, kind, identity):
-        return self.conn.execute('SELECT 1 FROM group_evidence_owners WHERE kind=? AND external_key=?',
-                                 (kind, identity)).fetchone() is not None
+        return group_evidence.entry(self.conn, kind, identity) is not None
 
     @lookup_read
     def identities(self, kind, after, limit):
-        return [row[0] for row in self.conn.execute(
-            'SELECT external_key FROM group_evidence_owners WHERE kind=? AND external_key>? '
-            'ORDER BY external_key LIMIT ?', (kind, after, limit))]
+        return group_evidence.identities(self.conn, kind, after, limit)
 
     @snapshot_read
     def next_prepared(self, after, max_bytes):
         row = self.conn.execute('SELECT surface,length(CAST(payload AS BLOB)) FROM rec_proposals '
-            'WHERE surface>? AND (surface IN (' + ','.join('?' for _ in PREPARED) + ") OR surface LIKE ? ESCAPE '\\') "
-            'ORDER BY surface LIMIT 1', (after, *sorted(PREPARED), r'model\_pair:%')).fetchone()
+            'WHERE surface>? AND surface IN (' + ','.join('?' for _ in PREPARED) + ') '
+            'ORDER BY surface LIMIT 1', (after, *sorted(PREPARED))).fetchone()
         if row is None:
             return None
         surface, size = row
@@ -95,12 +100,12 @@ class GroupEvidenceRepo(Repo):
 
     @lookup_read
     def roots_complete(self):
-        return bool(self.conn.execute('SELECT roots_complete FROM group_retention_state WHERE id=1').fetchone()[0])
+        return bool(number(self.conn, ROOTS))
 
     @synchronized
     def complete_roots(self):
         with self.conn.atomic(join=True):
-            self.conn.execute('UPDATE group_retention_state SET roots_complete=1 WHERE id=1')
+            save(self.conn, ROOTS, 1)
 
     @synchronized
     def retain_unknown(self, kind, identity, raw, reason, at):

@@ -1,12 +1,12 @@
 """Read worker-prepared Vibe inputs; missing preparation never runs in requests."""
 from functools import lru_cache
-import math
 from types import MappingProxyType
 
 from yt_playlist.core import json_cache
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import home_vibe, musical_character, rec_params, vibe_pools, vibe_recording_rules as vibe_preparation
 from yt_playlist.rec.vibe_readiness_index import MAX_INDEX_BYTES, VERSION, compact, prepare, project
+from yt_playlist.rec.vibe_score_policy import score_patterns
 from yt_playlist.rec.vibe_support import supported
 
 
@@ -31,14 +31,11 @@ def _prepared_index(encoded):
 
 
 def _encoded_index(store):
-    if getattr(store, '_recommendation_files', False):
-        metadata = store.recommendations.output('home', 'ranking-evidence') or {}
-        home = store.recommendations.head('home')
-        if home and any((store.recommendations.head('vibe:' + preset) or {}).get('id') != home['id']
-                        for preset in home_vibe.PRESETS):
-            metadata = {}
-    else:
-        metadata = (store.rec_proposals.proposal_fields('mode_bundles', ('_meta',)) or {}).get('_meta', {})
+    metadata = store.recommendations.output('home', 'ranking-evidence') or {}
+    home = store.recommendations.head('home')
+    if home and any((store.recommendations.head('vibe:' + preset) or {}).get('id') != home['id']
+                    for preset in home_vibe.PRESETS):
+        return None
     return metadata.get('vibe_readiness')
 
 
@@ -57,9 +54,7 @@ def load(store, include, avoid):
                 and value.get('inputs_policy') == vibe_preparation.serving_prefix()
                 and (not (include or avoid) or (value.get('genre_reserves')
                     and value.get('genre_request') in (None, (tuple(sorted(include)), tuple(sorted(avoid))))))):
-            if not getattr(store, '_recommendation_files', False):
-                return value
-            tracks = store.memoized_read(('vibe-index-inputs', encoded),
+            tracks = store.memoized_read(('vibe-index-inputs', encoded, score_patterns()),
                                         lambda: _current_tracks(store, value))
             return value if tracks is None else MappingProxyType({**value, 'tracks': _freeze(tracks)})
         return None
@@ -70,26 +65,14 @@ def _current_tracks(store, value):
     """Keep retained candidates while checking their current evidence and order.
 
     A background profile update does not retire an entire menu publication.
-    Relational fits supply the usual fast ranking path; only missing scores
-    need the same prepared profile fallback as ordinary Vibe serving.
+    Relational fits supply both ranking scores and support.
     """
     state, profiles = store.musical_profiles.readiness_state(item['key'] for item in value['tracks'])
     if state == value.get('profile_state'):
         return None
-    def ranked(profile, preset):
-        score = profile.get('vibes', {}).get('fits', {}).get(preset, {}).get('score')
-        return type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 1
-    def support(profile, preset):
-        vibes = profile['vibes']
-        # Each fit can be refreshed separately. Another preset's compatible
-        # version cannot qualify this preset's obsolete evidence.
-        return supported({'musical': {**profile, 'vibes': {**vibes,
-            'inputs_version': vibes['fits'].get(preset, {}).get('inputs_version')}}}, preset)
-    supports = {key: [preset for preset in home_vibe.PRESETS if support(profile, preset)]
+    patterns = score_patterns()
+    supports = {key: [preset for preset in home_vibe.PRESETS if supported({'musical': profile}, preset, patterns=patterns)]
                 for key, profile in profiles.items()}
-    fallback = [key for key, profile in profiles.items() if profile['version'] is not None
-                and any(not ranked(profile, preset) for preset in home_vibe.PRESETS)]
-    profiles.update(musical_character.load(store, fallback))
     tracks = []
     for item in value['tracks']:
         check_cancellable_work()
@@ -110,7 +93,7 @@ def ready(store, now, epoch, *, include_genres=(), avoid_genres=()):
         with store.read_view() as reader:
             return ready(reader, now, epoch, include_genres=include_genres, avoid_genres=avoid_genres)
     return store.memoized_read(('vibe-readiness', VERSION, home_vibe.VERSION,
-        musical_character.VERSION, vibe_preparation.serving_prefix(), now, epoch,
+        musical_character.VERSION, score_patterns(), now, epoch,
         tuple(include_genres), tuple(avoid_genres)),
         lambda: _ready(store, now, epoch, include_genres, avoid_genres))
 
@@ -144,7 +127,7 @@ def menus(store, now, epoch, include_genres=(), avoid_genres=()):
                                              for item in card['tracks']]} for card in cards])
                 for preset, cards in _menus(store, value, home_vibe.PRESETS, now, epoch, include_genres, avoid_genres)]
     return store.memoized_read(('vibe-selected-cards', VERSION, home_vibe.VERSION, _source(store),
-        musical_character.VERSION, vibe_preparation.serving_prefix(), now, epoch,
+        musical_character.VERSION, score_patterns(), now, epoch,
         tuple(include_genres), tuple(avoid_genres)),
         select)
 
@@ -207,7 +190,7 @@ def _menus_from_pools(store, value, presets, pools, now, epoch, include_genres, 
         store, [value['tracks'][index] for index in comfort_positions], now)}
     return menu_values(value, presets, pools, epoch, include_genres, avoid_genres,
         items=items, pending=pending, inputs=inputs, prior_inputs=prior_inputs, full_pools=full_pools,
-        resolve_catalog=getattr(store, '_recommendation_files', False),
+        resolve_catalog=True,
         artist_cap=int(rec_params.get_param(store, 'modes_artist_cap')),
         album_cap=int(rec_params.get_param(store, 'modes_album_cap')),
         comfort_minimum=rec_params.get_param(store, 'comfort_min_pool'), comfort_keys=comfort_keys)

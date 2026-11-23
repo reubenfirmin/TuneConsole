@@ -6,7 +6,7 @@ explanation, range, step, and default live here. Tunable consumers read through
 This replaces magic numbers scattered across recommend.py, so the page can render and reset knobs.
 
 Lane and genre *weights* are NOT here - those are multiplicative weights stored in the
-`rec_weights` table (axes `lane:*` / `genre:*`); see LANES below for their labels/help. This
+`taste_axes` rows (axes `lane:*` / `genre:*`); see LANES below for their labels/help. This
 module owns the scalar params (windows, ratios, counts, penalties), stored in the `settings`
 table as `rec_param:<name>` keys.
 
@@ -84,11 +84,11 @@ PARAMS = [
               "Chosen menus and corrections remain within the storage budget. Reports cover retained evidence.",
               7, 730, 1, 180, integer=True),
     ParamSpec("choice_halflife_d", "Choice memory half-life (days)", "discovery",
-              "Recent choice influence halves after this many days of wall time. NOW and Session "
+              "Recent choice influence halves after this many days of wall time. NOW and TODAY "
               "use their existing hour-scale controls; saved support requires separate return days.",
               1, 90, 1, 7, integer=True),
     ParamSpec("choice_saved_days", "Choice days for saved support", "discovery",
-              "Distinct UTC choice days before an interest earns lasting support shared across formats. "
+              "Distinct local listening days before a confirmed interest earns lasting support across formats. "
               "Radio branches within one episode are correlated and capped.",
               2, 30, 1, 3, integer=True),
     ParamSpec("choice_saved_w", "Saved choice support", "discovery",
@@ -158,7 +158,7 @@ PARAMS = [
               "Balance musical similarity against shared playlist membership on the Clusters canvas. "
               "0 uses only playlists; higher gives genre and era more influence.",
               0.0, 1.0, 0.05, 0.30),
-    # Cluster-ring shaping (defaults mirror embed.CLUSTER_BETA / embed.SEED_FANOUT; both apply at query
+    # Cluster-ring shaping (defaults mirror cluster_ranking.CLUSTER_BETA / cluster_ranking.SEED_FANOUT; both apply at query
     # time, so a change takes effect on the next grow with no rebuild).
     ParamSpec("cluster_beta", "Clusters: effect of removing a track", "discovery",
               "How much removing a track reduces similar suggestions on that branch. "
@@ -197,13 +197,6 @@ PARAMS = [
               "Adds extra preference for music like your recent likes. Off removes this boost "
               "without undoing likes. Stronger settings can crowd out other music you enjoy.",
               0.0, 2.0, 0.05, 0.45, low="0% · Off", high="100% · Strongest", percentage=True),
-    ParamSpec("dislike_transient_w", "Recent dislikes: influence", "transient",
-              "How much recent dislikes reduce recommendations for similar music.",
-              0.0, 3.0, 0.05, 1.50),
-    ParamSpec("dislike_durable_w", "Remember disliked music", "discovery",
-              "Keep reducing matches to disliked tracks after recent feedback fades. "
-              "Removing a dislike removes this influence; genre and era preferences stay independent.",
-              0.0, 1.0, 0.05, 0.35),
     ParamSpec("audio_transient_w", "Follow recent sound", "transient",
               "Adds extra preference for similar tempo, energy, and mood. Off removes this boost. "
               "Stronger settings can make picks sound alike. Requires sound information.",
@@ -222,10 +215,6 @@ PARAMS = [
               "Days until a mood choice has half its original influence. Lower makes mood choices fade sooner.", 1, 60, 1, 7, integer=True),
     ParamSpec("like_halflife_d", "Like memory half-life (days)", "transient",
               "Days until a like has half its original influence on current recommendations.", 1, 90, 1, 21, integer=True),
-    ParamSpec("dislike_halflife_d", "Dislike fade half-life (days)", "transient",
-              "Days until a dislike has half its original effect on recent genre and era preferences. "
-              "Remembered disliked music and the track exclusion have separate controls.",
-              5, 180, 5, 5, integer=True),
     ParamSpec("mood_alpha", "Mood choice influence", "transient",
               "How strongly a mood choice changes recommendations relative to your saved taste.",
               0.0, 1.0, 0.05, 0.35),
@@ -255,13 +244,15 @@ PARAMS = [
               "How strongly your current listening style affects Home and Radio once enough plays are available. "
               "Radio's stream controls and explicit stream choices take precedence.",
               0.0, 2.0, 0.05, 0.6),
-    ParamSpec("session_halflife_h", "Session memory half-life (hours)", "transient",
-              "Hours until this session's influence halves. Higher keeps it active across longer breaks.", 0.5, 24, 0.5, 4),
-    ParamSpec("session_alpha", "Session influence", "transient",
-              "How strongly this listening session affects recommendations relative to your saved taste.",
+    ParamSpec("session_halflife_h", "Today memory half-life (hours)", "transient",
+              "Hours until the influence of a same-day play halves. Today resets at local midnight.", 0.5, 24, 0.5, 4),
+    ParamSpec("session_alpha", "Today influence", "transient",
+              "How strongly earlier listening today affects recommendations.",
               0.0, 1.0, 0.05, 0.25),
+    ParamSpec("recent_horizon_days", "Recent evidence horizon (days)", "transient",
+              "How many local listening days can influence recent preferences.", 7, 90, 1, 30, integer=True),
     # --- Skips (#84 read-time classification of track_exit/bye rows). Defaults mirror the
-    # play/like/dislike transient channels: a moderate push with a two-week memory. ---
+    # play and like transient channels: a moderate push with a two-week memory. ---
     ParamSpec("skip_transient_w", "Recent skips: influence", "transient",
               "How much recent skips reduce recommendations for similar music. 0 ignores skips.", 0.0, 2.0, 0.05, 0.6),
     ParamSpec("skip_halflife_d", "Skip memory half-life (days)", "transient",
@@ -363,14 +354,17 @@ PARAMS = [
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
 
+# Installed preferences and historical comparisons can still read these values.
+LEGACY_MODE_PARAMS = frozenset({'modes_k', 'modes_min_members', 'modes_match_threshold', 'ppr_ab_share'})
+
 # #114: the everyday controls. Other discovery knobs are grouped into visible feature sections.
 SEMANTIC_PARAMS = ("breadth_bias", "play_transient_w", "like_transient_w", "audio_transient_w")
 
 
-# Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
+# Lane weights (axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
 LANE_MIN, LANE_MAX, LANE_DEFAULT = 0.2, 3.0, 1.0
 
-# Genre-family weights (rec_weights table, axis `genre:<family>`): 0 mutes, 1 neutral, 2 favors.
+# Genre-family weights (axis `genre:<family>`): 0 mutes, 1 neutral, 2 favors.
 GENRE_MIN, GENRE_MAX, GENRE_DEFAULT, GENRE_STEP = 0.0, 2.0, 1.0, 0.1
 
 # #18: how much of the transient facet lean reaches OUTWARD discovery (new artists/albums). Damped

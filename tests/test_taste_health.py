@@ -9,7 +9,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     from yt_playlist.rec import model_health
     assert model_health.prepare(store, 1000) is not None
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)

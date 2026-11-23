@@ -1,5 +1,6 @@
 """Exercise the actual queue, proposal and file-ledger group ownership paths."""
 import json
+import sqlite3
 
 import pytest
 
@@ -8,7 +9,7 @@ from tests.repos.test_compact_group_publication import database
 from tests.repos.test_group_retention import enable, drain
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.store import Store
-from yt_playlist.core import group_documents, group_evidence, policy_documents, home_outputs, model_projections
+from yt_playlist.core import group_documents, group_evidence, policy_documents, home_outputs
 from tests.rec.test_recommendation_roots import display_root
 from yt_playlist.rec import choice_evidence, group_roots
 from yt_playlist.rec.choice_capture import CaptureQueue
@@ -34,7 +35,7 @@ def issue(store, identity='menu'):
 
 
 def roots(store, kind):
-    return [row[0] for row in store.conn.execute('SELECT external_key FROM group_evidence_owners '
+    return [row[0] for row in store.conn.execute('SELECT external_key FROM group_evidence_contexts '
                                                 'WHERE kind=? ORDER BY external_key', (kind,))]
 
 
@@ -112,27 +113,6 @@ def test_database_close_leaves_contended_retirement_for_the_lifetime_reaper(grou
         other.conn.close()
 
 
-def test_database_close_defers_pending_retirement_during_cutover(groups):
-    from yt_playlist.core.db_rebuild import install
-
-    close = group_roots.pending(groups, context(), 10)
-    identity = roots(groups, 'pending')[0]
-    path = group_documents.directory(groups.conn) / '.pending' / (identity + '.lock')
-    state = {'format': 1, 'database': str(groups._db_path), 'phase': 'closing'}
-    install.save(groups._db_path, state)
-    groups.conn.close()
-    assert groups.conn._handle_closed and path.exists()
-    close()
-    state['phase'] = 'failed'
-    install.save(groups._db_path, state)
-    other = Store(groups._db_path)
-    other._bind_repositories()
-    try:
-        assert roots(other, 'pending') == [identity]
-        group_roots.reap_pending(other)
-        assert not roots(other, 'pending') and not path.exists()
-    finally:
-        other.conn.close()
 
 
 def test_irrelevant_historical_generation_is_not_a_choice_dependency(groups):
@@ -150,13 +130,17 @@ def test_proposal_replacement_and_sql_deletion_release_exact_prepared_owners(gro
     second = {'context': context('second', 'second')}
     groups.rec_proposals.put_proposals('home_prepared', first, 10)
     assert roots(groups, 'prepared') == [display_root(groups, 'home_prepared', 'context')]
+    group_version = groups.conn.execute(f'SELECT reference.value->>2 FROM {group_evidence.HOME_VERSIONS}').fetchone()
+    assert group_version is not None
+    with pytest.raises(sqlite3.IntegrityError, match='Home display retains this group version'), groups.conn:
+        groups.conn.execute('DELETE FROM group_versions WHERE id=?', group_version)
     with groups.rec_proposals.prepare_home(json.dumps(second), 11) as prepared:
         with pytest.raises(RuntimeError, match='controlled rollback'), groups.conn:
             groups.conn.execute('BEGIN IMMEDIATE')
             groups.rec_proposals.publish_home(prepared)
             raise RuntimeError('controlled rollback')
     assert groups.rec_proposals.get_proposals('home_prepared') == first
-    assert groups.conn.execute("SELECT generation_id FROM group_evidence_generations WHERE kind='prepared'").fetchone()[0] == 1
+    assert groups.conn.execute("SELECT generation_id FROM group_evidence_contexts WHERE kind='prepared'").fetchone()[0] == 1
     assert issue(groups) == 'menu'
     groups.rec_proposals.put_proposals('home_prepared', second, 12)
     with groups.conn:
@@ -166,17 +150,6 @@ def test_proposal_replacement_and_sql_deletion_release_exact_prepared_owners(gro
     enable(groups)
     drain(groups)
     assert groups.taste_groups.definition('first-leaf') is None
-
-
-def test_comparison_envelope_retains_context_until_its_owner_is_cleared(groups):
-    envelope = {'data': {'context': context()}, 'run_id': 1}
-    groups.rec_proposals.put_proposals('model_pair:1:incumbent:mixes', envelope, 10)
-    identity = groups.conn.execute('SELECT publication_id FROM model_pair_heads').fetchone()[0]
-    assert roots(groups, 'comparison') == [f'comparison-output:{identity}:context']
-    with groups.conn:
-        groups.conn.execute('BEGIN IMMEDIATE')
-        model_projections.clear(groups.conn)
-    assert not roots(groups, 'comparison')
 
 
 def test_context_roots_do_not_expand_unrelated_model_components(groups, monkeypatch):

@@ -64,10 +64,11 @@ def seed_recipe_owners(store, owners):
             "INSERT INTO playlist_scopes(id,provider_playlist_id,kind) VALUES (?,?,'shared')",
             [(f'owned-{i}', f'owned-{i}') for i in range(owners)])
         store.conn.executemany(
-            'INSERT INTO rec_recipes(id,playlist_scope_id,revision,created_at,model,'
-            "recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,1,'fixture',?,?,?)", rows)
-    rows = store.conn.execute('SELECT id,playlist_scope_id,created_at,model,'
-                              'recovery_filename,recovery_digest,recovery_bytes FROM rec_recipes ORDER BY id').fetchall()
+            'UPDATE playlist_scopes SET recipe_id=?,recipe_revision=?,recipe_created_at=1,'
+            "recipe_model='fixture',recipe_recovery_filename=?,recipe_recovery_digest=?,recipe_recovery_bytes=?,recipe_facets='[]' "
+            'WHERE id=?', [(row[0], *row[2:], row[1]) for row in rows])
+    rows = store.conn.execute('SELECT recipe_id,id,recipe_created_at,recipe_model,recipe_recovery_filename,'
+                              'recipe_recovery_digest,recipe_recovery_bytes FROM playlist_scopes ORDER BY recipe_id').fetchall()
     assert len(rows) == owners
     assert len({row[4] for row in rows}) == owners
     for i, row in enumerate(rows):
@@ -98,7 +99,7 @@ def test_batches_bound_candidates_and_allow_read_write_between_turns(
             other = Store(store._db_path)
             try:
                 other.conn.execute('PRAGMA busy_timeout=0')
-                assert other.conn.execute('SELECT count(*) FROM rec_recipes').fetchone()[0] == owners
+                assert other.conn.execute('SELECT count(recipe_id) FROM playlist_scopes').fetchone()[0] == owners
                 with other.conn:
                     other.conn.execute("INSERT INTO settings VALUES ('gc-probe','usable') "
                                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
@@ -125,16 +126,16 @@ def test_batches_bound_candidates_and_allow_read_write_between_turns(
 
 def test_snapshot_and_retained_action_backup_survive_collection(file_backed_store, tmp_path):
     store = file_backed_store
-    account = store.accounts.upsert_account('Owner', 'owner.json', None, True)
+    account = store.accounts.upsert_account('Owner', None, True)
     store.playlists.upsert_playlist(account, 'SOURCE', 'Source', 2, '', 1)
     original_backup = backup(tmp_path, account, 'SOURCE')
     undo = {'deletions': [{'identity': account, 'ytm': 'SOURCE', 'phase': 'pending',
                           'backup': original_backup}]}
-    store.actions.record_action('delete_playlist', '{}', '{}', 'delete_pending', json.dumps(undo), 2)
-    retained, = [Path(row[0]) for row in store.conn.execute('SELECT retained_filename FROM action_backups')]
+    action = store.actions.record_action('delete_playlist', '{}', '{}', 'delete_pending', json.dumps(undo), 2)
+    retained = Path(store.actions.repository.backups(action)[0]['retained_filename'])
     exact = retained.read_bytes()
     store.playlist_recipes.set_recipe('P', {'model': 'old'}, 1)
-    old = Path(store.conn.execute("SELECT recovery_filename FROM rec_recipes").fetchone()[0])
+    old = Path(store.conn.execute("SELECT recipe_recovery_filename FROM playlist_scopes WHERE id='P'").fetchone()[0])
     expired(old)
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
@@ -227,7 +228,7 @@ def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
     clock, interrupted_queries, interrupted_progress = [0], [], []
 
     def trace(sql):
-        if sql.startswith('WITH page AS MATERIALIZED') and ' FROM rec_recipes ' in sql:
+        if sql.startswith('WITH page AS MATERIALIZED') and 'recipe_recovery_filename FROM playlist_scopes' in sql:
             interrupted_queries.append(sql)
             clock[0] = 1  # Expire only after SQLite has begun the actual owner query.
 
@@ -255,7 +256,7 @@ def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
     store.settings.set_setting('after SQL deadline', 'usable')
     finish(store)
     assert not orphan.exists()
-    assert store.conn.execute('SELECT count(*) FROM rec_recipes').fetchone()[0] == 1024
+    assert store.conn.execute('SELECT count(recipe_id) FROM playlist_scopes').fetchone()[0] == 1024
 
 
 def test_worker_continues_local_batches_without_clients(file_backed_store, monkeypatch):

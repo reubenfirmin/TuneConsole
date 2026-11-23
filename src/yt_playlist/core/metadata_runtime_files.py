@@ -15,7 +15,7 @@ import tempfile
 
 from .evidence_ledger import canonical
 from .activity import check_cancellable_work, WorkBudgetExceeded
-from . import fao, policy_documents
+from . import fao, policy_documents, runtime_metadata_choices as choices
 from .metadata_contract import ALTERNATIVE_SECONDS, runtime_active
 from . import metadata_file_contract as contract
 
@@ -62,13 +62,15 @@ def _prepared(conn, kind, owner, revision, data):
         raise RuntimeError('Runtime metadata publication requires a writer transaction')
     current = None
     if runtime_active(conn):
-        if kind in ('choices', 'conflicts'):
-            current = conn.execute('SELECT revision FROM metadata_runtime_'+kind+' WHERE id=?', owner).fetchone()
+        if kind == 'choices':
+            current = conn.execute(f'SELECT revision FROM {choices.VIEW} WHERE id=?', owner).fetchone()
+        elif kind == 'conflicts':
+            current = conn.execute('SELECT runtime_revision FROM metadata_conflicts WHERE runtime_id=?', owner).fetchone()
         elif kind == 'native':
             current = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', owner).fetchone()
         elif kind == 'alternatives':
-            current = conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN metadata_runtime_providers p '
-                'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', owner).fetchone()
+            current = conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN enrichment_provider_config p '
+                "ON p.provider=s.provider WHERE s.recording_id=? AND p.metadata_provider_id=? AND s.status<>'queued'", owner).fetchone()
     return _prepared_at(directory(conn), kind, owner, revision, data,
                         current_revision=current[0] if current is not None else None)
 
@@ -279,19 +281,24 @@ def _verified_data(encoded, kind, owner, revision):
 
 def references(conn, *, include_expired=False):
     """Current serving/model facts and retained manual decisions, under a snapshot."""
-    if not runtime_active(conn):
-        return
+    if runtime_active(conn):
+        yield from active_references(conn, include_expired=include_expired)
+
+
+def active_references(conn, *, include_expired=False, choice_relation=choices.VIEW):
+    """List references for a snapshot whose metadata serving state is active."""
     import time
     cutoff = float('-inf') if include_expired else time.time()-ALTERNATIVE_SECONDS
-    for recording, code, at in conn.execute('SELECT s.recording_id,p.id,s.at FROM enrichment_provider_state s '
-        'JOIN metadata_runtime_providers p ON p.name=s.provider WHERE s.at>?', (cutoff,)):
+    for recording, code, at in conn.execute('SELECT s.recording_id,p.metadata_provider_id,s.at FROM enrichment_provider_state s '
+        'JOIN enrichment_provider_config p ON p.provider=s.provider AND p.metadata_provider_id IS NOT NULL '
+        "WHERE s.at>? AND s.status<>'queued'", (cutoff,)):
         yield 'alternatives', (recording, code), float(at), False
     for key, revision in conn.execute('SELECT source_key,revision FROM rec_musical_sources'):
         yield 'native', (key,), revision, True
-    for identity, revision in conn.execute('SELECT id,revision FROM metadata_runtime_choices'):
+    for identity, revision in conn.execute(f'SELECT id,revision FROM {choice_relation}'):
         for number in range(1, revision + 1):
             yield 'choices', (identity,), number, True
-    for identity, revision in conn.execute('SELECT id,revision FROM metadata_runtime_conflicts'):
+    for identity, revision in conn.execute('SELECT runtime_id,runtime_revision FROM metadata_conflicts WHERE runtime_id IS NOT NULL'):
         yield 'conflicts', (identity,), revision, True
 
 
@@ -306,9 +313,7 @@ def owns_file(conn, filename):
     identity = contract.record_id(filename)
     if identity is not None:
         from yt_playlist.repos import metadata_file_writes
-        if not metadata_file_writes.available(conn):
-            return False
-        return conn.execute('SELECT 1 FROM metadata_file_references WHERE file_id=? LIMIT 1', (identity,)).fetchone() is not None
+        return metadata_file_writes.retains(conn, identity)
     try:
         encoded = fao.read(filename, max_bytes=MAX_BYTES).bytes
         body = json.loads(encoded)['body']
@@ -320,19 +325,17 @@ def owns_file(conn, filename):
         _verified_data(encoded, kind, owner, revision)
     except (ValueError, KeyError, TypeError):
         return True
-    if not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='metadata_runtime_state'").fetchone():
-        return True
     if kind == 'native':
         row = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', owner).fetchone()
         return row is not None and row[0] == revision
     if kind == 'choices':
-        row = conn.execute('SELECT revision FROM metadata_runtime_choices WHERE id=?', owner).fetchone()
+        row = conn.execute(f'SELECT revision FROM {choices.VIEW} WHERE id=?', owner).fetchone()
         return row is not None and 1 <= revision <= row[0]
     if kind == 'conflicts':
-        row = conn.execute('SELECT revision FROM metadata_runtime_conflicts WHERE id=?', owner).fetchone()
+        row = conn.execute('SELECT runtime_revision FROM metadata_conflicts WHERE runtime_id=?', owner).fetchone()
         return row is not None and row[0] == revision
-    row = conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN metadata_runtime_providers p '
-        'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', owner).fetchone()
+    row = conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN enrichment_provider_config p '
+        "ON p.provider=s.provider WHERE s.recording_id=? AND p.metadata_provider_id=? AND s.status<>'queued'", owner).fetchone()
     return row is not None and row[0] == revision
 
 

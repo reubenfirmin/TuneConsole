@@ -66,7 +66,14 @@ def test_store_package_loads_worker_modules_and_saved_playlist_radio(tmp_path, b
             assert package.read('audio_model/' + name) == (ROOT / 'extension/audio_model' / name).read_bytes()
         for name in VENDOR_FILES | {'essentia-csp.js', 'bundle.json', 'runtime.json'}:
             assert 'audio_model/vendor/' + name in package.namelist()
-        assert json.loads(package.read('audio_model/vendor/bundle.json'))['purpose'] == 'tuneconsole_audio'
+        bundle = json.loads(package.read('audio_model/vendor/bundle.json'))
+        assert bundle['purpose'] == 'tuneconsole_audio'
+        assert 'mood_heads' not in bundle
+        assert {row['path'] for row in bundle['files']} == VENDOR_FILES
+        assert bundle['total_bytes'] == sum(row['bytes'] for row in bundle['files'])
+        vendor_files = {name.removeprefix('audio_model/vendor/') for name in package.namelist()
+                        if name.startswith('audio_model/vendor/') and not name.endswith('/')}
+        assert vendor_files == VENDOR_FILES | {'essentia-csp.js', 'bundle.json', 'runtime.json'}
         package.extractall(tmp_path / "unpacked")
     script = r"""
 const assert = require('node:assert/strict');
@@ -105,7 +112,7 @@ const {radio, sensors, audioCapture, audioCollection} = require('./tests/extensi
   assert.equal(radioCalls[0].world,'MAIN');
   assert.equal(radioCalls[1].target.tabId,7);
   assert.deepEqual(JSON.parse(JSON.stringify(radioCalls[1].args)),
-    [{playlist:'PL_fixture',videoIds:['first','next'],refresh:true}]);
+    [{playlist:'PL_fixture',videoIds:['first','next'],refresh:true,removedCurrent:null}]);
   assert.equal((await sensors.probe()).healthy,true,
     'the packaged bootstrap must accept its own sensor revisions');
   assert.equal((await sensors.ping(7,true,{nativeRating:true})).ok,true);
@@ -130,15 +137,15 @@ const {radio, sensors, audioCapture, audioCollection} = require('./tests/extensi
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize('failure', ['missing_models', 'missing_head', 'corrupt_weights',
+@pytest.mark.parametrize('failure', ['missing_models', 'missing_musicnn_metadata', 'corrupt_weights',
                                     'corrupt_runtime', 'incomplete_manifest', 'missing_worker'])
 def test_store_build_rejects_incomplete_audio_without_replacing_previous_zip(tmp_path, failure):
     package_source(tmp_path)
     model = tmp_path / 'extension/audio_model'
     if failure == 'missing_models':
         shutil.rmtree(model / 'vendor')
-    elif failure == 'missing_head':
-        (model / 'vendor/happy/model.json').unlink()
+    elif failure == 'missing_musicnn_metadata':
+        (model / 'vendor/musicnn/metadata.json').unlink()
     elif failure == 'corrupt_weights':
         (model / 'vendor/musicnn/group1-shard1of1.bin').write_bytes(b'corrupt')
     elif failure == 'corrupt_runtime':
@@ -148,7 +155,7 @@ def test_store_build_rejects_incomplete_audio_without_replacing_previous_zip(tmp
     else:
         manifest = model / 'vendor/bundle.json'
         data = json.loads(manifest.read_text())
-        data['files'] = [row for row in data['files'] if not row['path'].startswith('sad/')]
+        data['files'] = [row for row in data['files'] if row['path'] != 'musicnn/model.json']
         manifest.write_text(json.dumps(data))
     version = json.loads((tmp_path / 'extension/manifest.json').read_text())['version']
     archive = tmp_path / f'dist/tuneconsole-extension-{version}.zip'

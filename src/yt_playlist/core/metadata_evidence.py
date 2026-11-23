@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import sqlite3
 
 from . import metadata_values as values
+from . import metadata_choice_selections, metadata_selections
 from .metadata_contract import clock as _clock
 
 
@@ -77,10 +78,13 @@ def record_prepared(conn, delivery_id, prepared, *, source_run_id=None):
 
 def select(conn, entry_id, field, observation_id, *, now=None):
     """Change a typed base value and its exact lineage together."""
+    from . import catalog_metadata
     expected_scope, now = values.scope(field), _clock(now)
     with _atomic(conn):
-        subject = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
-        row = conn.execute('SELECT * FROM metadata_observations WHERE id=?', (observation_id,)).fetchone()
+        subject = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
+        row = conn.execute('SELECT o.*,COALESCE(d.provider,o.legacy_source) AS provider '
+                           'FROM metadata_observations o LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id '
+                           'WHERE o.id=?', (observation_id,)).fetchone()
         if (subject is None or row is None or row['field'] != field or row['field_scope'] != expected_scope
                 or row['recording_id'] != subject['recording_id']
                 or expected_scope != 'recording' and row['entry_id'] != entry_id
@@ -88,24 +92,19 @@ def select(conn, entry_id, field, observation_id, *, now=None):
             raise ValueError('Metadata selection has a different subject, field or scope')
         value = value_from_row(row).selected()
         if field in values.RECORDING_FIELDS:
-            table, key, identity = 'recording_metadata_selections', 'recording_id', subject['recording_id']
+            scope, identity = 'recording', subject['recording_id']
             if field == 'genre':
                 from . import genre_classifications
                 genre_classifications.write_evidence(conn, 'recordings', identity, value_from_row(row))
             else:
                 conn.execute(f'UPDATE recordings SET {field}=? WHERE id=? AND {field} IS NOT ?', (value, identity, value))
         else:
-            table, key, identity = 'entry_metadata_selections', 'entry_id', entry_id
-            if subject['video_id'] is not None:
-                conn.execute(f'UPDATE youtube_items SET {field}=? WHERE video_id=? AND {field} IS NOT ?', (value, subject['video_id'], value))
-            else:
-                conn.execute(f'UPDATE unresolved_items SET {field}=? WHERE entry_id=? AND {field} IS NOT ?', (value, entry_id, value))
-        conn.execute(f'INSERT INTO {table}({key},field,observation_id,attribution_status,selected_at) '
-                     "VALUES (?,?,?,'evidenced',?) ON CONFLICT(" + key + ',field) DO UPDATE '
-                     "SET observation_id=excluded.observation_id,attribution_status='evidenced',"
-                     'legacy_source=NULL,selected_at=excluded.selected_at '
-                     "WHERE observation_id IS NOT excluded.observation_id OR attribution_status<>'evidenced' OR legacy_source IS NOT NULL",
-                     (identity, field, observation_id, now))
+            scope, identity = 'entry', entry_id
+            from . import track_sources
+            track_sources.write_field(conn, entry_id, field, value)
+        if metadata_selections.save_evidence(conn, scope, identity, field, observation_id, None, now):
+            catalog_metadata.audit(conn, entry_id, subject['recording_id'], field, row['provider'] or 'legacy_unknown',
+                                   'select', value, now, genre_key=row['genre_key'])
 
 
 def transfer_recording_selection(conn, previous, target, field, *, now=None):
@@ -116,12 +115,12 @@ def transfer_recording_selection(conn, previous, target, field, *, now=None):
     with _atomic(conn):
         selected = conn.execute('SELECT s.*,o.value_kind,o.text_value,o.number_value,o.genre_key,o.unit,'
             'o.resolution_reason,COALESCE(d.provider,o.legacy_source,s.legacy_source) AS provider '
-            'FROM recording_metadata_selections s LEFT JOIN metadata_observations o ON o.id=s.observation_id '
+            f"FROM ({metadata_selections.projection('recording')}) s LEFT JOIN metadata_observations o ON o.id=s.observation_id "
             'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.recording_id=? AND s.field=?',
             (previous, field)).fetchone()
         if selected is None:
             return False
-        entry = conn.execute('SELECT id,video_id FROM catalog_entries WHERE recording_id=? ORDER BY id LIMIT 1',
+        entry = conn.execute('SELECT id,video_id FROM track_sources WHERE recording_id=? ORDER BY id LIMIT 1',
                              (target,)).fetchone()
         if entry is None:
             raise ValueError('A transferred selection needs an admitted target input')
@@ -133,9 +132,8 @@ def transfer_recording_selection(conn, previous, target, field, *, now=None):
             else:
                 raw = conn.execute(f'SELECT {field} FROM recordings WHERE id=?', (previous,)).fetchone()[0]
                 conn.execute(f'UPDATE recordings SET {field}=? WHERE id=?', (raw, target))
-            conn.execute('INSERT INTO recording_metadata_selections(recording_id,field,attribution_status,'
-                "legacy_source,selected_at) VALUES (?,?,'legacy_unresolved',?,?)",
-                (target, field, selected['legacy_source'], selected['selected_at']))
+            metadata_selections.save_evidence(conn, 'recording', target, field, None,
+                                              selected['legacy_source'], selected['selected_at'])
             return True
         observation = conn.execute('INSERT INTO metadata_observations(entry_id,recording_id,input_video_id,'
             'field_scope,field,value_kind,text_value,number_value,genre_key,unit,resolution_reason,observed_at,'
@@ -159,7 +157,7 @@ def reuse_recording_observation(conn, entry_id, observation_id, *, now=None):
         row = conn.execute('SELECT o.*,d.provider FROM metadata_observations o '
                            'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE o.id=?',
                            (observation_id,)).fetchone()
-        entry = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?',
+        entry = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?',
                              (entry_id,)).fetchone()
         if (row is None or entry is None or row['field_scope'] != 'legacy_recording'
                 or row['recording_id'] != entry['recording_id'] or row['field'] not in values.RECORDING_FIELDS
@@ -181,7 +179,7 @@ def reuse_recording_observation(conn, entry_id, observation_id, *, now=None):
 
 def choose(conn, entry_id, field, value=None, *, withdraw=False, source='user', now=None, expected_recording_id=None):
     """Retain every explicit decision, including null, blank and withdrawal."""
-    from . import metadata_runtime
+    from . import metadata_runtime, recording_metadata
     if metadata_runtime.active(conn):
         return metadata_runtime.choose(conn, entry_id, field, value, withdraw=withdraw, source=source,
                                        now=now, expected_recording_id=expected_recording_id)
@@ -191,16 +189,15 @@ def choose(conn, entry_id, field, value=None, *, withdraw=False, source='user', 
     prepared = values.Value('withdrawn') if withdraw else values.prepare(conn, field, value,
         unit=values.DEFAULT_UNIT.get(field) if value not in (None, '') else None)
     with _atomic(conn):
-        subject = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+        subject = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
         if subject is None or expected_recording_id is not None and subject['recording_id'] != expected_recording_id:
             raise ValueError('Metadata decision input changed before capture')
         observation = conn.execute('INSERT INTO metadata_observations(entry_id,recording_id,input_video_id,'
             'field_scope,field,value_kind,text_value,number_value,genre_key,unit,resolution_reason,observed_at,origin,legacy_source) '
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'user',?)", (entry_id, *tuple(subject), scope, field, prepared.kind,
              prepared.text, prepared.number, prepared.genre_key, prepared.unit, prepared.resolution_reason, now, source)).lastrowid
-        conn.execute('INSERT INTO metadata_choice_heads(entry_id,field,observation_id) VALUES (?,?,?) '
-                     'ON CONFLICT(entry_id,field) DO UPDATE SET observation_id=excluded.observation_id',
-                     (entry_id, field, observation))
+        metadata_choice_selections.select(conn, entry_id, field, observation)
+        recording_metadata.audit_choice(conn, entry_id, subject['recording_id'], field, source, prepared, now)
     return observation
 
 
@@ -215,8 +212,7 @@ def effective(conn, entry_id, field):
             raise ValueError('Unknown catalog entry')
         return row[0]
     values.scope(field)
-    row = conn.execute('SELECT o.* FROM metadata_choice_heads h JOIN metadata_observations o ON o.id=h.observation_id '
-                       'WHERE h.entry_id=? AND h.field=?', (entry_id, field)).fetchone()
+    row = metadata_choice_selections.get(conn, entry_id, field)
     if row is not None and row['value_kind'] != 'withdrawn':
         if field == 'genre':
             from .genre_classifications import selected_label
@@ -225,12 +221,10 @@ def effective(conn, entry_id, field):
     if field in values.RECORDING_FIELDS:
         from . import genre_classifications
         expression = genre_classifications.read_expression(conn, 'r', 'recordings') if field == 'genre' else f'r.{field}'
-        row = conn.execute(f'SELECT {expression} FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id '
+        row = conn.execute(f'SELECT {expression} FROM track_sources e JOIN recordings r ON r.id=e.recording_id '
                            'WHERE e.id=?', (entry_id,)).fetchone()
     else:
-        row = conn.execute(f'SELECT CASE WHEN e.video_id IS NOT NULL THEN y.{field} ELSE u.{field} END '
-                           'FROM catalog_entries e LEFT JOIN youtube_items y ON y.video_id=e.video_id '
-                           'LEFT JOIN unresolved_items u ON u.entry_id=e.id WHERE e.id=?', (entry_id,)).fetchone()
+        row = conn.execute(f'SELECT {field} FROM track_sources WHERE id=?', (entry_id,)).fetchone()
     if row is None:
         raise ValueError('Unknown catalog entry')
     return row[0]

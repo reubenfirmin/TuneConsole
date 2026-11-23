@@ -28,10 +28,10 @@ def _pristine_current_schema():
 def transfer_routes(monkeypatch):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, move
+    from yt_playlist.web.routes import app_update, audio_vibes, move
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, move)])
+        for module in (app_update, audio_vibes, move)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
@@ -39,8 +39,8 @@ def transfer_routes(monkeypatch):
 @pytest.fixture
 def transfers(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    source = store.accounts.upsert_account("Main", "c1", None, True)
-    target = store.accounts.upsert_account("Alt", "c2", None, False)
+    source = store.accounts.upsert_account("Main", None, True)
+    target = store.accounts.upsert_account("Alt", None, False)
     playlists = []
     tracks = {}
     for n, title in enumerate(("Evening", "Mix", "Weekend")):

@@ -18,10 +18,10 @@ def _pristine_current_schema():
 @pytest.fixture(autouse=True)
 def enrichment_routes_only(monkeypatch, enrichment_template_bytecode):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, enrich
+    from yt_playlist.web.routes import app_update, audio_vibes, enrich
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        app_update.build(ctx), audio_preview.build(ctx), enrich.build(ctx)])
+        app_update.build(ctx), audio_vibes.build(ctx), enrich.build(ctx)])
     templates = webapp.Jinja2Templates
 
     def compiled_templates(*args, **kwargs):
@@ -40,7 +40,7 @@ def enrichment_template_bytecode(tmp_path_factory):
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0,
                      background_work=False)
     return TestClient(app, base_url="http://127.0.0.1", backend_options={'use_uvloop': True})
@@ -56,10 +56,13 @@ def _seed(store):
 
 def test_enrich_page_renders_coverage(store):
     _seed(store)
-    html = _client(store).get("/enrich").text
+    response = _client(store).get("/enrich")
+    assert response.status_code == 200
+    html = response.text
     assert "Enrichment" in html
-    for label in ("Processed", "Genre", "Year", "BPM", "Energy", "Danceability"):
-        assert label in html
+    for label in ("Processed", "Genre", "Year", "BPM", "Danceability"):
+        assert f'<span class="cov-label">{label}</span>' in html
+    assert '<span class="cov-label">Energy</span>' not in html
     assert "In queue" in html and "Open conflicts" in html
 
 
@@ -217,7 +220,7 @@ def test_no_providers_explains_why_queue_cannot_run(store, monkeypatch, availabi
     monkeypatch.setattr(artwork, "retry_due", art_retry)
     def timestamps():
         return [tuple(row) for row in store.conn.execute(
-            "SELECT id,first_enriched_at,last_enriched_at FROM tracks ORDER BY id")]
+            "SELECT id,first_enriched_at,last_enriched_at FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL) ORDER BY id")]
     before = timestamps()
     assert worker.drain_once() == 0
     html = c.get("/enrich/stats").text
@@ -268,7 +271,7 @@ def test_queue_and_processed_details_are_separate_and_paginated(store):
         {'key': f'queue song {i:02}|artist', 'video_id': f'vid{i}',
          'title': f'Queue song {i:02}', 'artist': 'Artist', 'created_at': 1.0}
         for i in range(41)])
-    ids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+    ids = [row[0] for row in store.conn.execute('SELECT id FROM track_sources ORDER BY id')]
     done = store.tracks.upsert_track("done", "Completed song", "Artist", None, 200)
     complete_entries(store, [done], 995.0)
     c = _client(store)
@@ -358,7 +361,7 @@ def test_conflict_review_is_paginated(store):
         {'key': f'conflict song {i:02}|artist', 'video_id': f'vid{i}',
          'title': f'Conflict song {i:02}', 'artist': 'Artist', 'duration_s': 200}
         for i in range(21)])
-    for tid, in store.conn.execute('SELECT id FROM catalog_entries').fetchall():
+    for tid, in store.conn.execute('SELECT id FROM track_sources').fetchall():
         store.enrichment.upsert_conflict(tid, "genre", [{"provider": "a", "value": "Rock"},
                                              {"provider": "b", "value": "Pop"}])
     c = _client(store)

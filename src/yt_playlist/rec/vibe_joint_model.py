@@ -33,8 +33,8 @@ def fit(rows, vibe, *, fixed=None, memory_bytes=MEMORY_BYTES):
     calibration report must disclose that plug-in approximation. A single
     measurement per song cannot identify classifier noise separately from true
     between-song residuals: that combined variance is kept in new-track risk.
-    Independent replicate variance can be supplied in ``noise``; coverage/support
-    is not passed off as a calibrated observation precision.
+    Independent replicate variance can be supplied in ``noise``. The calibrated
+    format uses audio coverage to reduce the precision of incomplete captures.
     """
     rows = unique(rows)
     if any('metadata_prior' in row for row in rows):

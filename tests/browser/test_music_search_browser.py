@@ -16,7 +16,7 @@ pytestmark = pytest.mark.browser
 
 @pytest.fixture
 def music_app(store, without_metadata_providers, request):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     store.settings.set_setting('last_sync_at', '999')
     catalog = getattr(request, 'param', SongCatalog)()
     catalog._catalog['exact-song'] = catalog.search('favorite')[0]
@@ -140,6 +140,56 @@ def test_overlay_adds_without_closing_and_restores_keyboard_focus(music_app, sto
     expect(page.locator('.omni-input')).to_be_focused()
     page.keyboard.press('Control+k')
     expect(field).to_have_value('favorite')
+    assert not errors
+
+
+@pytest.mark.parametrize('outcome', ['saved', 'uncertain', 'unavailable'])
+def test_song_bookmark_uses_the_query_that_found_it(music_app, page, outcome):
+    base, catalog = music_app
+    search = catalog.search
+    offered = True
+
+    def search_offered_songs(query, **options):
+        return search(query, **options) if offered and query in ('favorite', 'favorite song') else []
+
+    catalog.search = search_offered_songs
+    catalog.uncertain = outcome == 'uncertain'
+    errors = prepare_page(page, 1440)
+    page.goto(base + '/playlists')
+    page.keyboard.press('Control+k')
+    dialog = page.locator('#music-search')
+    field = dialog.get_by_role('searchbox', name='Search music')
+    field.fill('favorite')
+    dialog.get_by_role('tab', name='YouTube Music', exact=True).click()
+    bookmark = dialog.locator('[data-video-id="exact-song"] .music-search-add')
+    expect(bookmark).to_have_attribute('aria-label', 'Add to library: A favorite song')
+
+    # Trigger the click before the debounced search replaces the visible row.
+    offered = outcome != 'unavailable'
+    with page.expect_response('**/search/songs/save') as response:
+        field.evaluate('''input => {
+          input.value = 'another song';
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+          document.querySelector('[data-video-id="exact-song"] .music-search-add').click();
+        }''')
+    assert response.value.request.post_data_json['query'] == 'favorite'
+    assert response.value.json()['state'] == ('pending' if outcome == 'uncertain' else outcome)
+    expect(dialog.locator('#music-catalog-count')).to_have_text('0')
+    offered = True
+    field.fill('favorite song' if outcome == 'unavailable' else 'favorite')
+
+    if outcome == 'uncertain':
+        expect(bookmark).to_have_attribute('aria-label', 'Check library change: A favorite song')
+        catalog.saved.add('exact-song')
+        with page.expect_request('**/search/songs/save') as check:
+            bookmark.click()
+        assert check.value.post_data_json['check'] is True
+    elif outcome == 'unavailable':
+        expect(bookmark).to_have_attribute('aria-label', 'Add to library: A favorite song')
+        assert not catalog.writes
+        bookmark.click()
+    expect(bookmark).to_have_attribute('aria-label', 'Remove from library: A favorite song')
+    assert catalog.writes == [['private-add-token']]
     assert not errors
 
 

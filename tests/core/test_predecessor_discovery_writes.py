@@ -36,8 +36,8 @@ def test_starter_selection_scan_candidates_and_distinct_impressions(installed):
 
 def test_acquired_track_pruning_and_account_scoped_import_reset(installed):
     store, _ = installed
-    first = store.accounts.upsert_account('First', 'first.json', None, True)
-    second = store.accounts.upsert_account('Second', 'second.json', None, False)
+    first = store.accounts.upsert_account('First', None, True)
+    second = store.accounts.upsert_account('Second', None, False)
     store.discovery.seed_spotify_artists(first, {'First only': 3, 'Shared': 5}, 10)
     store.discovery.seed_spotify_artists(second, {'Second only': 4, 'Shared': 8}, 11)
     with store.conn:

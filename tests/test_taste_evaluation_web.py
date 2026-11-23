@@ -1,5 +1,8 @@
 """Autotune reports, recommendation previews and baseline comparisons."""
 import json
+
+import pytest
+
 from tests.taste_support import _client
 
 def test_autotune_done_status_refreshes_model_status(store):
@@ -120,10 +123,19 @@ def test_taste_preview_explains_scope_sources_and_two_different_samples(store):
         assert f'href="{destination}"' in preview
 
 
-def test_taste_preview_explains_production_score_trace_in_plain_language(store, monkeypatch):
+@pytest.mark.parametrize(
+    ("now_delta", "session_delta"),
+    [(-0.01, 0.0), (0.0, -0.02), (-0.01, -0.02)],
+    ids=["now-only", "today-only", "now-and-today"],
+)
+def test_taste_preview_explains_production_score_trace_in_plain_language(
+    store, monkeypatch, now_delta, session_delta,
+):
     from yt_playlist.rec import surfaces
-    trace = {"durable": 0.4, "transient_delta": 0.1, "session_delta": -0.02,
-             "audio_delta": 0.03, "negative_delta": -0.05, "combined": 0.46, "rank_base": 0.8,
+    trace = {"durable": 0.4, "transient_delta": 0.1,
+             "now_delta": now_delta, "session_delta": session_delta,
+             "audio_delta": 0.03, "negative_delta": -0.05,
+             "combined": 0.48 + now_delta + session_delta, "rank_base": 0.8,
              "axes": {"genre": 1.2, "era": 1.0},
              "axis_labels": {"genre": "electronic", "era": "2010s"},
              "axis_product": 1.2, "axis_applied": 1.2, "axis_cap": 1.4,
@@ -136,8 +148,9 @@ def test_taste_preview_explains_production_score_trace_in_plain_language(store, 
 
     assert "Why this pick" in html
     assert "Night drive" in html and "recent listening favors it" in html
-    assert "This session makes it a weaker match" in html
-    assert "It resembles music you disliked" in html
+    assert ("Your current session makes it a weaker match." in html) == (now_delta < 0)
+    assert ("Today's listening makes it a weaker match." in html) == (session_delta < 0)
+    assert "It resembles music you disliked" not in html
     assert "genre preference favors it (electronic)" in html
     assert "<details" not in html
 

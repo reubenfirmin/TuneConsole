@@ -3,7 +3,7 @@ from yt_playlist.rec import vibe_pools, vibe_readiness
 
 
 def assemble(store, now, preset, epoch=0, *, bundles=None, include_genres=(), avoid_genres=()):
-    if bundles is None and getattr(store, '_recommendation_files', False):
+    if bundles is None:
         if not getattr(store, '_read_only', False):
             with store.read_view() as reader:
                 return assemble(reader, now, preset, epoch,

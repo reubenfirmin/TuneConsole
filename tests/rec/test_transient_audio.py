@@ -1,37 +1,10 @@
-"""Audio-aware transient tilt (#45): recent listening should be expressible as a direction in the
-audio-aware CONTENT vector space, so ranking can lean toward the SOUND (tempo / energy / mood) of what
-you have been playing, not only its genre/era/artist facets. This is the producer primitive
-(transient.audio_centroid_tilt); the scorer applies it (see the wiring note in the fork report)."""
+"""Recent plays can steer ranking toward similar recordings in the content space."""
 import numpy as np
 
-from yt_playlist.rec import embedding_vectors as embed, rec_params, scoring, transient
+from yt_playlist.rec import embedding_vectors as embed, musical_profiles, rec_params, scoring, transient
 from tests import model_support
 from tests.conftest import seed_catalog_track
 from tests.repository_mock_support import no_database, transient_store
-
-
-class _FakeDao:
-    def __init__(self, content, audio):
-        self._c, self._a = content, audio
-
-    def library_keys(self):
-        return set(self._c) | set(self._a)
-
-    def track_content(self):
-        return self._c
-
-    def track_audio_features(self):
-        return self._a
-
-
-def _store_with_content(s, monkeypatch, content, audio):
-    for key in set(content) | set(audio):
-        title, artist = key.split('|', 1)
-        seed_catalog_track(s, key, title, artist)
-    for method in ("library_keys", "track_content", "track_audio_features"):
-        monkeypatch.setattr(s.rec_query, method, getattr(_FakeDao(content, audio), method))
-    model_support.build_content_model(s)       # persist audio-aware content vectors
-    return s
 
 
 def test_tilt_is_none_when_no_recent_listening(transient_store):
@@ -42,17 +15,25 @@ def test_tilt_is_none_when_no_recent_listening(transient_store):
     assert transient.audio_centroid_tilt(s, now=1000.0) is None
 
 
-def test_tilt_leans_toward_the_sound_of_recent_plays(file_backed_store, monkeypatch):
-    # same genre and era for all three, so ONLY audio can separate them
-    content = {k: ("Techno", "2000") for k in ("hi1|a", "hi2|a", "lo|b")}
-    audio = {
-        "hi1|a": {"energy": 0.95, "bpm": 150.0, "danceability": 0.90},
-        "hi2|a": {"energy": 0.92, "bpm": 148.0, "danceability": 0.88},
-        "lo|b":  {"energy": 0.08, "bpm": 88.0,  "danceability": 0.20},
+def test_tilt_leans_toward_the_sound_of_recent_plays(file_backed_store):
+    s = file_backed_store
+    measurements = {
+        "hi1|a": {"intensity": 0.95, "bpm": 150.0, "danceability": 0.90},
+        "hi2|a": {"intensity": 0.92, "bpm": 148.0, "danceability": 0.88},
+        "lo|b": {"intensity": 0.08, "bpm": 88.0, "danceability": 0.20},
     }
-    s = _store_with_content(file_backed_store, monkeypatch, content, audio)
-    iid = s.accounts.upsert_account("main", "cred", None, True)
-    s.history.record_play_event(iid, "hi1|a", None, 1000.0, source_timezone="UTC")
+    rows = []
+    for key, values in measurements.items():
+        title, artist = key.split('|', 1)
+        seed_catalog_track(s, key, title, artist, video_id=title, genre='Techno', mb_year='2000')
+        profile = musical_profiles.resolve([], overrides=values)
+        rows.append((key, musical_profiles.canonical(profile), profile['version'],
+                     musical_profiles.digest(profile)))
+    s.musical_profiles.publish_recordings(rows, now=1000.0)
+    assert s.rec_query.track_content() == dict.fromkeys(measurements, ('Techno', '2000'))
+    assert model_support.build_content_model(s) == len(measurements)
+    iid = s.accounts.upsert_account("main", None, True)
+    s.history.record_play_event(iid, "hi1|a", "hi1", 1000.0, source_timezone="UTC")
 
     tilt = transient.audio_centroid_tilt(s, now=1000.0)
     assert tilt is not None
@@ -79,11 +60,11 @@ def test_tilt_degrades_gracefully_when_recent_track_has_no_content_vector(transi
     s = transient_store
     s.rec_model.get_rec_content_vectors.return_value = [
         ('hi|a', np.array([1., 0.], dtype=np.float32).tobytes())]
-    s.history.recent_plays_with_ts.return_value = [('unknown|x', 1000.)]
+    s.history.play_events_since.return_value = [{'identity_key': 'unknown|x', 'played_at': 1000.}]
     assert transient.audio_centroid_tilt(s, now=1000.0) is None   # no contribution, no error
 
 
 def test_tilt_is_none_when_content_model_unbuilt(transient_store):
     s = transient_store
-    s.history.recent_plays_with_ts.return_value = [('hi|a', 1000.)]
+    s.history.play_events_since.return_value = [{'identity_key': 'hi|a', 'played_at': 1000.}]
     assert transient.audio_centroid_tilt(s, now=1000.0) is None   # no content vectors at all

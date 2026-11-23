@@ -1,4 +1,4 @@
-"""Telemetry does not schedule models or invalidate snapshots of skip evidence."""
+"""Check how player events affect ranking refreshes and skip evidence snapshots."""
 from contextlib import closing
 import sqlite3
 
@@ -11,7 +11,7 @@ from tests.core.test_snapshot_revisions import database
 
 @pytest.fixture
 def player_store(database):
-    database.accounts.upsert_account('Telemetry fixture', 'fixture', None, True)
+    database.accounts.upsert_account('Playback fixture', None, True)
     return database
 
 
@@ -23,8 +23,7 @@ def event(store, kind):
 @pytest.mark.parametrize('kind', ['tick', 'rate', 'pause', 'track_exit', 'bye', 'ended'])
 def test_only_ranking_events_queue_a_refresh(player_store, kind):
     store = player_store
-    store.conn.execute('DELETE FROM rec_change_queue')
-    store.conn.commit()
+    store.rec_refresh.acknowledge(store.rec_refresh.revision())
     event(store, kind)
     assert (store.rec_refresh.revision() is not None) is (kind in ('track_exit', 'bye', 'ended'))
 

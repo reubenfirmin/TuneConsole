@@ -74,7 +74,8 @@ def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_fa
         return original(reader, now)
 
     monkeypatch.setattr(transient, 'facet_leans', counted)
-    payload = home_prepared.prepare(store, 1000)
+    assert home_prepared.prepare(store, 1000) is not None
+    payload = home_prepared.load_discovery(store)
     assert payload is not None
     assert len(payload['discovery_artists']) == len(payload['discovery_albums']) == 6
     # Discovery publishes independently before mix assembly, so it owns its own
@@ -113,7 +114,8 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
     # menus. Other lane/ranker selection contracts stay in test_stored_home.
     bundles = eligibility_inputs
     rec_params.set_param(store, 'ppr_ab_share', 0.5)
-    seed_dislike(store, bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
+    disliked = bundles['0']['wheelhouse'][0]['key']
+    seed_dislike(store, disliked, until=None, now=1)
     orders = [(epoch, (epoch % 2, (epoch + 1) % 2)) for epoch in range(3)]
     with store.read_snapshot() as snapshot, stored_home.preparation_inputs() as metadata_inputs:
         reader = snapshot.store
@@ -132,18 +134,19 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
                        'metadata_inputs': metadata_inputs,
                        'vibe_rank': home_vibe.ranker(reader, 1000)}
         checks, resolved = [], []
-        check = reader.rec_eligibility.suppressed_candidate_keys
+        check = reader.rec_model.suppressed_keys
         resolve = home_themes.resolved_genres
 
-        def counted_check(keys, now):
-            checks.append(set(keys))
-            return check(keys, now)
+        def counted_check(surface, now, scope='', *, keys=None, records=None, check_genres=True):
+            if surface == 'for_you' and keys is not None:
+                checks.append(set(keys))
+            return check(surface, now, scope, keys=keys, records=records, check_genres=check_genres)
 
         def counted_resolve(store, items):
             resolved.append(frozenset(item['key'] for item in items))
             return resolve(store, items)
 
-        monkeypatch.setattr(reader.rec_eligibility, 'suppressed_candidate_keys', counted_check)
+        monkeypatch.setattr(reader.rec_model, 'suppressed_keys', counted_check)
         monkeypatch.setattr(home_themes, 'resolved_genres', counted_resolve)
         actual = []
         for epoch, order in orders:
@@ -152,6 +155,9 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
         assert actual == expected
         assert all(cards for cards in actual)
         assert any(card.get('counterfactual') for cards in actual for card in cards)
+        offers = [offer for cards in actual for card in cards
+                  for offer in (card, card.get('counterfactual')) if offer]
+        assert all(disliked not in {track['key'] for track in offer['tracks']} for offer in offers)
         # Typed owners seek bounded pages instead of inflating one union. Each
         # recording is still checked/resolved only once across all three menus.
         assert checks and resolved
@@ -160,7 +166,7 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
         metadata = Counter(key for keys in resolved for key in keys)
         assert checked == metadata
         assert set(checked.values()) == {1}
-        assert store.rec_model.disliked_identity_keys() <= checked.keys()
+        assert disliked in checked
 
 
 @pytest.mark.parametrize('missing_bundles', [False, True])

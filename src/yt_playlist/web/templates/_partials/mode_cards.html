@@ -1,15 +1,15 @@
 <div id="home-mode-cards" class="gen-lanes" data-genre-notice="{{ genre_notice or '' }}"
+     {% if home_fragment is defined and not home_fragment %}data-home-opening{% endif %}
      {% if prepare_attempt %}hx-get="/home/cards?prepare_attempt={{ prepare_attempt }}" hx-trigger="every {{ prepare_interval }}s" hx-swap="outerHTML"{% endif %}
      {% if swap_oob %}hx-swap-oob="outerHTML"{% endif %}
      data-genre-warning="{{ genre_warning or '' }}"
      data-vibe="{{ vibe|default('') }}"
-     data-vibe-request="{{ (vibe_request or {}).get('id', '') }}"
-     data-vibe-request-phase="{{ (vibe_request or {}).get('phase', '') }}"
      data-preparing="{{ 'true' if preparing|default(False) else 'false' }}"
      data-preference-notice="{{ preference_notice|default('') or '' }}"
      data-genre-options='{{ genre_options|default([])|tojson }}'
      data-requested-genres='{{ requested_genres|default([])|tojson }}' data-epoch="{{ epoch|default(0) }}"
-     x-data="{ focus: null }" :class="{ 'has-focus': focus }">
+     x-data="{ focus: null }" :class="{ 'has-focus': focus }"
+     x-effect="if (!focus) $nextTick(() => $dispatch('mix-board-unfocused'))">
   {% if slots is defined %}
     {% for slot in slots %}
       {% if slot.proto %}{% with p=slot.proto %}{% include "_partials/generated_playlist.html" %}{% endwith %}

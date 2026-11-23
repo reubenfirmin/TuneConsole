@@ -254,13 +254,11 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, r
     # Publish complete keeper backups before any membership or positional write.
     # These stay separate from deleted-source backups: Undo restores each keeper
     # through its conflict-aware keeper step rather than creating another playlist.
-    owned = store.actions.has_durable_targets()
-    if owned:
-        for pl,entry in zip(keepers,restored):
-            snapshot = _remote_snapshot(client_for(pl),pl.provider_playlist_id)
-            entry['prev'] = [track['videoId'] for track in snapshot['tracks']]
-            entry['backup'] = backup_playlist(store,pl.id,now,client_for(pl),snapshot=snapshot)
-            entry['phase'] = 'pending'
+    for pl,entry in zip(keepers,restored):
+        snapshot = _remote_snapshot(client_for(pl),pl.provider_playlist_id)
+        entry['prev'] = [track['videoId'] for track in snapshot['tracks']]
+        entry['backup'] = backup_playlist(store,pl.id,now,client_for(pl),snapshot=snapshot)
+        entry['phase'] = 'pending'
     backups = []
     action_id = None
     deletion_locks = ExitStack()
@@ -289,25 +287,21 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, r
                                         json.dumps(undo), params_json=params,target_claims=keeper_claims)
 
     try:
-        if owned:
-            # Freezing the reviewed draft and committing the backup/intent must
-            # finish before the first remote mutation, including keep-all merges.
-            _record()
+        # Freeze the reviewed draft and commit the backup and intent before mutation.
+        _record()
         for pl in sorted(pls,key=lambda item:(item.account_id,item.provider_playlist_id)):
             deletion_locks.enter_context(claim_deletion_target(store,pl.account_id,pl.provider_playlist_id))
             store.actions.require_known_remote_outcome(pl.account_id,pl.provider_playlist_id)
-        if owned:
-            keeper_claims = store.actions.claim_forward_targets(action_id,'keeper',now)
-            for keeper_claim in keeper_claims:
-                deletion_locks.callback(store.actions.release_deletion,keeper_claim)
+        keeper_claims = store.actions.claim_forward_targets(action_id,'keeper',now)
+        for keeper_claim in keeper_claims:
+            deletion_locks.callback(store.actions.release_deletion,keeper_claim)
         for pl in keepers:
             # This editor's membership and order replace any earlier alternate placement,
             # including when the new remote mutation later needs recovery.
             cancel_insertions(store, pl.id, now)
             entry = next(e for e in restored if e['ytm']==pl.provider_playlist_id and e['identity']==pl.account_id)
-            if owned:
-                entry['phase'] = 'uncertain'
-                _record()
+            entry['phase'] = 'uncertain'
+            _record()
             try:
                 added, removed, prior, skipped, expected = _reconcile(
                     client_for(pl), pl.provider_playlist_id, result_video_ids)
@@ -346,9 +340,8 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, r
                 if entry["post_state"] is None:
                     raise ValueError("Couldn't verify the merged playlist order. Refusing to delete any source. "
                                      "Re-sync and check again.")
-            if owned:
-                entry['phase'] = 'complete'
-                _record()
+            entry['phase'] = 'complete'
+            _record()
         if droppers:
             _record()
             deletion_locks.enter_context(claim_action(store, action_id, operation="Deletion"))
@@ -358,7 +351,7 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, r
             _verify_and_delete(
                 store, pl.id, client_for(pl), client_for(keepers[0]), keepers[0].provider_playlist_id, now,
                 retained_video_ids=retained, excluded_video_ids=excluded, backups=backups,
-                action_id=action_id, locked=True,target_locked=owned)
+                action_id=action_id, locked=True,target_locked=True)
             summary["deleted"].append(pl.title)
     except Exception as e:
         extra = {"partial": True, "error": str(e)}

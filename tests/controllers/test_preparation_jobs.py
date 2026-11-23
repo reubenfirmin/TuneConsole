@@ -30,51 +30,36 @@ def test_note_preparation_uses_the_current_menu_and_returns_pending_work():
 
 
 @pytest.mark.parametrize('accepted', [False, True])
-def test_mode_staging_releases_reader_before_files_and_publishes_policy_before_heads(accepted):
-    operations = Mock()
-    proposals = Mock(spec_set=['stage_prepared_bundles', 'publish_prepared_bundles'])
-    proposals.stage_prepared_bundles.return_value = ('bundle-file', 'fresh-file')
-    ledger, settings = Mock(spec_set=['publish_prepared_policies']), Mock(spec_set=['publish_values'])
-    snapshot = SimpleNamespace(store=object(), release_reader=Mock())
-    operations.attach_mock(snapshot.release_reader, 'release')
-    operations.attach_mock(proposals.stage_prepared_bundles, 'stage')
-    operations.attach_mock(ledger.publish_prepared_policies, 'policies')
-    operations.attach_mock(proposals.publish_prepared_bundles, 'heads')
-    operations.attach_mock(settings.publish_values, 'settings')
-    snapshot.publish_ordered = Mock(side_effect=lambda publish, **kw: (publish() or True) if accepted else False)
+def test_mode_preparation_returns_the_payload_only_after_publication(accepted):
+    snapshot = SimpleNamespace(store=object())
+    publish = Mock(return_value=object() if accepted else None)
     payload = {'all': {'fresh': []}}
-    capture = Mock(return_value=(payload, [], SimpleNamespace(rows={'p': 'policy'}, bases={'b': 'base'}),
-                                {'captured-inputs': 'revision'}))
+    policies = SimpleNamespace(rows={'p': 'policy'}, bases={'b': 'base'})
+    settings = {'captured-inputs': 'revision'}
+    capture = Mock(return_value=(payload, [], policies, settings))
     preparation = ModePreparation(maintain=Mock(), resume=lambda: (False, None),
-        snapshot=lambda: nullcontext(snapshot), capture=capture, typed_publish=None,
-        proposals=proposals, ledger=ledger, settings=settings)
+        snapshot=lambda: nullcontext(snapshot), capture=capture, publish=publish)
     result = preparation.prepare(100)
     capture.assert_called_once_with(snapshot.store, 100)
-    assert operations.mock_calls[0] == call.release()
-    assert operations.mock_calls[1][0] == 'stage'
-    if accepted:
-        assert result is payload
-        assert operations.mock_calls[2:] == [call.policies(['policy'], ['base']),
-            call.heads('bundle-file', 'fresh-file', 100), call.settings({'captured-inputs': 'revision'})]
-    else:
-        assert result is None and len(operations.mock_calls) == 2
+    publish.assert_called_once_with(snapshot, payload, [], policies, settings, 100)
+    assert result is (payload if accepted else None)
 
 
 def test_cancelled_mode_capture_cannot_stage_or_publish():
-    proposals, snapshot = Mock(), SimpleNamespace(store=object(), publish_ordered=Mock())
+    publish, snapshot = Mock(), SimpleNamespace(store=object())
     preparation = ModePreparation(maintain=Mock(), resume=lambda: (False, None),
         snapshot=lambda: nullcontext(snapshot), capture=Mock(side_effect=WorkClosing('stopped')),
-        typed_publish=None, proposals=proposals, ledger=Mock(), settings=Mock())
+        publish=publish)
     with pytest.raises(WorkClosing):
         preparation.prepare(100)
-    assert not proposals.mock_calls and not snapshot.publish_ordered.mock_calls
+    publish.assert_not_called()
 
 
 def test_deferred_mode_publication_reuses_captured_plan_without_recapturing():
     snapshot, capture = Mock(), Mock()
     payload = {'captured-generation': 'old-complete-inputs'}
     preparation = ModePreparation(maintain=Mock(), resume=lambda: (True, payload),
-        snapshot=snapshot, capture=capture, typed_publish=None, proposals=Mock(), ledger=Mock(), settings=Mock())
+        snapshot=snapshot, capture=capture, publish=Mock())
     assert preparation.prepare(100) is payload
     snapshot.assert_not_called()
     capture.assert_not_called()

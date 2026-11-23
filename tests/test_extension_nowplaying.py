@@ -124,6 +124,27 @@ context.location.href = "https://music.youtube.com/watch?v=v1&list=PL2";
 main(false, "PL2");
 assert.equal(messages.at(-1).type, "now-heartbeat");
 assert.equal(messages.at(-1).playlist, "PL2");
+// A different queue confirmed by the player does get one play for this upload.
+const verifiedQueue = (playlist, album) => listeners.message({source: window,
+  data: {__tcSensorVersion: 4, __tcSensorRevision: 8, __tcNow: {
+    title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist, paused: false,
+    brandKnown: true, brandId: "brand-A", metadataVerified: true, videoVerified: true,
+    playerBar: album && {videoId: "v1", albumBrowseId: album},
+}}});
+verifiedQueue('PL2');
+assert.equal(messages.at(-1).type, 'play');
+assert.equal(messages.at(-1).playlist, 'PL2');
+verifiedQueue('PL2');
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+verifiedQueue('');
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+verifiedQueue('PL2');
+assert.equal(messages.at(-1).type, 'now-heartbeat');
+verifiedQueue('', 'MPRE_other');
+assert.equal(messages.at(-1).type, 'play');
+assert.equal(messages.at(-1).albumBrowseId, 'MPRE_other');
+verifiedQueue('', 'MPRE_other');
+assert.equal(messages.at(-1).type, 'now-heartbeat');
 context.location.href = "https://music.youtube.com/watch?v=v1";
 main(true, "");
 assert.equal(messages.at(-1).playlist, "");
@@ -377,7 +398,10 @@ const player = {getVideoData: () => data, getPlaylistId: () => playlist,
   getCurrentTime: () => video.currentTime, getDuration: () => video.duration,
   getPlayerResponse: () => playerResponse};
 const window = {__tcNowPoller: true, postMessage: msg => messages.push(msg),
-  addEventListener: (type, fn) => windowHandlers.set(type, fn),
+  addEventListener: (type, fn) => {
+    assert(!windowHandlers.has(type), `duplicate ${type} listener`);
+    windowHandlers.set(type, fn);
+  },
   removeEventListener: (type, fn) => {
     if (windowHandlers.get(type) === fn) windowHandlers.delete(type);
   },
@@ -411,6 +435,9 @@ const context = {
 };
 const source = fs.readFileSync('extension/nowplaying_main.js', 'utf8');
 vm.runInNewContext(source, context);
+const checkWindowListeners = () =>
+  assert.deepEqual([...windowHandlers.keys()].sort(), ['click', 'message', 'playing']);
+checkWindowListeners();
 const sensorRevision = window.__tcNowPoller.revision;
 const tick = () => [...timers.values()].forEach(fn => fn());
 const latest = () => messages.filter(m => m.__tcNow).at(-1).__tcNow;
@@ -641,13 +668,30 @@ vm.runInNewContext(source, context);
 tick();
 assert.equal(timers.size, 1);
 assert.equal(handlers.size, 4);
+const stoppedPlaying = windowHandlers.get('playing');
 window.__tcNowPoller.stop();
 assert.equal(timers.size, 0);
 assert.equal(handlers.size, 0);
 assert.equal(windowHandlers.size, 0);
+playlist = 'PL_restarted';
 vm.runInNewContext(source, context);
 assert.equal(timers.size, 1, 'a stopped sensor must restart even at the same version');
-assert.equal(windowHandlers.size, 2);
+checkWindowListeners();
+const playing = windowHandlers.get('playing');
+assert.notEqual(playing, stoppedPlaying);
+const nativeStarts = () => messages.map(msg => msg.__tcPlayer).filter(event => event?.kind === 'native-playing');
+const startCount = nativeStarts().length;
+const event = {isTrusted: true, target: video};
+stoppedPlaying(event);
+playing({isTrusted: false, target: video});
+assert.equal(nativeStarts().length, startCount);
+playing(event);
+playing(event);
+assert.equal(nativeStarts().length, startCount + 1);
+const {videoId, playlist: nativePlaylist, playingAt, playingSource} = nativeStarts().at(-1);
+assert.deepEqual({videoId, nativePlaylist, playingAt, playingSource}, {
+  videoId: 'clock-changed', nativePlaylist: 'PL_restarted', playingAt: now, playingSource: 'media-event',
+});
 // Full song metadata can schedule collection without borrowing a buffered endpoint.
 for (const length of ['195', 195, 195.5]) {
   playerResponse = {videoDetails: {videoId: data.video_id, lengthSeconds: length}};

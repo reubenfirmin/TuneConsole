@@ -59,12 +59,12 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
   const init={method:'POST',body:JSON.stringify({target:{videoId:'v'}})};
   if(previous==='legacy') window.__tcFetchHook=true;
   else {
-    vm.runInContext(source.replace('var REVISION = 2;', 'var REVISION = 1;'),context);
+    vm.runInContext(source.replace('var REVISION = 3;', 'var REVISION = 2;'),context);
     assert.equal(window.fetch(url,init),promise);
   }
   const oldHook=window.__tcFetchHook;
   vm.runInContext(source,context);
-  assert.equal(window.__tcFetchHook.revision,2);
+  assert.equal(window.__tcFetchHook.revision,3);
   if(previous==='older') assert.equal(oldHook.stopped,true);
   const installed=window.fetch;
   vm.runInContext(source,context);

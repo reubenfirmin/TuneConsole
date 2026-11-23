@@ -43,7 +43,7 @@ and after diagnostic expiry. The files consumed 57,831,143 logical and 184,291,3
 allocated bytes; historical SQL provenance still awaited separate retirement, so
 this did not establish net whole-database savings. The result supported reports
 that remain independent of expiring diagnostics. Evidence:
-`backups/687-served-facts-report.json`; reproducer: [served_facts.py](served_facts.py).
+`backups/687-served-facts-report.json`; reproducer: [released served_facts.py](https://github.com/reubenfirmin/TuneConsole/blob/v0.1.19/experiments/retained_copy/served_facts.py).
 
 ## 1 November 2026: mix choices
 

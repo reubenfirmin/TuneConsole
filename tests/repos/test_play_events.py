@@ -4,7 +4,7 @@ dedup window, or with another track in between, are new events."""
 
 
 def test_record_and_read_back(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     assert store.history.record_play_event(iid, "song|artist", "v1", 1000.0,
                                playlist_ytm_id="PL123", like_status="INDIFFERENT") is True
     evs = store.history.play_events_since(0)
@@ -17,7 +17,7 @@ def test_record_and_read_back(store):
 
 def test_same_track_rereport_merges_and_updates_like_status(store):
     # content.js re-reports the same track when likeStatus changes; that is one play, not two
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     assert store.history.record_play_event(iid, "song|artist", "v1", 1000.0, like_status="INDIFFERENT") is True
     assert store.history.record_play_event(iid, "song|artist", "v1", 1030.0, like_status="LIKE") is False
     evs = store.history.play_events_since(0)
@@ -27,14 +27,14 @@ def test_same_track_rereport_merges_and_updates_like_status(store):
 
 
 def test_replay_after_window_is_a_new_event(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     store.history.record_play_event(iid, "song|artist", "v1", 1000.0)
     assert store.history.record_play_event(iid, "song|artist", "v1", 1000.0 + 1801) is True
     assert len(store.history.play_events_since(0)) == 2
 
 
 def test_a_b_a_records_three_events(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     assert store.history.record_play_event(iid, "a|x", "v1", 1000.0) is True
     assert store.history.record_play_event(iid, "b|y", "v2", 1200.0) is True
     assert store.history.record_play_event(iid, "a|x", "v1", 1400.0) is True
@@ -42,7 +42,7 @@ def test_a_b_a_records_three_events(store):
 
 
 def test_merge_backfills_playlist_but_never_clears_it(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     store.history.record_play_event(iid, "a|x", "v1", 1000.0, playlist_ytm_id=None)
     store.history.record_play_event(iid, "a|x", "v1", 1010.0, playlist_ytm_id="PL9")
     assert store.history.play_events_since(0)[0]["playlist_ytm_id"] == "PL9"
@@ -51,7 +51,7 @@ def test_merge_backfills_playlist_but_never_clears_it(store):
 
 
 def test_merge_backfills_generated_policy_only_with_new_playlist_context(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     store.playlists.set_playlist_group("PLGEN", "Generated")
     store.playlists.mark_generated_playlist('PLGEN')
     store.history.record_play_event(iid, "a|x", "v1", 1000)
@@ -64,7 +64,7 @@ def test_merge_backfills_generated_policy_only_with_new_playlist_context(store):
 
 
 def test_marking_playlist_generated_does_not_relabel_earlier_organic_play(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     store.history.record_play_event(iid, "a|x", "v1", 1000, playlist_ytm_id="PLGEN")
     store.playlists.set_playlist_group("PLGEN", "Generated")
     store.playlists.mark_generated_playlist('PLGEN')
@@ -73,7 +73,7 @@ def test_marking_playlist_generated_does_not_relabel_earlier_organic_play(store)
 
 
 def test_since_filter_and_ordering(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     store.history.record_play_event(iid, "a|x", "v1", 1000.0)
     store.history.record_play_event(iid, "b|y", "v2", 2000.0)
     evs = store.history.play_events_since(1500.0)
@@ -82,8 +82,8 @@ def test_since_filter_and_ordering(store):
 
 def test_identities_are_independent_for_dedup(store):
     # the merge check is per identity: another identity playing the same track is its own event
-    iid1 = store.accounts.upsert_account("me1", "c", None, True)
-    iid2 = store.accounts.upsert_account("me2", "c", None, False)
+    iid1 = store.accounts.upsert_account("me1", None, True)
+    iid2 = store.accounts.upsert_account("me2", None, False)
     assert store.history.record_play_event(iid1, "a|x", "v1", 1000.0) is True
     assert store.history.record_play_event(iid2, "a|x", "v1", 1010.0) is True
     assert len(store.history.play_events_since(0)) == 2
@@ -94,7 +94,7 @@ def test_identities_are_independent_for_dedup(store):
 def _seed_exclusion_fixture(store):
     """One play with radio provenance, one with a different (deliberately-pressed) playlist's
     provenance, one with no provenance at all (a direct search/album play)."""
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     store.history.record_play_event(iid, "radio|x", "v1", 1000.0, playlist_ytm_id="PLRADIO")
     store.history.record_play_event(iid, "other|y", "v2", 1010.0, playlist_ytm_id="PLOTHER")
     store.history.record_play_event(iid, "none|z", "v3", 1020.0, playlist_ytm_id=None)

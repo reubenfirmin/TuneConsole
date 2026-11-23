@@ -1,5 +1,5 @@
 """Detached SQL facts for compact group reads; no file reads or retention."""
-from yt_playlist.core import group_storage
+from yt_playlist.core import policy_bodies
 
 
 def _policy(conn, version):
@@ -9,90 +9,76 @@ def _policy(conn, version):
         return None
     body = None
     if row[2] is not None:
-        body = conn.execute('SELECT configuration_filename,content_digest,configuration_offset,byte_size '
-                            'FROM recommendation_policy_bodies WHERE version=?', (row[2],)).fetchone()
-    return {'variant': tuple(row), 'body': tuple(body) if body is not None else None}
-
-
-def _generation(conn, row):
-    return {**dict(row), 'policy': _policy(conn, row['policy_version']),
-            'recording_inputs': group_storage.inputs_for(conn, row['input_manifest_id'])}
+        reference = policy_bodies.read(conn, row[2])
+        if reference is not None:
+            body = (reference['configuration_filename'], reference['content_digest'],
+                    reference['configuration_offset'], reference['byte_size'])
+    return {'variant': tuple(row), 'body': body}
 
 
 def head_generation(conn):
-    row = conn.execute('SELECT g.external_key FROM group_head h JOIN group_generations g '
-                       'ON g.id=h.generation_id WHERE h.id=1').fetchone()
+    row = conn.execute('SELECT external_key FROM group_generations WHERE is_active=1').fetchone()
     return row[0] if row else None
 
 
 def head_checkpoint(conn):
-    row = conn.execute('SELECT g.external_key,g.input_serial,g.policy_version FROM group_head h '
-                       'JOIN group_generations g ON g.id=h.generation_id WHERE h.id=1').fetchone()
+    row = conn.execute('SELECT external_key,input_serial,policy_version '
+                       'FROM group_generations WHERE is_active=1').fetchone()
     return {'generation': row[0], 'serial': row[1], 'policy': _policy(conn, row[2])} if row else None
 
 
-def head(conn, *, members=False, inputs=True):
-    row = conn.execute('SELECT g.* FROM group_head h JOIN group_generations g ON g.id=h.generation_id '
-                       'JOIN group_publications p ON p.generation_id=g.id WHERE h.id=1').fetchone()
+def head(conn, *, members=False, generation_id=None):
+    header = ('SELECT id,external_key,policy_version,input_fingerprint,input_serial,created_at,'
+              'metadata_filename,metadata_digest,metadata_bytes,metadata_offset FROM group_generations ')
+    row = (conn.execute(header + 'WHERE is_active=1').fetchone() if generation_id is None
+           else conn.execute(header + 'WHERE id=? AND is_published=1', (generation_id,)).fetchone())
     if row is None:
         return None
-    generation = _generation(conn, row) if inputs else {**dict(row), 'policy': _policy(conn, row['policy_version'])}
+    generation = {**dict(row), 'policy': _policy(conn, row['policy_version'])}
     return {**generation, 'groups': definitions(conn, row['external_key'], members=members)}
 
 
-def _definition(conn, row):
-    parent = conn.execute('SELECT x.external_version FROM generation_groups x '
-                         'WHERE x.generation_id=? AND x.group_id=?',
-                         (row['generation_id'], row['parent_group_id'])).fetchone()
-    return {**dict(row), 'parent_version': parent[0] if parent else None}
-
-
-_SELECT = ('SELECT v.*,t.external_key,x.external_version,x.generation_id FROM generation_groups x '
-           'JOIN group_generations g ON g.id=x.generation_id '
-           'JOIN group_publications p ON p.generation_id=g.id '
-           'JOIN group_versions v ON v.id=x.group_version_id JOIN taste_groups t ON t.id=x.group_id ')
+_SELECT = ('SELECT v.id,v.external_version,v.definition_filename,v.definition_digest,'
+           'v.definition_bytes,v.definition_offset,t.external_key,parent.external_version parent_version,'
+           'g.external_key generation,g.created_at generation_created_at '
+           'FROM group_versions v '
+           'JOIN group_generations g ON g.id=v.generation_id AND g.is_published=1 '
+           'JOIN taste_groups t ON t.id=v.group_id '
+           'LEFT JOIN group_versions parent ON parent.generation_id=v.generation_id '
+           'AND parent.group_id=v.parent_group_id AND parent.position IS NOT NULL ')
 
 
 def definitions(conn, generation, *, members=False):
     result = []
-    for row in conn.execute(_SELECT + 'WHERE g.external_key=? ORDER BY x.position', (generation,)):
-        value = _definition(conn, row)
+    for row in conn.execute(_SELECT + 'WHERE g.external_key=? AND v.position IS NOT NULL ORDER BY v.position', (generation,)):
+        value = dict(row)
+        value.pop('generation')
         if members:
             value['members'] = {key: (similarity, support) for key, similarity, support in conn.execute(
-                'SELECT r.identity_key,m.similarity,m.support FROM group_members m '
-                'JOIN recordings r ON r.id=m.recording_id WHERE m.group_version_id=?', (row['id'],))}
-            value['members'].update({key: (similarity, support) for key, similarity, support in conn.execute(
-                'SELECT raw_key,similarity,support FROM unresolved_group_members WHERE group_version_id=?', (row['id'],))})
+                'SELECT COALESCE(r.identity_key,m.raw_key),m.similarity,m.support FROM group_members m '
+                'LEFT JOIN recordings r ON r.id=m.recording_id WHERE m.group_version_id=? '
+                'ORDER BY m.recording_id IS NULL', (row['id'],))}
         result.append(value)
     return result
 
 
 def definition(conn, version, *, generation=None):
-    # An alias can name shared content, but the caller's exact served alias must
-    # actually occur in that generation before historical feedback is admitted.
-    row = conn.execute(_SELECT + 'JOIN group_version_aliases a ON a.external_version=x.external_version '
-        'WHERE x.external_version=? AND (g.external_key=? OR (? IS NULL AND g.id=a.first_generation_id))',
+    row = conn.execute(_SELECT +
+        'WHERE v.external_version=? AND v.position IS NOT NULL '
+        'AND (g.external_key=? OR (? IS NULL AND v.is_origin=1))',
         (version, generation, generation)).fetchone()
     if row is None:
         return None
-    created = conn.execute('SELECT external_key,created_at FROM group_generations WHERE id=?',
-                           (row['generation_id'],)).fetchone()
-    return {**_definition(conn, row), 'generation': created[0], 'created_at': created[1]}
+    return {**dict(row), 'created_at': row['generation_created_at']}
 
 
 def correction_definition(conn, version, *, generation=None):
     """The exact historical identity needed by a correction, without its diagnostic graph."""
-    row = conn.execute('SELECT t.external_key group_id,x.external_version version,'
-        'g.external_key generation,g.created_at,parent.external_version parent_version '
-        'FROM generation_groups x JOIN group_generations g ON g.id=x.generation_id '
-        'JOIN group_publications p ON p.generation_id=g.id '
-        'JOIN group_version_aliases a ON a.external_version=x.external_version '
-        'JOIN group_versions v ON v.id=x.group_version_id JOIN taste_groups t ON t.id=x.group_id '
-        'LEFT JOIN generation_groups parent ON parent.generation_id=x.generation_id '
-        'AND parent.group_id=v.parent_group_id '
-        'WHERE x.external_version=? AND (g.external_key=? OR (? IS NULL AND g.id=a.first_generation_id))',
-        (version, generation, generation)).fetchone()
-    return dict(row) if row is not None else None
+    row = definition(conn, version, generation=generation)
+    if row is None:
+        return None
+    return {'group_id': row['external_key'], 'version': row['external_version'],
+            **{field: row[field] for field in ('generation', 'created_at', 'parent_version')}}
 
 
 def learning_head(conn):
@@ -100,52 +86,46 @@ def learning_head(conn):
     generation = head_generation(conn)
     if generation is None:
         return None
-    rows = conn.execute('SELECT t.external_key group_id,x.external_version version,'
+    rows = conn.execute('SELECT t.external_key group_id,v.external_version version,'
         'parent.external_version parent_version,v.legacy,v.leaf,v.definition_filename,'
-        'v.definition_digest,v.definition_bytes,v.definition_offset FROM group_head h '
-        'JOIN group_publications p ON p.generation_id=h.generation_id '
-        'JOIN generation_groups x ON x.generation_id=h.generation_id '
-        'JOIN taste_groups t ON t.id=x.group_id JOIN group_versions v ON v.id=x.group_version_id '
-        'LEFT JOIN generation_groups parent ON parent.generation_id=x.generation_id '
-        'AND parent.group_id=v.parent_group_id WHERE h.id=1 ORDER BY x.position')
+        'v.definition_digest,v.definition_bytes,v.definition_offset FROM group_generations h '
+        'JOIN group_versions v ON v.generation_id=h.id JOIN taste_groups t ON t.id=v.group_id '
+        'LEFT JOIN group_versions parent ON parent.generation_id=h.id '
+        'AND parent.group_id=v.parent_group_id AND parent.position IS NOT NULL '
+        'WHERE h.is_active=1 AND v.position IS NOT NULL ORDER BY v.position')
     return {'generation': generation, 'groups': [dict(row) for row in rows]}
 
 
-def leaf_members(conn, generation):
-    parameters = (generation,)
-    base = ('FROM generation_groups x JOIN group_generations g ON g.id=x.generation_id '
-            'JOIN group_publications p ON p.generation_id=g.id JOIN group_versions v '
-            'ON v.id=x.group_version_id ')
-    result = dict(conn.execute('SELECT r.identity_key,x.external_version ' + base
+def member_rows(conn, query, generation, field, keys):
+    if keys is None:
+        yield from conn.execute(query, (generation,))
+        return
+    for offset in range(0, len(keys), 128):
+        batch = keys[offset:offset + 128]
+        placeholders = ','.join('?' for _ in batch)
+        yield from conn.execute(f'{query} AND {field} IN ({placeholders})', (generation, *batch))
+
+
+def leaf_members(conn, generation, *, keys=None):
+    keys = list(dict.fromkeys(keys)) if keys is not None else None
+    base = ('FROM group_versions v JOIN group_generations g ON g.id=v.generation_id AND g.is_published=1 ')
+    result = dict(member_rows(conn, 'SELECT r.identity_key,v.external_version ' + base
         + 'JOIN group_members m ON m.group_version_id=v.id JOIN recordings r ON r.id=m.recording_id '
-        'WHERE g.external_key=? AND v.leaf=1', parameters))
-    result.update(conn.execute('SELECT m.raw_key,x.external_version ' + base
-        + 'JOIN unresolved_group_members m ON m.group_version_id=v.id '
-        'WHERE g.external_key=? AND v.leaf=1', parameters))
+        'WHERE g.external_key=? AND v.leaf=1 AND v.position IS NOT NULL', generation, 'r.identity_key', keys))
+    result.update(member_rows(conn, 'SELECT m.raw_key,v.external_version ' + base
+        + 'JOIN group_members m ON m.group_version_id=v.id '
+        'WHERE g.external_key=? AND v.leaf=1 AND v.position IS NOT NULL AND m.raw_key IS NOT NULL',
+        generation, 'm.raw_key', keys))
     return result
 
 
-def successors(conn, version, *, limit=512):
-    rows = conn.execute('SELECT l.* FROM group_lineage l WHERE l.source_alias=? AND EXISTS('
-        'SELECT 1 FROM group_generation_lineage x JOIN group_publications p ON p.generation_id=x.generation_id '
-        'WHERE x.source_alias=l.source_alias AND x.target_alias=l.target_alias) '
-        'ORDER BY l.target_alias LIMIT ?', (version, limit + 1)).fetchall()
-    return [dict(row) for row in rows]
-
-
-def lineage(conn):
-    return [dict(row) for row in conn.execute('SELECT l.* FROM group_lineage l WHERE EXISTS('
-        'SELECT 1 FROM group_generation_lineage x JOIN group_publications p ON p.generation_id=x.generation_id '
-        'WHERE x.source_alias=l.source_alias AND x.target_alias=l.target_alias) ORDER BY l.source_alias,l.target_alias')]
-
-
 def legacy_versions(conn):
-    return {row[0] for row in conn.execute('SELECT a.external_version FROM group_version_aliases a '
-        'JOIN group_versions v ON v.id=a.group_version_id JOIN taste_groups t ON t.id=v.group_id '
-        'WHERE t.legacy_mode_id IS NOT NULL AND EXISTS(SELECT 1 FROM generation_groups x '
-        'JOIN group_publications p ON p.generation_id=x.generation_id WHERE x.external_version=a.external_version)')}
+    return {row[0] for row in conn.execute('SELECT v.external_version FROM group_versions v '
+        'JOIN taste_groups t ON t.id=v.group_id JOIN group_generations p ON p.id=v.generation_id '
+        'WHERE t.legacy_mode_id IS NOT NULL AND v.position IS NOT NULL AND p.is_published=1')}
 
 
 def canonical_version(conn, version):
-    row = conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?', (version,)).fetchone()
+    row = conn.execute('SELECT v.id FROM group_versions v JOIN group_generations g ON g.id=v.generation_id '
+                       'WHERE v.external_version=? AND v.is_origin=1 AND g.is_published=1', (version,)).fetchone()
     return row[0] if row else None

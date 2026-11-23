@@ -1,10 +1,21 @@
-"""Read actual starter and prepared-menu capacity without the onboarding flow."""
+"""Read actual starter and Mix Tapes capacity without the onboarding flow."""
 import logging
 import time
 
-from yt_playlist.rec import home_cards, home_prepared
+from yt_playlist.rec import home_cards, home_prepared, home_vibe, taste_analysis
 
 MIN_MIXES = 4
+
+
+def mixes_ready(store, now):
+    def check():
+        with home_vibe.natural():
+            service = home_cards.HomeCards.live(store, home_prepared._NoJobs(), logging.getLogger(__name__),
+                                               taste_analysis.library_summary(store))
+            request = home_cards.CardsRequest(now, use_genre_request=False, record=False)
+            return len(service.cards(request).protos) >= MIN_MIXES
+
+    return store.memoized_read(('live-mix-tape-readiness', now), check)
 
 
 def prepared_mixes_ready(store, now=None) -> bool:

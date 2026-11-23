@@ -1,9 +1,6 @@
 """Reconcile exact provider representations, never releases inferred from a title."""
 import hashlib
 import json
-import time
-
-from yt_playlist.core import albums
 from yt_playlist.library.album_fetch import shareable_album_tracks
 from yt_playlist.util.duration import parse_duration
 
@@ -40,64 +37,12 @@ def fingerprint(album):
 
 def primary_id(conn, browse_id):
     row = conn.execute("SELECT preferred.provider_id FROM album_provider_ids p "
-        "JOIN album_primary_provider_ids preferred ON preferred.album_id=p.album_id "
-        "AND preferred.provider=p.provider WHERE p.provider='youtube' AND p.provider_id=?",
+        "JOIN album_provider_ids preferred ON preferred.album_id=p.album_id "
+        "AND preferred.provider=p.provider AND preferred.is_primary=1 "
+        "WHERE p.provider='youtube' AND p.provider_id=?",
         (browse_id,)).fetchone()
     return row[0] if row else browse_id
 
-
-def observe(conn, browse_id, album, *, now=None):
-    """Caller owns the writer transaction. Return False for a changed known alias."""
-    existing = conn.execute("SELECT p.is_primary,p.equivalence_digest,p.album_id,f.digest "
-        'FROM album_provider_ids p LEFT JOIN album_provider_fingerprints f USING(provider,provider_id) '
-        "WHERE p.provider='youtube' AND p.provider_id=?", (browse_id,)).fetchone()
-    shared = existing and conn.execute('SELECT 1 FROM album_provider_ids '
-        "WHERE provider='youtube' AND album_id=? AND provider_id<>? LIMIT 1",
-        (existing['album_id'], browse_id)).fetchone()
-    comparison = fingerprint(album)
-    if comparison is None:
-        return not shared
-    digest, videos = comparison
-    now = time.time() if now is None else now
-    if shared and existing['digest'] != digest:
-        return False  # A changed edition must not overwrite the shared last-good tracklist.
-    aid = albums.observe(conn, browse_id, title=album['title'],
-        artist=', '.join(a['name'] for a in album['artists']), year=album['year'], rank=1)
-    conn.execute("INSERT INTO album_provider_fingerprints VALUES ('youtube',?,?,?) "
-        'ON CONFLICT(provider,provider_id) DO UPDATE SET digest=excluded.digest,observed_at=excluded.observed_at',
-        (browse_id, digest, now))
-    candidates = conn.execute('SELECT DISTINCT p.album_id FROM album_provider_fingerprints f '
-        'JOIN album_provider_ids p USING(provider,provider_id) '
-        "WHERE f.provider='youtube' AND f.digest=? AND p.album_id<>? ORDER BY p.album_id", (digest, aid)).fetchall()
-    for candidate in candidates:
-        target, retired = sorted((aid, candidate[0]))
-        conflict = conn.execute('SELECT 1 FROM album_provider_ids a JOIN album_provider_ids b '
-            "ON a.provider=b.provider AND a.provider<>'youtube' AND a.provider_id<>b.provider_id "
-            'WHERE a.album_id=? AND b.album_id=? LIMIT 1', (target, retired)).fetchone()
-        if not conflict and _compatible(conn, target, videos) and _compatible(conn, retired, videos):
-            _merge(conn, target, retired, digest, now)
-            aid = target
-    return True
-
-
-def _compatible(conn, aid, videos):
-    from . import album_tracklists
-    revisions = []
-    if album_tracklists.available(conn):
-        rows = conn.execute("SELECT id,status,order_status FROM album_tracklists WHERE album_id=? "
-            "AND capture_kind IN ('provider','legacy_full')",(aid,)).fetchall()
-        for revision in rows:
-            occurrences = conn.execute('SELECT o.position,coalesce(e.video_id,o.raw_source_ref) video_id '
-                'FROM album_track_occurrences o LEFT JOIN album_occurrence_sources s ON s.occurrence_id=o.id '
-                'LEFT JOIN catalog_entries e ON e.id=s.entry_id WHERE o.tracklist_id=? ORDER BY o.position,o.id',
-                (revision['id'],)).fetchall()
-            revisions.append({**dict(revision), 'occurrences': occurrences})
-    rows = conn.execute('SELECT t.*,e.video_id FROM album_tracks t '
-                        'LEFT JOIN catalog_entries e ON e.id=t.entry_id '
-                        'WHERE t.album_id=? ORDER BY t.position IS NULL,t.position,t.id', (aid,)).fetchall()
-    state = conn.execute('SELECT complete,expected_track_count FROM album_fetch_state WHERE album_id=?',
-                         (aid,)).fetchone()
-    return compatible({'revisions': revisions, 'tracks': rows, 'state': state}, videos)
 
 
 def compatible(inputs, videos):
@@ -122,74 +67,3 @@ def compatible(inputs, videos):
     if full and (not state or not state['complete'] or state['expected_track_count'] != len(full)):
         return False
     return not (not full and state and state['complete'] and state['expected_track_count'])
-
-
-def _merge(conn, target, retired, digest, now):
-    from . import album_memberships, album_feedback_storage, album_tracklists
-    if album_feedback_storage.available(conn):
-        album_feedback_storage.merge(conn,target,retired,now)
-        conn.execute('UPDATE discovery_fetch_history SET album_id=? WHERE album_id=?',(target,retired))
-        conn.execute('UPDATE album_playback_intents SET album_id=? WHERE album_id=?',(target,retired))
-    # Exact source IDs on youtube_items and frozen share snapshots remain untouched.
-    consolidated = album_memberships.available(conn)
-    if consolidated:
-        album_memberships.merge(conn, target, retired)
-    else:
-        for row in conn.execute('SELECT * FROM album_library_memberships WHERE album_id=?', (retired,)).fetchall():
-            prior = conn.execute('SELECT id,saved_at FROM album_library_memberships '
-                                 'WHERE album_id=? AND account_id IS ?', (target, row['account_id'])).fetchone()
-            if prior:
-                times = [t for t in (prior['saved_at'], row['saved_at']) if t is not None]
-                conn.execute('UPDATE album_library_memberships SET saved_at=? WHERE id=?',
-                             (min(times) if times else None, prior['id']))
-                conn.execute('DELETE FROM album_library_memberships WHERE id=?', (row['id'],))
-            else:
-                conn.execute('UPDATE album_library_memberships SET album_id=? WHERE id=?', (target, row['id']))
-        # In-flight remote snapshots cannot replace pre-reconciliation ownership.
-        conn.execute('INSERT INTO album_library_revisions SELECT id,1 FROM accounts WHERE 1 '
-                     'ON CONFLICT(account_id) DO UPDATE SET revision=revision+1')
-    old = conn.execute('SELECT * FROM album_discovery_memberships WHERE album_id=?', (retired,)).fetchone()
-    current = conn.execute('SELECT * FROM album_discovery_memberships WHERE album_id=?', (target,)).fetchone()
-    if old and current:
-        for field in ('found_at', 'first_shown', 'legacy_first_shown', 'last_shown', 'legacy_last_shown'):
-            values = [v for v in (old[field], current[field]) if v is not None]
-            value = (max(values) if 'last' in field else min(values)) if values else None
-            conn.execute(f'UPDATE album_discovery_memberships SET {field}=? WHERE album_id=?', (value, target))
-        conn.execute('UPDATE album_discovery_memberships SET offered_count=offered_count+?, '
-                     'legacy_offered_count=legacy_offered_count+? WHERE album_id=?',
-                     (old['offered_count'], old['legacy_offered_count'], target))
-        conn.execute('DELETE FROM album_discovery_memberships WHERE album_id=?', (retired,))
-    elif old:
-        conn.execute('UPDATE album_discovery_memberships SET album_id=? WHERE album_id=?', (target, retired))
-    from . import discovery_provenance
-    if discovery_provenance.available(conn):
-        reason = f'verified album reconciliation {retired} to {target}'
-        discovery_provenance.merge_origins(conn,'album_id',retired,target,reason=reason)
-        discovery_provenance.merge_subject(conn,'album',retired,target,reason=reason)
-    typed = album_tracklists.available(conn)
-    if not typed:
-        has_full = conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND is_full=1', (target,)).fetchone()
-        if has_full:
-            conn.execute('DELETE FROM album_tracks WHERE album_id=? AND is_full=1', (retired,))
-        else:
-            conn.execute('UPDATE album_tracks SET album_id=? WHERE album_id=? AND is_full=1', (target, retired))
-        for row in conn.execute('SELECT id,entry_id FROM album_tracks WHERE album_id=?', (retired,)).fetchall():
-            if conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND entry_id=?', (target, row['entry_id'])).fetchone():
-                conn.execute('DELETE FROM album_tracks WHERE id=?', (row['id'],))
-            else:
-                conn.execute('UPDATE album_tracks SET album_id=? WHERE id=?', (target, row['id']))
-        conn.execute('DELETE FROM album_tracks WHERE album_id=? AND is_full=0 AND entry_id IN '
-                     '(SELECT entry_id FROM album_tracks WHERE album_id=? AND is_full=1)', (target, target))
-        if not has_full:
-            conn.execute('DELETE FROM album_fetch_state WHERE album_id=?', (target,))
-            conn.execute('UPDATE album_fetch_state SET album_id=? WHERE album_id=?', (target, retired))
-        conn.execute('DELETE FROM album_fetch_state WHERE album_id=?', (retired,))
-    # Retain each original proof when an already-aliased release joins another.
-    conn.execute('UPDATE album_provider_ids SET is_primary=0,equivalence_digest=?,verified_at=? '
-                 'WHERE album_id=? AND is_primary=1 AND provider IN '
-                 '(SELECT provider FROM album_provider_ids WHERE album_id=?)', (digest, now, retired, target))
-    conn.execute('UPDATE album_provider_ids SET album_id=? WHERE album_id=?', (target, retired))
-    if typed:
-        album_tracklists.merge(conn,target,retired)
-    conn.execute('UPDATE album_alias_reconciliations SET album_id=? WHERE album_id=?', (target, retired))
-    conn.execute('INSERT INTO album_alias_reconciliations VALUES (?,?,?,?)', (retired, target, digest, now))

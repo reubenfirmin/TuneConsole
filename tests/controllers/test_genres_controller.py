@@ -25,7 +25,6 @@ def genres(monkeypatch):
         lambda name: next((value for value in defaults if value.casefold() == name.casefold()), name))
     repository = create_autospec(GenreRepo, instance=True, spec_set=True)
     repository.transaction.side_effect = nullcontext
-    repository.uses_keyed_preferences.return_value = True
     repository.label_matches.side_effect = lambda label, normalized: {normalized}
     repository.axis_matches.side_effect = lambda labels: {
         label: {normalized: None} for label, normalized in labels}

@@ -38,7 +38,8 @@ def visible(at=101):
 
 
 def learner(expand):
-    return ChoiceLearning(expand=expand, parameters=lambda: PARAMETERS, modes=lambda: [], axes=lambda _: {})
+    return ChoiceLearning(expand=expand, parameters=lambda: PARAMETERS, modes=lambda: [], axes=lambda _: {},
+                          rating_advances=lambda _: {})
 
 
 @pytest.mark.parametrize('condition', ['expired', 'unseen', 'future-context', 'future-observation'])
@@ -92,12 +93,25 @@ def test_context_acquires_unique_components_before_pure_restoration_and_keeps_ne
         choice_context.resolve_context(manifest, {})
 
 
+def test_mix_context_projects_large_unused_fields_before_publishing_any_artifact():
+    ledger = Mock(spec_set=['get', 'artifact'])
+    captured = {'at': 100, 'musical_groups': ['large group definition' * 4000]}
+    ledger.get.return_value = captured
+    contexts = ChoiceContexts(ledger)
+    inline = contexts.mix(captured)
+    assert inline == {'schema': 2, 'precision': 'theme-raw-genres-v1', 'at': 100}
+    ledger.get.assert_not_called()
+    assert contexts.mix({'artifact': 'legacy', 'at': 101}) == {**inline, 'at': 101}
+    ledger.get.assert_called_once_with('artifact', 'legacy')
+    ledger.artifact.assert_not_called()
+
+
 def test_response_retry_keeps_original_clock_without_republishing_or_retaining_again():
     ledger = Mock(spec_set=['get', 'put'])
     ledger.get.side_effect = [dict(id='offer', format='mixes', at=100, context='original',
         options=[{'id': 'one'}]), dict(opportunity_id='offer', kind='choice', option_id='one', at=101)]
     retain = Mock()
-    command = ChoiceEvidence(ledger, publish_mix=Mock(), retain=retain, roots_enabled=lambda: True)
+    command = ChoiceEvidence(ledger, publish_mix=Mock(), retain=retain)
     assert command.respond('offer', 'choice', 110, option_id='one', action_id='action', visible=(), details={}) is False
     ledger.put.assert_not_called()
     retain.assert_not_called()
@@ -170,18 +184,18 @@ def test_uncertain_head_publication_finishes_checkpoint_without_restaging():
 
 
 @pytest.mark.parametrize('deferred', [False, True])
-def test_storage_intent_uses_settings_owned_writes_without_an_outer_transaction(monkeypatch, deferred):
-    settings = Mock(spec_set=['publish_values'])
-    store = SimpleNamespace(_evidence_state_lock=RLock(), _evidence_maintenance=0, settings=settings)
+def test_storage_intent_uses_evidence_owned_writes_without_an_outer_transaction(monkeypatch, deferred):
+    evidence_files = Mock(spec_set=['update_maintenance'])
+    store = SimpleNamespace(_evidence_state_lock=RLock(), _evidence_maintenance=0, evidence_files=evidence_files)
     monkeypatch.setattr(choice_evidence.group_roots, 'writer',
-                        Mock(side_effect=AssertionError('Storage intent must not wrap settings SQL')))
+                        Mock(side_effect=AssertionError('Storage intent commits in its repository')))
     monkeypatch.setattr(choice_evidence.group_roots, 'admission', lambda _: nullcontext())
     monkeypatch.setattr(choice_evidence, '_maintain_storage', lambda *args, **kwargs: {'deferred': deferred})
     assert choice_evidence.maintain_storage(store, 100) == {'deferred': deferred}
-    expected = [call({choice_evidence.STORAGE_PENDING: '1'})]
+    expected = [call(pending=True)]
     if not deferred:
-        expected.append(call({choice_evidence.STORAGE_PENDING: '0', choice_evidence.STORAGE_PHASE: 'inventory'}))
-    assert settings.publish_values.call_args_list == expected
+        expected.append(call(pending=False, phase='inventory'))
+    assert evidence_files.update_maintenance.call_args_list == expected
     assert store._evidence_recovery_pending is deferred
     assert store._evidence_maintenance == 0
 
@@ -197,26 +211,24 @@ def test_storage_resumes_checkpoint_and_releases_protection_before_collection():
     from contextlib import contextmanager
 
     operations = Mock()
-    settings = Mock()
-    settings.get_setting.return_value = 'checkpoint'
+    evidence_files = Mock(maintenance_state=Mock(return_value={'phase': 'checkpoint'}))
     protected_reader = False
 
     @contextmanager
     def capture():
         nonlocal protected_reader
         protected_reader = True
-        yield SimpleNamespace(capture=lambda: ({'component'}, {'offer'}, {'run'}))
+        yield SimpleNamespace(capture=lambda: ({'component'}, {'offer'}))
         protected_reader = False
 
     def collect(*args, **kw):
         assert not protected_reader
         assert kw['protected_artifacts'] == {'pending', 'explicit', 'component'}
         assert kw['protected_opportunities'] == {'queued', 'offer'}
-        assert kw['protected_runs'] == {'run'}
         return {'collected': 1}
 
     ledger = SimpleNamespace(byte_budget=1000, maintain=Mock(side_effect=collect))
-    command = ChoiceStorage(ledger, settings, phase_key='phase', inventory=operations.inventory,
+    command = ChoiceStorage(ledger, evidence_files, inventory=operations.inventory,
         acknowledge=operations.acknowledge, more=lambda: False, capture=capture,
         pending=lambda: ({'pending'}, {'queued'}), protected=lambda: False,
         pending_protection=nullcontext, retired=operations.retired, phase=operations.phase,
@@ -224,7 +236,7 @@ def test_storage_resumes_checkpoint_and_releases_protection_before_collection():
     assert command.run(100, protected_artifacts={'explicit'}) == {'collected': 1}
     operations.inventory.assert_not_called()
     operations.acknowledge.assert_called_once_with(100)
-    settings.set_setting.assert_called_once_with('phase', 'retention')
+    evidence_files.update_maintenance.assert_called_once_with(phase='retention')
 
 
 def test_playback_requires_a_verified_option_and_uses_once_only_player_identity():
@@ -252,7 +264,8 @@ def test_album_capture_defers_response_acquisition_until_a_response_is_needed(mo
     ledger = Mock(spec_set=['bind_choice_playback', 'choice_playback'])
     ledger.choice_playback.return_value = dict(opportunity_id='offer', option_id='one', at=100)
     store = SimpleNamespace(rec_ledger=ledger, read_view=Mock(return_value=nullcontext(reader)),
-        collection=Mock(spec_set=['playback_source']), playlist_recipes=Mock(spec_set=['get_recipe']))
+        collection=Mock(spec_set=['playback_source']), playlist_recipes=Mock(spec_set=['get_recipe']),
+        history=Mock(spec_set=['browse_playback_onset']))
     observations = Mock(spec_set=['opportunity', 'safe_respond'])
     observations.opportunity.return_value = {'options': [{'id': 'one'}]}
     observations.safe_respond.return_value = True

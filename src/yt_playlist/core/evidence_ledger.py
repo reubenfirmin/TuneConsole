@@ -16,6 +16,7 @@ from collections import Counter
 
 from yt_playlist.core.activity import check_cancellable_work
 from .evidence_contract import artifact_components as _components, canonical
+from .evidence_paths import record_id
 
 
 class EvidenceConflict(ValueError):
@@ -53,8 +54,6 @@ def library_byte_budget(recordings):
 
 
 def _sync_directory(path):
-    # Whole-database replacement and the fixed coordination counters use this
-    # boundary. Managed document publication has no directory sync protocol.
     if hasattr(os, 'O_DIRECTORY'):
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -233,7 +232,7 @@ class EvidenceLedger:
         """Do not retire files belonging to an analytics reader or backup."""
         return self._maintain(*args, **kwargs)
 
-    def _maintain(self, before, *, protected_artifacts=(), protected_runs=(), orphan_before=None,
+    def _maintain(self, before, *, protected_artifacts=(), orphan_before=None,
                  protected_opportunities=(), pressure_before=None, compacted_contexts=(),
                  context_before=None, context_byte_budget=0, required_bytes=0, pending_protection=None,
                  retire_references=None, progress=None, _budget_state=None, _inventory=None,
@@ -249,7 +248,7 @@ class EvidenceLedger:
             from .evidence_inventory import Inventory
             from .evidence_retirement import Retirements
             retirements = Retirements(self.directory, path=getattr(self, 'retirement_path', None))
-            had_retirements = bool(retirements.offers or retirements.checkpoints)
+            had_retirements = bool(retirements.offers or retirements.checkpoints or retirements.files)
             inventory = Inventory(self, progress=progress).scan() if _inventory is None else _inventory
             # Inventory decodes immutable evidence and saves completed prefixes.
             # It must not exclude serving readers for that potentially long
@@ -278,8 +277,6 @@ class EvidenceLedger:
             # Durable responses and current capture pins still protect them.
             protected.update(event['opportunity_id'] for event in events
                              if event['observed_at'] >= before and event['opportunity_id'] not in resuming)
-            protected.update(oid for oid, offer in offers.items()
-                if any((offer.get(field) or {}).get('run_id') in protected_runs for field in ('comparison', 'monitor')))
             retired = {oid for oid, offer in offers.items()
                        if offer["observed_at"] < before and oid not in protected}
             # A preceding slice may have removed the offer before its events or
@@ -308,8 +305,7 @@ class EvidenceLedger:
             references = Counter(closure(pinned))
             references.update(path for path in artifacts if inventory[path]['mtime'] >= orphan_before)
             # A caller acknowledges compact, correction-capable inputs only after
-            # successful learning publication. Raw contexts then become optional
-            # diagnostics, even while their opportunities belong to an active trial.
+            # successful learning publication. Raw contexts then become optional diagnostics.
             compacted_contexts = (set(compacted_contexts) if compacted_contexts is not None else
                 {entry['data']['source_context'] for path, entry in inventory.items()
                  if self.path_kind(path) == 'checkpoint' and entry['data']['acknowledged']})
@@ -383,9 +379,7 @@ class EvidenceLedger:
                           if event['observed_at'] >= pressure_before}
                 candidates = sorted((offer for oid, offer in offers.items()
                     if oid not in retired | durable | set(protected_opportunities) | recent
-                    and offer['observed_at'] < pressure_before
-                    and not any((offer.get(field) or {}).get('run_id') in protected_runs
-                                for field in ('comparison', 'monitor'))),
+                    and offer['observed_at'] < pressure_before),
                     key=lambda offer: (offer['observed_at'], offer['id']))
                 for offer in candidates:
                     if used <= self.byte_budget * .7:
@@ -437,6 +431,9 @@ class EvidenceLedger:
                                            if path in removed and isinstance(identity, str)}
                 # Publish intent before the first unlink. Existing evidence and
                 # current pins, rather than this journal, still decide eligibility.
+                if _defer_reconciliation:
+                    retirements.files.update(identity for path in removed & inventory.keys()
+                                              if (identity := record_id(path)) is not None)
                 if had_retirements or removed or retirements.offers or retirements.checkpoints:
                     retirements.save()
                 if retired:
@@ -472,7 +469,6 @@ class EvidenceLedger:
             used = sum(sizes.values()) - sum(sizes.get(path, 0) for path in removed)
             save(used)
             reconciliation = ({'_retirement_offers': completed_offers, '_retirement_checkpoints': completed_checkpoints,
-                               '_removed': removed,
                                '_unlink_deferred': any(path.exists() for path in planned)}
                               if _defer_reconciliation else {})
             return {**reconciliation, "used_bytes": used, "budget_bytes": self.byte_budget, "deferred": deferred,

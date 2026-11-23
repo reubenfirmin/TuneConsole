@@ -6,10 +6,11 @@ job. Repairs return their consequences so the draft service can update its own a
 import math
 import statistics
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import zip_longest
 
 from yt_playlist.rec import road_trip_axes as axes, road_trip_candidates as candidates
+from yt_playlist.rec.road_trip_artists import artist_item, selected_artist
 from yt_playlist.rec.road_trip_mix import _axis_genre
 from yt_playlist.util import genre_map
 
@@ -27,14 +28,21 @@ class ClusterBatch:
     fresh: list[dict]
 
 
+def _artist_reference(value):
+    if isinstance(value, str):
+        return value, None  # Earlier drafts retain names alone.
+    return value['name'], value.get('browse_id')
+
+
 @dataclass
 class ArtistNeighborhoods:
     artists: list[str]
     genres: list[str]
     contexts: dict[str, dict]
+    refs: dict[str, dict] = field(default_factory=dict)
 
     def remember(self, name, songs, related):
-        songs = [c for c in songs if c["artist"].casefold() == name.casefold()]
+        songs = [c for c in songs if selected_artist(c, [name], self.refs)]
         genres = Counter(c["genre"] for c in songs if c["genre"])
         years = [c["year"] for c in songs[:5] if c.get("year")]
         genre = genres.most_common(1)[0][0] if genres else ''
@@ -75,14 +83,14 @@ class ArtistNeighborhoods:
                 candidate.update(cluster_genre=context["genre"], anchors=[anchor])
         return fresh
 
-    @staticmethod
-    def anchors(candidate, contexts):
+    def anchors(self, candidate, contexts):
         """Seeds keep their whole catalogs; one-hop peers need dates within ten years of the seed."""
         artist, anchors = candidate["artist"].casefold(), []
         for name, context in contexts.items():
-            if artist == name.casefold():
+            if selected_artist(candidate, [name], self.refs):
                 anchors.append(name)
-            elif artist in {a.casefold() for a in context["related"]}:
+            elif any(candidate.get('artist_browse_id') == browse if browse else artist == label.casefold()
+                     for label, browse in map(_artist_reference, context['related'])):
                 year, seed_year = candidate.get("year"), context.get("year")
                 if seed_year is None or (year and abs(year - seed_year) <= 10):
                     anchors.append(name)
@@ -100,7 +108,7 @@ class ArtistNeighborhoods:
             if candidate["source"] == "mine" or not origin:
                 kept.append(candidate)
                 continue
-            direct = next((n for n in contexts if n.casefold() == candidate["artist"].casefold()), None)
+            direct = selected_artist(candidate, contexts, self.refs)
             anchors = [direct] if direct else self.anchors(candidate, contexts)
             anchors = [n for n in anchors if not contexts[n]["genre"] or not candidate["genre"]
                        or contexts[n].get('family',genre_map.family(contexts[n]["genre"])) == candidate["family"]]
@@ -126,8 +134,13 @@ class ArtistNeighborhoods:
         """Hydrate old drafts only in the acquisition worker, using the original seed pages."""
         for name in self.artists:
             if name not in self.contexts:
-                batch = context(name)
-                self.remember(name, project(batch.rows), batch.related)
+                item = artist_item(name, self.refs)
+                if item is None:
+                    self.remember(name, [], [])
+                else:
+                    options = {'browse_id': item['browse_id']} if item.get('browse_id') else {}
+                    batch = context(item['name'], **options)
+                    self.remember(name, project(batch.rows), batch.related)
         genre_axes = feature_axes(self.contexts[name]['genre'] for name in self.artists)
         for name in self.artists:
             self.contexts[name]['family'] = genre_axes.get(self.contexts[name]['genre'], ('', None))[0]
@@ -152,14 +165,20 @@ class ArtistNeighborhoods:
                 candidate.update(cluster_genre=genre, anchors=anchors)
             kept.append(candidate)
         known = {c["video_id"] for c in kept}
-        neighborhoods = [[name] + context["related"] for name, context in contexts.items()]
+        neighborhoods = []
+        for key, facts in contexts.items():
+            item = artist_item(key, self.refs)
+            seed = [(item['name'], item.get('browse_id'))] if item is not None else []
+            neighborhoods.append([*seed, *map(_artist_reference, facts['related'])])
         names = list(dict.fromkeys(n for group in zip_longest(*neighborhoods) for n in group if n))
         per_artist = max(2, math.ceil(cap / max(1, len(names))))
         out = []
-        for name in names[:candidates.GENRE_ARTISTS]:
-            if name in self.artists and name not in contexts:
+        for name, browse in names[:candidates.GENRE_ARTISTS]:
+            if any(name == item['name'] and browse == item.get('browse_id') and key not in contexts
+                   for key in self.artists if (item := artist_item(key, self.refs))):
                 continue
-            rows = [r for r in songs(name) if r["video_id"] not in known]
+            available = songs(name, browse_id=browse) if browse else songs(name)
+            rows = [r for r in available if r["video_id"] not in known]
             accepted = 0
             for candidate in project(rows[:per_artist * 3]):
                 anchors = self.anchors(candidate, contexts)

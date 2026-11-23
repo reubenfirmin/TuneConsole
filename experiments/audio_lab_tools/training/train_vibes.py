@@ -24,7 +24,7 @@ from threadpoolctl import threadpool_limits
 
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from experiments.audio_lab_tools.legacy import audio_vibe_model as model
-from yt_playlist.rec import audio_vibe_prediction as heuristic
+from experiments.audio_lab_tools.legacy import audio_vibe_prediction as heuristic
 from yt_playlist.core import audio_annotations, audio_embedding, audio_vibe_metadata, sample_files
 
 MIN_SUPPORT = 3
@@ -93,7 +93,7 @@ def examples_from_db(path, *, require_embeddings=False):
             labels, earlier = audio_annotations.training_rows(conn, TAXONOMY_VERSION)
         else:
             # Existing frozen development snapshots keep their original format.
-            # This parser is read-only; live writers use annotation relations.
+            # Live captures use the single annotation archive.
             labels = list(conn.execute('SELECT labels.*,COALESCE(runs.video_id,'
                 '(SELECT video_id FROM sample_attributes WHERE run_id=labels.run_id '
                 'ORDER BY captured_at DESC,id DESC LIMIT 1)) video_id '

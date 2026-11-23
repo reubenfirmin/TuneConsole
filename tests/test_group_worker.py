@@ -1,8 +1,12 @@
+from fastapi.testclient import TestClient
+
 from tests.group_support import publish, recordings
 from tests.test_mode_refresh_worker import scheduled
-from yt_playlist.core.activity import check_stopping
-from yt_playlist.rec import group_serving
+from yt_playlist.core.activity import check_stopping, WorkBudgetExceeded
+from yt_playlist.library.worker_composition import maintenance_commands
+from yt_playlist.rec import group_preparation, group_serving
 from yt_playlist.rec.worker_queue import Job
+from yt_playlist.web.app import create_app
 
 
 def test_shadow_groups_run_after_home_and_do_not_show_a_model_refresh(scheduled, monkeypatch):
@@ -12,7 +16,7 @@ def test_shadow_groups_run_after_home_and_do_not_show_a_model_refresh(scheduled,
     monkeypatch.setattr(worker.tasks, 'stories', lambda: False)
     monkeypatch.setattr(worker, 'trigger_tv_refresh', lambda: False)
     monkeypatch.setattr(worker.preparation.groups, 'step', lambda now: calls.append('groups'))
-    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head', lambda: {'generation': 'prepared'})
+    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head_generation', lambda: 'prepared')
     monkeypatch.setattr(group_serving, 'prepare', lambda *args: calls.append('preview') or {})
     worker._schedule(full=False, groups=True)
     assert not worker.busy
@@ -39,7 +43,7 @@ def test_arriving_home_work_waits_for_admitted_shadow_to_finish(scheduled, monke
         check_stopping()
 
     monkeypatch.setattr(worker.preparation.groups, 'step', grouping)
-    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head', lambda: {'generation': 'prepared'})
+    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head_generation', lambda: 'prepared')
     monkeypatch.setattr(worker.tasks, 'home', lambda: calls.append('home') or False)
     monkeypatch.setattr(worker.tasks, 'stories', lambda: False)
     monkeypatch.setattr(worker, 'trigger_tv_refresh', lambda: False)
@@ -61,7 +65,7 @@ def test_background_capture_arrivals_do_not_cancel_graph_progress(scheduled, mon
         check_stopping()
 
     monkeypatch.setattr(worker.preparation.groups, 'step', grouping)
-    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head', lambda: {'generation': 'prepared'})
+    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head_generation', lambda: 'prepared')
     monkeypatch.setattr(group_serving, 'prepare', lambda *args: calls.append('preview') or {})
     monkeypatch.setattr(worker, '_prepare_content', lambda: calls.append('capture'))
     monkeypatch.setattr(worker, '_refresh_bundles', lambda: calls.append('bundles'))
@@ -75,7 +79,7 @@ def test_already_pending_background_work_does_not_starve_a_graph_slice(scheduled
     worker, _targets = scheduled
     calls = []
     monkeypatch.setattr(worker.preparation.groups, 'step', lambda now: calls.append('groups'))
-    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head', lambda: {'generation': 'prepared'})
+    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head_generation', lambda: 'prepared')
     monkeypatch.setattr(group_serving, 'prepare', lambda *args: calls.append('preview') or {})
     worker.jobs.merge(Job.PREPARE)
     worker.jobs.merge(Job.BUNDLES)
@@ -95,10 +99,9 @@ def test_poll_retries_missing_preview_after_restart_without_new_graph_inputs(sch
 
 
 def test_failed_preview_keeps_retry_and_reports_waiting(scheduled, monkeypatch):
-    from yt_playlist.rec import group_preparation
     worker, _targets = scheduled
     monkeypatch.setattr(worker.preparation.groups, 'step', lambda now: False)
-    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head', lambda: {'generation': 'prepared'})
+    monkeypatch.setattr(worker.ctx.store.taste_groups, 'head_generation', lambda: 'prepared')
     monkeypatch.setattr(group_serving, 'prepare', lambda *args: None)
     group_preparation.report(worker.ctx.store, 'ready', 1000)
     worker._prepare_groups()
@@ -106,8 +109,45 @@ def test_failed_preview_keeps_retry_and_reports_waiting(scheduled, monkeypatch):
     assert group_preparation.status(worker.ctx.store)['reason'] == 'preview-pending'
 
 
+def test_successful_preview_retry_clears_the_wait_and_worker_due_state(scheduled, monkeypatch):
+    from tests.test_group_serving import pools, publish as publish_preview_inputs
+
+    worker, _targets = scheduled
+    store, now = worker.ctx.store, worker.ctx.now_fn()
+    tracks = recordings([('House', 20, .4)])
+    head = publish_preview_inputs(store, tracks)
+    pools(store, tracks)
+    group_preparation.report(store, 'ready', now)
+
+    def interrupted(*args, **kwargs):
+        raise WorkBudgetExceeded('Preview work interrupted')
+
+    with monkeypatch.context() as fault:
+        fault.setattr(group_serving, 'prepare_candidates', interrupted)
+        worker._prepare_groups()
+    assert group_preparation.status(store)['reason'] == 'preview-pending'
+    assert store.rec_proposals.get_proposals(group_serving.SURFACE) is None
+
+    retry = worker.jobs.retry[Job.GROUPS]
+    retry.retry_at = 0
+    worker._prepare_groups()
+    assert store.rec_proposals.get_proposals(group_serving.SURFACE)['generation'] == head['generation']
+    assert group_preparation.status(store)['phase'] == 'ready'
+    assert not maintenance_commands(worker).groups_due(retry.dirty)
+    app = create_app(store, lambda: {}, now_fn=worker.ctx.now_fn, background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        response = client.get('/taste/grouping-preview')
+        assert response.status_code == 200
+        assert f'data-generation="{head["generation"]}"' in response.text
+        assert 'Preparing the updated musical groups for display.' not in response.text
+
+    group_preparation.report(store, 'deferred', now, reason='work-budget')
+    worker._prepare_groups()
+    assert group_preparation.status(store)['reason'] == 'work-budget'
+    assert maintenance_commands(worker).groups_due(retry.dirty)
+
+
 def test_poll_retries_persisted_failure_after_restart_even_with_a_complete_preview(scheduled, monkeypatch):
-    from yt_playlist.rec import group_preparation
     worker, _targets = scheduled
     publish(worker.ctx.store, recordings([('House', 3, .1)]))
     assert group_serving.prepare(worker.ctx.store, 1100)

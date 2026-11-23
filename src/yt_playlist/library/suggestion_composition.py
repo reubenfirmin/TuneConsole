@@ -1,13 +1,31 @@
 """Bind existing recommendation and evidence owners to suggestion commands."""
 from yt_playlist.controllers.suggestions import Suggestions, SuggestionFeedback
-from yt_playlist.rec import embed, graduation, measurement, rec_params, surfaces
+from yt_playlist.core.accounts import catalog_client
+from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
+from yt_playlist.library import artist_neighbors
+from yt_playlist.rec import embed, measurement, rec_params, surfaces
 
 
-def suggestions(store, worker):
+def suggestions(store, worker, clients=None):
+    def complete(pid, now):
+        youtube = {}
+        if clients is not None and (client := catalog_client(clients())) is not None:
+            members = store.playlists.get_playlist_track_keys(pid)
+            refs = store.artists.track_keys(keys=members)
+            seeds = sorted({artist for artists in refs.values() for artist in artists})
+            references = ((seed, store.artists.get_artist(seed)) for seed in seeds)
+            available = [(seed, ref) for seed, ref in references if ref and ref['provider_ids'].get('youtube')]
+            try:
+                with work_budget(3):
+                    for seed, ref in available[:4]:
+                        youtube[seed] = artist_neighbors.youtube(client, ref)
+            except WorkBudgetExceeded:
+                pass  # Use the supplemental pages that arrived within the read budget.
+        return surfaces.complete_playlist(store, pid, now=now, youtube=youtube)
+
     return Suggestions(store.playlists, store.rec_query, store.discovery, store.rec_model,
-        complete=lambda pid, now: surfaces.complete_playlist(store, pid, now=now),
-        neighbors=lambda *args, **kwargs: embed.neighbors_blended(store, *args, **kwargs),
-        proxy=lambda *args, **kwargs: embed.neighbors_for_unmodeled(store, *args, **kwargs),
+        complete=complete,
+        neighbors=lambda key, *, topn: embed.track_neighbors(store, key, topn=topn),
         record=lambda *args, **kwargs: measurement.record_recommendations(store, *args, **kwargs),
         rebuild=worker.trigger if worker else None)
 
@@ -28,6 +46,4 @@ def feedback(store):
                         'mainstream_min': rec_params.get_param(reader, 'pop_mainstream_min')}
             return {}
     return SuggestionFeedback(store.rec_model, store.rec_signals, store.playlists, store.playlist_recipes,
-        facts=facts, parameter=lambda name: rec_params.get_param(store, name), lanes=rec_params.LANE_NAMES,
-        facet=lambda *args, **kwargs: graduation.graduate_facet(store, *args, **kwargs),
-        moods=lambda *args, **kwargs: graduation.graduate_moods(store, *args, **kwargs))
+        facts=facts, parameter=lambda name: rec_params.get_param(store, name), lanes=rec_params.LANE_NAMES)

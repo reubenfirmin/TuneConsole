@@ -18,12 +18,12 @@ def familiarity(summary):
 class AlbumMenu:
     def __init__(self, proposals, notes, ledger, genres, settings, *, prepared, current, epoch,
                  tuning, defaults, excluded, select, listening, read_notes, present, close,
-                 opportunity, schedule, worker_available, writable, logger):
+                 opportunity, schedule, worker_available, logger):
         self.proposals, self.notes, self.ledger, self.genres, self.settings = proposals, notes, ledger, genres, settings
         self.prepared, self.current, self.epoch, self.tuning = prepared, current, epoch, tuning
         self.defaults, self.excluded, self.select, self.listening = defaults, excluded, select, listening
         self.read_notes, self.present, self.close, self.opportunity = read_notes, present, close, opportunity
-        self.schedule, self.worker_available, self.writable, self.logger = schedule, worker_available, writable, logger
+        self.schedule, self.worker_available, self.logger = schedule, worker_available, logger
 
     def selection(self, now):
         prepared = self.prepared(now)
@@ -33,11 +33,6 @@ class AlbumMenu:
 
     def query(self, now):
         prepared, payload, epoch, tuning, pool, items, policy = self.selection(now)
-        comparison = payload.get('context', {}).get('comparison')
-        if comparison and self.writable():
-            held = {'epoch': epoch, 'comparison': comparison}
-            if self.proposals.get_proposals('model_album_assignment') != held:
-                self.proposals.put_proposals('model_album_assignment', held, now)
         defaults = self.defaults()
         policy = {**policy, 'temporary_until': now + tuning['remaining'] if tuning['remaining'] else None,
                   'standing_defaults': defaults}

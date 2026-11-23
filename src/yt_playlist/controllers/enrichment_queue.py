@@ -6,10 +6,9 @@ from yt_playlist.repos.enrichment_sql import pending_coverage
 
 
 class EnrichmentQueue:
-    def __init__(self, repository, state, settings, *, read_snapshot, memoized_read, read_only):
+    def __init__(self, repository, state, *, read_snapshot, memoized_read, read_only):
         self.repository = repository
         self.state = state
-        self.settings = settings
         self.read_snapshot = read_snapshot
         self.memoized_read = memoized_read
         self.read_only = read_only
@@ -47,7 +46,7 @@ class EnrichmentQueue:
             return []
 
         def priority_order():
-            caught_up = float(self.settings.get_setting('enrich_caught_up_at') or 0)
+            caught_up = self.repository.caught_up_at() or 0
             return self.repository.priority_order(caught_up=caught_up, ordering=queue_policy.PRIORITY_ORDER)
 
         priorities = self.memoized_read('enrichment-priority-order', priority_order)
@@ -89,6 +88,12 @@ class EnrichmentQueue:
 
     def mark_recordings_enriched(self, recording_ids, now):
         return self.repository.mark_recordings_enriched(recording_ids, now)
+
+    def save_caught_up_at(self, now, *, initialize=False):
+        self.repository.save_caught_up_at(now, initialize=initialize)
+
+    def caught_up_at(self):
+        return self.repository.caught_up_at()
 
     def requeue_enrichment(self, track_ids):
         return self.repository.requeue_enrichment(track_ids)

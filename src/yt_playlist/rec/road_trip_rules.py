@@ -28,16 +28,17 @@ four different playlists: the seed is fresh per build, and the previous build's 
 """
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from copy import deepcopy
 from yt_playlist.core.version_policy import VersionPolicy
 
 from yt_playlist.rec import road_trip_axes, road_trip_candidates as candidates, road_trip_mix
 from yt_playlist.rec.road_trip_candidates import other_cap, own_candidates
 from yt_playlist.rec.road_trip_axes import canonical_genre
-from yt_playlist.rec.road_trip_mix import (_axis_genre, _bucket, _mix_source, _quota_weights,
-                                        _sample_order, _weight)
+from yt_playlist.rec.road_trip_artists import artist_item, recipe_inputs, selected_artist
+from yt_playlist.rec.road_trip_mix import _axis_genre, _bucket, _mix_source, _quota_weights
 from yt_playlist.rec.road_trip_neighborhoods import ArtistNeighborhoods
+from yt_playlist.rec.road_trip_ranking import TrackRanking, sample_order
 from yt_playlist.rec.road_trip_state import (DraftState, MAX_OTHER_POOL, ROW_FIELDS, draft_tracks,
                                           normalize_shape, restat)
 
@@ -52,12 +53,24 @@ class DraftInputs:
     genre_axes: dict
     family_genres: dict
     version_policy: VersionPolicy | None = None
+    ranking: TrackRanking = field(default_factory=TrackRanking)
+    excluded: frozenset[str] = frozenset()
 
 
 def _neighborhoods(state: DraftState) -> ArtistNeighborhoods:
     inputs = state.get("inputs", {})
     return ArtistNeighborhoods(inputs.get("artists", []), inputs.get("genres", []),
-                               state.setdefault("artist_contexts", {}))
+                               state.setdefault("artist_contexts", {}), inputs.get("artist_refs", {}))
+
+
+def _pending_inputs(inputs):
+    refs = inputs.get('artist_refs', {})
+    return ([item for key in inputs['artists'] if key and (item := artist_item(key, refs))]
+            + [{'kind': 'genre', 'name': genre} for genre in inputs['genres'] if genre])
+
+
+def input_key(item):
+    return item.get('artist_key') or item['name']
 
 
 def _refresh_genre_families(state, axes, candidates=()) -> bool:
@@ -116,6 +129,14 @@ def _pool_targets(recipe):
             min(MAX_OTHER_POOL, max(12, int(slots * POOL_SLACK * 0.6))))
 
 
+def _picked_row(candidate):
+    row = {key: candidate[key] for key in ROW_FIELDS}
+    for key in ('passenger_similarity', 'artist_ids', 'artist_browse_id', 'input'):
+        if key in candidate:
+            row[key] = candidate[key]
+    return row
+
+
 def repick_values(state: DraftState, inputs: DraftInputs) -> DraftState:
     """Re-draw the whole playlist under the state's current mix, familiarity, genre/era quotas and
     crossed-out slots. Mutates and returns `state` (picked, stats, axes).
@@ -135,8 +156,10 @@ def repick_values(state: DraftState, inputs: DraftInputs) -> DraftState:
         candidates=pool, own_pct=state["own_pct"], familiarity_pct=state["familiarity_pct"],
         target_minutes=state["target_minutes"], seed=state["seed"],
         artists=state.get("inputs", {}).get("artists", []), genres=state.get("inputs", {}).get("genres", []),
-        targets=state.get("targets") or {}, banned=state["banned"], previous=state.get("prev") or [],
-        building=bool(state.get("building")),genre_families=state['genre_families']),
+        targets=state.get("targets") or {}, banned=[*state["banned"], *sorted(inputs.excluded)],
+        previous=state.get("prev") or [],
+        building=bool(state.get("building")), genre_families=state['genre_families'],
+        ranking=inputs.ranking, artist_refs=state.get('inputs', {}).get('artist_refs', {})),
         random.Random(state["seed"]))
     groups, picked, short = result.groups, result.picked, result.short
     state["blend_available"] = result.blend_available
@@ -144,7 +167,7 @@ def repick_values(state: DraftState, inputs: DraftInputs) -> DraftState:
     ordered = result.ordered
     # The chosen rows are stored in full, not as ids into a pool: your side isn't kept anywhere, and
     # rendering the playlist (or saving it to YouTube) shouldn't have to reconstruct it.
-    state["picked"] = [{k: c[k] for k in ROW_FIELDS} for c in ordered]
+    state["picked"] = [_picked_row(c) for c in ordered]
     state["picks"] = [c["video_id"] for c in ordered]
     state["stats"] = {"short": short}
     state["mix_version"] = 2
@@ -176,35 +199,36 @@ def reroll_values(state: DraftState, index, inputs: DraftInputs) -> DraftState:
         return state
     gone = rows[index]
     state["banned"] = sorted(set(state["banned"]) | {gone["video_id"]})
-    banned = set(state["banned"])
+    banned = set(state["banned"]) | inputs.excluded
     used = {r["video_id"] for r in rows}
     # Replace like with like, so crossing out a track doesn't quietly shift the mine/theirs balance.
     side = "mine" if gone.get("source") == "mine" else "theirs"
     pool = (inputs.own if side == "mine"
             else [c for c in state["pool"] if c["source"] != "mine"])
     if _refresh_genre_families(state, inputs.genre_axes, pool):
-        eligible = inputs.own
+        eligible = [inputs.ranking.annotate(candidate) for candidate in inputs.own]
         if side != 'mine':
             _refresh_genre_families(state, inputs.genre_axes, eligible)
         state['blend_available'] = any(c['video_id'] not in banned and _mix_source(c,state)=='blend'
                                        for c in eligible)
     # ...and, where a slider is pinned, from the same genre/decade, so one swap can't breach a quota.
-    quotas = _quota_weights(state, side, [])
-    cands = [c for c in pool
-             if c["video_id"] not in used and c["video_id"] not in banned
-             and _mix_source(c, state) == _mix_source(gone, state)
+    quotas = _quota_weights(state, side)
+    eligible = (inputs.ranking.annotate(c) for c in pool
+                if c["video_id"] not in used and c["video_id"] not in banned)
+    cands = [c for c in eligible if _mix_source(c, state) == _mix_source(gone, state)
              and all(_bucket(c, kind, q) == _bucket(gone, kind, q) for kind, q in quotas.items())]
     rng = random.Random(state["seed"] + len(state["banned"]))
     fam = state["familiarity_pct"] / 100.0
     penalized = set(state.get("prev") or [])
-    order = _sample_order(cands, rng, lambda c: _weight(c, fam, penalized))
+    order = sample_order(cands, rng, fam, penalized, inputs.ranking)
     if side == "theirs":
-        artists = {a.casefold() for a in state.get("inputs", {}).get("artists", [])}
-        was_named = gone["artist"].casefold() in artists
-        same_group = [c for c in order if (c["artist"].casefold() in artists) == was_named]
+        seeds = state.get("inputs", {})
+        artists, refs = seeds.get("artists", []), seeds.get("artist_refs", {})
+        was_named = bool(selected_artist(gone, artists, refs))
+        same_group = [c for c in order if bool(selected_artist(c, artists, refs)) == was_named]
         order = same_group or order
     if order:
-        rows[index] = {k: order[0][k] for k in ROW_FIELDS}
+        rows[index] = _picked_row(order[0])
     else:
         rows.pop(index)                       # nothing left to offer: the slot just goes away
     state["picks"] = [r["video_id"] for r in rows]
@@ -220,8 +244,8 @@ def start_values(recipe, seed, inputs: DraftInputs, previous=None) -> DraftState
     filled in afterwards, chunk by chunk, by add_other_input. `previous` is the video_id list of the
     last build, penalized here so running the same recipe again gives a different playlist."""
     _, other_size = _pool_targets(recipe)
-    pending = ([{"kind": "artist", "name": a} for a in (recipe["artists"] or []) if a]
-               + [{"kind": "genre", "name": g} for g in (recipe["genres"] or []) if g])
+    seeds = recipe_inputs(recipe)
+    pending = _pending_inputs(seeds)
     # Reuse this transition's detached library pool for readiness and its first pick.
     own = inputs.own
     bare = sum(1 for c in own if not (c["genre"] and c["year"]))
@@ -242,13 +266,11 @@ def start_values(recipe, seed, inputs: DraftInputs, previous=None) -> DraftState
                                                                other_size),
              # What the recipe looked like when this draft was drawn, so a later edit can tell what
              # actually changed (apply_recipe) instead of rebuilding from scratch.
-             "inputs": {"artists": list(recipe["artists"] or []),
-                        "genres": list(recipe["genres"] or []),
-                        }}
+             "inputs": seeds}
     return repick_values(state, inputs)
 
 
-def apply_recipe_values(state: DraftState, recipe, inputs: DraftInputs) -> DraftState:
+def apply_recipe_values(state: DraftState, recipe, capture) -> DraftState:
     """Re-point a live draft at an edited recipe, WITHOUT starting over. The form stays usable while
     a playlist is on screen, so edits have to land on the mix you're looking at:
 
@@ -257,22 +279,28 @@ def apply_recipe_values(state: DraftState, recipe, inputs: DraftInputs) -> Draft
       · length / mix / familiarity      -> a re-pick, no network
 
     Returns the state; `state["pending"]` says whether the caller needs to run the worker again."""
-    dropped = ({"artist:" + a for a in recipe["artists"]} | {"genre:" + g for g in recipe["genres"]})
+    seeds = recipe_inputs(recipe)
+    dropped = ({"artist:" + a for a in seeds["artists"]} | {"genre:" + g for g in seeds["genres"]})
     was = {"artist:" + a for a in state.get("inputs", {}).get("artists", [])} | \
           {"genre:" + g for g in state.get("inputs", {}).get("genres", [])}
     gone = {i.split(":", 1)[1] for i in was - dropped}
     removed_genres = ({canonical_genre(g) for g in state.get("inputs", {}).get("genres", [])}
                       - {canonical_genre(g) for g in recipe["genres"]})
-    if set(recipe["artists"]) != set(state.get("inputs", {}).get("artists", [])):
-        artists = set(recipe["artists"])
+    if set(seeds["artists"]) != set(state.get("inputs", {}).get("artists", [])):
+        artists = set(seeds["artists"])
         genres = set(recipe["genres"]) | set(state.get("inputs", {}).get("genres", []))
-        state["artist_contexts"] = {a: c for a, c in state.get("artist_contexts", {}).items()
-                                    if a in artists}
+        contexts = state.get("artist_contexts", {})
+        expired = {ref.get("browse_id") or ref["name"] if isinstance(ref, dict) else ref
+                   for artist, context in contexts.items() if artist not in artists
+                   for ref in context.get("related", ())}
+        state["artist_contexts"] = {a: c for a, c in contexts.items() if a in artists}
         # Genre pools depend on the seed artists too. Rebuild those neighborhoods after a seed
         # edit, and remove related tracks whose originating artist is no longer selected.
         state["pool"] = [c for c in state["pool"] if c.get("input") not in genres
                          and (not c.get("anchors") or artists.intersection(c["anchors"]))]
-        state["done_inputs"] = [n for n in state["done_inputs"] if n not in genres]
+        represented = {c.get("artist_browse_id") or c.get("input") for c in state["pool"]}
+        state["done_inputs"] = [n for n in state["done_inputs"]
+                                if n not in genres and (n not in expired or n in represented or n in artists)]
         state["done_widening"] = []
         state["pending"] = [p for p in state["pending"] if p["name"] not in genres
                             and (not p.get("anchor") or p["anchor"] in artists)]
@@ -283,11 +311,9 @@ def apply_recipe_values(state: DraftState, recipe, inputs: DraftInputs) -> Draft
         state["pool"] = [c for c in state["pool"]
                          if c["source"] == "mine" or c["video_id"] in keep]
         state["done_inputs"] = [n for n in state["done_inputs"] if n not in gone]
-        state["pending"] = [p for p in state["pending"] if p["name"] not in gone]
-    queued = set(state["done_inputs"]) | {p["name"] for p in state["pending"]}
-    state["pending"] += [{"kind": k, "name": n}
-                         for k, names in (("artist", recipe["artists"]), ("genre", recipe["genres"]))
-                         for n in names if n and n not in queued]
+        state["pending"] = [p for p in state["pending"] if input_key(p) not in gone]
+    queued = set(state["done_inputs"]) | {input_key(p) for p in state["pending"]}
+    state["pending"] += [item for item in _pending_inputs(seeds) if input_key(item) not in queued]
     state["name"] = recipe["name"]
     state["target_minutes"] = recipe["target_minutes"]
     state["own_pct"] = recipe["own_pct"]
@@ -298,7 +324,7 @@ def apply_recipe_values(state: DraftState, recipe, inputs: DraftInputs) -> Draft
     # A full existing pool must still leave room for the newly selected inputs.
     state["other_limit"] = max(other_size, sum(c["source"] == "theirs" for c in state["pool"])
                                + len(state["pending"]) * state["other_cap"])
-    state["inputs"] = {"artists": list(recipe["artists"]), "genres": list(recipe["genres"])}
+    state["inputs"] = seeds
     for genre in removed_genres:
         axis = "genre:" + genre
         if not _neighborhoods(state).for_genre(genre) and not road_trip_axes.available_seconds(state["pool"], axis):
@@ -311,7 +337,7 @@ def apply_recipe_values(state: DraftState, recipe, inputs: DraftInputs) -> Draft
     if state["pending"]:
         state["building"] = True
         state["phase"] = "theirs"
-    return repick_values(state, inputs)
+    return repick_values(state, capture(state))
 
 
 def finish_values(state: DraftState, inputs: DraftInputs) -> DraftState:
@@ -336,7 +362,8 @@ def normalized_values(state: DraftState, inputs: DraftInputs | None = None) -> D
         banned = set(state['banned'])
         own = inputs.own or []
         _refresh_genre_families(state, inputs.genre_axes, own)
-        state['blend_available'] = any(c['video_id'] not in banned and _mix_source(c,state)=='blend'
+        state['blend_available'] = any(c['video_id'] not in banned
+                                       and _mix_source(inputs.ranking.annotate(c), state) == 'blend'
                                        for c in own)
     repaired = _repair_artist_clusters(state)
     # Existing unsaved drafts otherwise retain the old duration-based, underfilled Blend draw
@@ -356,6 +383,9 @@ def normalized_values(state: DraftState, inputs: DraftInputs | None = None) -> D
         state["axes"]["theirs"] = road_trip_axes.merge(state["axes"]["theirs"],
                                              [c for c in state["picked"] if c["source"] == "theirs"],
                                              state["pool"])
+    if inputs is not None and inputs.excluded:
+        state['picked'] = [row for row in state.get('picked', []) if row['video_id'] not in inputs.excluded]
+        state['picks'] = [row['video_id'] for row in state['picked']]
     for axis in state["axes"]["theirs"]:
         if axis["kind"] == "genre":
             axis["artists"] = list(_neighborhoods(state).for_genre(axis["name"]))

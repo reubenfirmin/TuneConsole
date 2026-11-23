@@ -11,40 +11,25 @@ class RecommendationReportsRepo(Repo):
         with self.conn.atomic():
             return recommendation_file_writes.reserve(self.conn, 'recommendation_report_files', surface, chunk_key, integrity)
 
-    @lookup_read
-    def native(self):
-        return self._store._recommendation_reports
-
-    def _owned(self):
-        return self._store._recommendation_reports or reports.prepared_owner(self.conn)
-
     @snapshot_read
-    def document(self, surface):
+    def manifest(self, surface):
         with keyed_reads(self._store, 'rec_proposals', (surface,)):
-            if self._owned():
-                return None, reports.manifest(self.conn, surface)
-            row = self.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
-            return row[0] if row else None, None
+            return reports.manifest(self.conn, surface)
 
     @lookup_read
     def present(self, surface):
         with keyed_reads(self._store, 'rec_proposals', (surface,)):
-            if self._owned():
-                return reports.present(self.conn, surface)
-            return self.conn.execute("SELECT 1 FROM rec_proposals WHERE surface=? AND payload NOT IN ('null','{}')",
-                                     (surface,)).fetchone() is not None
+            return reports.present(self.conn, surface)
 
     @lookup_read
     def checkpoint(self, surface):
         with keyed_reads(self._store, 'rec_proposals', (surface,)):
-            owned = self._owned()
-            return owned, reports.checkpoint(self.conn, surface) if owned else None
+            return reports.checkpoint(self.conn, surface)
 
     @snapshot_read
     def usage(self):
         with keyed_reads(self._store, 'rec_proposals', ('listening_choices',)):
-            owned = self._owned()
-            return owned, reports.choice_usage(self.conn) if owned else None
+            return reports.choice_usage(self.conn)
 
     @synchronized
     def publish(self, prepared, durable, *, file_ids):

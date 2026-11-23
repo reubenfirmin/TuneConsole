@@ -108,6 +108,15 @@
 .page-playlist .library-table-card {
   border-block: 0;
 }
+.playlist-track-card .track-table > thead {
+  position: sticky;
+  top: calc(var(--topbar-h, 3.45rem) + var(--setup-banner-height, 0px));
+  z-index: 3;
+  background: var(--canvas);
+}
+.playlist-track-card .track-table > thead th {
+  position: static;
+}
 .page-album .library-table-card {
   margin-block-start: 0;
   border-block: 0;

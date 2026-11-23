@@ -14,32 +14,40 @@ from copy import deepcopy
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import mix_choices
+from yt_playlist.controllers.choice_context import ChoiceContexts
 from yt_playlist.rec.choice_context import context_manifest as _context_manifest, learning_context
 from yt_playlist.library.choice_composition import resolve_context
 from yt_playlist.rec import group_roots, home_cache, recommendation_roots
 
 logger = logging.getLogger(__name__)
-from yt_playlist.core.choice_capture_contract import FORMATS, ACTIONS, STORAGE_PENDING, STORAGE_PHASE, STORAGE_SECONDS
+from yt_playlist.core.choice_capture_contract import FORMATS, ACTIONS, STORAGE_SECONDS
 
 
-def present(store, format, options, now, *, context, window, episode_id=None, vibe=None):
+def present(store, format, options, now, *, context, window, episode_id=None, vibe=None, reader=None, defer=None):
     """Rerenders reuse one complete menu; edits or new model inputs create another opportunity."""
     if getattr(store, 'activity_paused', False) or getattr(store, '_read_only', False):
         return None
+    options, context = deepcopy(list(options)), deepcopy(context)
     if format == 'mixes':
         options = [mix_choices.visible_option(option) for option in options]
-        context = mix_choices.context(_context_manifest(store.rec_ledger.evidence(), context), mixes=True)
+        context = ChoiceContexts(store.rec_ledger.evidence()).mix(context)
     menu = [format, window, options, context]
     if vibe is not None:
         menu.append(vibe)
     identity = hashlib.sha256(canonical(menu)).hexdigest()[:32]
-    if issue(store, format, options, now, context=context, episode_id=episode_id,
-             opportunity_id=identity, reuse=True, vibe=vibe) is None:
+    if _submit_offer(store, format, options, now, context=context, episode_id=episode_id,
+                     opportunity_id=identity, reuse=True, vibe=vibe) is None:
         return None
-    held = store.rec_proposals.get_proposals('choice_window:' + format) or {}
-    if held.get('opportunity_id') != identity:
-        store.rec_proposals.put_proposals('choice_window:' + format,
-            {'opportunity_id': identity, 'window': str(window)}, now)
+    surface = 'choice_window:' + format
+    save_window = store.rec_proposals.put_proposals
+    value = {'opportunity_id': identity, 'window': str(window)}
+    if defer is None:
+        reader = store if reader is None else reader
+        held = reader.rec_proposals.get_proposals(surface) or {}
+        if held.get('opportunity_id') != identity:
+            save_window(surface, value, now)
+    else:
+        defer('save listening choice window', save_window, surface, value, now)
     return identity
 
 
@@ -118,16 +126,17 @@ def _model_context(store, now, *, facet_leans=None):
     Context centroids/weights are retained, not merely a hash whose input later disappears.
     This supports predictions on these recorded options, not fitting arbitrary new embeddings.
     """
-    from yt_playlist.library import listening_composition as layers
-    from yt_playlist.rec import rec_params, scoring, transient
-    has_content = bool(store.settings.get_setting("rec_content_model"))
-    current, count, _ = layers.now_mode_mix(store, now) if has_content else (None, 0, [])
-    session, session_count, _ = layers.session_mode_mix(store, now) if has_content else (None, 0, [])
+    from yt_playlist.rec import group_viz, rec_params, scoring, transient
+    encoder = store.rec_model.recording_encoder()
+    has_content = bool(encoder)
+    recording = store.rec_model.recording_state()
+    head = group_viz.prepared(store)
+    (current, count, _), (session, session_count, _) = scoring.group_readings(store, head, now)
     policy = {"params": {spec.name: rec_params.get_param(store, spec.name) for spec in rec_params.PARAMS},
               "weights": store.rec_model.get_weights(now=now), "leans": store.rec_model.get_leans(),
-              "content_model": store.settings.get_setting("rec_content_model"),
-              "content_generation": store.settings.get_setting("rec_content_generation"),
-              "collaborative_inputs": store.settings.get_setting("rec_fit_inputs"),
+              "content_model": encoder,
+              "content_generation": recording.generation,
+              "collaborative_inputs": recording.fit_fingerprint,
               "album_feedback": scoring.album_feedback_state.state(store),
               "format_preference": store.settings.get_setting("home_format"),
               "method": store.settings.get_setting("rec_embed_method"),
@@ -135,13 +144,12 @@ def _model_context(store, now, *, facet_leans=None):
     def taste(value):
         return {"titles": value.titles, "centroids": value.centroids.tolist(),
                 "weights": value.weights.tolist(), "sources": getattr(value, "sources", [])}
-    return {"schema": 1, "at": now, "policy": policy,
-        "layers": {"now": {"modes": current, "events": count,
-                           "window_h": rec_params.get_param(store, "now_window_h")},
-                   "session": {"modes": session, "events": session_count,
+    return {"schema": 2, "at": now, "policy": policy,
+        "layers": {"now": {"groups": current, "events": count},
+                   "today": {"groups": session, "events": session_count,
                                "halflife_h": rec_params.get_param(store, "session_halflife_h")},
                    "recent": {"facets": transient.facet_leans(store, now) if facet_leans is None else facet_leans},
-                   "saved": {"collaborative": taste(scoring.playlist_taste(store, now=now)),
+                   "permanent": {"collaborative": taste(scoring.playlist_taste(store, now=now)),
                              "content": taste(scoring.content_taste(store, now=now)) if has_content else None}}}
 
 
@@ -150,26 +158,32 @@ def issue(store, format, options, now, *, context, episode_id=None, opportunity_
     """Freeze the complete actual menu and its pre-response state, with optional scored forecast."""
     if getattr(store, 'activity_paused', False):
         return None
+    options, context = deepcopy(list(options)), deepcopy(context)
+    if format == 'mixes':
+        options = [mix_choices.visible_option(option) for option in options]
+        context = ChoiceContexts(store.rec_ledger.evidence()).mix(context)
+    return _submit_offer(store, format, options, now, context=context, episode_id=episode_id,
+                         opportunity_id=opportunity_id, reuse=reuse, vibe=vibe)
+
+
+def _submit_offer(store, format, options, now, *, context, episode_id, opportunity_id, reuse, vibe):
+    if getattr(store, 'activity_paused', False):
+        return None
     if format not in FORMATS or not math.isfinite(now):
         raise ValueError("Unknown listening format")
     if vibe is not None:
         from yt_playlist.rec.home_vibe import PRESETS
         if format != 'mixes' or vibe not in PRESETS:
             raise ValueError('Unknown displayed Vibe')
-    options, context = deepcopy(list(options)), deepcopy(context)
-    if format == 'mixes':
-        options = [mix_choices.visible_option(option) for option in options]
-        context = mix_choices.context(_context_manifest(store.rec_ledger.evidence(), context), mixes=True)
-    if recommendation_roots.enabled(store):
-        generations = set(recommendation_roots.references(context)) | set(recommendation_roots.from_options(options))
-        if generations:
-            context['recommendation_generations'] = recommendation_roots.references(
-                {'recommendation_generations': sorted(generations)})
+    context.pop('comparison', None)  # A restored offer can predate trial retirement.
+    generations = set(recommendation_roots.references(context)) | set(recommendation_roots.from_options(options))
+    if generations:
+        context['recommendation_generations'] = recommendation_roots.references(
+            {'recommendation_generations': sorted(generations)})
     ids = [str(option["id"]) for option in options]
     if not options or any(not identity for identity in ids) or len(ids) != len(set(ids)):
         raise ValueError("A choice opportunity needs distinct alternatives")
     identity = opportunity_id or uuid.uuid4().hex
-    comparison = context.get('comparison')
     record = {"schema": 1, "id": identity, "format": format, "at": now, "observed_at": now,
               "episode_id": episode_id or identity,
               "options": options}
@@ -179,13 +193,6 @@ def issue(store, format, options, now, *, context, episode_id=None, opportunity_
         record['vibe'] = vibe
     if format == 'mixes':
         record['context_at'] = context.get('at', now)
-    if comparison:
-        record['comparison'] = comparison
-    else:
-        from yt_playlist.rec import product_comparison
-        monitoring = product_comparison.monitoring_assignment(store, format, now)
-        if monitoring:
-            record['monitor'] = monitoring
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
         try:
@@ -278,7 +285,8 @@ def refresh_report(store, now):
     decay is refreshed at most every 15 minutes; event admission and bandit expiry
     can bring that deadline forward. Raw replay remains available independently.
     """
-    from yt_playlist.rec import choice_bandit, group_learning, rec_params
+    from yt_playlist.library.listening_window import choice_timezone
+    from yt_playlist.rec import choice_bandit, choice_statistics, group_learning, rec_params
     generation = store.rec_ledger.evidence().generation()
     inputs = hashlib.sha256(canonical({
         'bandit': choice_bandit.parameters(store),
@@ -288,6 +296,8 @@ def refresh_report(store, now):
         'halflife': rec_params.get_param(store, 'choice_halflife_d'),
         'attribution': rec_params.get_param(store, 'choice_attribution_h'),
         'album_identity': [2, store.collection.album_alias_revision()],
+        'listener_policy': [choice_statistics.INTEREST_POLICY, choice_timezone(store),
+                            {str(account): zone for account, zone in store.history.listening_calendars().items()}],
     })).hexdigest()
     checkpoint = store.rec_proposals.report_checkpoint('listening_choices') or {}
     if (checkpoint.get('generation') == generation and checkpoint.get('inputs') == inputs
@@ -343,7 +353,7 @@ def maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
         store._evidence_maintenance = getattr(store, '_evidence_maintenance', 0) + 1
         store._evidence_recovery_pending = True
     try:
-        store.settings.publish_values({STORAGE_PENDING: '1'})
+        store.evidence_files.update_maintenance(pending=True)
         # Inventory/checkpoint/retention already commit durable prefixes. A
         # deadline inside a prefix rolls it back and repeats its reads next time.
         with group_roots.admission(store):
@@ -351,7 +361,7 @@ def maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
                                       protected_artifacts=protected_artifacts)
         store._evidence_recovery_failed = False
         if not result.get('deferred'):
-            store.settings.publish_values({STORAGE_PENDING: '0', STORAGE_PHASE: 'inventory'})
+            store.evidence_files.update_maintenance(pending=False, phase='inventory')
             store._evidence_recovery_pending = False
         return result
     except WorkBudgetExceeded:
@@ -380,7 +390,7 @@ def daily(store, now):
     storage = maintain_storage(store, now)
     report = compile_report(store, now)
     evaluation = replay(store, now)
-    # Content-addressed revisions preserve corrections without inventing new trials.
+    # Content-addressed revisions preserve corrections on the original offer.
     identity = hashlib.sha256(canonical([int(now // 86400), report["watermark"]])).hexdigest()
     ledger = store.rec_ledger.evidence()
     previous = ledger.get("report", identity)

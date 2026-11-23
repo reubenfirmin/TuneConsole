@@ -17,8 +17,8 @@ DAY = 86400
 
 @pytest.fixture
 def store(store):
-    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
-    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
+    store.conn.execute("INSERT INTO accounts(id,label,is_master) VALUES (1,'me',1)")
+    store.conn.execute("INSERT INTO accounts(id,label,is_master) VALUES (2,'brand',0)")
     store.conn.commit()
     return store
 
@@ -189,8 +189,7 @@ def test_the_lingering_window_pattern_is_removed(store, tmp_path):
         _hist(store, 1, d, ["hum"])
     assert repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl') == 5
     remaining = [r[0] for r in store.conn.execute(
-        "SELECT CAST(c.captured_at/86400 AS INT) FROM listening_observations o "
-        "JOIN listening_capture_receipts c ON c.id=o.capture_id")]
+        "SELECT CAST(first_observed_at/86400 AS INT) FROM listening_observations WHERE capture_id IS NOT NULL")]
     assert sorted(remaining) == [10, 11]
 
 
@@ -228,7 +227,7 @@ def test_run_once_does_nothing_without_a_takeout_import(store, monkeypatch, tmp_
     _hist(store, 1, 15, ["phantom"])
     store.history.repair_verified_imports()             # takeout_imported_at is unset
     assert "phantom" in _keys(store)
-    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) is None
+    assert store.history.repository.verified_imports_repaired() is None
 
 
 def test_run_once_fires_after_a_takeout_import_and_then_stops(store, monkeypatch, tmp_path):
@@ -240,13 +239,13 @@ def test_run_once_fires_after_a_takeout_import_and_then_stops(store, monkeypatch
     store.settings.set_setting("takeout_imported_at", "1000.0")
     store.history.repair_verified_imports()
     assert "phantom" not in _keys(store)
-    watermark = store.settings.get_setting(repair.PHANTOM_PURGE_SEEN)
+    watermark = store.history.repository.verified_imports_repaired()
     assert watermark
 
     _hist(store, 1, 16, ["phantom2"])                   # a fresh phantom after the repair ran
     store.history.repair_verified_imports()              # same import: must not run again
     assert "phantom2" in _keys(store)
-    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) == watermark
+    assert store.history.repository.verified_imports_repaired() == watermark
 
 
 def test_run_once_fires_again_after_a_NEW_takeout_import(store, monkeypatch, tmp_path):
@@ -257,14 +256,14 @@ def test_run_once_fires_again_after_a_NEW_takeout_import(store, monkeypatch, tmp
     _ev(store, 1, "real", 20)
     store.settings.set_setting("takeout_imported_at", "1000.0")
     repair.run_once(store)
-    first_watermark = store.settings.get_setting(repair.PHANTOM_PURGE_SEEN)
+    first_watermark = store.history.repository.verified_imports_repaired()
 
     _hist(store, 1, 16, ["phantom2"])
     _coverage(store)
     store.settings.set_setting("takeout_imported_at", "2000.0")  # a fresh import
     repair.run_once(store)
     assert "phantom2" not in _keys(store)
-    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) != first_watermark
+    assert store.history.repository.verified_imports_repaired() != first_watermark
 
 
 def test_run_once_notices_an_older_import_verified_later(store, monkeypatch, tmp_path):
@@ -431,7 +430,7 @@ def test_run_once_backup_directory_failure_preserves_history_and_watermark(store
     repair.run_once(store)
     store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['observed']
-    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) is None
+    assert store.history.repository.verified_imports_repaired() is None
     assert 'history preserved' in caplog.text and 'recoverable from' not in caplog.text
 
 

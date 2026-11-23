@@ -3,6 +3,7 @@ from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.rec.road_trip import draft_tracks
 from copy import deepcopy
 from yt_playlist.core.action_errors import ActionInputError
+from yt_playlist.core.artist_policy import token
 from yt_playlist.util.navigation import playlist_url
 
 
@@ -11,9 +12,10 @@ BLANK_RECIPE = {'id': None, 'name': '', 'own_pct': 50, 'familiarity_pct': 50,
 
 
 class RoadTripCommands:
-    def __init__(self, recipes, drafts, *, account, generated, artist_genre, logger):
+    def __init__(self, recipes, drafts, *, account, generated, artist_genre, logger, artist_identity=None):
         self.recipes, self.drafts = recipes, drafts
         self.account, self.generated, self.artist_genre, self.logger = account, generated, artist_genre, logger
+        self.artist_identity = artist_identity
 
     def client(self):
         try:
@@ -104,5 +106,15 @@ class RoadTripCommands:
             rows = client.search(query, filter='artists') or []
         except Exception:
             return []
-        return list(dict.fromkeys(name for row in rows[:8]
-                                 if (name := row.get('artist') or row.get('title'))))
+        results = {}
+        for row in rows[:8]:
+            name = row.get('artist') or row.get('title')
+            if not name:
+                continue
+            identity = self.artist_identity(row['browseId']) if self.artist_identity and row.get('browseId') else None
+            if identity is None:
+                results.setdefault(name, name)
+            else:
+                key = token(identity)
+                results.setdefault(key, {'key': key, 'name': name})
+        return list(results.values())

@@ -19,7 +19,7 @@ class _TrackInputParser(HTMLParser):
 
 
 def _seed(store, genre="Techno"):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.tracks.upsert_track("v1", "Anchor", "Band", None, None)
     b = store.tracks.upsert_track("v2", "Bonus", "Band", None, None)
     if genre:
@@ -39,6 +39,40 @@ def test_playlist_suggestions_fragment_renders_fits(store):
     assert r.status_code == 200
     assert "Complete this playlist" in r.text
     assert "Bonus" in r.text                       # a fitting owned track
+
+
+def test_playlist_completion_only_offers_playable_related_uploads(store):
+    target, client = _seed(store)
+    artist = "Related Artist"
+    store.artist_similarity.cache_similar(store.artists.key("Band"), [[artist, .9]], now=1)
+    for video, title, genre, available in (
+        ("playable", "Playable candidate", "Techno", True),
+        ("unavailable", "Unavailable candidate", "Techno", False),
+        ("wrong-genre", "Wrong genre candidate", "Jazz", True),
+    ):
+        store.tracks.upsert_track(video, title, artist, available=available, library=False)
+        store.discovery.upsert_discovered_track(f"{title.lower()}|related artist", video, title,
+                                                artist, "", None, genre, None, None, 1)
+
+    fragment = client.get(f"/playlist/{target}/suggestions")
+    assert fragment.status_code == 200
+    assert "watch?v=playable" in fragment.text
+    assert "Unavailable candidate" not in fragment.text
+    assert "Wrong genre candidate" not in fragment.text
+
+    preferred = store.discovery.discovered_tracks_by_keys(["unavailable candidate|related artist"])
+    recording_id = preferred["unavailable candidate|related artist"]["recording_id"]
+    store.tracks.upsert_track("alternate", "Unavailable candidate (alternate upload)", artist,
+                              available=True, library=False)
+    store.tracks.associate_youtube_item("alternate", recording_id, source="verified",
+                                       evidence={"isrc": "same recording"}, now=1., same_recording=True)
+    fragment = client.get(f"/playlist/{target}/suggestions")
+    assert fragment.status_code == 200
+    assert "watch?v=alternate" in fragment.text
+    assert '"videoId": "alternate"' in fragment.text
+    assert '"videoId": "unavailable"' not in fragment.text
+    assert "watch?v=unavailable" not in fragment.text
+    assert "Wrong genre candidate" not in fragment.text
 
 
 def test_playlist_suggestions_unknown_id_404(store):
@@ -62,7 +96,7 @@ def test_suggestion_card_has_wired_add_button(store):
 
 
 def test_recs_rebuild_endpoint(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/recs/rebuild")
@@ -108,7 +142,7 @@ def test_genreless_suggestion_add_requeues_enrichment(store):
 
     assert r.status_code == 200 and worker.triggered == 1
     row = store.conn.execute(
-        "SELECT first_enriched_at, last_enriched_at FROM tracks WHERE id=?", (tid,)).fetchone()
+        "SELECT first_enriched_at, last_enriched_at FROM catalog_tracks WHERE id=?", (tid,)).fetchone()
     assert row["first_enriched_at"] is None and row["last_enriched_at"] is None
 
 

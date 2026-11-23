@@ -15,6 +15,7 @@ from tests.store_fixture_support import without_query_timing
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.db_reads import MAX_READERS
 from yt_playlist.rec import account_growth, growth_access
+from yt_playlist.web.radio_state import LaunchAdmission
 from yt_playlist.web.routes import radio_session
 from yt_playlist.web.routes.bridge import build as bridge_routes
 
@@ -53,9 +54,8 @@ def test_radio_direction_projection_does_not_block_unrelated_requests(file_backe
         return state
 
     radio = SimpleNamespace(
-        work=Activity(), start=result, select=result, tune=result, seen=result,
-        launch_request=lambda _: nullcontext(threading.Event()),
-        bootstrap=lambda: {'state': {'active': True}, 'seeds': []},
+        active=True, work=Activity(), start=result, select=result, tune=result, seen=result,
+        launch_request=lambda launch_id: nullcontext(LaunchAdmission(launch_id)),
         reserve_tuning=lambda: 1,
     )
     bridge = SimpleNamespace(begin_playback_intent=lambda: None)
@@ -84,7 +84,7 @@ def test_radio_direction_projection_does_not_block_unrelated_requests(file_backe
     }]}]}
 
 
-@pytest.mark.parametrize('phase', ['bootstrap', 'start_access', 'tune_access'])
+@pytest.mark.parametrize('phase', ['seed_resolution', 'start_access', 'tune_access'])
 def test_radio_preflight_leaves_status_and_unrelated_requests_available(poc, monkeypatch, phase):
     controller, remote, frames, *_ = poc
     controller.ctx.bridge.resumable_player = None
@@ -101,8 +101,8 @@ def test_radio_preflight_leaves_status_and_unrelated_requests_available(poc, mon
             return target(*args, **kwargs)
         return call
 
-    if phase == 'bootstrap':
-        monkeypatch.setattr(controller, 'bootstrap', held(controller.bootstrap))
+    if phase == 'seed_resolution':
+        monkeypatch.setattr(controller.launch, 'resolve_known', held(controller.launch.resolve_known))
     else:
         if phase == 'start_access':
             monkeypatch.setattr(account_growth, 'radio_access', held(lambda *args, **kwargs: True))

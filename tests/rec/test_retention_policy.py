@@ -14,7 +14,7 @@ import pytest
 
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded
 from yt_playlist.library import group_lifetimes
-from yt_playlist.rec import choice_evidence, group_roots, recommendation_roots
+from yt_playlist.rec import choice_evidence, group_roots
 from yt_playlist.rec.retention_maintenance import Retention
 from yt_playlist.repos import compact_group_publication, group_retention, recommendation_publication
 
@@ -123,7 +123,6 @@ def test_gc_dispatch_uses_recovery_repository_and_resumes_daily_cadence(no_sqlit
 def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
         no_sqlite, monkeypatch, tmp_path):
     store = NoDatabase()
-    store._compact_group_files = True
     store._db_path = tmp_path / 'never-opened.sqlite'
     store._lock = RLock()
     store.recommendations = Mock(spec=['checkpoint_retirement', 'cleanup_generations', 'cleanup_pools'])
@@ -150,7 +149,6 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
         return None
 
     store.recommendations.checkpoint_retirement.side_effect = lambda: events.append('checkpoint')
-    monkeypatch.setattr(recommendation_roots, 'enabled', lambda value: True)
     store.recommendations.cleanup_generations.side_effect = generation_turn
     store.recommendations.cleanup_pools.side_effect = pool_turn
     # OS lifetime-file reaping is a separate integration obligation.
@@ -183,8 +181,9 @@ def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sq
     store.choice_capture.artifacts.return_value = {'inventory-artifact'}
     store.choice_capture.opportunities.return_value = {'inventory-opportunity'}
     store.settings = Mock(spec=['get_setting'])
-    store.settings.get_setting.side_effect = lambda key: (
-        'retention' if key == choice_evidence.STORAGE_PHASE else None)
+    store.settings.get_setting.return_value = None
+    store.evidence_files = Mock(maintenance_state=Mock(return_value={'phase': 'retention'}))
+    store.group_evidence = Mock(roots_complete=Mock(return_value=True))
     reader = NoDatabase()
     reader.settings = Mock(get_setting=Mock(return_value=None))
     reader.rec_proposals = Mock(get_proposals=Mock(return_value={}))
@@ -209,6 +208,7 @@ def test_evidence_retention_enters_repository_protection_at_final_deletion(no_sq
 
     store.read_view = committed_inputs
     reader.model_selection = Mock(
+        active_run_id=Mock(return_value=None),
         retained_pair_artifacts=Mock(return_value=([], [])),
         selection_runs=Mock(return_value=[]))
     ledger = Mock(byte_budget=1024)

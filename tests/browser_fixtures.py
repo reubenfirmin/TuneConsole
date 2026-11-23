@@ -131,7 +131,7 @@ def live_app(store, monkeypatch, browser_template_bytecode, without_metadata_pro
     # responses. The first real request still pays for each cold compilation.
     monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()

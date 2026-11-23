@@ -12,17 +12,10 @@ def source(store):
     return getattr(store, '_evidence_source', store)
 
 
-def enabled(store):
-    return getattr(store, '_compact_group_files', False)
-
-
 @contextmanager
 def admission(store, *, blocking=True):
     """Serialize this domain across processes without holding the serving lock."""
     store = source(store)
-    if not enabled(store):
-        yield
-        return
     with store._lock:
         if not hasattr(store, '_group_root_admission'):
             store._group_root_admission = threading.RLock()

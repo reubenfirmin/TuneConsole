@@ -33,6 +33,7 @@ class Runs:
         (directory / "release-provenance.json").write_text(json.dumps({
             "schema": 1, "tag": "v1.2.3", "version": "1.2.3", "revision": "a" * 40,
             "source_run": "123", "repository": self.repository,
+            "sha256": {f"macos-notarization-{arch}.json": "b" * 64 for arch in ("arm64", "x86_64")},
             "architectures": {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                               "container": ["amd64", "arm64"]},
         }))
@@ -76,12 +77,19 @@ def test_incomplete_or_expired_candidates_report_exact_platform(tmp_path, state)
     assert all(row["state"] == "complete" for row in rows[:-1])
 
 
-def test_current_build_can_inspect_after_all_builds_but_other_active_source_cannot(tmp_path):
+def test_publication_waits_for_the_candidate_run_to_complete(tmp_path):
     backend = Runs()
     backend.run_info["status"] = "in_progress"
     with pytest.raises(ValueError, match="complete"):
         inspect(backend, tmp_path)
-    assert inspect(backend, tmp_path, allow_active=True)
+
+
+def test_recovery_selects_retained_platforms_even_without_provenance():
+    backend = Runs()
+    backend.artifacts = backend.artifacts[:-2]
+    assert candidates.recover(backend, "123", "a" * 40, "v1.2.3") == "1,2,3,4,5,6,7"
+    with pytest.raises(ValueError, match="exact revision"):
+        candidates.recover(backend, "123", "b" * 40, "v1.2.3")
 
 
 def test_artifact_outage_is_not_reported_as_a_missing_platform(tmp_path):
@@ -174,7 +182,7 @@ def test_summary_preserves_failed_stage_and_publication_only_recovery(tmp_path):
     text = summary.render({"flatpak": {"result": "success"}, "promote": {"result": "failure"}},
                           "v1.2.3", "123", evidence=tmp_path)
     assert "expired" in text
-    assert "gh workflow run release.yml -f tag=v1.2.3 -f source_run=123" in text
+    assert "gh workflow run release.yml --ref main -f tag=v1.2.3 -f source_run=123" in text
     assert "retain the draft/checkpoint" in text
     assert "All downloads" not in text
 

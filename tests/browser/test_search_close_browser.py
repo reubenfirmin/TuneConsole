@@ -1,10 +1,63 @@
 """Closing search must not change later focus or cancel a reopened search."""
 
+from urllib.parse import urlsplit
+
 import pytest
 from playwright.sync_api import expect
 
 
 pytestmark = pytest.mark.browser
+
+
+def test_browser_back_cancels_the_open_search(live_app, page):
+    reads = []
+
+    def pending(route):
+        reads.append(urlsplit(route.request.url).path)
+        route.fulfill(status=503, headers={'X-Read-Pending': 'true', 'Retry-After': '1'})
+
+    page.route('**/search/**', pending)
+    page.route('**/bridge/status', lambda route: route.fulfill(json={
+        'connected': True, 'now_playing': {'video_id': 'playing', 'title': 'Current song', 'paused': False}}))
+    page.goto(live_app + '/artists')
+    page.locator('.topbar nav a[href="/albums"]').click()
+    expect(page.get_by_role('heading', name='Albums', exact=True)).to_be_visible()
+    page.get_by_role('button', name='Search music…', exact=True).click()
+    dialog = page.locator('#music-search')
+    with (page.expect_request('**/search/omni?*', timeout=5000),
+          page.expect_request('**/search/catalog?*', timeout=5000),
+          page.expect_request('**/search/catalog/sections?*', timeout=5000)):
+        dialog.get_by_role('searchbox', name='Search music', exact=True).fill('outgoing query')
+    page.evaluate('''() => {
+        window.outgoingSearch = Alpine.$data(document.querySelector('#music-search')).controller;
+        history.back();
+    }''')
+    expect(page.get_by_role('heading', name='Artists', exact=True)).to_be_visible()
+    expect(dialog).to_be_hidden()
+    assert page.evaluate('window.outgoingSearch.signal.aborted')
+    expect(page.locator('.global-now-playing .hs-now-title')).to_have_text('Current song')
+    assert sorted(reads) == ['/search/catalog', '/search/catalog/sections', '/search/omni']
+
+
+def test_closing_cancels_the_queued_search_even_after_immediate_reopen(live_app, page):
+    reads = []
+    page.route('**/search/**', lambda route: (reads.append(route.request.url), route.fulfill(body='')))
+    page.goto(live_app + '/artists')
+    page.get_by_role('button', name='Search music…', exact=True).click()
+    page.clock.install()
+    page.evaluate('''() => {
+        const dialog = document.querySelector('#music-search');
+        const query = dialog.querySelector('input');
+        query.value = 'abandoned query';
+        query.dispatchEvent(new Event('input', {bubbles: true}));
+        dialog.querySelector('[aria-label="Close music search"]').click();
+        openMusicSearch({query: 'x'});
+        window.reopenedSearch = Alpine.$data(dialog).controller;
+    }''')
+    page.clock.run_for(400)
+    expect(page.get_by_role('searchbox', name='Search music', exact=True)).to_have_value('x')
+    assert page.evaluate('!window.reopenedSearch.signal.aborted')
+    assert not reads
 
 
 def observe_close(page):

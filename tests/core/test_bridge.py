@@ -1,7 +1,8 @@
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import pytest
-from yt_playlist.core.bridge import Bridge, BridgeError
+from yt_playlist.core.bridge import Bridge, BridgeError, PreparedNavigation
 from yt_playlist.core.activity import WorkClosing, cancellable_work
 from yt_playlist.integrations.youtube_music import YouTubeMusicIAO
 
@@ -47,6 +48,53 @@ def test_execute_raises_when_not_connected():
     bridge = Bridge()
     with pytest.raises(BridgeError):
         bridge.execute("POST", "https://music.youtube.com/youtubei/v1/browse", {})
+
+
+@pytest.mark.parametrize('interruption', [None, 'newer_play', 'stopped', 'reconnect'])
+def test_prepared_navigation_rechecks_ownership_before_queueing(loop, interruption):
+    bridge = Bridge()
+    entered, release, prepared, cancelled, delivered = (threading.Event() for _ in range(5))
+    sent = []
+
+    def prepare():
+        entered.set()
+        assert release.wait(3)
+        prepared.set()
+        return True
+
+    async def send(frame):
+        sent.append((frame, prepared.is_set()))
+        delivered.set()
+
+    bridge.connect(send, loop)
+    intent = bridge.begin_playback_intent()
+    frame = {'type': 'navigate', 'url': 'starting-radio'}
+    with ThreadPoolExecutor(1) as worker:
+        handoff = worker.submit(bridge.send_control, PreparedNavigation(frame, prepare, cancelled.is_set), intent=intent)
+        try:
+            assert entered.wait(3) and not delivered.is_set()
+            if interruption == 'newer_play':
+                assert bridge.send_control({'type': 'navigate', 'url': 'newer-play'})
+                assert delivered.wait(3)
+            elif interruption == 'stopped':
+                cancelled.set()
+            elif interruption == 'reconnect':
+                bridge.connect(send, loop)
+        finally:
+            release.set()
+        if interruption == 'reconnect':
+            with pytest.raises(BridgeError) as error:
+                handoff.result(3)
+            assert error.value.outcome == 'not-dispatched'
+        else:
+            assert handoff.result(3) == (interruption is None)
+    if interruption is None:
+        assert delivered.wait(3) and sent == [(frame, True)]
+        assert type(sent[0][0]) is dict
+    elif interruption == 'newer_play':
+        assert sent == [({'type': 'navigate', 'url': 'newer-play'}, False)]
+    else:
+        assert not sent
 
 
 def test_new_connection_cannot_dispatch_a_bound_skip_using_an_old_workers_capability(loop):

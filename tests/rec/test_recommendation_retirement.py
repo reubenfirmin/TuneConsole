@@ -14,13 +14,13 @@ from yt_playlist.core import file_collection, recommendation_outputs as outputs,
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.rec import choice_evidence, group_roots, rec_worker
 from yt_playlist.rec.worker_queue import Job
-from yt_playlist.controllers.group_retention import GroupRetention
+from yt_playlist.repos.group_retention import GroupRetentionRepo
 from yt_playlist.repos import recommendation_publication as publication
 
 
 def orphan(store):
     prepared = plan(store)
-    pool = pools.prepare('abandoned', prepared.policy_version, None, 'f' * 64, 'card', [pools.Candidate(1, .5)])
+    pool = pools.prepare('abandoned', prepared.policy_version, 'f' * 64, 'card', [pools.Candidate(1, .5)])
     with store.conn.atomic():
         identity = publication._create_pool(store.conn, pool)
         pools.append(store.conn, identity, pool.candidates, 0)
@@ -75,7 +75,7 @@ def test_file_batches_resume_after_a_retained_reader_and_keep_build_outputs(reco
     publish(store, plan(store))
     build = store.recommendations.claim(plan(store, 'building'))
     store.recommendations.stage(plan(store, 'building'), build)
-    kept = {Path(row[0]) for row in store.conn.execute('SELECT filename FROM prepared_outputs')}
+    kept = {Path(row[0]) for row in store.conn.execute('SELECT filename FROM recommendation_chunks')}
     stale = [Path(outputs.publish(outputs.directory(store.conn), outputs.encode('orphan', str(i), i))[0])
              for i in range(3)]
     sizes = sum(path.stat().st_size for path in stale)
@@ -119,7 +119,7 @@ def test_group_budget_cannot_starve_recommendations_or_file_collection(recommend
     def blocked(*args):
         raise WorkBudgetExceeded('group closure is not finished')
 
-    monkeypatch.setattr(GroupRetention, 'step', blocked)
+    monkeypatch.setattr(GroupRetentionRepo, 'step', blocked)
     result = group_roots.maintain_retention(store)
     assert result['pending'] and result['generations'] == 1 and result['pools'] == 1
     # Fresh native files retain their expiry grace; the legacy orphan is free
@@ -129,7 +129,7 @@ def test_group_budget_cannot_starve_recommendations_or_file_collection(recommend
     assert not store.conn.execute('SELECT 1 FROM recommendation_pools WHERE id=?', (identity,)).fetchone()
     assert store.recommendations.output('home', 'framing') == {'title': 'second'}
     assert not store.activity_paused
-    assert store.settings.get_setting(choice_evidence.STORAGE_PENDING) != '1'
+    assert not store.evidence_files.maintenance_state()['pending']
 
 
 def test_interrupted_file_batch_syncs_its_prefix_and_resumes_accounting(recommendations, monkeypatch):
@@ -197,7 +197,6 @@ def test_interrupted_file_writer_reservation_rolls_back_and_can_retry(recommenda
 def test_sql_turns_checkpoint_committed_prefixes_after_releasing_the_serving_lock(
         recommendations, monkeypatch):
     from yt_playlist.core import db_checkpoint
-    from yt_playlist.repos import proposal_cache
 
     store = recommendations
     publish(store, plan(store))
@@ -215,10 +214,10 @@ def test_sql_turns_checkpoint_committed_prefixes_after_releasing_the_serving_loc
         checkpoints.append(True)
 
     # A checkpoint for every row would defeat small retirement transactions.
-    monkeypatch.setattr(proposal_cache, 'checkpoint_wal',
+    monkeypatch.setattr(publication, 'checkpoint_wal',
                         lambda *args: pytest.fail('Checkpointed an individual retirement prefix'))
     monkeypatch.setattr(db_checkpoint, 'checkpoint_wal', checkpoint)
-    monkeypatch.setattr(GroupRetention, 'step', lambda *args: False)
+    monkeypatch.setattr(GroupRetentionRepo, 'step', lambda *args: False)
     monkeypatch.setattr(group_roots, 'reap_pending', lambda *args: None)
     from yt_playlist.repos import compact_group_publication
     monkeypatch.setattr(compact_group_publication, 'cleanup', lambda *args, **kwargs: False)

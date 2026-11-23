@@ -19,7 +19,7 @@ from yt_playlist.repos.base import Repo, synchronized
 @pytest.fixture
 def writes(file_backed_store):
     store = file_backed_store
-    account = store.accounts.upsert_account('Recovery', 'fixture', None, True)
+    account = store.accounts.upsert_account('Recovery', None, True)
     store.settings.set_setting('lastfm_api_key', 'previous')
 
     def write(kind, value):

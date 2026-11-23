@@ -2,8 +2,8 @@
 
 Domain owners remain the maintenance sources. Historical definitions serve
 explicit upgrades and the compiler; application initialization reads this data
-resource directly. Installed text-version columns retain their existing format
-until an explicit rebuild, while new destinations use normalized identities.
+resource directly. Installed releases reach the same layout through regular
+schema changes.
 """
 from functools import lru_cache
 import json
@@ -45,16 +45,12 @@ def statements(*, normalized=True):
     yield from definition()['destination_statements' if normalized else 'installed_statements']
 
 
-def complete(conn):
-    """The complete snapshot applies after every represented bounded change.
-
-    Earlier installed owners keep their frozen numbered contract and ordinary
-    bounded admission. This check never advances or rewrites either history.
-    """
+def applied_changes(conn):
+    """Read the names of the installed changes after checking the shipped prefix."""
     if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
-        return False
+        return set()
     rows = [list(row) for row in conn.execute('SELECT version,name FROM schema_changes ORDER BY version')]
     expected = definition()['regular_history']
     if rows != expected[:len(rows)]:
         raise MigrationError('Regular schema history is not the supported contiguous prefix')
-    return len(rows) == len(expected)
+    return {name for _, name in rows}

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from yt_playlist.core.activity import cancellable_work, check_stopping
 from yt_playlist.core.work_diagnostics import work_span
+from yt_playlist.rec.stored_radio import HOME_LANES, PUBLICATION_SURFACES
 
 
 @dataclass(frozen=True)
@@ -29,12 +30,9 @@ class RadioPreparation:
                 or time.monotonic() - s.candidates_checked_at < 6):
             return None
         s.candidates_checked_at = time.monotonic()
-        with self.store.read_view() as reader:
-            ready = bool(reader.settings.get_setting('rec_content_model')
-                         and (reader.recommendations.head('home') if getattr(reader, '_recommendation_files', False)
-                              else reader.rec_proposals.has_proposals('mode_bundles')))
+        ready = self.store.recommendations.radio_group_pools_ready(PUBLICATION_SURFACES, HOME_LANES)
         if not ready:
-            if worker and not worker.busy and not s.preparation_requested:
+            if ready is None and worker and not worker.busy and not s.preparation_requested:
                 worker.trigger_mode_refresh()
                 s.preparation_requested = True
             return None

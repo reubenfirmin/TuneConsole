@@ -3,7 +3,8 @@ import hashlib
 import json
 from contextlib import nullcontext
 
-from yt_playlist.core import evidence_contract
+from yt_playlist.core import evidence_contract, playback_bindings
+from yt_playlist.core.choice_checkpoints import validate as validate_checkpoint
 from yt_playlist.core.evidence_inventory import Inventory
 from yt_playlist.core.evidence_ledger import EvidenceConflict
 from yt_playlist.core.evidence_paths import MAX_BYTES, record_key, record_id, maintenance_path
@@ -49,13 +50,31 @@ class EvidenceLedger:
     def owns(self, kind, identity, path):
         return path == self._path(kind, identity)
 
-    def read_path(self, path):
+    def read_path(self, path, *, opportunity_inventory=None):
+        """Read a verified file, or project its retained offer metadata for checkpointing."""
         with self.files.retained():
-            files = self._view()
-            if files.path_kind(path) == 'orphan':
+            identity = record_id(path)
+            files = (self.files.with_references(self.repository.reference_for_file(identity))
+                     if identity is not None else self.files)
+            kind = files.path_kind(path)
+            if kind == 'orphan':
                 return None
-            value = json.loads(files._read_bytes(path))
-            return self.project_opportunity(value) if files.path_kind(path) == 'opportunity' else value
+            value = (opportunity_inventory.cached(path, kind)
+                     if kind == 'opportunity' and opportunity_inventory is not None else None)
+            if value is None or value.get('at') is None:
+                value = json.loads(files._read_bytes(path))
+            return self.project_opportunity(value) if kind == 'opportunity' else value
+
+    def checkpoint_inventory(self):
+        return Inventory(self.files, path=maintenance_path(self.directory, 1, 'inventory'))
+
+    def has_checkpoint(self, identity, inventory):
+        with self.files.retained():
+            files = self._view([record_key('checkpoint', identity)])
+            cached = inventory.cached(files._path('checkpoint', identity), 'checkpoint')
+            if cached is not None:
+                return cached['source_context'] == identity and cached['acknowledged']
+            return validate_checkpoint(files.get('checkpoint', identity), identity) is not None
 
     def get(self, kind, identity):
         with self.files.retained():
@@ -109,15 +128,17 @@ class EvidenceLedger:
             reserved = self.repository.reserve(missing)
             files = self.files.with_references({**previous, **reserved})
             result = files.put(kind, identity, value, artifact=artifact, _budget_state=budget)
-            self.repository.complete(reserved, previous)
+            if kind == 'response' and playback_bindings.coordinates(value) is not None:
+                self.repository.complete(reserved, previous, playback=value)
+            else:
+                self.repository.complete(reserved, previous)
             return result
 
     def maintain(self, *args, pending_protection=None, retire_references=None, progress=None, **kwargs):
         with self.files._budget() as budget:
             files = self._view()
-            maintenance_id = self.repository.begin_maintenance()
-            files.inventory_path = maintenance_path(self.directory, maintenance_id, 'inventory')
-            files.retirement_path = maintenance_path(self.directory, maintenance_id, 'retirements')
+            files.inventory_path = maintenance_path(self.directory, 1, 'inventory')
+            files.retirement_path = maintenance_path(self.directory, 1, 'retirements')
             inventory = Inventory(files, progress=progress).scan()
             projected = {entry['data']['id']: self.project_opportunity(entry['data'])
                          for path, entry in inventory.items() if files.path_kind(path) == 'opportunity'}
@@ -126,12 +147,16 @@ class EvidenceLedger:
             with protection as pending:
                 result = files.maintain(*args, **kwargs, progress=progress, _budget_state=budget,
                     _inventory=inventory, _defer_reconciliation=True, pending_protection=lambda: nullcontext(pending))
-                if '_removed' not in result:
+                if '_retirement_offers' not in result:
                     return result
-                removed = result.pop('_removed')
-                self.repository.retire_files({identity for path in removed if (identity := record_id(path)) is not None})
                 offers, checkpoints = sorted(result.pop('_retirement_offers')), sorted(result.pop('_retirement_checkpoints'))
                 intent = Retirements(self.directory, path=files.retirement_path)
+                if intent.files:
+                    paths = {reference[0]: path for path, reference in files.owned_paths.items()}
+                    self.repository.retire_files({identity for identity in intent.files & paths.keys()
+                                                  if not paths[identity].exists()})
+                    intent.files.clear()
+                    intent.save()
                 if not offers and not checkpoints and retire_references is not None:
                     retire_references([], [])
                 while offers or checkpoints:
@@ -142,5 +167,4 @@ class EvidenceLedger:
                     del offers[:BATCH]
                     del checkpoints[:BATCH]
                 result['deferred'] = bool(intent.offers or intent.checkpoints or result.pop('_unlink_deferred'))
-                self.repository.finish_maintenance(maintenance_id)
                 return result

@@ -11,8 +11,25 @@ on:
       revision:
         required: true
         type: string
+      source-run:
+        default: ''
+        type: string
+    secrets:
+      FLATPAK_GPG_KEY:
+        required: true
+      SPARKLE_PRIVATE_ED_KEY:
+        required: true
+      MACOS_CERTIFICATE_P12:
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      MACOS_NOTARY_APPLE_ID:
+        required: false
+      MACOS_NOTARY_APP_PASSWORD:
+        required: false
 jobs:
   wheel:
+    if: inputs.source-run == ''
     runs-on: ubuntu-latest
     env:
       SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
@@ -41,18 +58,26 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: release-wheel
+          overwrite: true
           retention-days: 30
           path: dist/*.whl
           if-no-files-found: error
   containers:
+    if: inputs.source-run == ''
     uses: ./.github/workflows/container.yml
     with:
       version: ${{ inputs.version }}
       stage: true
       revision: ${{ inputs.revision }}
   macos:
+    if: inputs.source-run == ''
     uses: ./.github/workflows/macos.yml
-    secrets: inherit
+    secrets:
+      SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
     with:
       version: ${{ inputs.version }}
       tag: ${{ inputs.tag }}
@@ -60,7 +85,8 @@ jobs:
   flatpak:
     needs: wheel
     uses: ./.github/workflows/flatpak.yml
-    secrets: inherit
+    secrets:
+      FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
     with:
       version: ${{ inputs.version }}
       wheel-artifact: release-wheel
@@ -68,25 +94,74 @@ jobs:
       revision: ${{ inputs.revision }}
   provenance:
     needs: [wheel, containers, macos, flatpak]
-    runs-on: ubuntu-latest
+    if: >-
+      !cancelled() && (inputs.source-run != '' ||
+      (needs.wheel.result == 'success' && needs.containers.result == 'success' &&
+      needs.macos.result == 'success' && needs.flatpak.result == 'success'))
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.revision }}
+          ref: ${{ inputs.source-run != '' && github.workflow_sha || inputs.revision }}
+          fetch-depth: ${{ inputs.source-run != '' && '0' || '1' }}
+      - name: Select the original platform artifacts
+        if: inputs.source-run != ''
+        id: retained
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN: ${{ inputs.source-run }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_REVISION: ${{ inputs.revision }}
+        run: python3 packaging/release_candidates.py "$SOURCE_RUN" "$RELEASE_TAG" "$RELEASE_REVISION" --recover
       - uses: actions/download-artifact@v4
+        if: inputs.source-run != ''
+        with:
+          artifact-ids: ${{ steps.retained.outputs.artifact_ids }}
+          run-id: ${{ inputs.source-run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          merge-multiple: true
+          path: candidate
+      - uses: actions/download-artifact@v4
+        if: inputs.source-run == ''
         with:
           pattern: release-*
           merge-multiple: true
           path: candidate
-      - name: Install repository assembly tools
-        timeout-minutes: 3
+      - uses: docker/setup-buildx-action@v3
+        if: inputs.source-run != ''
+      - uses: docker/login-action@v3
+        if: inputs.source-run != ''
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify and recover retained container receipts
+        if: inputs.source-run != ''
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          RELEASE_REVISION: ${{ inputs.revision }}
+          VERSION: ${{ inputs.version }}
         run: |
-          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
-          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 install -y flatpak ostree
+          for arch in amd64 arm64; do
+            receipt="candidate/container-$arch.json"
+            python3 packaging/container/receipt.py "${IMAGE,,}" "$arch" "$VERSION" "$RELEASE_REVISION" "$receipt" --repair "$receipt"
+          done
+      - name: Install repository assembly tools
+        timeout-minutes: 5
+        run: |
+          apt_options=(-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2)
+          packages=(flatpak ostree)
+          python3 packaging/ci_stage.py --timeout 70 --attempts 2 flatpak-apt-indexes -- \
+            sudo timeout --verbose --kill-after=5s 60s apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          python3 packaging/ci_stage.py --timeout 70 --attempts 2 flatpak-apt-download -- \
+            sudo timeout --verbose --kill-after=5s 60s apt-get "${apt_options[@]}" \
+              install --yes --download-only --no-install-recommends "${packages[@]}"
+          sudo apt-get install --yes --no-download --no-install-recommends "${packages[@]}"
       - name: Assemble the final signed repository
         timeout-minutes: 2
         env:
           FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+          RELEASE_REVISION: ${{ inputs.revision }}
         run: |
           printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
           fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
@@ -98,13 +173,31 @@ jobs:
           done
           # One signed summary contains both architectures' AppStream refs.
           flatpak build-update-repo candidate/flatpak-repo --no-summary-index --gpg-sign="$fpr"
-          cp packaging/flatpak/tuneconsole.flatpakrepo candidate/flatpak-repo/
+          git show "$RELEASE_REVISION:packaging/flatpak/tuneconsole.flatpakrepo" > candidate/flatpak-repo/tuneconsole.flatpakrepo
           tar -cf candidate/flatpak-repository.tar -C candidate flatpak-repo
       - name: Record final-version payload hashes and release commit
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_REVISION: ${{ inputs.revision }}
-        run: python3 packaging/candidate_provenance.py create candidate "$RELEASE_TAG" --revision "$RELEASE_REVISION"
+          ORIGINAL_RUN: ${{ inputs.source-run }}
+        run: |
+          tree=$(git rev-parse "$RELEASE_REVISION^{tree}")
+          python3 packaging/candidate_provenance.py create candidate "$RELEASE_TAG" --revision "$RELEASE_REVISION" --tree "$tree" --original-run "$ORIGINAL_RUN"
+      - uses: actions/upload-artifact@v4
+        if: inputs.source-run != ''
+        with:
+          name: release-recovered-platforms
+          overwrite: true
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            candidate/*.flatpak
+            candidate/*.dmg
+            candidate/appcast-*.xml
+            candidate/macos-notarization-*.json
+            candidate/yt_playlist-*.whl
+            candidate/container-*.json
+            candidate/flatpak-repo-*.tar
       - uses: actions/upload-artifact@v4
         with:
           name: release-provenance

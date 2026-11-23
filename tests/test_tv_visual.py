@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_tv_stream import stream, video
-from yt_playlist.core.identities import BridgeClient
+from yt_playlist.integrations.youtube_music_sdk import BridgeClient
 from yt_playlist.egress import BlockedHost, EgressGuard, host_allowed
 from yt_playlist.rec import tv, tv_visual
 from yt_playlist.web.app import create_app
@@ -211,7 +211,7 @@ def test_bridge_keeps_storyboards_which_get_song_would_strip(monkeypatch):
 
 def test_visual_route_checks_membership_and_uses_the_playlist_account(store, stream, monkeypatch):
     iid, client, playlist, recipe, items = stream
-    other = store.accounts.upsert_account('other', 'cred2', None, False)
+    other = store.accounts.upsert_account('other', None, False)
     calls = []
     def inspect(self, actual_store, actual_client, item, now):
         calls.append((actual_client, item['video_id']))

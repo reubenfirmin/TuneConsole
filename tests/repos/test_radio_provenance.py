@@ -2,7 +2,7 @@ from yt_playlist.repos.base import GENERATED_GROUP
 
 
 def _ident(store):
-    return store.accounts.upsert_account("main", "ref", None, True)
+    return store.accounts.upsert_account("main", None, True)
 
 
 def test_radio_playlist_play_is_quarantined_by_real_list_id(store):

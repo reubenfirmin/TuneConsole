@@ -13,7 +13,7 @@ DAY = 86400.0
 
 def _store(consumer_store):
     s = consumer_store()
-    s.accounts.upsert_account("main", "bridge", None, True)
+    s.accounts.upsert_account("main", None, True)
     return s
 
 

@@ -139,6 +139,32 @@ def test_preparation_cannot_evict_tracked_foreground_reads(store):
     assert len(calls) == 2
 
 
+def test_committed_preparation_shares_memo_and_sees_later_commits(file_backed_store):
+    store = file_backed_store
+    store.settings.set_setting('prepared-input', 'old')
+    calls = []
+
+    def read(reader):
+        def prepare():
+            calls.append(True)
+            return reader.settings.get_setting('prepared-input')
+        return reader.memoized_read('prepared-result', prepare)
+
+    with store.read_snapshot() as snapshot:
+        assert read(snapshot.store) == 'old'
+    with store.read_view(preparation=True) as reader:
+        assert not reader.conn.in_transaction
+        assert read(reader) == 'old'
+        assert len(calls) == 1
+        store.settings.set_setting('prepared-input', 'new')
+        assert read(reader) == 'new'
+    with store.read_view(preparation=True) as reader:
+        assert read(reader) == 'new'
+    with store.read_snapshot() as snapshot:
+        assert read(snapshot.store) == 'new'
+    assert len(calls) == 3
+
+
 def test_cache_hit_keeps_publication_dependencies_and_scopes_settings(store):
     store.settings.set_setting("input", "old")
     calls = []

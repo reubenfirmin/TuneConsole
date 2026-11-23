@@ -7,7 +7,7 @@
 (() => {
   const SENSOR_VERSION = 4;
   const MIN_SENSOR_REVISION = 8;
-  const RECEIVER_REVISION = 16;
+  const RECEIVER_REVISION = 20;
   const previous = window.__tcBridgeLoaded;
   if (Number.isSafeInteger(previous?.revision) && previous.revision >= RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
@@ -16,11 +16,13 @@
   if (previous) previous.stop();
   const cleanups = [];
   const receiver = window.__tcBridgeLoaded = {revision: RECEIVER_REVISION, stopped: false,
+    get checkingPlaybackAudio() { return !!stopPlaybackMeter; },
     stop() {
       if (receiver.stopped) return;
       receiver.stopped = true;
       ratingCommandSerial += 1;
       playbackCommandSerial += 1;
+      stopPlaybackMeter?.();
       cleanups.forEach(cleanup => cleanup());
       for (const finish of sensorProbes.values()) finish(null);
     }};
@@ -29,8 +31,72 @@
   let sensorProbeSerial = 0;
   let ratingCommandSerial = 0;
   let playbackCommandSerial = 0;
+  let resumeAttempt = null;
+  let stopPlaybackMeter = null;
   let activeRatingId = null;
   const sensorProbes = new Map();
+  const nativeVideo = () => document.querySelector("#movie_player video") ||
+    document.querySelector("ytmusic-player video") || document.querySelector("video");
+  const matchesPlayback = (snapshot, before) => snapshot?.videoId === before.videoId &&
+    snapshot.playlist === before.playlist && snapshot.brandId === before.brandId &&
+    (!before.queueItem || (snapshot.queueItem?.videoId === before.queueItem.videoId &&
+      snapshot.queueItem?.index === before.queueItem.index));
+  const matchesResumeMedia = ({video, source, sourceObject}) =>
+    nativeVideo() === video && (!source || video.currentSrc === source) && video.srcObject === sourceObject;
+  const unverifiedResume = videoId => resumeAttempt && resumeAttempt.before.videoId === videoId && !resumeAttempt.confirmed;
+
+  const openPlaybackMeter = video => {
+    let stream, context, borrowed, stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (!borrowed) stream?.getTracks().forEach(track => track.stop());
+      if (context) void context.close().catch(() => {});
+    };
+    try {
+      if (video.mediaKeys) return null;
+      borrowed = window.__tcAudioCapture?.recordingStream?.(video);
+      stream = borrowed || video.captureStream();
+      const track = stream.getAudioTracks()[0];
+      if (!borrowed) {
+        stream.getTracks().filter(item => item !== track).forEach(item => item.stop());
+        stream.addEventListener("addtrack", event => { if (stopped || event.track !== track) event.track.stop(); });
+      }
+      if (!track) { stop(); return null; }
+      // Observe a copy of the selected element, leaving its audible output alone.
+      // Split channels before measuring so stereo phase cancellation cannot hide sound.
+      context = new AudioContext({sinkId: {type: "none"}});
+      const source = context.createMediaStreamSource(new MediaStream([track]));
+      const channels = context.createChannelSplitter();
+      const sink = context.createGain();
+      sink.gain.value = 0;
+      sink.connect(context.destination);
+      source.connect(channels);
+      const meters = Array.from({length: channels.numberOfOutputs}, (_, index) => {
+        const meter = context.createAnalyser();
+        channels.connect(meter, index);
+        meter.connect(sink);
+        return meter;
+      });
+      const samples = new Float32Array(meters[0].fftSize);
+      return {stop, hasSignal() {
+        if (stopped || context.state !== "running" || track.muted || track.readyState !== "live") return false;
+        return meters.some(meter => {
+          meter.getFloatTimeDomainData(samples);
+          let low = Infinity, high = -Infinity;
+          for (const value of samples) {
+            low = Math.min(low, value);
+            high = Math.max(high, value);
+            if (high - low > .0002) return true;
+          }
+          return false;
+        });
+      }};
+    } catch (e) {
+      stop();
+      return null;
+    }
+  };
 
   const isAllowed = (u) => {
     try {
@@ -65,7 +131,7 @@
         pendingPlaylistRefresh = null;
         return;
       }
-      const video = document.querySelector("video");
+      const video = nativeVideo();
       if (video && !video.paused && !video.ended) return;
       location.reload();
       pendingPlaylistRefresh = null;
@@ -131,7 +197,7 @@
     return {ok: true};
   };
 
-  const clickNext = (videoId, snapshot) => {
+  const clickNext = (videoId, snapshot, ratingAdvance = false) => {
     if (!videoId || !snapshot || snapshot.videoId !== videoId) {
       return {ok: false, error: "The playing song changed. Try again."};
     }
@@ -139,7 +205,7 @@
       try {
         chrome.runtime.sendMessage({type: "pevent", kind: "next", videoId,
           position: snapshot.position, duration: snapshot.duration, playlist: snapshot.playlist || "",
-          brandId: snapshot.brandId || "", brandKnown: true});
+          brandId: snapshot.brandId || "", brandKnown: true, ratingAdvance});
       } catch (e) {}
     }
     const control = document.querySelector("ytmusic-player-bar .next-button");
@@ -167,44 +233,99 @@
     catch (e) { finish(null); }
   };
 
-  const controlPlayback = async (msg) => {
+  const controlPlayback = async (msg, nativeStart = null) => {
     const serial = ++playbackCommandSerial;
+    stopPlaybackMeter?.();
     const current = () => !receiver.stopped && serial === playbackCommandSerial;
     const sample = () => new Promise(resolve => probePlayer(resolve));
     const action = msg.action || "toggle";
     if (!["toggle", "play", "pause"].includes(action)) return {ok: false, error: "Invalid playback action"};
-    if (msg.videoId || msg.resumeOnly) {
-      const snapshot = await sample();
-      if (!msg.videoId || snapshot?.videoId !== msg.videoId) {
-        return {ok: false, error: "The playing song changed. Try again."};
-      }
-    }
+    const before = msg.videoId || msg.resumeOnly ? await sample() : null;
+    const matches = snapshot => snapshot?.videoId === msg.videoId &&
+      (!msg.playlist || snapshot.playlist === msg.playlist) &&
+      (msg.queueIndex === undefined || snapshot.queueItem?.index === msg.queueIndex);
+    if ((msg.videoId || msg.resumeOnly) && (!msg.videoId || !matches(before)))
+      return {ok: false, error: "The playing song changed. Try again."};
+    const needsAudio = action === "play" && !!msg.videoId;
+    if (needsAudio && before.bindingConflict)
+      return {ok: false, error: "The native queue and media do not match"};
     if (!current()) return {ok: false, error: "Playback command was superseded"};
-    const video = document.querySelector("video");
+    const video = nativeVideo();
     if (!video) return {ok: false, error: "No YouTube Music player is available"};
+    if (nativeStart && (video !== nativeStart || video.paused))
+      return {ok: false, error: "Native playback did not continue"};
     const paused = action === "pause" || (action === "toggle" && !video.paused);
     const position = video.currentTime;
-    if (video.paused !== paused) {
-      const clicked = clickPlayPause();
-      if (!clicked.ok) return clicked;
-    }
-    const deadline = Date.now() + 2000;
-    while (current() && document.querySelector("video") === video) {
-      if (video.paused === paused && (paused || (!video.ended && video.readyState >= 2 &&
-          video.currentTime > position + .05))) {
-        const snapshot = msg.videoId ? await sample() : null;
-        if (!current() || document.querySelector("video") !== video || video.paused !== paused) break;
-        if (msg.videoId && snapshot?.videoId !== msg.videoId) {
-          return {ok: false, error: "The playing song changed. Try again."};
-        }
-        return {ok: true, paused, videoId: msg.videoId || snapshot?.videoId || ""};
+    const attempt = needsAudio ? {before, video, source: video.currentSrc, sourceObject: video.srcObject,
+      checking: true, interrupted: false, confirmed: false} : null;
+    if (attempt && (video.paused || unverifiedResume(before.videoId))) resumeAttempt = attempt;
+    const interruptionEvents = ["pause", "ended", "seeking", "emptied", "encrypted"];
+    let meter = null;
+    const closeMeter = () => {
+      meter?.stop();
+      if (stopPlaybackMeter === closeMeter) stopPlaybackMeter = null;
+    };
+    const interrupt = () => { attempt.interrupted = true; closeMeter(); };
+    const ready = () => !video.ended && !video.seeking && video.readyState >= 2 &&
+      video.currentTime > position + .05;
+    const hasOutput = () => ready() && !video.paused && !video.muted && video.volume > 0 && !video.mediaKeys;
+    if (attempt) interruptionEvents.forEach(event => video.addEventListener(event, interrupt));
+    try {
+      if (video.paused !== paused) {
+        const clicked = clickPlayPause();
+        if (!clicked.ok) return clicked;
       }
-      if (Date.now() >= deadline) break;
-      await new Promise(resolve => setTimeout(resolve, 50));
+      const deadline = performance.now() + 2000;
+      const stillCurrent = () => current() && nativeVideo() === video &&
+        (!attempt || (!attempt.interrupted && matchesResumeMedia(attempt))) && performance.now() < deadline;
+      while (stillCurrent()) {
+        if (attempt && hasOutput() && !meter) {
+          attempt.source = video.currentSrc;
+          meter = openPlaybackMeter(video);
+          if (!meter) break;
+          stopPlaybackMeter = closeMeter;
+        }
+        if (video.paused === paused && (paused || ready()) && (!attempt || hasOutput() && meter?.hasSignal())) {
+          const snapshot = msg.videoId ? await sample() : null;
+          if (!stillCurrent() || video.paused !== paused) break;
+          if (msg.videoId && (!matches(snapshot) || (attempt && !matchesPlayback(snapshot, before)))) {
+            return {ok: false, error: "The playing song changed. Try again."};
+          }
+          if (!attempt) return {ok: true, paused, videoId: msg.videoId || snapshot?.videoId || ""};
+          if (!snapshot.bindingConflict && snapshot.videoVerified && !snapshot.paused &&
+              (!Number.isFinite(before.position) || snapshot.position > before.position + .05)) {
+            const output = await chrome.runtime.sendMessage({type: "native-playback-output"});
+            if (!stillCurrent() || !hasOutput() || output?.unmuted !== true) break;
+            closeMeter();
+            attempt.confirmed = true;
+            report(snapshot);
+            return {ok: true, paused, videoId: msg.videoId};
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    } finally {
+      if (attempt) {
+        attempt.checking = false;
+        interruptionEvents.forEach(event => video.removeEventListener(event, interrupt));
+      }
+      closeMeter();
     }
     return {ok: false, error: paused ? "Pause was not confirmed. Open YouTube Music and try again." :
-      "Playback did not start. Click Play in YouTube Music, then try again."};
+      "Playback was not confirmed. Check YouTube Music before trying again."};
   };
+
+  const onNativePlay = event => {
+    const failed = resumeAttempt;
+    const video = nativeVideo();
+    if (!event.isTrusted || event.target !== video || !failed || failed.confirmed ||
+        (failed.checking && !failed.interrupted)) return;
+    // A new start on the provider can recover a failed card action. Check the
+    // selected media again before releasing credit, without clicking the player.
+    void controlPlayback({action: "play", videoId: failed.before.videoId}, video).catch(() => {});
+  };
+  document.addEventListener("play", onNativePlay, true);
+  cleanups.push(() => document.removeEventListener("play", onNativePlay, true));
 
   const confirmNext = (videoId, sendResponse, deadline = Date.now() + 2500) => {
     probePlayer(current => {
@@ -220,9 +341,10 @@
 
   const confirmRating = (videoId, desiredStatus, sendResponse, deadline = Date.now() + 2000) => {
     probePlayer(current => {
-      if ((current?.videoId && current.videoId !== videoId) ||
-          ((current?.playerBar?.ratingVideoId ?? current?.playerBar?.videoId) === videoId &&
-            current.playerBar.likeStatus === desiredStatus)) {
+      if (current?.videoId && current.videoId !== videoId) {
+        sendResponse({ok: true, advanced: true});
+      } else if ((current?.playerBar?.ratingVideoId ?? current?.playerBar?.videoId) === videoId &&
+                 current.playerBar.likeStatus === desiredStatus) {
         sendResponse({ok: true});
       } else if (Date.now() >= deadline) {
         sendResponse({ok: false, error: "YouTube Music hasn’t confirmed its selected thumb yet."});
@@ -236,10 +358,10 @@
     probePlayer(current => {
       try {
         if (current?.videoId && current.videoId !== videoId) {
-          sendResponse({ok: true}); // Music already advanced after the native dislike.
+          sendResponse({ok: true, advanced: true});
         } else if ((current?.playerBar?.ratingVideoId ?? current?.playerBar?.videoId) === videoId &&
                    current.playerBar.likeStatus === "DISLIKE") {
-          const result = clickNext(videoId, current);
+          const result = clickNext(videoId, current, true);
           if (result.ok) confirmNext(videoId, sendResponse);
           else sendResponse(result);
         } else if (!current || Date.now() >= deadline) {
@@ -259,12 +381,12 @@
     "ytmusic-immersive-header-renderer ytmusic-play-button-renderer"
   );
   const clickPlaybackStart = () => {
-    const v = document.querySelector("video");
+    const v = nativeVideo();
     if (v && !v.paused) return; // a pending play() must never be toggled back to paused
     clickPlayPause();
   };
   const playbackStarted = () => {
-    const v = document.querySelector("video");
+    const v = nativeVideo();
     return !!(v && !v.paused && !v.ended && v.readyState >= 2);
   };
   const playbackDelay = () => new Promise(resolve => setTimeout(resolve, 250));
@@ -312,9 +434,9 @@
     // A watch navigation can leave the preceding player alive while its new
     // queue loads. Do not resume or confirm that preceding song.
     if (!current() || !matches()) return result(false);
-    const v = document.querySelector("video");
+    const v = nativeVideo();
     const position = v?.currentTime || 0;
-    const progressed = () => document.querySelector('video') === v && matches() &&
+    const progressed = () => nativeVideo() === v && matches() &&
       playbackStarted() && v.currentTime > position + .05;
     if (v && v.paused) {
       try {
@@ -356,7 +478,7 @@
     };
   };
   const sensorStatus = np => {
-    const v = document.querySelector("video");
+    const v = nativeVideo();
     return { ok: true, hasVideo: !!v, paused: !!(v && v.paused), url: location.href,
       receiverRevision: RECEIVER_REVISION, mainRevision,
       mainVersion: mainFrameAt === null ? null : SENSOR_VERSION,
@@ -434,7 +556,7 @@
             sendResponse({ok: false, error: "Player account is unavailable or different"});
             return;
           }
-          const result = clickNext(msg.videoId, snapshot);
+          const result = clickNext(msg.videoId, snapshot, msg.ratingAdvance === true);
           if (result.ok) confirmNext(msg.videoId, sendResponse);
           else sendResponse(result);
         }
@@ -449,7 +571,7 @@
       }
       playbackCommandSerial += 1;
       const control = snapshot => {
-        const video = document.querySelector("video");
+        const video = nativeVideo();
         if (!video || (msg.resumeOnly && (!msg.videoId || snapshot?.videoId !== msg.videoId))) return;
         if ((msg.action === "play" && !video.paused) || (msg.action === "pause" && video.paused)) return;
         clickPlayPause();
@@ -467,13 +589,13 @@
       let attempts = 0;
       const confirm = () => {
         if (receiver.stopped) { sendResponse({ok: false}); return; }
-        const video = document.querySelector('video');
+        const video = nativeVideo();
         if (!video || video.paused) { sendResponse({ok: true, paused: true}); return; }
         if (++attempts >= 30) { sendResponse({ok: false, paused: false}); return; }
         setTimeout(confirm, 50);
       };
       try {
-        const video = document.querySelector('video');
+        const video = nativeVideo();
         if (video && !video.paused) clickPlayPause();
         confirm();
       } catch (error) { sendResponse({ok: false, error: String(error)}); }
@@ -483,7 +605,7 @@
       playbackCommandSerial += 1;
       // Pause only a playing tab, so this never resumes an already-paused player.
       try {
-        const v = document.querySelector("video");
+        const v = nativeVideo();
         if (v && !v.paused) clickPlayPause();
       } catch (e) {}
       return;
@@ -542,6 +664,8 @@
   // MAIN-world companion (nowplaying_main.js) that reads it and postMessages track changes here. We
   // also poll the player-bar DOM as a fallback. Either source feeds report(); dedup keeps it quiet.
   let lastNowPlaying = previous?.lastNowPlaying || "";
+  let lastNowPlayingPlaylist = previous?.lastNowPlayingPlaylist || "";
+  let lastNowPlayingAlbum = previous?.lastNowPlayingAlbum || "";
   let lastAccount = null; // null means unknown; an empty brandId means the verified main account.
   const report = (np) => {
     if (!np || !np.title) return;
@@ -549,6 +673,8 @@
     const lst = np.playlist || "";
     const position = Number.isFinite(np.position) && np.position >= 0 ? np.position : null;
     const duration = Number.isFinite(np.duration) && np.duration > 0 ? np.duration : null;
+    if (np.videoVerified && resumeAttempt && vid !== resumeAttempt.before.videoId) resumeAttempt = null;
+    const resumeUnverified = unverifiedResume(vid);
     // MAIN captures these fields together with the bar's identity. DOM fallback must prove its
     // identity too; a bar still showing the preceding song cannot rate the new playing video.
     const bar = np.playerBar || domNowPlaying();
@@ -562,11 +688,15 @@
     // when those credits arrive as well, so a previously unknown upload can be learned.
     const key = JSON.stringify([np.brandId, vid || [np.title, np.artist], likeStatus,
       np.metadataVerified === true]);
+    // Only the player can verify which queue owns the same upload after a new launch.
+    const changedQueue = np.videoVerified === true && (lst
+      ? lst !== lastNowPlayingPlaylist : albumBrowseId && albumBrowseId !== lastNowPlayingAlbum);
     // The backend ages this card out when the YTM tab disappears. Keep its presence fresh when
     // paused or unchanged, without recording another play. Chrome can throttle both sensors in a
     // background tab, causing them to take turns reporting the same paused track.
     if (np.paused || !vid || !np.brandKnown ||
-        (np.metadataVerified !== true && np.videoVerified !== true) || key === lastNowPlaying) {
+        (np.metadataVerified !== true && np.videoVerified !== true) || np.bindingConflict ||
+        resumeUnverified || (key === lastNowPlaying && !changedQueue)) {
       // Carry the current snapshot as well as presence. Chrome can suspend/throttle this page while
       // audio devices change; if that gap exceeds the backend's stale-card timeout, a presence-only
       // heartbeat cannot rebuild Now Playing and the UI stays blank until the next track. This frame
@@ -576,12 +706,17 @@
         metadataVerified: np.metadataVerified === true,
         videoVerified: np.videoVerified === true,
         likeStatus, videoId: vid, playlist: lst, queueItem: np.queueItem, albumBrowseId, position, duration, paused: !!np.paused,
-        muted: !!np.muted, brandKnown: !!np.brandKnown, brandId: np.brandId || "",
+        muted: !!np.muted, bindingConflict: !!np.bindingConflict, resumeUnverified,
+        brandKnown: !!np.brandKnown, brandId: np.brandId || "",
       }); } catch (e) {}
       return;
     }
+    lastNowPlayingAlbum = albumBrowseId || (key === lastNowPlaying ? lastNowPlayingAlbum : "");
+    receiver.lastNowPlayingAlbum = lastNowPlayingAlbum;
     lastNowPlaying = key;
     receiver.lastNowPlaying = key;
+    lastNowPlayingPlaylist = lst;
+    receiver.lastNowPlayingPlaylist = lst;
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
       metadataVerified: np.metadataVerified === true,
@@ -604,7 +739,12 @@
       const p = ev.data.__tcPlayer;
       lastAccount = p.brandKnown ? { brandId: p.brandId || "" } : null;
       if (!p.brandKnown) return; // Unknown account must not become main-account playback history.
-      lastPlayer = { videoId: p.videoId, position: p.position, duration: p.duration, brandId: p.brandId };
+      if (p.kind !== "native-playing") {
+        lastPlayer = { videoId: p.videoId, position: p.position, duration: p.duration, brandId: p.brandId };
+      }
+      if (unverifiedResume(p.videoId) && (p.kind === "tick" || p.kind === "ended" || p.kind === "track_exit" ||
+          p.kind === "native-playing" ||
+          p.kind === "state" && p.state === "playing")) return;
       try { chrome.runtime.sendMessage(Object.assign({ type: "pevent" }, p)); } catch (e) {}
       return;
     }
@@ -637,9 +777,14 @@
   window.addEventListener("message", onMainMessage);
   cleanups.push(() => window.removeEventListener("message", onMainMessage));
   const onPageHide = () => {
+    playbackCommandSerial += 1;
+    stopPlaybackMeter?.();
     // #91 goodbye: close the session and the last track's record when the tab goes away.
     try {
-      if (lastPlayer) chrome.runtime.sendMessage(Object.assign({ type: "pevent", kind: "bye" }, lastPlayer));
+      if (lastPlayer) {
+        const player = unverifiedResume(lastPlayer.videoId) ? {brandId: lastPlayer.brandId} : lastPlayer;
+        chrome.runtime.sendMessage(Object.assign({ type: "pevent", kind: "bye" }, player));
+      }
     } catch (e) {}
   };
   window.addEventListener("pagehide", onPageHide);
@@ -652,7 +797,7 @@
     const img = document.querySelector("img.image.ytmusic-player-bar") ||
                 document.querySelector("ytmusic-player-bar img");
     if (t && t.textContent.trim()) {
-      const v = document.querySelector("video");
+      const v = nativeVideo();
       let videoId = "", playlist = "";
       // Only the player bar describes playback. A browsed watch/playlist URL is unrelated.
       const link = document.querySelector('ytmusic-player-bar a[href*="watch?"]');

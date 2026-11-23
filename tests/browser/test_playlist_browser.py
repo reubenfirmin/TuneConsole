@@ -38,7 +38,7 @@ def assert_header_layout(page):
 
 @pytest.fixture
 def live_playlist_app(store):
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     tracks = [store.tracks.upsert_track(f"v{i}", title, artist, "Alb", 200, 1)
               for i, title, artist in [(0, "Song A", "Artist X"), (1, "Song B", "Artist Y")]]
@@ -51,6 +51,53 @@ def live_playlist_app(store):
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
         with LiveServer(server, sockets=[sock]):
             yield {"base": f"http://127.0.0.1:{port}", "pid": pid, "store": store, "client": client}
+
+
+@pytest.mark.parametrize('width', [1000, 1180, 1600])
+def test_playlist_columns_stay_at_the_viewport_edge_while_scrolling(live_playlist_app, page, tmp_path, width):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    tracks = [store.tracks.upsert_track(f'pin{i}', f'Song {i:02}', 'Artist', 'Album', 200, 1)
+              for i in range(36)]
+    store.playlists.set_playlist_tracks(pid, tracks)
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.goto(f'{base}/playlist/{pid}')
+    head = page.locator('.playlist-track-card thead')
+    first_row = page.locator('#playlist-track-body tr').first
+    expect(first_row).to_contain_text('Song 00')
+    # Fixed side navigation can be shorter than the window. It still takes up
+    # no space above the content.
+    page.locator('.topbar').evaluate('''bar => {
+      if (getComputedStyle(bar).position === 'fixed') bar.style.bottom = '8px';
+      dispatchEvent(new Event('resize'));
+    }''')
+    at_start = head.bounding_box()
+    assert at_start['y'] + at_start['height'] <= first_row.bounding_box()['y'] + 1
+
+    for distance in (240, 530, 110):
+        page.evaluate('(y) => window.scrollTo({top: y, behavior: "instant"})', at_start['y'] + distance)
+        pinned = head.bounding_box()
+        top = page.evaluate('''() => Math.max(0, ...Array.from(document.querySelectorAll('.setup-status, .topbar'))
+          .filter(element => getComputedStyle(element).position === 'sticky' && element.offsetHeight)
+          .map(element => element.getBoundingClientRect().bottom))''')
+        assert pinned['y'] == pytest.approx(top, abs=1)
+        assert pinned['height'] == pytest.approx(at_start['height'], abs=1)
+        song = head.get_by_role('button', name='Song', exact=True).bounding_box()
+        assert song['y'] < pinned['y'] + pinned['height']
+        assert song['x'] == pytest.approx(first_row.locator('td').nth(3).bounding_box()['x'], abs=1)
+        assert page.locator('#playlist-track-body').evaluate('''(body, bottom) => {
+          const button = Array.from(body.querySelectorAll('.rowmenu button')).find(button => {
+            const {top, bottom: end, width, height} = button.getBoundingClientRect();
+            return width && height && top > bottom + 2 && end < innerHeight - 100;
+          });
+          if (!button) return false;
+          const {x, y, width, height} = button.getBoundingClientRect();
+          return button.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+        }''', pinned['y'] + pinned['height'])
+    page.screenshot(path=tmp_path / 'pinned-playlist-header.png')
+
+    page.evaluate('window.scrollTo({top: 0, behavior: "instant"})')
+    assert head.bounding_box()['y'] == pytest.approx(page.locator('.playlist-track-card table').bounding_box()['y'], abs=1)
+    assert head.bounding_box()['y'] > top
 
 
 @pytest.mark.parametrize('failed_first', [False])

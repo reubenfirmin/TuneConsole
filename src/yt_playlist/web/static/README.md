@@ -58,11 +58,10 @@ initial document because HTMX panels do not replace the head. Visualization prim
 contain SVG roses, bar/chain readings and responsive grids; feature layouts stay with panels.
 Enrichment uses `enrichment.css`; `enrichment-conflicts.css` also loads on library detail
 routes for the shared resolver. Discovery adds `discovery.css` after its workflow controls.
-Road Trip uses `road-trip.css`; Home's featured subject uses `home-observation.css`.
+Road Trip uses `road-trip.css`.
 The former analytics bundle's Trends instrument charts, insight cards, review calendar and
-library-health layouts have no live template or script consumers and were removed. The old
-Wikipedia card layout was also unused; its live subject rule stays with Home. Canvas
-switcher rules now live in `clusters.css`, where the saved-canvas controls are rendered.
+library-health layouts have no live template or script consumers and were removed.
+Canvas switcher rules now live in `clusters.css`, where the saved-canvas controls are rendered.
 The graph vendor scripts, renderer and graph CSS load only in Clusters. Generating and the
 story reel are standalone templates with their own styles and no application feature bundle.
 

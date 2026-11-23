@@ -59,8 +59,8 @@ def pair(installed, without_query_timing):
     try:
         other.conn.execute('PRAGMA synchronous=OFF')
         with schema_inspection.reuse_tables(other.conn):
-            other.init_schema(defer_metadata=True)
-            assert group_roots.enabled(store) and group_roots.enabled(other)
+            other.init_schema()
+            assert other.rec_ledger.evidence().get('opportunity', 'first-release') is not None
             yield store, other
     finally:
         other.conn.close()
@@ -154,7 +154,7 @@ def test_publish_before_acknowledgement_failure_is_deduplicated_after_reopen(pai
     reopened = Store(store._db_path)
     with closing(reopened.conn):
         reopened.conn.execute('PRAGMA synchronous=OFF')
-        reopened.init_schema(defer_metadata=True)
+        reopened.init_schema()
         assert pending(reopened) == [intent]
         assert album_feedback.drain(reopened) == 1
         assert not pending(reopened)
@@ -219,7 +219,7 @@ def test_pause_cancellation_and_shutdown_keep_intents_for_next_worker(pair):
     other.conn.close()
     reopened = Store(store._db_path)
     with closing(reopened.conn):
-        reopened.init_schema(defer_metadata=True)
+        reopened.init_schema()
         resumed = RecWorker(SimpleNamespace(store=reopened, work=Activity(),
             logger=logging.getLogger(__name__), now_fn=lambda: 10))
         try:
@@ -253,7 +253,7 @@ def test_shutdown_during_feedback_sql_keeps_intent_for_restart(pair, monkeypatch
 
     other.conn.create_function('stop_feedback', 0, stop_during_query)
 
-    def interrupted_read(conn):
+    def interrupted_read(conn, *, after, limit):
         # Exercise the Store's actual progress handler during an admitted read.
         conn.execute('WITH RECURSIVE n(x) AS (VALUES(stop_feedback()) UNION ALL '
             'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
@@ -264,7 +264,7 @@ def test_shutdown_during_feedback_sql_keeps_intent_for_restart(pair, monkeypatch
         return len(waits) > 1
 
     with monkeypatch.context() as shutdown:
-        shutdown.setattr(outbox, 'available', interrupted_read)
+        shutdown.setattr(outbox, 'pending', interrupted_read)
         shutdown.setattr(worker._stop, 'wait', bounded_wait)
         with caplog.at_level(logging.WARNING):
             worker._maintenance_loop()
@@ -277,7 +277,7 @@ def test_shutdown_during_feedback_sql_keeps_intent_for_restart(pair, monkeypatch
     other.conn.close()
     reopened = Store(store._db_path)
     with closing(reopened.conn):
-        reopened.init_schema(defer_metadata=True)
+        reopened.init_schema()
         resumed = RecWorker(SimpleNamespace(store=reopened, work=Activity(),
             logger=logging.getLogger(__name__), now_fn=lambda: 10))
         try:
@@ -352,7 +352,7 @@ def test_unexpected_feedback_sql_failure_keeps_warning(pair, monkeypatch, caplog
         logger=logging.getLogger(__name__), now_fn=lambda: 10))
     other.conn.create_function('interrupt_feedback', 0, lambda: (other.conn.interrupt(), 0)[1])
 
-    def failed_read(conn):
+    def failed_read(conn, *, after, limit):
         if failure == 'interrupted':
             conn.execute('SELECT interrupt_feedback()').fetchone()
         else:
@@ -362,7 +362,7 @@ def test_unexpected_feedback_sql_failure_keeps_warning(pair, monkeypatch, caplog
 
     try:
         with monkeypatch.context() as failed:
-            failed.setattr(outbox, 'available', failed_read)
+            failed.setattr(outbox, 'pending', failed_read)
             with caplog.at_level(logging.WARNING, logger='yt_playlist.rec.album_feedback'):
                 if failure == 'interrupted':
                     assert worker._poll_album_feedback() == 0

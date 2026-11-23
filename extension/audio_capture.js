@@ -1,7 +1,7 @@
 // Capture and inference both stay in the YTM tab. Runtime ports carry metadata.
 (() => {
   if (location.origin !== 'https://music.youtube.com') return;
-  const REVISION = 4;
+  const REVISION = 5;
   const previous = window.__tcAudioCapture || window.__tcAudioPreviewCapture;
   if (previous?.revision >= REVISION) return;
   previous?.stop();
@@ -13,6 +13,9 @@
   let playerIdentity = null;
   const readyMedia = () => [...document.querySelectorAll('video,audio')]
     .find(item => !item.paused && !item.ended && item.readyState >= 2);
+  // A short card confirmation and an excerpt share the selected element's
+  // capture route. If confirmation opened it first, wait for it to close.
+  const captureAvailable = () => !window.__tcBridgeLoaded?.checkingPlaybackAudio;
   function unavailableMedia() {
     const elements = [...document.querySelectorAll('video,audio')];
     const states = elements.slice(0, 4).map(item =>
@@ -180,7 +183,7 @@
         if (differentSong(message.video_id))
           throw Error('The player moved to another song. Waiting for its playback update.');
         const media = readyMedia();
-        if (!media) {
+        if (!media || !captureAvailable()) {
           // Buffering and DOM replacement can outlast the scheduling snapshot.
           // Recover here rather than depending on the background app's timers.
           const deadline = mediaDeadline ?? Date.now() + 3000;
@@ -189,7 +192,7 @@
           port.postMessage({id: message.id, type: 'waiting'});
           pending.poll = setInterval(() => {
             if (waiting !== pending) return;
-            if (differentSong(message.video_id) || readyMedia() || Date.now() >= deadline) {
+            if (differentSong(message.video_id) || (readyMedia() && captureAvailable()) || Date.now() >= deadline) {
               clearWaiting();
               begin(message, deadline);
             }
@@ -289,7 +292,11 @@
     port.onMessage.addListener(message => begin(message));
   }
   const controller = window.__tcAudioCapture = {revision: REVISION,
-    inspect() { return {running: !!(current || waiting)}; }, stop() {
+    inspect() { return {running: !!(current || waiting)}; },
+    recordingStream(media) {
+      if (current?.media === media && current.recorder?.state === 'recording') return current.stream;
+    },
+    stop() {
     clearWaiting();
     if (current) clean(current);
     chrome.runtime.onConnect.removeListener(connect);

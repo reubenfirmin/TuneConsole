@@ -4,56 +4,39 @@ from yt_playlist.core.runtime import Runtime
 
 
 def _configured(store, tmp_path):
-    rt = Runtime(store, tmp_path / "config.toml", tmp_path)
-    rt.apply_setup([{"label": "main", "credential_ref": "browser.json", "is_master": True},
-        {"label": "brand", "credential_ref": "browser.json", "brand_account_id": "UC9"}])
+    rt = Runtime(store, tmp_path / "config.toml")
+    rt.config_path.write_text('[providers]\nsetting="preserved"\n')
+    rt.apply_setup([{"label": "main", "is_master": True},
+        {"label": "brand", "brand_account_id": "UC9"}])
     return rt
 
 
-@pytest.mark.parametrize("failure", ["publish", "reload", "reconcile"])
-def test_failed_save_retains_file_and_runtime_and_can_reconcile_committed_bindings(store, tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["client", "bindings"])
+def test_failed_save_retains_file_bindings_and_runtime(store, tmp_path, monkeypatch, failure):
     rt = _configured(store, tmp_path)
     before, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.accounts.get_accounts()
-    original_replace = rt.files.publish
-    original_validate = rt._validate_clients
-    original_bindings = store.accounts.repository.replace_accounts
-    if failure == "publish":
-        def fail(*args):
-            raise OSError("publication failed")
-        monkeypatch.setattr(rt.files, "publish", fail)
-    elif failure == "reload":
-        def fail(*args):
-            raise ValueError("candidate client cannot load")
+    def fail(*args, **kwargs):
+        raise ValueError("controlled failure")
+
+    if failure == "client":
         monkeypatch.setattr(rt, "_validate_clients", fail)
     else:
-        def failed_reconciliation(rows, *, expected):
-            raise ValueError("identity reconciliation failed")
-        monkeypatch.setattr(store.accounts.repository, "replace_accounts", failed_reconciliation)
+        monkeypatch.setattr(store.accounts.repository, "replace_accounts", fail)
     with pytest.raises(ValueError, match="not saved"):
-        rt.apply_setup([{"label": "renamed", "credential_ref": "browser.json", "is_master": True}])
+        rt.apply_setup([{"label": "renamed", "is_master": True}])
     assert rt.config_path.read_bytes() == before
-    if failure == 'publish':
-        assert [account.label for account in store.accounts.get_accounts()] == ['renamed']
-    else:
-        assert store.accounts.get_accounts() == accounts
+    assert store.accounts.get_accounts() == accounts
     assert rt.configured and rt._provider is provider
     assert set(rt.clients()) == {i.id for i in accounts}
-    assert list(tmp_path.glob(".config.toml.*")) == []
-    monkeypatch.setattr(rt.files, 'publish', original_replace)
-    monkeypatch.setattr(rt, '_validate_clients', original_validate)
-    monkeypatch.setattr(store.accounts.repository, 'replace_accounts', original_bindings)
-    rt.load()
-    assert store.accounts.get_accounts() == accounts
-    assert set(rt.clients()) == {account.id for account in accounts}
 
 
-def test_failed_reload_restores_last_usable_file_and_runtime(store, tmp_path):
+def test_reload_uses_sqlite_even_when_legacy_file_cannot_be_parsed(store, tmp_path):
     rt = _configured(store, tmp_path)
-    previous, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.accounts.get_accounts()
+    accounts = store.accounts.get_accounts()
     rt.config_path.write_text("invalid [ toml")
     rt.load()
-    assert rt.configured and rt._provider is provider
-    assert rt.config_path.read_bytes() == previous
+    assert rt.configured and set(rt.clients()) == {account.id for account in accounts}
+    assert rt.config_path.read_text() == "invalid [ toml"
     assert store.accounts.get_accounts() == accounts
 
 
@@ -63,10 +46,10 @@ def test_display_label_edits_preserve_ids_history_and_reopening(store, tmp_path)
     for account in accounts:
         store.history.record_history_plays(account.id, 1, ["song|artist"], source_timezone="UTC")
     rt.apply_setup([{"id": account.id, "label": f"Renamed {account.label}",
-        "credential_ref": account.credential_ref, "brand_account_id": account.brand_account_id,
+        "brand_account_id": account.brand_account_id,
         "is_master": account.is_master} for account in accounts])
     assert {i.id for i in store.accounts.get_accounts()} == {i.id for i in accounts}
-    reopened = Runtime(store, rt.config_path, tmp_path)
+    reopened = Runtime(store, rt.config_path)
     reopened.load()
     assert reopened.configured
     assert set(reopened.clients()) == {i.id for i in accounts}
@@ -75,10 +58,10 @@ def test_display_label_edits_preserve_ids_history_and_reopening(store, tmp_path)
 
 def test_clients_use_bridge_wired_after_startup_load(store, tmp_path):
     from yt_playlist.core.bridge import Bridge
-    rt = Runtime(store, tmp_path / "config.toml", tmp_path)
+    rt = Runtime(store, tmp_path / "config.toml")
     rt.load()
     rt.bridge = Bridge()
-    assert all(c._session._bridge is rt.bridge for c in rt.clients().values())
+    assert all(c._provider._session._bridge is rt.bridge for c in rt.clients().values())
 
 
 def test_setup_form_carries_stable_identity_on_rename(store, tmp_path):
@@ -89,7 +72,7 @@ def test_setup_form_carries_stable_identity_on_rename(store, tmp_path):
     app = create_app(store, rt.clients, setup=rt, background_work=False)
     with TestClient(app, base_url="http://127.0.0.1") as client:
         response = client.post("/setup", headers={"accept": "application/json"}, data={
-            "account_id": [str(main.id), str(brand.id)], "label": ["New main", "New brand"],
+            "identity_id": [str(main.id), str(brand.id)], "label": ["New main", "New brand"],
             "brand_account_id": ["", brand.brand_account_id], "master": "0"})
         assert response.status_code == 200
     assert [(i.id, i.label) for i in store.accounts.get_accounts()] == [(main.id, "New main"), (brand.id, "New brand")]
@@ -101,11 +84,11 @@ def test_label_swap_and_reuse_keep_account_history_separate(store,tmp_path):
     for account in (main,brand):
         store.history.record_history_plays(account.id,1,['song|artist'],source_timezone='UTC')
         store.playlists.upsert_playlist(account.id,'LM',account.label,0,'h',1)
-    rt.apply_setup([dict(id=main.id,label=brand.label,credential_ref=main.credential_ref,is_master=True),
-                    dict(id=brand.id,label=main.label,credential_ref=brand.credential_ref,
+    rt.apply_setup([dict(id=main.id,label=brand.label,is_master=True),
+                    dict(id=brand.id,label=main.label,
                          brand_account_id=brand.brand_account_id)])
     assert {i.id:i.label for i in store.accounts.get_accounts()}=={main.id:brand.label,brand.id:main.label}
-    rt.apply_setup([dict(label=main.label,credential_ref='browser.json',brand_account_id='NEW',is_master=True)])
+    rt.apply_setup([dict(label=main.label,brand_account_id='NEW',is_master=True)])
     new = store.accounts.get_master_account()
     assert new.id not in {main.id,brand.id}
     assert {r[0] for r in store.conn.execute('SELECT account_id FROM listening_observations')}=={main.id,brand.id}
@@ -118,7 +101,7 @@ def test_unknown_or_retargeted_submitted_id_does_not_change_setup(store,tmp_path
     rt = _configured(store,tmp_path)
     before,contents = list(store.conn.iterdump()),rt.config_path.read_bytes()
     with pytest.raises(ValueError,match='not saved'):
-        rt.apply_setup([dict(id=submitted_id,label='name',credential_ref='browser.json',
+        rt.apply_setup([dict(id=submitted_id,label='name',
                              brand_account_id=brand,is_master=True)])
     assert list(store.conn.iterdump())==before
     assert rt.config_path.read_bytes()==contents

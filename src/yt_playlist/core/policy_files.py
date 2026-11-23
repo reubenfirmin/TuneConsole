@@ -2,8 +2,7 @@
 from contextlib import ExitStack, contextmanager
 import hashlib
 
-from yt_playlist.core import fao, file_collection, file_map, policy_documents, policy_history_files
-from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core import fao, file_collection, file_map, policy_documents, policy_history_files, policy_history_read
 from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.policy_paths import record_path, record_id
 
@@ -19,34 +18,15 @@ class PolicyFiles:
             stack.enter_context(file_collection.retained_reader(self.archive_root))
             yield
 
-    @contextmanager
-    def write_reserved(self, records):
-        references = []
-        with ExitStack() as retained:
-            for record in records:
-                path = record_path(self.root, record['file_id'])
-                encoded = canonical({'format': policy_documents.FORMAT, 'configuration': record['value']})
-                if (len(encoded) > policy_documents.MAX_BYTES or len(encoded) != record['size']
-                        or hashlib.sha256(encoded).hexdigest() != record['digest']):
-                    raise ValueError('Policy configuration changed after reservation')
-                pending = retained.enter_context(fao.prepare(path, fao.Content(encoded, max_bytes=policy_documents.MAX_BYTES)))
-                pending.publish()
-                references.append((str(path), record['digest'], len(encoded), 0))
-            yield references
+    def publish(self, records):
+        return list(policy_documents.publish_many(self.root, (record['value'] for record in records)))
 
     def read(self, row):
         return policy_documents.read(row['configuration_filename'], row['content_digest'],
             offset=row['configuration_offset'], size=row['byte_size'])
 
     def archived(self, version, header):
-        if header is None or header['state'] == 'expired':
-            return None
-        if header.get('file') is not None:
-            return policy_history_files.read(self.archive_root, version, header['file'])
-        value = file_map.get(self.archive_root, header['publication'], version)
-        if value is None or value.get('state') != 'archived':
-            raise fao.CorruptFile('Required historical policy is missing')
-        return value
+        return policy_history_read.read(self.archive_root, version, header)
 
     def archive_records(self, rows, bodies):
         records, used = [], 0

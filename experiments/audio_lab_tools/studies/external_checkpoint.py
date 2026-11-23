@@ -82,7 +82,7 @@ def freeze(database):
         annotation_snapshot = None
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_annotations'").fetchone():
             labels, _ = audio_annotations.training_rows(conn, train_vibes.TAXONOMY_VERSION)
-            annotation_snapshot = audio_annotations.export_snapshot(conn, target / 'annotation-documents')
+            annotation_snapshot = audio_annotations.export_snapshot(conn)
         else:
             labels = dictionaries(conn, 'SELECT * FROM audio_session_labels ORDER BY updated_at,run_id')
         library = {'captured_at': stamp(), 'labels': labels,

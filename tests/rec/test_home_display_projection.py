@@ -73,9 +73,7 @@ def test_cached_display_falls_back_after_file_damage_and_follows_republication(f
     baseline = publish_menu(store, prefix='baseline')
     tailored = publish_menu(store, prefix='tailored', surface='home_tuned')
     assert cards(store, home_prepared.load(store, 1000, display_only=True)).protos == cards(store, tailored).protos
-    filename = store.conn.execute('SELECT f.filename FROM home_display_files f '
-        'JOIN home_display_heads h ON h.publication_id=f.publication_id '
-        "WHERE h.surface='home_tuned' LIMIT 1").fetchone()[0]
+    filename = store.home_cache.document('home_tuned').parts[0][1]
     if damage == 'missing':
         Path(filename).unlink()
     else:
@@ -90,9 +88,11 @@ def test_cached_display_falls_back_after_file_damage_and_follows_republication(f
     assert cards(store, home_prepared.load(store, 1000, display_only=True)).protos == cards(store, replacement).protos
 
 
-@pytest.mark.parametrize('compressed', [False, True])
+@pytest.mark.parametrize('encoding', ['plain', 'compressed', 'indexed'])
 def test_display_restores_only_selected_menu_and_preserves_the_same_assignment(file_backed_store, monkeypatch,
-                                                                            compressed):
+                                                                            encoding):
+    from yt_playlist.core import home_outputs
+
     store = file_backed_store
     payload = publish_menu(store)
     menu = payload['menus'][0]
@@ -103,30 +103,44 @@ def test_display_restores_only_selected_menu_and_preserves_the_same_assignment(f
             for track in proto['tracks']:
                 track['musical'] = {'selected_menu': index, 'observations': list(range(300))}
                 track['serving_context'] = {'checkpoint': index, 'observations': list(range(300))}
-    # Use both installed plain JSON and the shared-profile representation.
-    encoded = json_cache.encode(payload) if compressed else json.dumps(payload)
+    if encoding == 'indexed':
+        payload['schema'] = home_prepared.SCHEMA
+        encoded = json_cache.encode_home_menus(payload['menus'], home_prepared._display_payload(payload))
+    else:
+        encoded = json_cache.encode(payload) if encoding == 'compressed' else json.dumps(payload)
     store.rec_proposals.publish_prepared_home(encoded, 1000)
     expected = cards(store, payload)
     restored_menus = []
+    parts = []
     original = json_cache._restore_profiles
+    read = home_outputs.files.read
 
     def restore(value, profiles, *args, **kwargs):
         if isinstance(value, dict) and 'musical' in value:
             restored_menus.append(value['musical'])
         return original(value, profiles, *args, **kwargs)
 
+    def read_part(*args, surface, chunk_key):
+        if surface == home_prepared.SURFACE:
+            parts.append(chunk_key)
+        return read(*args, surface=surface, chunk_key=chunk_key)
+
     monkeypatch.setattr(json_cache, '_restore_profiles', restore)
+    monkeypatch.setattr(home_outputs.files, 'read', read_part)
     projected = home_prepared.load(store, 1000, display_only=True)
     # Unselected checkpoints must not dominate the detached selection copy.
     # The selected result below must still carry every original field.
     assert len(json.dumps(projected)) < len(json.dumps(payload)) / 4
     actual = cards(store, projected)
     assert actual == expected
-    if compressed:
+    if encoding == 'compressed':
         assert restored_menus
         # Only the selected menu's evidence enters restoration. This fixture's
         # slot copies have no profiles; none of the other eleven menus is read.
         assert len(restored_menus) == sum(len(proto['tracks']) for proto in expected.protos)
+    if encoding == 'indexed':
+        selected = actual.protos[0]['tracks'][0]['musical']['selected_menu']
+        assert parts == ['0', str(1 + selected)]
     actual.protos[0]['tracks'][0]['musical']['observations'].append('mutated')
     assert cards(store, home_prepared.load(store, 1000, display_only=True)) == expected
 
@@ -139,7 +153,7 @@ def test_display_preserves_a_whole_held_menu_with_its_frozen_evidence(file_backe
     second = publish_menu(store, prefix='second')
     second['menus'][0]['epoch'] = first['menus'][0]['epoch'] + 3
     evidence = {'origin': 'held-worker-menu', 'observations': [2, 4, 6]}
-    first['menus'][0]['protos'][0]['tracks'][0]['musical'] = evidence
+    first['menus'][0]['protos'][0]['tracks'][1]['musical'] = evidence
     payload = {**first, 'menus': [first['menus'][0], second['menus'][0]]}
     store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1000)
     store.rec_proposals.put_proposals('home_choice', {
@@ -147,13 +161,15 @@ def test_display_preserves_a_whole_held_menu_with_its_frozen_evidence(file_backe
         'experiments': [proto['experiment_id'] for proto in first['menus'][0]['protos']],
         'menu': first['menus'][0], 'choice_context': first['choice_context'],
         'assignment': {'policy': 'test', 'probability': .5}}, 1000)
-    seed_dislike(store, first['menus'][0]['protos'][0]['tracks'][0]['key'], until=None, now=999)
+    blocked = first['menus'][0]['protos'][0]['tracks'][0]['key']
+    seed_dislike(store, blocked, until=None, now=999)
     expected = cards(store, payload)
     actual = cards(store, home_prepared.load(store, 1000, display_only=True), record=True)
     assert actual == expected
     assert actual.protos[0]['tracks'][0]['musical'] == evidence
     assert not actual.protos[0]['assignment'].get('censored')
-    assert [p['tracks'] for p in actual.protos] == [p['tracks'] for p in first['menus'][0]['protos']]
+    assert [p['tracks'] for p in actual.protos] == [
+        [track for track in p['tracks'] if track['key'] != blocked] for p in first['menus'][0]['protos']]
     held = store.rec_proposals.get_proposals('home_choice')
     assert held['menu'] == first['menus'][0]
 

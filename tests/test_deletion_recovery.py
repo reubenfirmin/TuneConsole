@@ -38,7 +38,7 @@ def deletion(file_backed_store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     store = file_backed_store
     database = store._db_path
-    identity = store.accounts.upsert_account("Main", "bridge", None, True)
+    identity = store.accounts.upsert_account("Main", None, True)
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
     keeper = store.playlists.upsert_playlist(identity, "KEEP", "Keeper", 2, "", 1)
     client = RecoveryClient({"SOURCE": ["a", "b"], "KEEP": ["a", "b"]})
@@ -214,8 +214,10 @@ def test_backup_and_intent_are_committed_before_transport_and_survive_lost_reply
             undo = json.loads(action.undo_json)
             entry, = undo["deletions"]
             assert entry["phase"] == "uncertain" and entry["ytm"] == playlist_id
-            step = reader.conn.execute("SELECT phase,outcome,backup_status,claim_token FROM action_steps "
-                                       "WHERE action_id=? AND operation='delete_playlist'",(action.id,)).fetchone()
+            step = reader.conn.execute(
+                "SELECT s.phase,s.outcome,s.backup_status,t.claim_token FROM action_steps s "
+                "JOIN action_targets t ON t.id=s.target_id AND t.action_id=s.action_id "
+                "WHERE s.action_id=? AND s.operation='delete_playlist'", (action.id,)).fetchone()
             assert tuple(step[:3])==('uncertain','unknown','verified') and step['claim_token']
             backup = json.loads(fao.read(entry['backup']).bytes)
             assert backup["ytm_playlist_id"] == playlist_id
@@ -315,6 +317,9 @@ def test_collection_sees_intent_created_mid_sweep_without_loading_history(deleti
     def no_history():
         pytest.fail("Deletion admission must not load the full action log")
 
+    # SOURCE's deletion creates the pending KEEP deletion before the sweep reaches KEEP.
+    playlists = {playlist.id: playlist for playlist in store.playlists.get_playlists()}
+    monkeypatch.setattr(store.playlists, "get_playlists", lambda: [playlists[source], playlists[keeper]])
     monkeypatch.setattr(client, "delete_playlist", delete)
     monkeypatch.setattr(store.actions, "get_actions", no_history)
 

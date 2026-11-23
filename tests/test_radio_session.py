@@ -253,12 +253,13 @@ def test_launch_from_paused_tab_accepts_exact_tracks_with_stale_header_count(poc
     state = c.start("v5")
     assert state["ok"] and state["starting"]
     assert c.session.initial_tracks == []
-    assert [t["video_id"] for t in state["tracks"]] == ["v5", "v1", "v2"]
+    assert [t["video_id"] for t in state["tracks"]] == ["v5"]
     assert frames == [{"type": "navigate", "url":
                        "https://music.youtube.com/watch?v=v5&list=PLSESSION"}]
     # Later edits still require a complete snapshot with a consistent count.
     with pytest.raises(PlaylistPending):
         c._remote_tracks(c.session)
+    monkeypatch.setattr(remote, "get_playlist", read)
     play(c, "v5")
     assert not c.status()["starting"]
 
@@ -302,9 +303,10 @@ def test_restart_with_old_radio_paused_starts_the_chosen_song(poc):
     restarted = PlaylistRadio(c.ctx)
     state = restarted.start("v5")
     assert state["ok"] and not state.get("joined")
-    assert remote.ids == ["v5", "v1", "v2"]
+    assert remote.ids == ["v5"]
     assert frames[-1]["url"] == "https://music.youtube.com/watch?v=v5&list=PLSESSION"
     assert state["starting"]
+    play(restarted, "v5")
     restarted.stop()
     checkpoint = restarted.persistence.load()
     with pytest.raises(ValueError, match='changed.*worker'):
@@ -322,6 +324,56 @@ def test_native_observer_confirms_launch_without_a_visible_radio_page(poc):
     c.session.launch_deadline = time.monotonic() - 1
     assert c.status()["active"]
     assert not c.status()["starting"]
+
+
+def test_seeded_queue_timeout_preserves_playback_and_stops_preparation(poc):
+    c, remote, _, workers, _ = poc
+    assert c.start("v5")["ok"]
+    c.ctx.bridge.now_playing = {"video_id": "v5", "playlist_ytm_id": "PLSESSION", "paused": False}
+    c.ctx.bridge.now_playing_seen_at = time.monotonic()
+    assert not c.status()["starting"]
+    c.session.preparation_deadline = time.monotonic() - 1
+    c._monitor(c.session)
+    assert c.status()["active"] and c.status()["exhausted"]
+    assert c.join()["active"] and len(workers) == 1
+    assert remote.ids == ["v5"] and not remote.adds
+
+
+@pytest.mark.parametrize('deadline_elapsed', [False, True])
+def test_confirmed_seed_fills_queue_while_paused(poc, monkeypatch, deadline_elapsed):
+    c, remote, frames, *_ = poc
+    assert c.start('v5')['ok']
+    s, bridge = c.session, c.ctx.bridge
+    bridge.now_playing = {'video_id': 'v5', 'playlist_ytm_id': 'PLSESSION',
+                          'paused': True, 'position': 0, 'duration': 180}
+    c.listening.observe(s)
+    c.advance(s)
+    assert remote.ids == ['v5'] and not remote.adds
+
+    bridge.now_playing = {**bridge.now_playing, 'paused': False, 'position': 1}
+    c.listening.observe(s)
+    assert s.playback_confirmed and s.furthest == 0
+    bridge.now_playing = {**bridge.now_playing, 'paused': True}
+    if deadline_elapsed:
+        s.preparation_deadline = time.monotonic() - 1
+        connected = iter((True, False))
+
+        def poll_once(_):
+            bridge.connected = next(connected)
+
+        monkeypatch.setattr(s.wake, 'wait', poll_once)
+        c._monitor(s)
+    else:
+        c.listening.observe(s)
+        c.advance(s)
+
+    assert s.playback_confirmed and not s.halted and s.error is None
+    assert not s.seeded_launch and len(remote.ids) == 3 and remote.ids[0] == 'v5'
+    assert [item for addition in remote.adds for item in addition] == remote.ids[1:]
+    assert bridge.now_playing['paused'] and len(frames) == 1
+    if not deadline_elapsed:
+        play(c, 'v5')
+        assert len(remote.ids) == 3 and len(frames) == 1
 
 
 def test_seed_outside_prepared_pool_resolves_exact_library_upload(poc):

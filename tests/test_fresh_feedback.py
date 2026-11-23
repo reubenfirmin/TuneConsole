@@ -26,7 +26,7 @@ def _pristine_current_schema():
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0,
                                  background_work=False),
                       base_url="http://127.0.0.1")

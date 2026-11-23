@@ -1,5 +1,13 @@
 """Explicit serving-policy custody for saved Radio queues and seed offers."""
+import json
+
 from . import home_outputs
+from .recommendation_outputs import RADIO_SEED_SETTING
+
+
+SESSION_VERSIONS = 'SELECT r.key FROM radio_sessions o,json_each(o.policy_roots) r WHERE r.value=1'
+VERSIONS = (SESSION_VERSIONS + " UNION SELECT r.key FROM settings s,json_each(s.value,'$.policy_roots') r "
+            f"WHERE s.key='{RADIO_SEED_SETTING}' AND r.value=1")
 
 
 def queue_versions(state):
@@ -9,11 +17,12 @@ def queue_versions(state):
     return home_outputs.policy_references({'tracks': tracks})
 
 
-def save_session(conn, identity, state):
-    if not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='radio_session_policies'").fetchone():
-        return
-    conn.execute('DELETE FROM radio_session_policies WHERE session_id=?', (identity,))
-    for version in sorted(queue_versions(state)):
-        known = conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?', (version,)).fetchone()
-        conn.execute('INSERT INTO radio_session_policies VALUES (?,?,?,?)',
-                     (identity, version, version if known else None, None if known else 'missing_policy'))
+def encode(conn, versions):
+    return conn.execute('SELECT json_group_object(v.value,p.version IS NOT NULL) '
+                        'FROM json_each(?) v LEFT JOIN recommendation_policies p ON p.version=v.value',
+                        (json.dumps(sorted(set(versions))),)).fetchone()[0]
+
+
+def save_session(conn, identity, versions):
+    roots = encode(conn, versions)
+    conn.execute('UPDATE radio_sessions SET policy_roots=? WHERE id=? AND policy_roots<>?', (roots, identity, roots))

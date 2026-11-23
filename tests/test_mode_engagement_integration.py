@@ -8,13 +8,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_page_bytecode, home_routes_only, without_metadata_providers
+from tests.home_fixture_support import home_page_bytecode, home_routes_only, serve_home_offers, without_metadata_providers
 from tests.playlist_fixture_support import remote_catalog
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.library import live_plays, player_events, playlist_generated
 from yt_playlist.library.listen_derive import classify_exit
-from yt_playlist.rec import home_cache, home_cards, home_prepared, mode_eval
+from yt_playlist.rec import home_cards, mode_eval
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only',
@@ -54,26 +54,25 @@ class _Cards(HTMLParser):
 
 @pytest.fixture
 def engagement(store, monkeypatch, home_page_bytecode):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.modes.replace_modes([
         {"mode_id": mid, "label": genre, "families": [[genre, 1]],
          "centroid": np.eye(2, dtype=np.float32)[mid - 1], "size": 40, "rep_keys": []}
         for mid, genre in ((1, "house"), (2, "techno"))
     ], retired_ids=[], now=1)
-    payload = {"_meta": {"comfort_pool": 0, "year_cuts": None, "full_pools": True}}
-    for mid, lane, genre in ((1, "wheelhouse", "house"), (2, "explore", "techno")):
-        payload[str(mid)] = {lane: [
+    tracks_by_mode = {
+        mid: [
             {"key": f"song {mid} {i}|artist {mid} {i}", "video_id": f"v{mid}_{i}",
              "title": f"Song {mid} {i}", "artist": f"Artist {mid} {i}", "album": "",
              "thumbnail": None, "plays": 0, "reason": "", "lane": lane, "genre": genre}
-            for i in range(20)]}
+            for i in range(4)]
+        for mid, lane, genre in ((1, "wheelhouse", "house"), (2, "explore", "techno"))
+    }
+    subjects = [track for tracks in tracks_by_mode.values() for track in tracks]
     clock = [1_700_000_000.0]
-    # Provenance begins with completed offers. Keep both real mode populations,
-    # then publish their selected cards without running unrelated ranking.
-    seed_publication_subjects(store, [track for mid in (1, 2)
-        for tracks in payload[str(mid)].values() for track in tracks])
+    seed_publication_subjects(store, subjects)
     completed_tracks = {row['video_id']: dict(row) for row in store.conn.execute(
-        'SELECT id,video_id,identity_key,title,artist FROM tracks')}
+        'SELECT id,video_id,identity_key,title,artist FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)')}
 
     def existing_track(video_id, title, artist, *args, **kwargs):
         track = completed_tracks[video_id]
@@ -86,8 +85,9 @@ def engagement(store, monkeypatch, home_page_bytecode):
 
     # Provider copying and metadata ingestion are completed lower inputs. The
     # HTTP handler still associates each returned real playlist with its mode.
-    def materialize(owner, title, tracks, client, now, account_id, *, recipe):
+    def materialize(owner, title, tracks, client, now, account_id, *, recipe, on_created):
         remote_id = f'saved-mode-{recipe["mode_id"]}'
+        on_created(remote_id, title)
         pid = owner.playlists.upsert_playlist(account_id, remote_id, title, len(tracks),
                                              'completed-copy', now)
         owner.playlists.set_playlist_tracks(pid, [existing_track(
@@ -97,18 +97,14 @@ def engagement(store, monkeypatch, home_page_bytecode):
     monkeypatch.setattr(playlist_generated, 'create_generated_playlist', materialize)
     monkeypatch.setattr(store.tracks, 'observe_track', observed_track)
     protos = []
-    for mid in (1, 2):
-        lane, tracks = next(iter(payload[str(mid)].items()))
+    for mid, tracks in tracks_by_mode.items():
+        lane = tracks[0]['lane']
         proto = home_cards._proto(store, lane, f'Mode {mid}', tracks, clock[0])
         proto.update(mode_id=mid, recipe={'model': 'mode', 'mode_id': mid, 'lane': lane})
         protos.append(proto)
-    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
-                                   None, None, [], [], home_cards._epoch(store, 'cards'), None)
-    home_prepared.remember(store, None, result, clock[0])
-    home_cache.put(store, 'home_prepared', home_cache.read(store, 'home_tuned'), clock[0])
-    fake = FakeClient(catalog=remote_catalog(
-        track for mid in (1, 2) for tracks in payload[str(mid)].values() for track in tracks))
-    app = create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0])
+    serve_home_offers(monkeypatch, protos)
+    fake = FakeClient(catalog=remote_catalog(subjects))
+    app = create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0], background_work=False)
     app.state.ctx.templates.env.bytecode_cache = home_page_bytecode
     client = TestClient(app, base_url="http://127.0.0.1")
     response = client.get("/home/cards")
@@ -125,7 +121,7 @@ def engagement(store, monkeypatch, home_page_bytecode):
             "recipe": json.dumps(card["recipe"])})
         assert response.status_code == 200
         pid = store.conn.execute(
-            'SELECT membership_ref_id FROM rec_mode_picks WHERE mode_id=?', (mid,)).fetchone()[0]
+            'SELECT id FROM playlists WHERE picked_mode_id=?', (mid,)).fetchone()[0]
         selected[mid] = next(playlist for playlist in store.playlists.get_playlists() if playlist.id == pid)
     # These are the production ingestion functions used by /bridge/ws; no listen-stat mock.
     ctx = SimpleNamespace(store=store)
@@ -160,7 +156,7 @@ def test_saved_mode_retains_attributed_plays_and_exit_depth_over_multiple_days(e
 
 def test_saved_mode_retains_the_link_needed_to_read_skip_and_completion_depth(engagement):
     store = engagement.store
-    picks = dict(store.conn.execute('SELECT membership_ref_id, mode_id FROM rec_mode_picks'))
+    picks = dict(store.conn.execute('SELECT id,picked_mode_id FROM playlists WHERE picked_mode_id IS NOT NULL'))
     playlist_ids = {playlist.provider_playlist_id: playlist.id for playlist in store.playlists.get_playlists()}
     exits = store.player_events.player_events_since(engagement.start, kind="track_exit")
     # The saved choice remains linked to its playlist and raw exit observations.

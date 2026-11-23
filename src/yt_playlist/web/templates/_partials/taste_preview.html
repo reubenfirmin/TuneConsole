@@ -13,9 +13,9 @@
     <p class="preview-explanation">
       {% if i.trace.contexts %}Matches music in {% for c in i.trace.contexts %}{{ c.name }}{% if not loop.last %}, {% else %}.{% endif %}{% endfor %}
       {% else %}Selected using your saved taste and listening preferences.{% endif %}
-      {% if i.trace.negative_delta|default(0) < 0 %}It resembles music you disliked.{% endif %}
       {% if i.trace.transient_delta > 0 %}Your recent listening favors it.{% elif i.trace.transient_delta < 0 %}Your recent listening makes it a weaker match.{% endif %}
-      {% if i.trace.session_delta > 0 %}It also fits this listening session.{% elif i.trace.session_delta < 0 %}This session makes it a weaker match.{% endif %}
+      {% if i.trace.get('now_delta', 0) > 0 %}It fits your current listening session.{% elif i.trace.get('now_delta', 0) < 0 %}Your current session makes it a weaker match.{% endif %}
+      {% if i.trace.session_delta > 0 %}It also fits what you played today.{% elif i.trace.session_delta < 0 %}Today's listening makes it a weaker match.{% endif %}
       {% if i.trace.audio_delta > 0 %}Its tempo, energy, or mood fits your recent listening.{% endif %}
       {% for axis, value in i.trace.axes.items() %}{% if value > 1.01 %}Your {{ axis }} preference favors it{% if i.trace.axis_labels.get(axis) %} ({{ i.trace.axis_labels.get(axis) }}){% endif %}.{% elif value < 0.99 %}Your {{ axis }} preference gives it less priority{% if i.trace.axis_labels.get(axis) %} ({{ i.trace.axis_labels.get(axis) }}){% endif %}.{% endif %}{% endfor %}
     </p>

@@ -11,7 +11,7 @@ from tests.genre_catalog_support import bound_shipped_catalog
 from tests.home_fixture_support import without_metadata_providers
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, native_sql_calls
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import cluster_ranking, rec_params
 from yt_playlist.core import embeddings
 from yt_playlist.core import genre_identity
 from yt_playlist.core.store import Store
@@ -64,7 +64,7 @@ def _tracks(store, titles, artist, angle=0, album="", genre=""):
     seed_publication_subjects(store, items)
     v = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))], dtype=np.float32)
     with store.conn:
-        store.conn.executemany('UPDATE youtube_items SET thumbnail=? WHERE video_id=?',
+        store.conn.executemany('UPDATE track_sources SET thumbnail=? WHERE video_id=?',
                                [('/static/nag/intro.png', item['video_id']) for item in items])
         embeddings.publish(store.conn, 'rec_vectors', [(item['key'], v.tobytes()) for item in items],
                            model_version='test-ring')
@@ -75,7 +75,7 @@ def _tracks(store, titles, artist, angle=0, album="", genre=""):
 def cluster_client():
     with ExitStack() as clients:
         def open_client(store):
-            iid = store.accounts.upsert_account("main", "cred", None, True)
+            iid = store.accounts.upsert_account("main", None, True)
             app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
             # One real application lifecycle and portal per client, rather than
             # starting and stopping an event loop for every expansion request.
@@ -186,9 +186,9 @@ def test_artist_groups_have_equal_influence_on_related_picks(store):
     near_a = _track(store, "Near A", "Other", 5)
     middle = _track(store, "Middle", "Other", 45)
     near_b = _track(store, "Near B", "Other", 85)
-    ranked = embed.cluster_expand(store, pos_keys=a + b, seed_groups=[a, b], topn=3)
+    ranked = cluster_ranking.rank_candidates(store, pos_keys=a + b, seed_groups=[a, b], topn=3)
     assert ranked[0][0] == middle
     scores = dict(ranked)
     assert abs(scores[near_a] - scores[near_b]) < 0.06
-    emphasized = embed.cluster_expand(store, pos_keys=a + b + b + b, seed_groups=[a, b], topn=3)
+    emphasized = cluster_ranking.rank_candidates(store, pos_keys=a + b + b + b, seed_groups=[a, b], topn=3)
     assert emphasized[0][0] == near_b  # explicit emphasis still steers a grouped ring

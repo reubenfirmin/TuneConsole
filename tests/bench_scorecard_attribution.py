@@ -18,7 +18,6 @@ from yt_playlist.core import db_diagnostics
 from yt_playlist.rec import scorecard
 from yt_playlist.core.activity import cancellable_work
 from yt_playlist.core.store import Store
-from yt_playlist.rec.scorecard_attribution import VIDEO
 
 
 START = 1_800_000_000
@@ -30,7 +29,7 @@ FOREGROUND_BUDGET_SECONDS = 1.0
 
 def _seed(store, exit_count, exit_videos):
     """Model repeated opportunities across nine active days in a 30-day window."""
-    iid = store.accounts.upsert_account('profile', 'fixture', None, True)
+    iid = store.accounts.upsert_account('profile', None, True)
     impressions, plays, responses = [], [], []
     times = []
     for index in range(IMPRESSIONS):
@@ -115,16 +114,16 @@ def test_scorecard_profile(tmp_path, monkeypatch, record_property, profile, exit
         if stage == 'execute' and 'WHERE identity_key IN (' in cursor._sql:
             entered.set()
         result = original(cursor, stage, target, *args)
-        if stage == 'execute' and f'WHERE {VIDEO} IN (' in cursor._sql:
+        if stage == 'execute' and ' video_id FROM rec_served_impressions ' in cursor._sql:
             # Explain the exact executed batch, preserving its IN cardinality,
-            # partial-index predicate and horizon bounds. Never explain a shortcut.
+            # policy kind and horizon bounds.
             with_plan = sqlite3.Cursor(cursor.connection)
             try:
                 plan = with_plan.execute('EXPLAIN QUERY PLAN ' + args[0], args[1]).fetchall()
             finally:
                 with_plan.close()
             lookups.append({'sql_id': hashlib.sha256(args[0].encode()).hexdigest()[:12],
-                            'video_parameters': len(args[1]) - 2,
+                            'video_parameters': len(args[1]) - 3,
                             'serving_connection': cursor.connection is store.conn,
                             'plan': [row[3] for row in plan]})
         return result

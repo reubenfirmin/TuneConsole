@@ -2,16 +2,16 @@
 
 Controllers coordinate database reservations, file access and completion.
 See [storage boundaries](storage-boundaries.md) for source-family ownership,
-preparation commands and rebuild capabilities.
+and preparation commands.
 Repositories own SQL; file ports receive detached identities and receipts. A new
-immutable body has a committed pending record before FAO preparation starts.
+receipt-owned body has a committed pending record before FAO preparation starts.
 After publication, its repository verifies the receipt and marks it ready while
 selecting the domain head. Readers exclude pending work. Failed publication
 preserves the prior selected head; abandoned files receive ordinary owner expiry.
 
-The database ID names the file. Digests verify bytes, model inputs or logical
-content equality; they do not name newly written files. Several domain records
-may share one bounded pack whose own SQL receipt supplies its file ID. See
+The database ID names receipt-owned files. Group documents are published in
+bounded packs named by their SHA-256 digest. Group definitions, generations and
+lineage rows own the exact ranges in the packs. See
 [file packs](#file-packs) for limits and seeking.
 
 ## Bodies written during normal operation
@@ -24,25 +24,22 @@ their readers and explicit backup adapters remain supported.
 | Domain and root | Owning SQL identity | New path |
 | --- | --- | --- |
 | Collection/workflow state, `D.collections` | `collection_file_writes.id`, bound to kind and domain owner | `by-id/HH/ID.json` |
-| Retained action playlist backups, `D.collections` | `action_backup_writes.id` | `backups/HH/ID.json` |
-| Recommendation/prepared output, `D.recommendations` | `recommendation_file_writes.id`, bound to output owner, surface and chunk | `by-id/HH/ID.json` |
-| Group documents, `D.groups` | `group_file_writes.id` | `by-id/HH/ID.json` |
+| Retained action playlist backups, `D.collections` | `actions.backup_inventory` | `backups/HH/ID.json` |
+| Recommendation/prepared output, `D.recommendations` | `collection_file_writes` recommendation receipt, bound to file ID, output owner, surface and chunk | `by-id/HH/ID.json` |
+| Group documents, `D.groups` | `group_versions`, `group_generations` | `DIGEST[:2]/DIGEST.json` |
 | Policy bodies, `D.policies` | `policy_file_writes.id` | `by-id/HH/ID.json` |
 | Archived policy configurations, `D.policy-history` | `policy_history_files.id` | `by-id/HH/ID.json` |
-| Musical profiles, `D.profiles` | `profile_file_writes.id`, bound to recording/source kind | `KIND/by-id/HH/ID.json` |
-| Recording/artist embeddings, `D.embeddings` | `embedding_file_writes.id`, bound to kind and vector basis | `KIND/by-id/HH/ID.bin` |
+| Musical profiles, `D.profiles` | Shared `profile` receipt with a recording or source owner | `KIND/by-id/HH/ID.json` |
+| Recording/artist embeddings, `D.embeddings` | `recording_embedding_files` and `artist_embedding_files` | `KIND/HH/DIGEST.bin`, with the original numeric locator for previously selected packs |
 | Shared Vibe models, `D.vibe-models` | `vibe_model_file_writes.id` | `by-id/HH/ID.json` |
-| Prediction input detail, `D.vibe-provenance` | `provenance_file_writes.id`; calculation heads retain the file ID | `by-id/HH/ID.json` |
+| Prediction input detail, `D.vibe-provenance` | Shared `prediction-provenance` receipt referenced by the prediction | `by-id/HH/ID.json` |
 | Audio measurements, adjacent `sample-attributes` | `sample_attributes.id` | `by-id/FIRST-UTF8-BYTE/ESCAPED-ID.json` |
-| Audio analyses, `D.annotations` | `annotation_file_writes.id` | `by-id/HH/ID.json` |
-| Paid descriptions, `D.descriptions` | `description_file_writes.id` | `by-id/HH/ID.json` |
-| Captured metadata deliveries, `D.metadata` | `delivery_file_writes.id`; delivery rows own retained ranges | `by-id/HH/ID.json` |
-| Runtime metadata, `D.metadata-runtime` | `metadata_file_writes.id`; kind/owner/revision references select ready receipts | `by-id/HH/ID.json` |
-| Listening evidence, `D.evidence` | `evidence_file_writes.id`; kind/key references select ready receipts | `KIND/HH/ID.json` |
-| Listening retention inventory/intents, `D.evidence` | `evidence_file_maintenance.id = 1` | `maintenance/1/inventory.json`, `maintenance/1/retirements.json` |
-| Served diagnostics, `D.served` | committed `impression_file_writes.impression_id`, then `rec_served_impressions.id` | `DECIMAL-ID-MOD-100/ID.json` |
-| Playback captures, `D.playback-feedback.sqlite3.observations` | independent inbox `capture_id`, a stored 32-character hexadecimal ID | `LAST-TWO-ID-CHARACTERS/ID.json` |
-| Durable playlist snapshots, configured data `backups` directory | `playlist_backup_writes.id`, a stored 32-character hexadecimal capture ID | `ID.json` |
+| Captured metadata deliveries, `D.metadata` | Shared `metadata-delivery` receipt with the contract digest and selected delivery ID | `by-id/HH/ID.json` |
+| Runtime metadata, `D.metadata-runtime` | Shared `runtime-metadata` receipt selected by kind, owner and revision | `by-id/HH/ID.json` |
+| Listening evidence, `D.evidence` | Shared `listening-evidence` receipt selected by kind and record key | `KIND/HH/ID.json` |
+| Listening retention inventory/intents, `D.evidence` | `collection_file_writes.evidence_maintenance` on row 0 | `maintenance/1/inventory.json`, `maintenance/1/retirements.json` |
+| Served diagnostics, `D.served` | IDs reserved by `settings.next_served_impression_id` and published with `rec_served_impressions.id` | `DECIMAL-ID-MOD-100/ID.json` |
+| Durable playlist snapshots, configured data `backups` directory | `collection_file_writes.owner_id` for `kind='playlist-backup'`, a stored 32-character hexadecimal capture ID | `ID.json` |
 
 The seventeen collection kinds are road-trip drafts, radio sessions, library sync,
 taste settings, taste checkpoints, taste comparisons, experiment decisions,
@@ -52,12 +49,26 @@ intents and discovery candidates. Their domain keys remain distinct from the
 immutable file receipt ID. The finite mapping lives in
 [`collection_owners.py`](collection_owners.py).
 
-The eight recommendation output owners are `prepared_outputs`,
-`album_note_outputs`, `listening_output_files`, `home_display_files`,
-`recommendation_report_files`, `model_pair_files`, `radio_seed_output` and
+Shared receipts in these five file domains use `collection_file_writes.file_address`.
+The address retains the original path ID for existing files and uses the shared
+row ID for new files.
+
+Recommendation output owners are `prepared_outputs`,
+`listening_output_files`, `home_display_files`,
+`recommendation_report_publications`, `radio_seed_output` and
 `model_autotune_output`. Listening evidence has six kinds: opportunity, response,
 forecast, artifact, report and checkpoint. Runtime metadata has four kinds:
 alternatives, native inputs, choices and conflicts.
+
+Playback captures, including their sequence and full bodies, live in a single
+FAO-managed queue at `D.playback-feedback/inbox.json`. Acknowledgement removes a
+capture after the library commits its projection and receipt. Startup publishes
+the installed queue durably before retiring the SQLite sidecar. Legacy observation
+files age out through ordinary orphan collection after cutover.
+
+Story preparation owns its replaceable Wikipedia cache at `D.wiki/cards.json`.
+The file holds hit and miss cards by subject and is bounded by the story cache's
+eviction policy. It has no SQL owner and can be repopulated by story preparation.
 
 ## Existing formats and operational files
 
@@ -95,8 +106,7 @@ queries with database-free directory/file ports. Directory work occurs before
 serving-lock admission; bounded ownership pages resume after a deadline. Owner
 and seek-key changes invalidate saved SQL scan progress. Reader fences protect
 older snapshots and active publication. Installed writers retain their single
-repository writer reservation during the final ownership/deletion decision;
-inbox queries never hold the library's SQL transaction.
+repository writer reservation during the final ownership/deletion decision.
 
 Required bodies do not expire merely because they are old. Owner-specific
 retention rules are in [storage contracts](storage-contracts.md).

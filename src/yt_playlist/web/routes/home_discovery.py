@@ -1,13 +1,15 @@
 """Prepared discovery/story reads and explicit visible-story measurements."""
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from yt_playlist.rec import album_tuning, home_prepared, into_recently
+from yt_playlist.core.activity import work_budget
+from yt_playlist.core.db_reads import READ_SECONDS
+from yt_playlist.rec import access, album_tuning, home_prepared, into_recently
 from yt_playlist.web.context import request_form
 from yt_playlist.web.routes.home_access import guard, state as growth_state
 from yt_playlist.controllers.album_menu import familiarity as _familiarity
 from yt_playlist.library.home_album_composition import album_menu
-from yt_playlist.library.home_query_composition import navigation
+from yt_playlist.library.home_query_composition import navigation, panel_access
 
 
 class StoryImpressions(BaseModel):
@@ -48,7 +50,8 @@ def build(ctx, views):
     @router.post("/home/format", status_code=204)
     def home_format(request: Request, form=Depends(request_form)):
         preference, panel = form.get("format"), form.get("panel")
-        status = commands.choose(preference, panel, lambda: growth_state(ctx, request))
+        status = commands.choose(preference, panel, lambda: growth_state(ctx, request),
+                                 panel_access=lambda panel: panel_access(ctx, panel))
         return Response('Wait until all three listening formats are ready.' if status == 409 and preference is not None
                         else '', status_code=status)
 
@@ -93,9 +96,12 @@ def build(ctx, views):
         """Read worker-prepared stories; the request only rotates the already decorated pool."""
         return story_fragment(ctx, request)
 
-    @router.post("/home/into-recently/impressions", status_code=204, dependencies=[Depends(guard(ctx, 'recent'))])
+    @router.post("/home/into-recently/impressions", status_code=204)
     def story_impressions(visible: StoryImpressions):
-        commands.story_impressions(visible.subjects, now_fn())
+        with work_budget(READ_SECONDS):
+            if not panel_access(ctx, 'recent'):
+                raise HTTPException(409, access.DENIED_MESSAGE)
+            commands.story_impressions(visible.subjects, now_fn())
         return Response(status_code=204)
 
     @router.get("/home/discovery", dependencies=[Depends(guard(ctx, 'discover'))])
@@ -107,7 +113,7 @@ def build(ctx, views):
     def home_revisit(request: Request):
         now = now_fn()
         return templates.TemplateResponse(request, '_partials/rediscover.html',
-            home_prepared.collections(store, views.prepared(now), now))
+            home_prepared.revisit(store, now))
 
     @router.get("/home/discover", dependencies=[Depends(guard(ctx, 'discover'))])
     def home_discover(request: Request):

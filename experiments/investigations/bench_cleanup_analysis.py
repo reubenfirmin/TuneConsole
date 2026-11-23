@@ -53,7 +53,7 @@ def _current_page(store):
 
 
 def _seed(store, size, sparse=False):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     tids = [store.tracks.upsert_track(f'v{i}', f'Song {i}', 'Artist', None, 100)
             for i in range(size * 12 if sparse else 80)]
     for i in range(size):

@@ -12,7 +12,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def test_confirmation_reconciles_other_account_changes_into_the_existing_cache():
     accounts = Mock(spec_set=['auth_expirations', 'update_auth_expiration'])
     accounts.auth_expirations.return_value = {1: 'main'}
-    accounts.update_auth_expiration.return_value = ({2: 'brand', 3: 'other'}, False)
+    accounts.update_auth_expiration.return_value = {2: 'brand', 3: 'other'}
     current = {}
     sessions = AuthSessions(accounts, current, Mock(spec_set=['warning']))
     sessions.load()
@@ -24,7 +24,7 @@ def test_confirmation_reconciles_other_account_changes_into_the_existing_cache()
 
 def test_clear_after_write_pause_retries_even_when_the_cache_is_already_empty():
     accounts = Mock(spec_set=['auth_expirations', 'update_auth_expiration'])
-    accounts.update_auth_expiration.side_effect = [None, ({}, False)]
+    accounts.update_auth_expiration.side_effect = [None, {}]
     current = {1: 'main'}
     sessions = AuthSessions(accounts, current, Mock(spec_set=['warning']))
     sessions.clear_all()
@@ -38,7 +38,7 @@ def test_clear_after_write_pause_retries_even_when_the_cache_is_already_empty():
 def test_unreadable_saved_notice_keeps_live_state_and_logs_without_transport_errors():
     accounts = Mock(spec_set=['auth_expirations', 'update_auth_expiration'])
     accounts.auth_expirations.side_effect = ValueError('invalid saved notice')
-    accounts.update_auth_expiration.return_value = ({2: 'brand'}, True)
+    accounts.update_auth_expiration.return_value = {2: 'brand'}
     current, logger = {1: 'live'}, Mock(spec_set=['warning'])
     sessions = AuthSessions(accounts, current, logger)
     sessions.load()
@@ -46,4 +46,4 @@ def test_unreadable_saved_notice_keeps_live_state_and_logs_without_transport_err
     sessions.clear(1)
     assert current == {2: 'brand'}
     accounts.update_auth_expiration.assert_called_once_with(account_id=1)
-    assert logger.warning.call_count == 2
+    logger.warning.assert_called_once()

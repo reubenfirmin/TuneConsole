@@ -39,7 +39,7 @@ def song(store, iid, name, *, plays=0, age=40, liked=False):
 
 
 def test_pool_needs_like_or_repeat_and_obeys_month_and_heavy_rotation_rest(store):
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     song(store, iid, 'never')
     song(store, iid, 'liked-unheard', liked=True)
     song(store, iid, 'one', plays=1)
@@ -53,10 +53,10 @@ def test_pool_needs_like_or_repeat_and_obeys_month_and_heavy_rotation_rest(store
 
 
 def test_generated_membership_is_eligible_but_a_real_recent_generated_play_counts_as_heard(store):
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     key = song(store, iid, 'favorite', plays=2, age=60)
     pid = store.playlists.upsert_playlist(iid, 'GEN', 'Generated', 1, None, NOW)
-    tid = store.conn.execute('SELECT id FROM tracks WHERE video_id=?', ('v-favorite',)).fetchone()[0]
+    tid = store.conn.execute('SELECT id FROM catalog_tracks WHERE video_id=?', ('v-favorite',)).fetchone()[0]
     store.playlists.set_playlist_tracks(pid, [tid])
     store.playlists.mark_generated_playlist('GEN')
     assert [r['key'] for r in surfaces.rediscover_tracks(store, NOW)] == [key]
@@ -65,7 +65,7 @@ def test_generated_membership_is_eligible_but_a_real_recent_generated_play_count
 
 
 def test_comfort_requires_a_quiet_liked_or_often_played_song(store):
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     song(store, iid, 'liked-unheard', liked=True)
     song(store, iid, 'unliked-unheard')
     song(store, iid, 'only-three', plays=3, age=60)
@@ -79,7 +79,7 @@ def test_comfort_requires_a_quiet_liked_or_often_played_song(store):
 @pytest.mark.parametrize('source', ['generated', 'calendar'])
 def test_comfort_rechecks_real_listening_when_prepared_pool_is_reused(store, source):
     from yt_playlist.rec import library_pool, vibe_pools
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     key = song(store, iid, 'favorite', plays=4, age=60)
     parameters = {'lane': 'comfort', 'epoch': 0, 'include_genres': [], 'avoid_genres': []}
     library_pool.prepare(store, NOW, parameters)
@@ -101,7 +101,7 @@ def test_comfort_rechecks_real_listening_when_prepared_pool_is_reused(store, sou
 
 def test_held_comfort_menu_rechecks_listening_without_mutating_the_saved_offer(store, monkeypatch):
     from yt_playlist.rec import home_cache
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     key = song(store, iid, 'favorite', plays=4, age=60)
     menu = {'epoch': 0, 'protos': [{'lane': 'comfort', 'tracks': [{'key': key}]}]}
     payload = {'tuning': 'same', 'menus': [menu]}
@@ -114,8 +114,8 @@ def test_held_comfort_menu_rechecks_listening_without_mutating_the_saved_offer(s
 
 
 def test_calendar_imports_count_once_per_account_day_without_recounting_exact_events(store):
-    main = store.accounts.upsert_account('Main', 'cred', None, True)
-    other = store.accounts.upsert_account('Other', 'cred', 'other', False)
+    main = store.accounts.upsert_account('Main', None, True)
+    other = store.accounts.upsert_account('Other', 'other', False)
     key = song(store, main, 'calendar-and-exact', plays=2, age=60)
     day = NOW-60*DAY
     store.history.record_history_plays(main, day+100, [(key, 'Today')], source_timezone='UTC')
@@ -129,10 +129,11 @@ def test_calendar_imports_count_once_per_account_day_without_recounting_exact_ev
     # Calendar evidence uses the existing noon date marker plus its one-day
     # conservative rest boundary, without claiming an exact listening time.
     assert rows[0]['last_played'] == day+3.5*DAY
+    assert store.rec_candidates.comfort_candidates(NOW, keys=[key]) == rows
 
 
 def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store, monkeypatch):
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     # Artist ingestion is independent of the remembered-song eligibility SQL.
     # Keep actual catalog, rating and listening writes for every candidate.
     with monkeypatch.context() as inputs:
@@ -161,7 +162,7 @@ def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(
     ratings.record_confirmed(store, iid, 'v-song0', 'DISLIKE', NOW)
     store.history.record_play_event(iid, 'song1', 'v-song1', NOW, source_timezone='UTC')
     with store.conn:
-        store.conn.execute('UPDATE youtube_items SET available=0 WHERE video_id=?', ('v-song2',))
+        store.conn.execute('UPDATE track_sources SET available=0 WHERE video_id=?', ('v-song2',))
     with store.read_view() as reader:
         current = home_prepared.collections(reader, prepared, NOW)['rediscover_tracks']
     assert not {'song0', 'song1', 'song2'} & {r['key'] for r in current}
@@ -169,7 +170,7 @@ def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(
 
 
 def test_albums_never_claim_unheard_saved_collection_is_a_memory(store):
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     _seed_album(store, iid, 'unheard', 'Andre Sobota Collection', NOW)
     assert surfaces.rediscover_albums(store, NOW) == []
     _seed_album(store, iid, 'heard', 'Old favorite', NOW, played_at=NOW-60*DAY)

@@ -63,7 +63,7 @@ def test_batched_axes_preserve_alias_collisions_redirects_and_unknowns(store):
     conn.executemany("INSERT INTO genre_catalog(key,name,source) VALUES (?,?,'custom')",
                      [('one', 'First'), ('two', 'Second'), ('old', 'Retired')])
     conn.execute("INSERT INTO genre_alias VALUES ('first','First','two','custom')")
-    conn.execute("INSERT INTO genre_redirects VALUES ('old','two')")
+    conn.execute("UPDATE genre_catalog SET redirect_key='two' WHERE key='old'")
     labels = ['First', 'Second', 'Retired', 'old', 'one', 'Techno', 'Novel unknown style']
     expected = {label: (genre_identity.family(conn, label), genre_identity.resolve(conn, label)[0])
                 for label in labels}
@@ -85,7 +85,7 @@ def test_large_label_batch_does_not_rescan_all_aliases_for_each_label(store):
                          [(f'local-alias-{i}', f'Local alias {i}', f'local-{i % 2000}')
                           for i in range(8000)])
         conn.execute("INSERT INTO genre_alias VALUES ('local style 3','Local style 3','local-7','custom')")
-        conn.execute("INSERT INTO genre_redirects VALUES ('local-8','local-9')")
+        conn.execute("UPDATE genre_catalog SET redirect_key='local-9' WHERE key='local-8'")
     labels = [label for i in range(40) for label in (f'Local style {i}', f'LOCAL ALIAS {i}')]
     expected = {label: (genre_identity.family(conn, label), genre_identity.resolve(conn, label)[0])
                 for label in labels}

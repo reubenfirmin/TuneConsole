@@ -17,27 +17,26 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "rec_proposal_cache_heads": "surface", "rec_proposal_cache_builds": "cache_id",
                 "rec_proposal_cache_chunks": "cache_id",
                 "recordings": "identity_key", "youtube_items": "video_id",
-                "catalog_entries": "recording_id", "unresolved_items": "entry_id",
+                "catalog_entries": "recording_id", "track_sources": ("recording_id", "video_id", "id"),
+                "unresolved_items": "entry_id",
                 "entry_field_choices": "entry_id", "library_memberships": "entry_id",
                 "discovery_memberships": "recording_id", "discovery_sources": "recording_id",
-                "rec_content_pending": "identity_key", "prepared_recording_inputs": "recording_id",
-                "unresolved_preparation_inputs": "raw_key",
-                "recording_embeddings": "space", "artist_embeddings": "space",
+                "rec_content_pending": "identity_key", "prepared_recording_inputs": ("recording_id", "raw_key"),
                 "rec_musical_sources": "source_key", "rec_musical_links": ("source_key", "recording_id"),
-                "musical_source_observations": "source_key", "metadata_choice_heads": "entry_id",
+                "metadata_choice_heads": "entry_id",
                 "metadata_runtime_choices": "entry_id", "metadata_runtime_recording_sources": "recording_id",
                 "metadata_runtime_entry_sources": "entry_id", "metadata_runtime_recording_genres": "recording_id",
                 "metadata_observations": "entry_id",
-                "metadata_file_references": "owner_key", "metadata_file_writes": "id",
+                "metadata_file_writes": ("id", "owner_key"),
                 "native_metadata_observations": "id", "metadata_deliveries": "id",
                 "published_metadata_head": "id", "published_metadata_destination_head": "id",
                 "published_metadata_destination_native": "source_key",
                 "published_metadata_destination_deliveries": "id",
-                "rec_musical_pending": "source_key", "rec_musical_source_profiles": "source_key",
                 "rec_musical_profiles": "identity_key", "entry_artists": "entry_id", "track_artists": "entry_id",
                 "recording_vibes": "recording_id", "sample_attributes": "recording_id",
                 "measurements": "recording_id",
                 "vibe_versions": "id",
+                "vibe_definitions": "vibe",
                 "choice_learning_heads": "surface", "choice_learning_publications": "id",
                 "choice_learning_parameters": "publication_id", "choice_learning_exclusions": "publication_id",
                 "choice_mode_estimates": "publication_id", "choice_group_estimates": "publication_id",
@@ -49,22 +48,65 @@ _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": 
                 "generation_groups": "generation_id", "taste_groups": "id", "group_versions": "id",
                 "group_version_aliases": "external_version", "group_members": "group_version_id",
                 "recommendation_policies": "version", "recommendation_policy_bodies": "version"}
-# Keyed musical-link readers consume source/recording membership only. The
+# Keep the applied durable preview trigger definitions on their original keys.
+_SNAPSHOT_KEY_COLUMNS = {**_KEY_COLUMNS, 'playlists': 'playlist_scope_id',
+                         'prepared_recording_inputs': 'recording_id',
+                         'unresolved_preparation_inputs': 'raw_key',
+                         'rec_musical_source_profiles': 'source_key',
+                         'metadata_file_references': 'owner_key',
+                         'collection_file_writes': ('metadata_owner_key', 'content_digest', 'file_address', 'display_key',
+                                                    'chunk_generation_id'),
+                         'playlist_scopes': 'provider_playlist_id',
+                         'playlist_items': 'playlist_id',
+                         'choice_learning_publications': 'surface',
+                         'group_versions': ('id', 'generation_id', 'external_version')}
+# Chunk generations and file addresses can have the same numeric ID.
+_SNAPSHOT_KEY_NAMESPACES = {('collection_file_writes', 'chunk_generation_id'): 'chunk-generation:'}
+# Keyed musical-link readers consume membership and verified classifier values. The
 # delivery token fences incoming alternatives; changing it alone must not
 # discard a model calculation. Unannotated reads still guard the complete row.
-_KEY_COLUMN_EXCLUSIONS = {"rec_musical_links": {"delivery_id"}}
-# A declared catalog read consumes every recording field except enrichment's
-# scheduling timestamps. Default/unannotated reads still guard the entire row.
+_KEY_COLUMN_EXCLUSIONS = {"rec_musical_links": {"delivery_id"}, "group_versions": {"evidence_holds"},
+                          "rec_musical_sources": {"accepted_run", "accepted_at", "accepted_hash"},
+                          "group_generations": {"is_active", "build_owner", "build_expires_at", "build_ready",
+                                                "build_output_digest", "build_parent_id", "worker_checkpoint_at",
+                                                "worker_input_serial", "evidence_holds"}}
+# A declared catalog read consumes recording fields except enrichment clocks
+# and the separately read AcousticBrainz estimates. Default reads guard the row.
 # Excluding only these fields also guards newly added catalog columns.
 _COLUMN_GROUP_EXCLUSIONS = {
-    "recordings": {"catalog": {"first_enriched_at", "last_enriched_at"}},
+    "recordings": {"catalog": {"first_enriched_at", "last_enriched_at", "musical_profile_prepared_at",
+                                "acousticbrainz_estimates", "content_pending_position", "content_pending_revision"}},
     "rec_musical_profiles": {"definition": {"prepared_at"}},
 }
 _COLUMN_GROUP_INCLUSIONS = {
-    "recordings": {"identity": {"id", "identity_key"}},
+    "group_generations": {"selection": {"is_active"}},
+    "recordings": {"identity": {"id", "identity_key", "redirect_recording_id"}},
+    "taste_axes": {
+        "weights": {"id", "kind", "genre_key", "family_key", "value", "weight", "weight_updated_at"},
+        "mix_controls": {"id", "kind", "genre_key", "family_key", "value", "home_hidden", "lean",
+                         "lean_updated_at", "lean_last_graduated_day"},
+    },
     "metadata_runtime_state": {"format": {"id", "active"}},
     "prepared_recording_inputs": {"grouping": {
         "recording_id", "library_present", "library_genre", "library_year"}},
+}
+_SNAPSHOT_COLUMN_GROUP_INCLUSIONS = {
+    **_COLUMN_GROUP_INCLUSIONS,
+    'prepared_recording_inputs': {**_COLUMN_GROUP_INCLUSIONS['prepared_recording_inputs'],
+                                  'repair': {'recording_id'}},
+    'recommendation_generation_surfaces': {'selection': {'selected'}},
+    'metadata_runtime_state': {**_COLUMN_GROUP_INCLUSIONS['metadata_runtime_state'],
+                               'enrichment_queue': {'enrichment_caught_up_at'}},
+    'playlists': {'recap': {'id', 'account_id', 'title', 'track_count', 'created_at', 'created_at_source',
+                            'playlist_scope_id', 'is_current'}},
+    'playlist_scopes': {'recap': {'id', 'provider_playlist_id', 'origin', 'adopted', 'recipe_revision'}},
+    "artists": {"identity": {"id", "name", "provisional", "redirect_artist_id"}},
+    "recordings": {
+        **_COLUMN_GROUP_INCLUSIONS["recordings"],
+        "content_profile": {"id", "identity_key", "musical_profile_version", "musical_profile_digest",
+                            "musical_profile_publication", "musical_profile_size", "musical_profile_file_id"},
+        "vibe_evidence": {"id", "mb_recording_id", "effective_mb_recording_id", "acousticbrainz_estimates"},
+    },
 }
 
 
@@ -90,7 +132,7 @@ class Revisions:
     def __init__(self, conn):
         self.conn = conn
         # Batch TEMP DDL, releasing only the transaction this constructor owns.
-        # A cancelled refresh must leave an already-open Store ready to retry.
+        # Admission can retry a cancelled bind without leaking a transaction.
         owned = not conn.in_transaction
         try:
             # SQLite may open BEGIN's transaction before execute is interrupted.
@@ -106,8 +148,6 @@ class Revisions:
 
     def _bind(self):
         conn = self.conn
-        # If external DDL races binding, this older epoch forces another bind
-        # and prevents readers using a newer definition from trusting counters.
         self.schema_version = conn.execute('PRAGMA main.schema_version').fetchone()[0]
         self.tables = set()
         self.views = {r[0] for r in conn.execute(
@@ -128,16 +168,20 @@ class Revisions:
             groups = {group: [c for c in columns if c not in excluded]
                       for group, excluded in _COLUMN_GROUP_EXCLUSIONS.get(name, {}).items()}
             groups.update({group: [c for c in columns if c in included]
-                           for group, included in _COLUMN_GROUP_INCLUSIONS.get(name, {}).items()})
+                           for group, included in _SNAPSHOT_COLUMN_GROUP_INCLUSIONS.get(name, {}).items()})
             for operation in ("INSERT", "UPDATE", "DELETE"):
                 keys = ["''"]
-                if name in _KEY_COLUMNS:
-                    columns_for_keys = _KEY_COLUMNS[name]
+                if name in _SNAPSHOT_KEY_COLUMNS:
+                    columns_for_keys = (_KEY_COLUMNS[name] if name == 'prepared_recording_inputs'
+                                        else _SNAPSHOT_KEY_COLUMNS[name])
                     if isinstance(columns_for_keys, str):
                         columns_for_keys = (columns_for_keys,)
-                    keys.extend(f"'key:' || {side}.{_identifier(column)}" for column in columns_for_keys for side in
-                                (("OLD", "NEW") if operation == "UPDATE" else
-                                 ("OLD",) if operation == "DELETE" else ("NEW",)))
+                    sides = ("OLD", "NEW") if operation == "UPDATE" else ("OLD",) if operation == "DELETE" else ("NEW",)
+                    for column in columns_for_keys:
+                        if column in columns:
+                            namespace = _SNAPSHOT_KEY_NAMESPACES.get((name, column), '')
+                            prefix = _literal('key:' + namespace)
+                            keys.extend(f'{prefix} || {side}.{_identifier(column)}' for side in sides)
                 writes = "".join(
                     # Nullable references have no keyed consumer. Their whole
                     # owner revision still advances through the first key.
@@ -152,10 +196,24 @@ class Revisions:
                 conn.execute(f"CREATE TEMP TRIGGER IF NOT EXISTS {trigger} AFTER {operation} "
                              f"ON main.{_identifier(name)}{condition} BEGIN {writes} END")
                 for group, group_columns in groups.items():
+                    if not group_columns:
+                        continue
+                    if name == 'recommendation_generation_surfaces' and group == 'selection':
+                        # Only an update can select or unselect an existing surface.
+                        if operation != 'UPDATE' or 'selected' not in columns:
+                            continue
                     group_changed = " OR ".join(
                         f"OLD.{_identifier(c)} IS NOT NEW.{_identifier(c)}"
                         for c in group_columns)
                     condition = f" WHEN {group_changed}" if operation == "UPDATE" else ""
+                    if name == 'group_generations' and group == 'selection' and operation != 'UPDATE':
+                        condition = ' WHEN ' + ('NEW' if operation == 'INSERT' else 'OLD') + '.is_active=1'
+                    if name == 'prepared_recording_inputs':
+                        if operation == 'UPDATE':
+                            condition = f' WHEN ({group_changed}) AND (OLD.recording_id IS NOT NULL OR NEW.recording_id IS NOT NULL)'
+                        else:
+                            row = 'NEW' if operation == 'INSERT' else 'OLD'
+                            condition = f' WHEN {row}.recording_id IS NOT NULL'
                     trigger = _identifier(f"snapshot_revision_{name}_{group}_{operation.lower()}")
                     conn.execute(f"CREATE TEMP TRIGGER IF NOT EXISTS {trigger} AFTER {operation} "
                                  f"ON main.{_identifier(name)}{condition} BEGIN "
@@ -163,22 +221,6 @@ class Revisions:
                                  f"VALUES ({_literal(name)},{_literal('group:' + group)},total_changes()+1) "
                                  "ON CONFLICT(table_name,record_key) "
                                  "DO UPDATE SET revision=excluded.revision; END")
-
-    def refresh(self):
-        """Bind newly published owners before pinning another background view.
-
-        Older views already carry a different main schema epoch and cannot
-        publish. Rebinding these connection-local counters scans definitions
-        only, leaving all stored data and applied history untouched.
-        """
-        if self.conn.execute('PRAGMA main.schema_version').fetchone()[0] == self.schema_version:
-            return
-        if self.conn.in_transaction:
-            raise RuntimeError('Cannot refresh snapshot revisions inside another transaction')
-        self.unbind(self.conn)
-        rebound = Revisions(self.conn)
-        self.tables, self.views = rebound.tables, rebound.views
-        self.schema_version = rebound.schema_version
 
     def capture(self, dependencies=None):
         """Read last-write serials, seeking only requested dependencies when supplied.
@@ -235,7 +277,12 @@ class Reads:
     @contextmanager
     def records(self, table, keys, *, prefix="key:"):
         previous = self._record_keys.get(table)
-        self._record_keys[table] = tuple(prefix + key for key in keys)
+        if prefix == 'key:' and previous is not None and not previous[1]:
+            # The caller declared which columns it consumes. A nested lookup
+            # by row key must not add dependencies on the other columns.
+            yield
+            return
+        self._record_keys[table] = (tuple(prefix + key for key in keys), prefix == 'key:')
         self._authorized.clear()
         try:
             yield
@@ -251,13 +298,14 @@ class Reads:
             if operation in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
                 return sqlite3.SQLITE_DENY
             if operation == sqlite3.SQLITE_READ:
-                keys = self._record_keys.get(table)
-                if keys is not None:
+                scope = self._record_keys.get(table)
+                if scope is not None:
+                    keys, keyed = scope
                     token = table, 'keys'
                     if token not in self._authorized:
                         self.include({(table, key) for key in keys})
                         self._authorized.add(token)
-                    if _column not in _KEY_COLUMN_EXCLUSIONS.get(table, ()):
+                    if not keyed or _column not in _KEY_COLUMN_EXCLUSIONS.get(table, ()):
                         return sqlite3.SQLITE_OK
                     # A caller consuming bookkeeping needs its full guard;
                     # keyed membership counters deliberately omit it.
@@ -284,15 +332,16 @@ def setting_reads(store, keys):
 
 
 @contextmanager
-def keyed_reads(store, table, keys):
+def keyed_reads(store, table, keys, *, column=None):
     """Track exact keys; the query must constrain every consumed row to these keys."""
-    if table not in _KEY_COLUMNS:
+    if table not in _SNAPSHOT_KEY_COLUMNS:
         raise ValueError(f"No keyed revision counter for {table}")
+    namespace = _SNAPSHOT_KEY_NAMESPACES[table, column] if column is not None else ''
     reads = getattr(store, "_snapshot_reads", None)
     if reads is None:
         yield
     else:
-        with reads.records(table, tuple(map(str, keys))):
+        with reads.records(table, tuple(namespace + str(key) for key in keys)):
             yield
 
 
@@ -305,7 +354,7 @@ def column_group_reads(store, table, group):
     Only callers which consume the declared fields may use this scope.
     """
     if (group not in _COLUMN_GROUP_EXCLUSIONS.get(table, {})
-            and group not in _COLUMN_GROUP_INCLUSIONS.get(table, {})):
+            and group not in _SNAPSHOT_COLUMN_GROUP_INCLUSIONS.get(table, {})):
         raise ValueError(f"Unknown snapshot column group: {table}.{group}")
     reads = getattr(store, "_snapshot_reads", None)
     if reads is None:

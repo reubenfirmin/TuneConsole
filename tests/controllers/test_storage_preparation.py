@@ -1,5 +1,5 @@
 """Bounded maintenance workflows with explicit capabilities and no SQLite."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import hashlib
 import json
@@ -11,8 +11,8 @@ from yt_playlist.controllers import preparation
 from yt_playlist.controllers.collection_recovery import CollectionRecovery
 from yt_playlist.controllers.profile_preparation import ProfilePreparation
 from yt_playlist.controllers.embedding_preparation import EmbeddingPreparation
-from yt_playlist.core import collection_backup, collection_owners, workflow_settings
-from yt_playlist.core.db_rebuild import retention_plan
+from yt_playlist.core import collection_backup, collection_owners, fao, workflow_settings
+from yt_playlist.core.embedding_files import EmbeddingFiles
 from yt_playlist.core.schema_contract import MigrationError
 
 
@@ -37,7 +37,7 @@ def test_collection_restore_checks_current_owners_before_writing():
         chunk=lambda _: {'format': collection_backup.FORMAT, 'type': 'chunk', 'records': [record]},
         validate=lambda _: calls.append('validate'))
     with pytest.raises(ValueError, match='database owners'):
-        CollectionRecovery(Repository(), files).restore('manifest')
+        CollectionRecovery(Repository(), files, relocating=nullcontext).restore('manifest')
     assert calls == ['validate', 'begin', 'rollback']
 
 
@@ -49,18 +49,6 @@ def test_collection_backup_rejects_escape_paths_before_reading():
         collection_backup.add_records({}, {'format': collection_backup.FORMAT, 'type': 'chunk', 'records': [record]})
 
 
-def test_retention_plan_protects_unknown_fk_owners_and_rejects_composite_references():
-    schema = {name: () for name in ('recommendation_generations', 'recommendation_heads',
-        'recommendation_generation_refs', 'recommendation_builds')}
-    schema['future_owner'] = (('recommendation_generations', (('generation', 'id'),)),)
-    selected = retention_plan.plan(schema, now=123)
-    assert any('"future_owner"' in sql and 'r."generation"=compact_drop_generations.id' in sql
-               for sql, _ in selected.statements)
-    assert any(parameters == (123,) for _, parameters in selected.statements)
-    assert 'future_owner' not in selected.predicates
-    schema['future_owner'] = (('recommendation_generations', (('a', 'id'), ('b', 'version'))),)
-    with pytest.raises(ValueError, match='Unsupported recommendation generation reference'):
-        retention_plan.plan(schema, now=123)
 
 
 def test_profile_conversion_wraps_cursor_and_verifies_before_sql_publication():
@@ -104,21 +92,24 @@ def test_profile_conversion_wraps_cursor_and_verifies_before_sql_publication():
     assert calls == [('page', 'last'), ('page', ''), 'write']
 
 
-def test_embedding_conversion_preserves_order_basis_and_exact_float_bytes():
-    vector = b'\x00\x00\x00\x80'  # Float32 negative zero must survive exactly.
-    calls = []
-    row = (9, 41, 'collaborative', 'basis', 1, vector, 123.)
-    reference = (41, 1, b'digest', 0, 9, 123.)
-    repository = SimpleNamespace(page=lambda *_: [row],
-        publish=lambda *args: calls.append(('publish', args)))
-    files = SimpleNamespace(write_legacy=lambda *args: calls.append(('write', args)) or [reference],
-        read_many=lambda *_: [(41, vector)])
+def test_embedding_conversion_preserves_order_basis_and_exact_float_bytes(tmp_path, monkeypatch):
+    negative_zero, one = b'\x00\x00\x00\x80', b'\x00\x00\x80\x3f'
+    rows = [(9, 41, 'collaborative', 'basis', 1, negative_zero, 123.),
+            (10, 12, 'collaborative', 'basis', 1, one, 124.)]
+    publications = []
+    repository = SimpleNamespace(page=lambda *_: rows, publish=lambda *args: publications.append(args))
+    files = EmbeddingFiles(tmp_path)
     command = EmbeddingPreparation(repository, files)
-    assert command.prepare('recording', 1) == 1
-    assert calls == [('write', ('recording', 1, [(41, vector, 123., 9)])),
-                     ('publish', ('recording', 'collaborative', 'basis', [reference]))]
-    calls.clear()
-    files.read_many = lambda *_: [(41, b'\x00' * 4)]
-    with pytest.raises(Exception, match='float32 bytes'):
-        command.prepare('recording', 1)
-    assert [call[0] for call in calls] == ['write']
+    assert command.prepare('recording', 2) == 2
+    (kind, space, basis, references), = publications
+    assert (kind, space, basis) == ('recording', 'collaborative', 'basis')
+    assert [(subject, width, position, order, built) for subject, width, _, position, order, built in references] == [
+        (41, 1, 0, 9, 123.), (12, 1, 1, 10, 124.),
+    ]
+    heads = [(subject, None, width, digest, position) for subject, width, digest, position, _, _ in references]
+    assert files.read_many(kind, heads) == [(41, negative_zero), (12, one)]
+    publications.clear()
+    monkeypatch.setattr(files, 'read_many', lambda *_: [(41, b'\x00' * 4), (12, one)])
+    with pytest.raises(fao.CorruptFile, match='float32 bytes'):
+        command.prepare('recording', 2)
+    assert publications == []

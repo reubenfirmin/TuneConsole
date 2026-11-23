@@ -21,6 +21,11 @@ const FIELDS = {
   spectral_crest: ['Spectral crest', ''], perceptual_spread: ['Perceptual spread', ''],
   perceptual_sharpness: ['Perceptual sharpness', ''], bark_loudness: ['Bark loudness', 'arbitrary units'],
 };
+const RULES = {
+  weakest_excerpt: 'Lowest excerpt score',
+  peak_excerpt: 'Highest excerpt score',
+  sustained_or_building: 'Higher of the last excerpt score and upper median, minus a quarter of any first-to-last drop. Minimum of zero.',
+};
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -66,12 +71,54 @@ function measurementSummary(samples) {
   return summary.join(' ');
 }
 
+export function renderSpecialists(container, samples, models, choices) {
+  const ordered = [...samples].sort((a, b) => a.position_seconds - b.position_seconds
+    || a.target_seconds - b.target_seconds || a.id.localeCompare(b.id));
+  const rows = Object.entries(choices).map(([vibe, choice]) => {
+    const model = models?.[vibe];
+    const scores = new Map(model?.excerpts?.map(excerpt => [excerpt.sample_id, excerpt.score]));
+    return {vibe, label: choice.label, score: model?.score, rule: model?.rule, mode: model?.mode,
+      excerpts: ordered.map(sample => scores.get(sample.id))};
+  });
+  const key = JSON.stringify([ordered.map(sample => sample.id), rows]);
+  if (container.dataset.evidence === key) return;
+  container.dataset.evidence = key;
+  container.replaceChildren();
+  container.append(element('h3', 'Vibe specialist scores'));
+  if (!rows.some(row => Number.isFinite(row.score))) {
+    container.append(element('p', samples.length
+      ? 'Specialist scores are unavailable for these excerpts. Your labels can still be saved.'
+      : 'Scores appear here after an audio check is saved. Your labels can be saved now.'));
+    return;
+  }
+  container.append(element('p', 'Compare scores for the same listening purpose across songs.'));
+  const result = element('table');
+  const header = result.createTHead().insertRow();
+  for (const label of ['Specialist and scoring rule', 'Final', ...ordered.map(sample => `${sample.position_seconds.toFixed(1)}s`)]) {
+    const cell = element('th', label);
+    cell.scope = 'col';
+    header.append(cell);
+  }
+  const body = result.createTBody();
+  for (const evidence of rows) {
+    const row = body.insertRow();
+    row.dataset.vibeScore = evidence.vibe;
+    const heading = element('th', evidence.label);
+    heading.scope = 'row';
+    if (evidence.mode === 'shadow') heading.append(element('small', 'Shadow evaluation'));
+    if (evidence.rule) heading.append(element('small', RULES[evidence.rule] || evidence.rule));
+    row.append(heading, element('td', number(evidence.score)),
+      ...evidence.excerpts.map(score => element('td', Number.isFinite(score) ? number(score) : '—')));
+  }
+  container.append(result);
+}
+
 export function renderInspector(container, samples) {
   const key = samples.map(sample => sample.id).join(',');
   if (container.dataset.samples === key) return;
   container.dataset.samples = key;
   if (!container.children.length) container.append(element('p',
-    'Measurements describe each 10-second excerpt, not the whole song. Loudness is measured from captured playback. Peak normalization removes gain, but does not measure perceived loudness. Tempo may be half or double the beat. Classifier scores are not measured emotions.'));
+    'Measurements describe each 10-second excerpt. Loudness is measured from captured playback. Tempo may be half or double the beat.'));
   let quality = container.querySelector('[data-vibe-measurement-summary]');
   if (!quality) {
     quality = element('p'); quality.dataset.vibeMeasurementSummary = '';
@@ -97,9 +144,8 @@ export function renderInspector(container, samples) {
       measurements.open = true;
       section.append(measurements);
     } else section.append(element('p', 'Audio attributes unavailable: this excerpt used the earlier extension build.'));
-    section.append(table('Mood model outputs (6)', Object.entries(sample.traits).map(([name, value]) =>
-      [name, number(value.score) + (['arousal', 'valence'].includes(name) ? ' (DEAM scale)' : '')])),
-    table('Music tags (50)', Object.entries(sample.tags).sort((a, b) => b[1] - a[1]).map(([key, value]) => [key, number(value)])));
+    section.append(table('Music tags (50)',
+      Object.entries(sample.tags).sort((a, b) => b[1] - a[1]).map(([key, value]) => [key, number(value)])));
     container.append(section);
   }
 }

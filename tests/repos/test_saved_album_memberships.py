@@ -1,4 +1,4 @@
-"""Album reconciliation needs successful observations of its original account cohort."""
+"""Saved albums reconcile after complete snapshots from all active accounts."""
 import pytest
 
 from tests.genre_catalog_support import bound_catalog
@@ -31,13 +31,14 @@ def album(browse):
 
 
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
-def test_unobserved_legacy_owner_survives_deactivation_and_restart(membership_store):
+def test_inactive_account_does_not_block_reconciliation_after_restart(membership_store):
     store = membership_store
     path = store._db_path
-    first = store.accounts.upsert_account('Main','bridge',None,True)
-    second = store.accounts.upsert_account('Other','bridge','other',False)
+    first = store.accounts.upsert_account('Main',None,True)
+    second = store.accounts.upsert_account('Other','other',False)
     store.collection.add_saved_album(album('unknown'))
     store.collection.replace_saved_album_snapshots({first:[]},now=1)
+    assert store.collection.saved_album_ids() == {'unknown'}
     with store.conn:
         store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (second,))
     store.conn.close()
@@ -46,37 +47,36 @@ def test_unobserved_legacy_owner_survives_deactivation_and_restart(membership_st
         store.conn.execute('PRAGMA synchronous=OFF')
         store.init_schema()
         store.collection.replace_saved_album_snapshots({first:[]},now=2)
-        assert store.collection.saved_album_ids()=={'unknown'}
-        assert {r[0] for r in store.conn.execute('SELECT account_id FROM account_album_state WHERE legacy_cohort_present=1')}=={first,second}
-        # An inactive account's submitted snapshot is not a successful observation.
+        assert store.collection.saved_album_ids() == set()
         assert store.collection.replace_saved_album_snapshots({second:[]},now=3)==set()
-        assert store.collection.saved_album_ids()=={'unknown'}
-        with store.conn:
-            store.conn.execute('UPDATE accounts SET active=1 WHERE id=?', (second,))
-        store.collection.replace_saved_album_snapshots({second:[]},now=4)
-        assert store.collection.saved_album_ids()==set()
+        assert [tuple(row) for row in store.conn.execute(
+            'SELECT id,saved_album_synced_at FROM accounts ORDER BY id')] == [(first, 2), (second, None)]
     finally:
         store.conn.close()
 
 
-def test_new_account_does_not_expand_the_original_legacy_cohort(store):
-    owner = store.accounts.upsert_account('Main','bridge',None,True)
+def test_new_active_account_requires_a_snapshot(store):
+    owner = store.accounts.upsert_account('Main',None,True)
     store.collection.add_saved_album(album('unknown'))
-    store.accounts.upsert_account('New','bridge','new',False)
+    new = store.accounts.upsert_account('New','new',False)
     store.collection.replace_saved_album_snapshots({owner:[]})
+    assert store.collection.saved_album_ids() == {'unknown'}
+    store.collection.replace_saved_album_snapshots({new: []})
     assert store.collection.saved_album_ids()==set()
 
 
-def test_legacy_without_any_original_accounts_cannot_be_resolved_vacuously(store):
+def test_unattributed_albums_resolve_after_the_first_account_syncs(store):
     store.collection.add_saved_album(album('unknown'))
-    owner = store.accounts.upsert_account('New','bridge',None,True)
+    assert store.collection.replace_saved_album_snapshots({}) == set()
+    assert store.collection.saved_album_ids() == {'unknown'}
+    owner = store.accounts.upsert_account('New',None,True)
     store.collection.replace_saved_album_snapshots({owner:[]})
-    assert store.collection.saved_album_ids()=={'unknown'}
+    assert store.collection.saved_album_ids() == set()
 
 
 def test_new_legacy_batch_needs_new_observations_and_retains_scoped_ownership(store):
-    first = store.accounts.upsert_account('Main','bridge',None,True)
-    second = store.accounts.upsert_account('Other','bridge','other',False)
+    first = store.accounts.upsert_account('Main',None,True)
+    second = store.accounts.upsert_account('Other','other',False)
     store.collection.add_saved_album(album('old'))
     store.collection.replace_saved_album_snapshots({first:[album('owned')],second:[]})
     assert store.collection.saved_album_ids()=={'owned'}
@@ -88,8 +88,8 @@ def test_new_legacy_batch_needs_new_observations_and_retains_scoped_ownership(st
 
 
 def test_added_legacy_evidence_invalidates_older_fetches_and_observations(store):
-    first = store.accounts.upsert_account('Main','bridge',None,True)
-    second = store.accounts.upsert_account('Other','bridge','other',False)
+    first = store.accounts.upsert_account('Main',None,True)
+    second = store.accounts.upsert_account('Other','other',False)
     store.collection.add_saved_album(album('old'))
     store.collection.replace_saved_album_snapshots({first:[]})
     revision = store.collection.saved_album_revision(first)
@@ -105,28 +105,28 @@ def test_stale_snapshot_is_rejected_across_store_connections(membership_store):
     path = membership_store._db_path
     first,second = membership_store,Store(path)
     try:
-        owner = first.accounts.upsert_account('Main','bridge',None,True)
+        owner = first.accounts.upsert_account('Main',None,True)
         second.conn.execute('PRAGMA synchronous=OFF')
         second.init_schema()
         revision = first.collection.saved_album_revision(owner)
         second.collection.add_saved_album(album('saved'),account_id=owner)
         assert first.collection.replace_saved_album_snapshots({owner:[]},expected_revisions={owner:revision})==set()
         assert first.collection.saved_album_ids()=={'saved'}
-        assert not first.conn.execute('SELECT * FROM account_album_state WHERE snapshot_observed_at IS NOT NULL').fetchall()
+        assert not first.conn.execute('SELECT 1 FROM accounts WHERE saved_album_synced_at IS NOT NULL').fetchone()
     finally:
         first.conn.close()
         second.conn.close()
 
 
 def test_snapshot_and_revision_rollback_together(store):
-    owner = store.accounts.upsert_account('Main','bridge',None,True)
+    owner = store.accounts.upsert_account('Main',None,True)
     store.collection.add_saved_album(album('saved'),account_id=owner)
     revision = store.collection.saved_album_revision(owner)
     with pytest.raises(KeyError):
         store.collection.replace_saved_album_snapshots({owner:[{'title':'Invalid'}]},expected_revisions={owner:revision})
     assert store.collection.saved_album_revision(owner)==revision
     assert store.collection.saved_album_ids()=={'saved'}
-    assert not store.conn.execute('SELECT * FROM account_album_state WHERE snapshot_observed_at IS NOT NULL').fetchall()
+    assert not store.conn.execute('SELECT 1 FROM accounts WHERE saved_album_synced_at IS NOT NULL').fetchone()
     assert store.collection.replace_saved_album_snapshots({owner:[]},expected_revisions={owner:revision})=={owner}
     # Even an empty complete snapshot invalidates another in-flight snapshot.
     assert store.collection.replace_saved_album_snapshots({owner:[album('stale')]},expected_revisions={owner:revision})==set()

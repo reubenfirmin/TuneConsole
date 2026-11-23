@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, create_autospec
+from contextlib import nullcontext
 
 import pytest
 
@@ -15,7 +16,8 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def feedback():
     repository = create_autospec(PlaybackFeedbackRepo, instance=True, spec_set=True)
     repository.try_access.return_value.__enter__.return_value = True
-    repository.has_receipt.return_value = False
+    repository.receipt_result.return_value = None
+    repository.projection.return_value = nullcontext()
     queue = create_autospec(PlaybackInbox, instance=True)
     queue.replaying = Mock()
     return PlaybackFeedback(repository, queue, SimpleNamespace(activity_paused=False))
@@ -31,15 +33,17 @@ def test_receipt_is_written_after_successful_projection(feedback):
         calls.append('projection')
         return True
 
-    assert feedback.apply_observation(row, project)
+    assert feedback.apply_observation(row, lambda store, row: row, project)
     feedback.repository.record_receipt.assert_called_once_with(row, True)
     assert calls == ['projection', 'receipt']
 
 
-def test_committed_receipt_skips_projection_after_acknowledgement_failure(feedback):
-    feedback.repository.has_receipt.return_value = True
-    project = Mock()
-    assert feedback.apply_observation({'capture_id': 'capture'}, project)
+@pytest.mark.parametrize('result', [True, False])
+def test_committed_receipt_skips_projection_after_acknowledgement_failure(feedback, result):
+    feedback.repository.receipt_result.return_value = result
+    prepare, project = Mock(), Mock()
+    assert feedback.apply_observation({'capture_id': 'capture'}, prepare, project) is result
+    prepare.assert_not_called()
     project.assert_not_called()
     feedback.repository.record_receipt.assert_not_called()
 
@@ -50,16 +54,18 @@ def test_busy_or_paused_replay_defers_without_projecting_or_writing(feedback, pa
         feedback.store.activity_paused = True
     else:
         feedback.repository.try_access.return_value.__enter__.return_value = False
-    project = Mock()
-    assert not feedback.apply_observation({'capture_id': 'capture'}, project)
+    prepare, project = Mock(), Mock()
+    assert feedback.apply_observation({'capture_id': 'capture'}, prepare, project) is None
+    prepare.assert_not_called()
     project.assert_not_called()
-    feedback.repository.has_receipt.assert_not_called()
+    feedback.repository.receipt_result.assert_not_called()
     feedback.repository.record_receipt.assert_not_called()
 
 
 def test_projection_failure_cannot_record_a_success_receipt(feedback):
     with pytest.raises(RuntimeError, match='interrupted'):
-        feedback.apply_observation({'capture_id': 'capture'}, Mock(side_effect=RuntimeError('interrupted')))
+        feedback.apply_observation({'capture_id': 'capture'}, lambda store, row: row,
+                                   Mock(side_effect=RuntimeError('interrupted')))
     feedback.repository.record_receipt.assert_not_called()
 
 

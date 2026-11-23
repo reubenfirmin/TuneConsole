@@ -1,4 +1,3 @@
-import json
 import logging
 import sqlite3
 from contextlib import closing, contextmanager
@@ -8,6 +7,7 @@ import numpy as np
 import pytest
 
 from yt_playlist.core import schema_inspection
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import measurement, rec_params, scorecard
@@ -64,12 +64,11 @@ def test_track_response_shares_policy_and_unchanged_models_skip_full_reads(store
     _record_visible_tracks(store, 101)
     assert len(policies) == 2
     assert reads == []  # Analytics writes and a new response time do not invalidate model inputs.
-    rows = store.conn.execute("SELECT model_version,provenance FROM rec_served_impressions").fetchall()
+    rows = store.conn.execute('SELECT id,policy_kind,propensity FROM rec_served_impressions').fetchall()
     assert len(rows) == 16
-    configs = [scorecard.served_recommendation(store, r[0])["configuration"] for r in
-               store.conn.execute("SELECT id FROM rec_served_impressions")]
-    assert {c["ranker"] for c in configs} == {"ppr", "lane"}
-    assert {json.loads(r["provenance"])["policy_kind"] for r in rows} == {"live", "counterfactual"}
+    served = [(row, scorecard.served_recommendation(store, row['id'])) for row in rows]
+    assert {(row['policy_kind'], row['propensity'], offer['configuration']['ranker']) for row, offer in served} == {
+        ('live', .5, 'ppr'), ('counterfactual', 0, 'lane')}
 
 
 @pytest.mark.parametrize("suffix,field", [
@@ -96,7 +95,7 @@ def test_catalog_inputs_invalidate_baskets_and_content_space_settings(store):
     store.tracks.set_track_genre(b, "Rock")
     after = measurement.serving_policy(store, 100)[1]["models"]
     assert before["baskets"] != after["baskets"]
-    store.settings.set_setting("rec_content_model", '{"cat":{},"ncat":0,"cont":[]}')
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder='{"cat":{},"ncat":0,"cont":[]}'))
     assert measurement.serving_policy(store, 100)[1]["models"]["content_space"] != after["content_space"]
 
 
@@ -117,16 +116,16 @@ def test_external_vector_write_invalidates_cached_identity(tmp_path, consumer_st
         store.conn.close()
 
 
-def test_mode_centroid_publication_invalidates_model_identity(store):
+def test_retired_mode_centroid_does_not_invalidate_active_model_identity(store):
     mode = {"mode_id": 1, "label": "Mode", "families": [], "centroid": [1., 0.], "size": 2, "rep_keys": []}
     store.modes.replace_modes([mode], [], 1)
-    before = measurement.serving_policy(store, 100)[1]["models"]["modes"]
+    before = measurement.serving_policy(store, 100)[1]["models"]
     store.modes.replace_modes([{**mode, "centroid": [0., 1.]}], [], 2)
-    assert measurement.serving_policy(store, 100)[1]["models"]["modes"] != before
+    assert measurement.serving_policy(store, 100)[1]["models"] == before
 
 
 def test_new_listening_evidence_invalidates_basket_identity(store):
-    identity = store.accounts.upsert_account("main", "ref", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     keys = []
     for i in range(2):
         tid = store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", None, 200)

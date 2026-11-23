@@ -7,30 +7,11 @@ import pytest
 
 from tests.test_mode_refresh_worker import scheduled
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.rec import rec_worker
+from yt_playlist.rec import maintenance, rec_worker
 from yt_playlist.rec.maintenance import Projections
 from yt_playlist.rec.worker_queue import Job, PendingJobs, Retry
 
 
-def test_requests_cannot_start_worker_until_storage_is_ready(scheduled, monkeypatch):
-    worker, targets = scheduled
-    ready = threading.Event()
-    worker.ctx.storage_maintenance = SimpleNamespace(ready=ready)
-    worker.ctx.store.settings.set_setting('runtime-is-writable', 'yes')
-    calls = []
-    offer = SimpleNamespace(surface='home', run=lambda: calls.append('measurement'), close=lambda: None)
-    monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('ratings') or set())
-    worker.trigger_rating_update()
-    assert not worker.enqueue_measurement(offer)
-    assert not worker._schedule(full=False, evidence_storage=True)
-    assert not targets and not worker.jobs
-    assert worker.ctx.store.settings.get_setting('runtime-is-writable') == 'yes'
-    ready.set()
-    worker.trigger_rating_update()
-    assert worker.enqueue_measurement(offer)
-    assert len(targets) == 1
-    targets.pop()()
-    assert calls == ['measurement', 'ratings']
 
 
 def test_detached_batches_preserve_new_arrivals_and_bound_artwork():
@@ -42,7 +23,7 @@ def test_detached_batches_preserve_new_arrivals_and_bound_artwork():
     queue.merge(Job.ARTWORK, range(50))
     queue.merge(Job.HOME)
     batch = queue.drain()
-    assert list(batch) == [Job.FULL, Job.MODES, Job.CONTENT, Job.HOME, Job.ARTWORK, Job.STORIES]
+    assert list(batch) == [Job.FULL, Job.MODES, Job.CONTENT, Job.HOME, Job.ARTWORK]
     assert batch[Job.ARTWORK] == [0, 1, 2]
     assert batch[Job.CONTENT] == {"one", "two"}
     queue.merge(Job.CONTENT, {"three"})
@@ -151,6 +132,7 @@ def test_direct_rebuild_hands_all_arrivals_to_one_serial_continuation(scheduled,
         calls.append("full")
         worker.trigger_rating_update()
         worker.trigger_home_refresh(force=True)
+        worker.trigger_story_refresh()
         worker.trigger_artist_images([4, 3, 2, 1])
         assert worker.enqueue_measurement(offer)
 
@@ -182,7 +164,7 @@ def test_arrival_during_a_job_is_drained_without_starting_another_worker(schedul
     worker.trigger_rating_update()
     assert len(targets) == 1
     targets.pop()()
-    assert calls == ["ratings", "home", "stories"] and not targets and not worker.busy
+    assert calls == ["ratings", "home"] and not targets and not worker.busy
 
 
 def test_model_backoff_preserves_retry_without_delaying_ratings(scheduled, monkeypatch):
@@ -192,7 +174,7 @@ def test_model_backoff_preserves_retry_without_delaying_ratings(scheduled, monke
     monkeypatch.setattr(rec_worker.time, "monotonic", lambda: now[0])
     # Missing/expired candidates have an independent recovery job. This case
     # isolates the model failure clock; candidate recovery is covered separately.
-    monkeypatch.setattr(worker.ctx.store.rec_proposals, 'has_proposals', lambda *_: True)
+    monkeypatch.setattr(worker.ctx.store.recommendations, 'head', lambda *_: {'id': 1})
     monkeypatch.setattr(candidate_refresh, 'due', lambda *_: False)
 
     def fail():
@@ -249,13 +231,13 @@ def test_expiry_refreshes_pools_without_refitting_models(scheduled, monkeypatch)
     worker._poll_refresh()
     assert calls == ['bundles']
     # A quiet hourly check advances the clock without preparing anything.
-    monkeypatch.setattr(worker.ctx.store.rec_proposals, 'has_proposals', lambda *_: True)
+    monkeypatch.setattr(worker.ctx.store.recommendations, 'head', lambda *_: {'id': 1})
     monkeypatch.setattr(candidate_refresh, 'due', lambda *_: calls.append('check') or False)
     wall[0] += candidate_refresh.CHECK_INTERVAL_S
     worker._poll_refresh()
     worker._poll_refresh()
     assert calls == ['bundles', 'check']
-    assert worker.ctx.store.settings.get_setting(candidate_refresh.CHECKED_AT) == str(wall[0])
+    assert float(worker.ctx.store.settings.get_setting(candidate_refresh.CHECKED_AT)) == wall[0]
 
 
 @pytest.mark.parametrize('bundles_pending', [False, True])
@@ -366,22 +348,42 @@ def test_successful_pool_build_coalesces_next_request_but_keeps_rating_work(sche
     restarted.shutdown()
 
 
-def test_projection_admission_can_be_used_without_a_worker_and_releases_rejected_jobs(store,monkeypatch):
-    monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS','1')
+def test_projection_admission_can_be_used_without_a_worker_and_releases_rejected_jobs(file_backed_store, monkeypatch):
+    store = file_backed_store
+    monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
+    monotonic = 100
+    monkeypatch.setattr(maintenance, 'time', SimpleNamespace(monotonic=lambda: monotonic))
     scheduled_kinds = []
-    accepting = [False]
+    accepting = False
+    expected = {"trends": True, "cleanup": True, "analytics": True, "library_taste": True}
 
     def schedule(kinds):
         scheduled_kinds.append(dict(kinds))
-        return accepting[0]
+        return accepting
 
+    def execute(label, prepare, *args):
+        if label == 'library_taste summary':
+            return prepare(*args)
+        return {}
+
+    assert store.rec_proposals.library_taste_summary() is None
     projections = Projections(store, lambda: 100, logging.getLogger(__name__), accepting=lambda: True,
-                              schedule=schedule, execute=lambda *args: {})
+                              schedule=schedule, execute=execute)
     projections.poll()
-    assert scheduled_kinds == [{"trends": True, "cleanup": True, "analytics": True}] and not projections.active
-    accepting[0] = True
+    assert scheduled_kinds == [expected] and not projections.active
+    accepting = True
     projections.poll()
+    assert scheduled_kinds == [expected, expected]
+    assert projections.active == set(expected)
+
+    summary = projections.run("library_taste")
+    assert summary is not None and store.rec_proposals.library_taste_summary() == summary
     assert projections.active == {"trends", "cleanup", "analytics"}
+    assert projections.completed["library_taste"][-1]
+    monotonic += 31
+    projections.poll()
+    assert scheduled_kinds == [expected, expected]
+
     projections.run("trends")
     assert projections.active == {"cleanup", "analytics"} and projections.completed["trends"][-1]
 

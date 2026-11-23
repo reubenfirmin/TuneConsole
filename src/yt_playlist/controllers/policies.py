@@ -1,6 +1,5 @@
-"""Validate immutable policy messages, publish files, then commit SQL receipts."""
+"""Validate immutable policies, publish files and commit their SQL owners."""
 import json
-from contextlib import ExitStack
 
 from yt_playlist.core import policy_config, policy_documents
 from yt_playlist.core.evidence_ledger import canonical
@@ -20,12 +19,7 @@ class Policies:
                                or max(len(rows), len(bases)) > policy_config.MAX_BATCH_VARIANTS):
             raise policy_config.PolicyStorageFull('Prepared policy batch exceeds its storage budget; retaining published pools')
         capacity = (policy_config.MAX_UNUSED_VARIANTS, policy_config.MAX_UNUSED_BYTES) if enforce_budget else None
-        with self.guard(), ExitStack() as retained:
-            if not self.repository.file_owned():
-                links = [(version, value[BASE_FIELD]) for version, raw, _created in rows
-                         if BASE_FIELD in (value := json.loads(raw))]
-                return self.repository.publish_legacy(rows, bases, links, capacity=capacity)
-            retained.enter_context(self.files.retained())
+        with self.guard(), self.files.retained():
             prepared = {True: {}, False: {}}
             for body, records in ((True, bases), (False, rows)):
                 for record in records:
@@ -67,16 +61,12 @@ class Policies:
                                                 'configuration': record['value']})) for record in pending)
                 if count + added_count > capacity[0] or size + added_bytes > capacity[1]:
                     raise policy_config.PolicyCapacityFull(count, size, added_count, added_bytes)
-            identities = self.repository.reserve_files(pending)
-            if len(identities) != len(pending):
-                raise ValueError('Policy reservation changed its record count')
-            pending = [record | {'file_id': identity} for record, identity in zip(pending, identities, strict=True)]
-            references = retained.enter_context(self.files.write_reserved(pending))
+            references = self.files.publish(pending)
             if len(references) != len(pending):
                 raise ValueError('Policy publication changed its record count')
             installed = []
             for record, (filename, digest, size, offset) in zip(pending, references, strict=True):
-                if digest != record['digest'] or size != record['size'] or offset != 0:
+                if digest != record['digest'] or size != record['size']:
                     raise ValueError('Policy publication changed a configuration')
                 installed.append({key: value for key, value in record.items() if key != 'value'} |
                                  dict(filename=filename, size=size, offset=offset))
@@ -90,8 +80,6 @@ class Policies:
 
     def captured(self, versions):
         versions = sorted(set(versions) - {None})
-        if not self.repository.file_owned():
-            return self.repository.legacy_capture(versions)
         with self.files.retained():
             facts = self.repository.records(versions)
             bases = {row['base_version'] for row in facts['policies'].values() if row['base_version'] is not None}
@@ -116,8 +104,6 @@ class Policies:
     def configuration(self, version):
         rows, bases = self.captured([version])
         if not rows:
-            if not self.repository.file_owned():
-                return None
             with self.files.retained():
                 saved = self.files.archived(version, self.repository.archived(version))
                 return unpack(saved) if saved else None
@@ -129,24 +115,16 @@ class Policies:
         header = self.repository.archived(version)
         return header['state'] if header else 'missing'
 
-    def retention_candidates(self, before, *, limit=None, cursor_key=None):
-        protected = policy_config.protected_references(self.repository.legacy_root_messages())
-        return self.repository.retention_candidates(before, protected=protected,
-            limit=policy_config.SCAN_LIMIT if limit is None else limit, byte_limit=policy_config.SCAN_BYTES,
-            cursor_key=policy_config.CURSOR if cursor_key is None else cursor_key)
+    def retention_candidates(self, before, *, limit=None):
+        return self.repository.retention_candidates(before,
+            limit=policy_config.SCAN_LIMIT if limit is None else limit, byte_limit=policy_config.SCAN_BYTES)
 
     def retirement_pending(self, before):
-        protected = policy_config.protected_references(self.repository.legacy_root_messages())
-        return self.repository.retirement_pending(before, protected=protected)
+        return self.repository.retirement_pending(before)
 
-    def restart_retirement(self):
-        self.repository.clear_retirement_cursor(policy_config.CURSOR)
-
-    def prune(self, versions, cursor, *, cursor_key=None):
+    def prune(self, versions):
         with self.guard():
-            protected = policy_config.protected_references(self.repository.legacy_root_messages())
-            return self.repository.prune([version for version in versions if version not in protected], cursor,
-                cursor_key=policy_config.CURSOR if cursor_key is None else cursor_key,
+            return self.repository.prune(versions,
                 limit=policy_config.SCAN_LIMIT, byte_limit=policy_config.SCAN_BYTES)
 
     def prepare_history(self, now, *, limit=None):
@@ -162,17 +140,12 @@ class Policies:
             records = self.files.archive_records(rows, bodies)
             if not records:
                 return 0
-            identities = self.repository.reserve_history(records)
-            if len(identities) != len(records):
-                raise ValueError('Historical policy reservation changed its record count')
+            identities = self.repository.reserve_history(len(records))
             records = [record | {'file_id': identity} for record, identity in zip(records, identities, strict=True)]
             with self.files.write_archive_reserved(records):
-                self.repository.publish_history(records)
-            return len(records)
+                return self.repository.publish_history(records, before)
 
     def maintain_history(self, now):
-        if not self.repository.history_available():
-            return 0
         converted = self.prepare_history(now)
         with self.guard():
             versions = self.repository.expiring_history(now - policy_config.HISTORY_RETAIN_DAYS * 86400,

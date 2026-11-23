@@ -15,7 +15,7 @@ from tests.rec.test_vibe_prediction import track
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.controllers.vibe_evaluation import VibeEvaluation
-from yt_playlist.core import catalog, db_handles, file_collection, profile_files
+from yt_playlist.core import catalog, file_collection, profile_files
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.providers.base import MetadataObservation
@@ -95,9 +95,8 @@ def comparison_inputs(scope, stratum):
 
 
 def runtime_comparison(rows, profiles, recording, artist, monkeypatch):
-    # Keep runtime profile preparation, cohort resolution and joint prediction
-    # real. SQL publication/restart belongs to test_vibe_prediction; this owner
-    # compares the offline calculation with that exact runtime calculation.
+    # Compare the frozen arithmetic baseline and the production joint scorer
+    # on the same held-out target and original measurements.
     key = 'heldout|target artist'
     profile = profiles[str(recording)]
     raw = json.dumps(profile['content'])
@@ -110,23 +109,21 @@ def runtime_comparison(rows, profiles, recording, artist, monkeypatch):
                 continue
             evidence = {'fits': {vibe: {'score': row['score'], 'support': row['support']}}}
             for group in vibe_prediction.groups(json.dumps(row['artists']), row['genre']):
-                cohort = cohorts.setdefault(group, {'stats': {}, 'inputs': {}})
-                cohort['stats'] = vibe_prediction.adjust(cohort['stats'], evidence, 1)
-                cohort['inputs'].setdefault(vibe, {})[str(row['recording'])] = row['measurement']
+                cohorts[group] = vibe_prediction.adjust(cohorts.get(group, {}), evidence, 1)
     reader = SimpleNamespace(
         musical_profiles=SimpleNamespace(recording_inputs=lambda *_args, **_kwargs: deepcopy(source_inputs)),
         genres=SimpleNamespace(feature_axes=lambda _labels: {'Psybient': ('electronic', 'psybient')}),
         vibe_predictions=SimpleNamespace(
-            inputs=lambda _keys: {key: {'recording': recording, 'artist': json.dumps([artist]),
-                                       'samples': [], 'metadata': {}, 'old': None}},
-            groups=lambda keys: deepcopy({group: cohorts[group] for group in keys if group in cohorts}),
+            inputs=lambda _keys, *, usable_samples: {key: {'recording': recording, 'artist': json.dumps([artist]),
+                                                           'samples': [], 'metadata': {}, 'old': None}},
             retained_joint_fits=lambda _keys: {},
+            retained_conditioning=lambda _prediction: None,
             joint_albums=lambda _keys: {}))
     musical = musical_preparation.recordings(page, inputs=source_inputs)
-    monkeypatch.setattr(vibe_joint_state, 'QUALIFICATIONS', {})
-    monkeypatch.setattr(vibe_joint_state, 'posterior', lambda *_args: None)
-    incumbent, _ = vibe_preparation.recordings(reader, page, musical, source_inputs=source_inputs)
-    old = json.loads(incumbent[0][1])['vibes']['fits']
+    metadata = evaluation.masked_profile(profile)
+    fallback = {vibe: home_vibe.heuristic_affinity(metadata, vibe) for vibe in rows}
+    groups = vibe_prediction.groups(json.dumps([artist]), 'psybient')
+    old = vibe_prediction.resolve(fallback, None, [(group, cohorts[group]) for group in groups if group in cohorts])['fits']
     posteriors = {}
     for vibe, originals in rows.items():
         training = [{**row, 'metadata_prior': home_vibe.heuristic_affinity(
@@ -150,9 +147,12 @@ def test_frozen_masked_comparison_matches_runtime_and_ignores_target_observation
     recording, artist, fold, rows, profiles = comparison_inputs(scope, stratum)
     old, candidate = runtime_comparison(rows, profiles, recording, artist, monkeypatch)
     assert old['relax']['source'] == ('artist_genre' if stratum == 'known' else 'heuristic')
-    assert candidate['relax']['source'] == ('artist_genre' if stratum == 'known' else 'artist')
-    assert all(fit['generation'] == 'controlled-generation' and
-               fit['new_track_variance'] > fit['mean_variance'] > 0 for fit in candidate.values())
+    if stratum == 'known':
+        assert set(candidate) == set(home_vibe.PRESETS)
+        assert all(fit['source'] == 'artist_genre' and fit['generation'] == 'controlled-generation' and
+                   fit['new_track_variance'] > fit['mean_variance'] > 0 for fit in candidate.values())
+    else:
+        assert candidate == {}
     # Snapshot capture has its real SQL/file owners below. Only its completed
     # lower output is supplied here. Freeze and validate each distinct plan,
     # then reuse that loaded input beneath all six real heldout fits, including
@@ -186,7 +186,11 @@ def test_frozen_masked_comparison_matches_runtime_and_ignores_target_observation
             assert row['recording'] == recording and result['training_recordings'] == 2
             assert row['truth'] == truth
             assert row['baseline'] == pytest.approx(old[vibe]['score'])
-            assert row['candidate'] == pytest.approx(candidate[vibe]['score'])
+            if stratum == 'known':
+                assert row['candidate'] == pytest.approx(candidate[vibe]['score'])
+            else:
+                assert row['new_track_variance'] > row['mean_variance'] > 0
+                assert row['interval90'][0] <= row['candidate'] <= row['interval90'][1]
             actual[vibe] = {name: row[name] for name in ('baseline', 'candidate', 'interval90')}
         scores.append(actual)
     assert plans[0]['profile_inputs'] == plans[1]['profile_inputs']
@@ -230,9 +234,9 @@ def masked_source(file_backed_store):
         {'key': 'heldout-upload|target artist', 'title': 'heldout-upload',
          'artist': 'Target artist', 'video_id': 'heldout-upload', 'genre': 'Psybient'},
     ])
-    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+    entries = dict(store.conn.execute('SELECT video_id,id FROM track_sources'))
     target, alternate = entries['heldout'], entries['heldout-upload']
-    recording, = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (target,)).fetchone()
+    recording, = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (target,)).fetchone()
     with store.conn:
         catalog.associate_item(store.conn, 'heldout-upload', recording, source='verified',
                                evidence={'same': True}, now=1, same_recording=True)
@@ -255,22 +259,16 @@ def test_masked_capture_filters_before_source_slots_and_never_reads_target_files
         store.conn.executemany("INSERT INTO rec_musical_sources "
             "(source_key,provider,scope,entity_id) VALUES (?,'fixture','recording','heldout-native')",
             [(source,) for source in blocked])
-        store.conn.executemany('INSERT INTO rec_musical_links VALUES (?,?,?)',
+        store.conn.executemany('INSERT INTO rec_musical_links(source_key,recording_id,delivery_id) VALUES (?,?,?)',
                                [(source, recording, '') for source in blocked])
-    size, read = profile_files.size, profile_files.read
-    def allowed_source(source):
-        assert store.conn.execute('SELECT scope FROM rec_musical_sources WHERE source_key=?',
-                                  (source,)).fetchone()[0] == scope
-    def masked_size(conn, kind, source):
-        assert kind == 'source'
-        allowed_source(source)
-        return size(conn, kind, source)
-    def masked_read(conn, kind, source, **options):
-        assert kind == 'source'
-        allowed_source(source)
-        return read(conn, kind, source, **options)
-    monkeypatch.setattr(profile_files, 'size', masked_size)
-    monkeypatch.setattr(profile_files, 'read', masked_read)
+    original = profile_files.ProfileFiles._original
+    def checked_file(files, kind, reference, cache):
+        if kind == 'source':
+            source = reference[0]
+            assert store.conn.execute('SELECT scope FROM rec_musical_sources WHERE source_key=?',
+                                      (source,)).fetchone()[0] == scope
+        return original(files, kind, reference, cache)
+    monkeypatch.setattr(profile_files.ProfileFiles, '_original', checked_file)
     for turn, calm in enumerate((False, True)):
         # Leave the 66 disallowed source bodies unprepared. Reading even one
         # would fail: scope admission must precede file reads and source slots.
@@ -284,7 +282,7 @@ def test_masked_capture_filters_before_source_slots_and_never_reads_target_files
                 ], run_id='mutation-' + str(turn), now=2000 + turn)
             with store.conn:
                 for entry in (target, alternate):
-                    for field, value in (('energy', .01 if calm else .99), ('bpm', 60 if calm else 240),
+                    for field, value in (('bpm', 60 if calm else 240),
                                          ('mood_relaxed', .99 if calm else .01)):
                         catalog.choose_field(store.conn, entry, field, value, now=2000 + turn)
         _references, _choices, truncated = store.musical_profiles.repository.recording_facts([key])[key]
@@ -298,7 +296,7 @@ def test_masked_capture_filters_before_source_slots_and_never_reads_target_files
         finally:
             store.conn.execute('PRAGMA query_only=OFF')
         assert store.conn.total_changes == changes
-    assert store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?',
+    assert store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?',
                               (alternate,)).fetchone()[0] == recording
 
 
@@ -309,13 +307,13 @@ def test_masked_capture_rejects_relational_overflow_without_reading_source_files
         store.conn.executemany('INSERT INTO rec_musical_sources '
             "(source_key,provider,scope,entity_id) VALUES (?,'fixture','recording','overflow')",
             [(source,) for source in overflow])
-        store.conn.executemany('INSERT INTO rec_musical_links VALUES (?,?,?)',
+        store.conn.executemany('INSERT INTO rec_musical_links(source_key,recording_id,delivery_id) VALUES (?,?,?)',
                                [(source, recording, '') for source in overflow])
     # Capture owns SQL and FAO reads; the completed training manifest is a
     # separate lower input, independent of the link-overflow admission rule.
     monkeypatch.setattr(VibeEvaluation, 'training_manifest', lambda *_args, **_kwargs:
                         [{'recording': recording}])
-    monkeypatch.setattr(profile_files, 'read', lambda *_args, **_kwargs:
+    monkeypatch.setattr(profile_files.ProfileFiles, '_original', lambda *_args, **_kwargs:
                         pytest.fail('Overflow capture read an unprepared source body'))
     # Freeze opens its own database connection. Any committed write through
     # that connection changes data_version, even a later commit restoring the
@@ -328,20 +326,15 @@ def test_masked_capture_rejects_relational_overflow_without_reading_source_files
     assert (store.conn.execute('PRAGMA main.data_version').fetchone()[0], store.conn.total_changes) == state
 
 
-def test_masked_snapshot_holds_database_and_file_lifetimes_until_capture_finishes(masked_source, monkeypatch):
+def test_masked_snapshot_holds_file_lifetimes_until_capture_finishes(masked_source, monkeypatch):
     store, target, _alternate, recording, _key = masked_source
     observe(store, target, [{'name': 'Ambient'}], scope='artist', entity='allowed-description')
     assert prepare_source(store, monkeypatch)
     expected = vibe_evaluation.evaluation_profile_inputs(store.conn, [recording])
     database, root = store._db_path, profile_files.directory(store.conn)
     store.conn.close()
-    with db_handles.lease(database, exclusive=True, timeout=0):
-        pass
     capture_profiles = vibe_evaluation.evaluation_profile_inputs
     def retained_inputs(conn, recordings, **options):
-        with pytest.raises(TimeoutError):
-            with db_handles.lease(database, exclusive=True, timeout=0):
-                pytest.fail('Capture admitted database replacement')
         with file_collection.collector(root) as admitted:
             assert admitted is False
         return capture_profiles(conn, recordings, **options)
@@ -350,8 +343,6 @@ def test_masked_snapshot_holds_database_and_file_lifetimes_until_capture_finishe
     monkeypatch.setattr(vibe_evaluation, 'evaluation_profile_inputs', retained_inputs)
     snapshot = vibe_evaluation.evaluation_snapshot(database, tuple(home_vibe.PRESETS))
     assert snapshot['profile_inputs'] == expected
-    with db_handles.lease(database, exclusive=True, timeout=0):
-        pass
     with file_collection.collector(root) as admitted:
         assert admitted is True
 
@@ -391,8 +382,8 @@ def test_categorical_freeze_keeps_revisions_and_withdrawals_without_samples(file
     first, _ = track(store, 'judged', artist='First artist', genre='Psybient')
     alternate, _ = track(store, 'judged-upload', artist='First artist', genre='Psybient')
     other, _ = track(store, 'reserved', artist='New artist', genre='Doom Metal')
-    recording, = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (first,)).fetchone()
-    reserved, = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (other,)).fetchone()
+    recording, = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (first,)).fetchone()
+    reserved, = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (other,)).fetchone()
     with store.conn:
         catalog.associate_item(store.conn, 'judged-upload', recording, source='verified',
             evidence={'same': True}, now=1, same_recording=True)

@@ -3,6 +3,7 @@ import math
 
 VERSION = 'specialist-intensity-max-1'
 CHANNELS = ('energize', 'release')
+SOURCES = ('audio_measurement', 'artist', 'artist_genre')
 
 
 def ensemble(fits):
@@ -15,7 +16,7 @@ def ensemble(fits):
     available = {}
     for name in CHANNELS:
         fit = fits.get(name)
-        if not isinstance(fit, dict) or fit.get('source') == 'heuristic':
+        if not isinstance(fit, dict) or fit.get('source') not in SOURCES:
             continue
         score, support = fit.get('score'), fit.get('support')
         if (type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 1

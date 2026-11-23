@@ -6,11 +6,11 @@ import sqlite3
 
 from tests import file_custody_support as custody
 from yt_playlist.core import evidence_ledger, policy_documents
-from yt_playlist.core.db_rebuild import job
 
 
 def copy_readonly_library(path, destination, monkeypatch, report):
     from tests.library_image.fixtures import managed_database
+    from tests.library_image.schema_coordinates import read_schema
     managed = managed_database(path, report)
     if managed is not None:
         return managed
@@ -60,9 +60,11 @@ def copy_readonly_library(path, destination, monkeypatch, report):
         with monkeypatch.context() as capture:
             capture.setattr(policy_documents, 'retained_reader', read_only_fence)
             capture.setattr(evidence_ledger.EvidenceLedger, '_budget', read_only_budget)
-            with job._files(source):
+            with custody.retained_readers(source):
                 source.execute('BEGIN')
-                report['source_version'] = source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]
+                schema = read_schema(source)
+                report['source_schema'] = schema
+                report['source_version'] = schema['schema']
                 source.backup(copied, pages=128)
                 manifests = custody.export_files(source, destination)
                 evidence = path.with_name(path.name + '.evidence')

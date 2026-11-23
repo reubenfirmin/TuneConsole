@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import schema_definition
+from yt_playlist.core.migrations import schema_definition
 from yt_playlist.core.schema_contract import tokens
 
 

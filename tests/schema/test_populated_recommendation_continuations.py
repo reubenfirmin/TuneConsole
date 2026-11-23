@@ -19,7 +19,7 @@ import pytest
 
 from tests.schema import populated_scope_restart
 from yt_playlist.core import (
-    group_documents, group_storage, prepared_inputs,
+    content_work, group_documents, group_storage, prepared_inputs, profile_files,
     recommendation_outputs, recommendation_pools,
 )
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
@@ -45,7 +45,7 @@ def _sha(path):
 
 def _sources():
     paths = (
-        'core/store.py', 'core/db_reads.py', 'core/db_rebuild/sqlite_checks.py',
+        'core/store.py', 'core/db_reads.py', 'core/migrations/regular.py',
         'core/recommendation_outputs.py', 'core/recommendation_pools.py',
         'core/migrations/current.py', 'core/migrations/registry.py',
         'core/migrations/runner.py', 'core/schema/current.json',
@@ -140,23 +140,22 @@ def isolated_current_library(request, tmp_path_factory):
 
 
 def _heads(conn):
-    return dict(conn.execute('SELECT surface,generation_id FROM recommendation_heads ORDER BY surface'))
+    return dict(conn.execute('SELECT surface,generation_id FROM recommendation_generation_surfaces '
+                             'WHERE selected=1 ORDER BY surface'))
 
 
 def _slots(conn):
     return {(r[0], r[1], r[2]): r[3] for r in conn.execute(
-        'SELECT m.surface,m.mode_key,m.purpose,m.pool_id FROM recommendation_heads h '
+        'SELECT m.surface,m.mode_key,m.purpose,m.pool_id FROM recommendation_generation_surfaces h '
         'JOIN recommendation_surface_pools m ON m.generation_id=h.generation_id AND m.surface=h.surface '
-        'ORDER BY m.surface,m.mode_key,m.purpose')}
+        'WHERE h.selected=1 ORDER BY m.surface,m.mode_key,m.purpose')}
 
 
 def _rows(conn, identity):
     return conn.execute(
-        "SELECT 'recording',c.recording_id,c.rank,c.score,b.intensity_band,b.genre_key "
-        'FROM recommendation_candidates c LEFT JOIN recommendation_radio_bands b '
-        'ON b.pool_id=c.pool_id AND b.recording_id=c.recording_id WHERE c.pool_id=? '
-        "UNION ALL SELECT 'unresolved',raw_key,rank,score,intensity_band,genre_key "
-        'FROM unresolved_recommendation_candidates WHERE pool_id=? ORDER BY 3', (identity, identity))
+        "SELECT CASE WHEN recording_id IS NULL THEN 'unresolved' ELSE 'recording' END, "
+        'COALESCE(recording_id,raw_key),rank,score,intensity_band,genre_key '
+        'FROM recommendation_candidates WHERE pool_id=? ORDER BY rank', (identity,))
 
 
 def _pool_fingerprint(conn, identity):
@@ -178,18 +177,18 @@ def _prepared_pool(conn, identity):
         cls = recommendation_pools.Candidate if kind == 'recording' else recommendation_pools.UnresolvedCandidate
         values.append(cls(owner, score, band, genre))
     prepared = recommendation_pools.prepare(header['pool_key'], header['policy_version'],
-        header['group_version_id'], header['input_fingerprint'], header['purpose'], values)
+        header['input_fingerprint'], header['purpose'], values)
     assert prepared.content_digest == header['content_digest']
     return prepared
 
 
 def _allocation(conn):
     tables = ('recommendation_generations', 'recommendation_pools', 'recommendation_candidates',
-              'unresolved_recommendation_candidates', 'recommendation_radio_bands',
-              'recommendation_surface_pools', 'prepared_outputs')
+              'recommendation_surface_pools', 'recommendation_chunks')
+    storage = (*tables[:-1], 'collection_file_writes')
     names = [row[0] for row in conn.execute(
         'SELECT name FROM sqlite_schema WHERE (type=\'table\' OR type=\'index\') AND tbl_name IN ('
-        + ','.join('?' for _ in tables) + ')', tables)]
+        + ','.join('?' for _ in storage) + ')', storage)]
     return {
         'rows': {table: conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for table in tables},
         'allocated_bytes': sum(row[0] for row in conn.execute(
@@ -251,13 +250,13 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
         values = list(original_pool.candidates)
         values[index] = replace(values[index], score=changed_score)
         changed_pool = recommendation_pools.prepare(original_pool.pool_key, original_pool.policy_version,
-            original_pool.group_version_id, hashlib.sha256(canonical(
+            hashlib.sha256(canonical(
                 ['review486-score-update', original_pool.input_fingerprint, changed_recording, changed_score])).hexdigest(),
             original_pool.purpose, values)
         slots = tuple(publication.Slot(*slot, changed_pool if slot == selected_slot else surface_pools[identity])
                       for slot, identity in before_slots.items() if slot[0] == 'fresh')
         chunks = []
-        for row in conn.execute('SELECT * FROM prepared_outputs WHERE generation_id=? AND surface=? ORDER BY id',
+        for row in conn.execute('SELECT * FROM recommendation_chunks WHERE generation_id=? AND surface=? ORDER BY id',
                                 (before_heads['fresh'], 'fresh')):
             encoded = recommendation_outputs._read(row['filename'], row['content_digest'], row['byte_size'],
                                                     surface='fresh', chunk_key=row['chunk_key'])
@@ -327,8 +326,7 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
             assert _pool_fingerprint(conn, identity) == expected, f'Original pool {identity} changed'
         expected_rows = len(changed_pool.candidates)
         assert report['sql_row_deltas']['recommendation_pools'] == 1
-        assert (report['sql_row_deltas']['recommendation_candidates']
-                + report['sql_row_deltas']['unresolved_recommendation_candidates']) == expected_rows
+        assert report['sql_row_deltas']['recommendation_candidates'] == expected_rows
         report.update(new_pool_id=new_id, unrelated_heads_slots_and_original_full_content_preserved=True,
                       candidate_row_write_amplification=expected_rows,
                       held_original_pool_fingerprint=before_facts[old_id])
@@ -388,7 +386,7 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
         assert len(cards) == 4 and all(len(card['tracks']) == 12 for card in cards)
         phase[0] = 'radio'
         started = time.monotonic()
-        radio = RadioCandidates(store, now, comparison=None)
+        radio = RadioCandidates(store, now)
         try:
             radio.rng.seed(0)
             seeds = radio.seed_offer(12)
@@ -418,7 +416,7 @@ def _group_allocation(conn):
     tables = [row[0] for row in conn.execute(
         "SELECT name FROM sqlite_schema WHERE type='table' AND (name GLOB 'group_*' "
         "OR name GLOB 'unresolved_group_*' OR name IN "
-        "('taste_groups','generation_groups','rec_group_clock')) ORDER BY name")]
+        "('taste_groups','rec_group_clock')) ORDER BY name")]
     objects = [row[0] for row in conn.execute(
         "SELECT name FROM sqlite_schema WHERE type IN ('table','index') AND tbl_name IN ("
         + ','.join('?' for _ in tables) + ') ORDER BY name', tables)]
@@ -443,17 +441,17 @@ def _group_allocation(conn):
 def _retained_group_snapshot(store, generation, alias):
     definition = store.taste_groups.definition(alias, generation=generation)
     assert definition is not None, 'The exact historical served alias must remain readable'
-    version = store.conn.execute('SELECT group_version_id FROM group_version_aliases '
-                                 'WHERE external_version=?', (alias,)).fetchone()[0]
+    version = store.conn.execute('SELECT v.id FROM group_versions v JOIN group_generations g ON g.id=v.generation_id '
+                                 'WHERE v.external_version=? AND g.external_key=?', (alias, generation)).fetchone()[0]
     digest, records = hashlib.sha256(), 0
     for encoded in group_storage.version_rows(store.conn, version):
         digest.update(encoded)
         digest.update(b'\n')
         records += 1
-    members = {table: store.conn.execute(
-        f'SELECT count(*) FROM {table} WHERE group_version_id=?', (version,)).fetchone()[0]
-        for table in ('group_members', 'unresolved_group_members')}
-    assert members['group_members'] > 0, 'Retained-version proof needs genuine populated members'
+    resolved, unresolved = store.conn.execute(
+        'SELECT count(recording_id),count(raw_key) FROM group_members WHERE group_version_id=?', (version,)).fetchone()
+    members = {'resolved': resolved, 'unresolved': unresolved}
+    assert resolved > 0, 'Retained-version proof needs genuine populated members'
     return {'definition': definition, 'canonical_version_id': version,
             'member_counts': members, 'stream_records': records, 'full_content_sha256': digest.hexdigest()}
 
@@ -502,15 +500,16 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
                         key=lambda group: (group['size'], group['version']))
         for group in leaves:
             rows = conn.execute(
-                'SELECT p.*,r.identity_key,m.payload actual_profile FROM group_version_aliases a '
-                'JOIN group_members g ON g.group_version_id=a.group_version_id '
+                'SELECT p.*,r.identity_key FROM group_versions v '
+                'JOIN group_generations h ON h.id=v.generation_id AND h.is_active=1 '
+                'JOIN group_members g ON g.group_version_id=v.id '
                 'JOIN recordings r ON r.id=g.recording_id JOIN prepared_recording_inputs p ON p.recording_id=r.id '
-                'JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
-                'WHERE a.external_version=? AND p.library_present=1 AND NOT EXISTS('
-                'SELECT 1 FROM recording_redirects d WHERE d.retired_id=r.id) ORDER BY r.id', (group['version'],))
+                'WHERE v.external_version=? AND p.library_present=1 AND r.musical_profile_version IS NOT NULL '
+                'AND r.redirect_recording_id IS NULL ORDER BY r.id', (group['version'],))
             for row in rows:
                 inputs = prepared_inputs.payload(row)
-                profile = json.loads(row['actual_profile']) if row['actual_profile'] else None
+                actual_profile = profile_files.read(conn, 'recording', row['identity_key'])
+                profile = json.loads(actual_profile) if actual_profile else None
                 original = group_similarity.recording(row['identity_key'], inputs['library'], profile)
                 alternatives = sorted((genre for genre in genres if genre != original.genre),
                     key=lambda genre: (genre_map.family(genre) == original.family, genre))
@@ -519,15 +518,18 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
                 inputs['library']['genre'] = alternatives[0]
                 expected = group_versions.recording_inputs([
                     group_similarity.recording(row['identity_key'], inputs['library'], profile)])[row['identity_key']]
-                if previous['payload']['recording_inputs'].get(row['identity_key']) == expected:
+                previous_inputs = previous['payload']['recording_inputs']
+                previous_digest = previous_inputs.get(f"recording:{row['recording_id']}",
+                                                      previous_inputs.get(row['identity_key']))
+                if previous_digest == expected:
                     continue
-                selected = (dict(row), group, inputs, profile, expected)
+                selected = (dict(row), group, inputs, profile, expected, actual_profile)
                 break
             rows.close()
             if selected is not None:
                 break
         assert selected is not None, 'No suitable actual retained member and genuine genre change found'
-        row, group, inputs, profile, expected = selected
+        row, group, inputs, profile, expected, actual_profile = selected
         key, alias = row['identity_key'], group['version']
         raw = json.dumps(inputs, sort_keys=True, separators=(',', ':'))
         digest = hashlib.sha256(raw.encode()).hexdigest()
@@ -538,7 +540,7 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
                       expected_group_input_digest=expected, original_retained_version=old_snapshot,
                       actual_profile_sha256=hashlib.sha256(canonical(profile)).hexdigest(),
                       storage_before=_group_allocation(conn))
-        queued = list(map(tuple, conn.execute('SELECT * FROM rec_content_pending ORDER BY position,identity_key')))
+        queued = content_work.pending(conn, -1)
         counters = store.prepared_content.counters()
         now = time.time()
         store.taste_groups.retain_evidence('prepared', f'review485-retained:{time.time_ns()}',
@@ -552,9 +554,8 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
         assert prepared_inputs.payload(accepted) == inputs and accepted['digest'] == digest
         assert accepted['input_revision'] == counters[0] + 1
         assert store.prepared_content.counters() == (counters[0] + 1, counters[1])
-        assert list(map(tuple, conn.execute('SELECT * FROM rec_content_pending ORDER BY position,identity_key'))) == queued
-        actual_profile = conn.execute('SELECT payload FROM rec_musical_profiles WHERE identity_key=?', (key,)).fetchone()
-        assert (actual_profile[0] if actual_profile else None) == row['actual_profile']
+        assert content_work.pending(conn, -1) == queued
+        assert profile_files.read(conn, 'recording', key) == actual_profile
         report.update(queued_rows_preserved=len(queued), accepted_input_counter_delta=1, status='preparing')
         report['original_shadow_setting'] = store.settings.get_setting('rec_group_shadow')
         if report['original_shadow_setting'] == '0':
@@ -634,7 +635,7 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
                                                - report['storage_before']['referenced_file_bytes'])
         assert _retained_group_snapshot(store, previous['generation'], alias) == old_snapshot
         report['retained_version_unchanged_after_preparation'] = True
-        assert list(map(tuple, conn.execute('SELECT * FROM rec_content_pending ORDER BY position,identity_key'))) == queued
+        assert content_work.pending(conn, -1) == queued
         final = store.taste_groups.head()
         if published:
             assert final['generation'] != previous['generation']
@@ -654,8 +655,7 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
         assert store.taste_groups.head_generation() == final['generation']
         assert _retained_group_snapshot(store, previous['generation'], alias) == old_snapshot
         report['retained_version_unchanged_after_reopen'] = True
-        assert list(map(tuple, store.conn.execute(
-            'SELECT * FROM rec_content_pending ORDER BY position,identity_key'))) == queued
+        assert content_work.pending(store.conn, -1) == queued
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
         assert published, 'Grouping deferred within unchanged production budgets; inspect group-input-continuation.json'
         report['status'] = 'passed'

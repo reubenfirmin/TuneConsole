@@ -24,8 +24,8 @@ from yt_playlist.web.spotify_import import JOB_KEY, save_job
 @pytest.mark.parametrize("operation", ["find-album-candidates", "resolve-album"])
 @pytest.mark.parametrize("overlap", ["delete", "replace"])
 def test_album_operation_rejects_overlapping_report_deletion_or_replacement(store, operation, overlap):
-    first = store.accounts.upsert_account("First", "first", None, True)
-    second = store.accounts.upsert_account("Second", "second", None, False)
+    first = store.accounts.upsert_account("First", None, True)
+    second = store.accounts.upsert_account("Second", None, False)
     entered, release = threading.Event(), threading.Event()
 
     class BlockingClient(AlbumClient):
@@ -116,7 +116,7 @@ def test_failed_album_operation_releases_report_owner(store, monkeypatch, operat
     waits = []
     monkeypatch.setattr(spotify_library, 'with_retry',
                         partial(spotify_library.with_retry, sleep=waits.append))
-    iid = store.accounts.upsert_account("First", "first", None, True)
+    iid = store.accounts.upsert_account("First", None, True)
     client = AlbumClient()
     client.results["One Artist"].append({**client.results["One Artist"][0], "browseId": "MPRE-alternate"})
     report = import_spotify_library(store, album_zip("One"), client, iid, 100)
@@ -143,8 +143,8 @@ def test_failed_album_operation_releases_report_owner(store, monkeypatch, operat
 
 @pytest.mark.parametrize("handoff", ["completed", "replacement", "deleted"])
 def test_status_poll_preserves_report_completed_or_replaced_during_its_read(store, monkeypatch, handoff):
-    first = store.accounts.upsert_account("First", "first", None, True)
-    second = store.accounts.upsert_account("Second", "second", None, False)
+    first = store.accounts.upsert_account("First", None, True)
+    second = store.accounts.upsert_account("Second", None, False)
     provider_entered, finish_provider = threading.Event(), threading.Event()
     poll_read, finish_poll = threading.Event(), threading.Event()
 
@@ -230,7 +230,7 @@ def test_status_poll_preserves_report_completed_or_replaced_during_its_read(stor
 
 @pytest.mark.parametrize("status", ["queued", "running"])
 def test_status_poll_recovers_a_genuinely_interrupted_import(store, status):
-    identity = store.accounts.upsert_account("Destination", "credential", None, True)
+    identity = store.accounts.upsert_account("Destination", None, True)
     previous = {"status": status, "account_id": identity, "started_at": 900}
     save_job(store, previous)
     app = create_app(store, lambda: {identity: AlbumClient()}, now_fn=lambda: 1000,

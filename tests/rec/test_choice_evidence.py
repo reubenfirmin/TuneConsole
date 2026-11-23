@@ -10,25 +10,23 @@ def offer(store, identity="menu", episode="episode", now=100):
                          opportunity_id=identity, episode_id=episode)
 
 
-def test_mix_menu_availability_owns_the_serving_connection(store, monkeypatch):
+def test_mix_menu_publication_owns_the_serving_connection(store, monkeypatch):
     from yt_playlist.core import mix_choices
 
-    assert mix_choices.available(store.conn)
     observed = []
-    original = mix_choices.available
+    original = mix_choices.insert_menu
 
-    def available(connection):
-        if connection is store.conn:
-            observed.append(store._lock.held_by_current_thread)
-        return original(connection)
+    def insert_menu(connection, plan):
+        observed.append((connection is store.conn, store._lock.held_by_current_thread, connection.in_transaction))
+        return original(connection, plan)
 
-    monkeypatch.setattr(mix_choices, 'available', available)
+    monkeypatch.setattr(mix_choices, 'insert_menu', insert_menu)
     identity = choices.issue(store, 'mixes', [
         {'id': 'comfort', 'label': 'Comfort listening', 'intent': 'comfort', 'genres': ['jazz']}],
         100, context={}, opportunity_id='serving-guard')
 
     assert identity == 'serving-guard'
-    assert observed and all(observed), observed
+    assert observed == [(True, True, True)]
     assert choices.opportunity(store, identity)['options'][0]['descriptor_id']
 
 
@@ -74,7 +72,7 @@ def test_unknown_menus_wrong_options_and_chronology_are_not_invented(store):
 
 
 def test_mix_playback_resolves_recipe_from_exact_external_queue(store):
-    iid = store.accounts.upsert_account("main", "test", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL-generated", "Generated mix", 1, "h", 1)
     oid = choices.issue(store, "mixes", [{"id": "comfort", "tracks": []}], 100,
                         context={}, opportunity_id="mix")

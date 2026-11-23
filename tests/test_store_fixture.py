@@ -6,9 +6,9 @@ from contextlib import closing
 import pytest
 
 from tests.home_fixture_support import browser_store
-from tests.store_fixture_support import mock_snapshot_coordinator
-from yt_playlist.core import group_preview_work
+from yt_playlist.core.group_preparation_state import ROOTS
 from yt_playlist.core.store import Store
+from yt_playlist.core.worker_settings import save
 
 
 def _logical_state(conn):
@@ -92,11 +92,11 @@ def test_consumer_fixture_matches_a_genuine_fresh_bootstrap(
 @pytest.mark.parametrize('fixture_name', ['store', 'file_backed_store', 'browser_store',
                                        'consumer_memory', 'consumer_file'])
 def test_consumer_mutations_never_reach_another_fixture(request, fixture_name, _pristine_current_schema, value,
-                                                      consumer_store, tmp_path, monkeypatch):
+                                                      consumer_store, tmp_path):
     store = request.getfixturevalue(fixture_name)
     assert store.settings.get_setting('fixture_private_value') is None
     assert not store.conn.execute(
-        "SELECT 1 FROM youtube_items WHERE video_id='fixture_private_track'").fetchone()
+        "SELECT 1 FROM track_sources WHERE video_id='fixture_private_track'").fetchone()
     published = []
     with store.read_snapshot() as snapshot:
         assert snapshot.store.settings.get_setting('fixture_private_value') is None
@@ -112,32 +112,28 @@ def test_consumer_mutations_never_reach_another_fixture(request, fixture_name, _
     assert not _pristine_current_schema.execute(
         "SELECT 1 FROM settings WHERE key='fixture_private_value'").fetchone()
     assert not _pristine_current_schema.execute(
-        "SELECT 1 FROM youtube_items WHERE video_id='fixture_private_track'").fetchone()
+        "SELECT 1 FROM track_sources WHERE video_id='fixture_private_track'").fetchone()
     if fixture_name.startswith('consumer_'):
         peer = consumer_store(':memory:' if store._db_path is None else tmp_path / 'peer.db')
         assert peer.conn is not store.conn and peer._evidence_key != store._evidence_key
         assert peer.settings.get_setting('fixture_private_value') is None
         assert not peer.conn.execute(
-            "SELECT 1 FROM youtube_items WHERE video_id='fixture_private_track'").fetchone()
+            "SELECT 1 FROM track_sources WHERE video_id='fixture_private_track'").fetchone()
     if fixture_name == 'consumer_file':
-        with mock_snapshot_coordinator(store, monkeypatch):
-            with store.read_snapshot() as snapshot:
-                assert snapshot._schema == store.conn.execute('PRAGMA main.schema_version').fetchone()[0]
-                assert snapshot.is_current()
-                with store.conn:
-                    store.conn.execute('INSERT INTO group_preview_work '
-                        '(singleton,token,schema_version,started_at) VALUES (1,?,?,1)',
-                        ('private-preview', snapshot._schema))
-                assert not snapshot.is_current()
-                assert snapshot.is_current(allow_stale_tables=group_preview_work.TABLES)
-                store.settings.set_setting('fixture_private_value', 'changed input')
-                assert not snapshot.is_current(allow_stale_tables=group_preview_work.TABLES)
-            with store.read_snapshot() as snapshot:
-                with closing(sqlite3.connect(store._db_path)) as other:
-                    other.execute("INSERT INTO settings VALUES ('external-fixture-write','changed')")
-                    other.commit()
-                assert not snapshot.is_current(allow_stale_tables=group_preview_work.TABLES)
-            with store.read_snapshot() as snapshot:
-                with store.conn:
-                    store.conn.execute('CREATE TABLE fixture_schema_change(value TEXT)')
-                assert not snapshot.is_current(allow_stale_tables=group_preview_work.TABLES)
+        with store.read_snapshot() as snapshot:
+            assert snapshot._schema == store.conn.execute('PRAGMA main.schema_version').fetchone()[0]
+            with store.conn:
+                save(store.conn, ROOTS, 1)
+            assert snapshot.store.settings.get_setting('fixture_private_value') == value
+            assert snapshot.is_current()
+            store.settings.set_setting('fixture_private_value', 'changed input')
+            assert not snapshot.is_current()
+        with store.read_snapshot() as snapshot:
+            with closing(sqlite3.connect(store._db_path)) as other:
+                other.execute("INSERT INTO settings VALUES ('external-fixture-write','changed')")
+                other.commit()
+            assert not snapshot.is_current()
+        with store.read_snapshot() as snapshot:
+            snapshot.release_reader()
+            store.init_schema()
+            assert not snapshot.is_current()

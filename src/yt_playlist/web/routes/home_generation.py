@@ -4,6 +4,7 @@ import json
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 
+from yt_playlist.controllers.generated_playlists import MixSaveIncomplete
 from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.core.activity import activity_for
 from yt_playlist.library import playlist_generated
@@ -62,10 +63,15 @@ def build(ctx):
             except PlaylistAddUncertain as exc:
                 ctx.logger.warning('generated mix additions remain unconfirmed: %s', exc)
                 result.update(error='Some songs are still unconfirmed.', partial_ytm=exc.playlist_id,
-                    save_uncertain=True, selected_tracks=tracks,
+                    save_uncertain=True, selected_tracks=exc.selected_tracks,
                     addition_recovery={'account_id': exc.account_id, 'playlist': exc.playlist_id,
                         'confirmed': list(exc.confirmed), 'rejected': list(exc.skipped),
                         'uncertain': list(exc.uncertain), 'unattempted': list(exc.unattempted)})
+            except MixSaveIncomplete as exc:
+                ctx.logger.exception('generated mix launch failed after creating playlist %s', exc.recovery['playlist'])
+                result.update(error='We couldn’t confirm playback.', save_uncertain=True,
+                              partial_ytm=exc.recovery['playlist'], selected_tracks=exc.tracks,
+                              addition_recovery=exc.recovery)
             except playlist_generated.TrackLengthLimitError as exc:
                 result.update(error=str(exc), track_length_limited=True)
             except ActionInputError as exc:
@@ -75,6 +81,11 @@ def build(ctx):
                 result.update(save_uncertain=True, error="We couldn’t confirm playback.",
                               selected_tracks=[track for track in tracks if isinstance(track, dict)]
                               if isinstance(tracks, list) else [])
+        if request.headers.get('HX-Request') == 'true' and form.get('mix_card') == '1' and result.get('save_uncertain'):
+            return JSONResponse({'recovery': result.get('addition_recovery'), 'tracks': [
+                {'video_id': track['video_id'], 'recording_id': track.get('recording_id')}
+                for track in result['selected_tracks'] if isinstance(track, dict) and track.get('video_id')
+            ]}, headers={'HX-Reswap': 'none', 'X-Mix-Recovery': '1'})
         if (request.headers.get('HX-Request') == 'true' and form.get('artist_start') != '1'
                 and result.get('ytm') and not result.get('error')):
             # Navigate before any card swap. Rendering the saved confirmation

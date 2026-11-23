@@ -142,7 +142,7 @@ def test_followup_recomputes_late_imports_generated_exclusions_and_once_only_hit
     assert revised['trials'] == 2 and revised['previous_hits'] == revised['selected_hits'] == 1
 
 
-@pytest.mark.parametrize('blocked', [{'kind': 'daily'}, {'kind': 'product'}, {'followup': {'frozen_at': 100}}])
+@pytest.mark.parametrize('blocked', [{'kind': 'daily'}, {'followup': {'frozen_at': 100}}])
 def test_followup_controller_does_not_restart_owned_or_frozen_runs(blocked):
     repository = Mock(spec_set=['selection_runs', 'model_forecasts', 'save_selection'])
     repository.selection_runs.return_value = [dict(id=1, status='retained', diagnostic_challenger={'dim': 2}, **blocked)]

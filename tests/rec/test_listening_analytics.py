@@ -27,7 +27,7 @@ def listening_enabled(monkeypatch, store):
 
 
 def seed(store):
-    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', None, True)
     for key, artist, genre in [('a', 'A', 'Techno'), ('b', 'A', 'Techno'), ('c', 'B', 'Jazz')]:
         seed_catalog_track(store, key, key.upper(), artist, video_id='v'+key, genre=genre)
     return iid
@@ -118,7 +118,7 @@ def test_confirmed_action_history_survives_clear_and_native_or_sync_state_is_not
     ratings.record_confirmed(store,iid,'va','LIKE',NOW-90)
     payload=analytics.build(store,NOW)
     assert (total(payload,'hearts'),total(payload,'skulls'),total(payload,'clears'))==(1,1,1)
-    actions=list(store.conn.execute('SELECT previous_status,status FROM listening_rating_actions ORDER BY id'))
+    actions=list(store.conn.execute('SELECT previous_status,status FROM confirmed_rating_actions ORDER BY id'))
     assert [tuple(a) for a in actions]==[('LIKE','DISLIKE'),('DISLIKE','INDIFFERENT'),('INDIFFERENT','LIKE')]
 
 
@@ -148,7 +148,7 @@ def test_publication_uses_compact_manifest_and_preserves_inflight_previous_chunk
 
 
 def test_rating_start_is_frozen_queued_and_never_borrowed_from_another_play(store):
-    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', None, True)
     offers = []
     store.choice_capture = CaptureQueue(lambda capture: offers.append(capture) or True)
     ctx = SimpleNamespace(store=store)

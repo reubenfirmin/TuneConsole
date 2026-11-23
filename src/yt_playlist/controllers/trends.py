@@ -10,8 +10,7 @@ class Trends:
         return hour_buckets(self.repository.play_hour_rows(
             since, until, exclude_generated, calendar=calendar), calendar=calendar)
 
-    def publish_rollup(self, rows, encoded_payload, now, imported):
-        self.repository.publish_first_play(rows, imported)
+    def publish_rollup(self, encoded_payload, now):
         self.proposals.put_encoded('trend_rollups', encoded_payload, now)
 
     def catalog_artists(self):
@@ -26,20 +25,8 @@ class Trends:
     def ledger_track_plays(self, since, until, exclude_generated=True, *, calendar=False):
         return self.repository.ledger_track_plays(since, until, exclude_generated, calendar=calendar)
 
-    def track_audio(self):
-        return self.repository.track_audio()
-
     def ledger_artist_plays(self, since, until, exclude_generated=True, *, calendar=False):
         return self.repository.ledger_artist_plays(since, until, exclude_generated, calendar=calendar)
-
-    def prepare_first_play(self):
-        return self.repository.prepare_first_play()
-
-    def clear_first_play(self):
-        return self.repository.clear_first_play()
-
-    def refresh_first_play(self):
-        return self.repository.refresh_first_play()
 
     def first_play_map(self, kind):
         return self.repository.first_play_map(kind)

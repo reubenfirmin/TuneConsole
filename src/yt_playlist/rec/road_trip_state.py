@@ -8,12 +8,20 @@ from typing import NotRequired, TypedDict
 from yt_playlist.core.version_policy import VersionPolicy
 
 from yt_playlist.rec import road_trip_axes as axes
-from yt_playlist.rec.road_trip_mix import AVG_TRACK_S, _apportion_percentages, _mix_source, _mix_weights
+from yt_playlist.rec.road_trip_mix import (
+    AVG_TRACK_S, _apportion_percentages, _mix_source, _mix_weights, _quota_weights, _quotas, missed_balances,
+)
 
 MAX_OTHER_POOL = 44
 MIN_ARTIST_CAP = 4
 ROW_FIELDS = ("video_id", "title", "artist", "album", "thumbnail", "duration", "source",
               "genre", "family", "year", "decade", "cluster_genre")
+
+
+class DraftSelections(TypedDict):
+    artists: list[str]
+    genres: list[str]
+    artist_refs: NotRequired[dict[str, dict]]
 
 
 class DraftState(TypedDict):
@@ -24,7 +32,7 @@ class DraftState(TypedDict):
     familiarity_pct: int
     blacklist_genres: list[str]
     target_minutes: int
-    inputs: dict[str, list[str]]
+    inputs: DraftSelections
     pool: list[dict]
     picked: list[dict]
     picks: list[str]
@@ -102,4 +110,6 @@ def restat(state: DraftState) -> None:
                       "yours_count": len(yours), "blend_count": len(blend),
                       "yours_minutes": mins(yours), "blend_minutes": mins(blend),
                       "overlap_count": len(blend),
+                      "balance_short": {party: missed_balances(rows, _quotas(_quota_weights(state, party), len(rows)))
+                                        for party, rows in (("mine", mine), ("theirs", theirs))},
                       "mix_targets": _apportion_percentages(_mix_weights(state), len(picked))}

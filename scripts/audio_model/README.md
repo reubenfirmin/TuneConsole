@@ -46,8 +46,10 @@ python3 scripts/audio_model/bundle.py
 scripts/build-extension.sh
 ```
 
-The build stages the five production worker modules, all six model graphs and their
+The build stages the five production worker modules, the MusiCNN graph and its
 weights and metadata, TensorFlow.js, Meyda, and the CSP-compatible Essentia runtime.
+An older build cache may still contain legacy mood heads. Staging selects only
+the audio assets used for production capture.
 Missing files, incompatible manifests, or mismatched SHA-256 hashes fail the build
 before it replaces an existing ZIP. Only manifested runtime artifacts are packaged;
 research corpora, probes, and local training output are excluded.

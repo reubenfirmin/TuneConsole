@@ -14,10 +14,10 @@
     <div class="into-story-head">
       <h3 id="{{ heading_id }}" data-story-subject="{{ card.subject }}">
         {% if card.url %}
-        <a class="wiki-subject into-subject" href="{{ card.url }}" target="_blank" rel="noopener nofollow"
+        <a class="into-subject" href="{{ card.url }}" target="_blank" rel="noopener nofollow"
            aria-label="Read about {{ card.display }} on Wikipedia">{{ card.display }}</a>
         {% else %}
-        <strong class="wiki-subject into-subject">{{ card.display }}</strong>
+        <strong class="into-subject">{{ card.display }}</strong>
         {% endif %}
       </h3>
       {% if card.seed %}

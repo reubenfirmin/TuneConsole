@@ -4,6 +4,7 @@ Provider ingestion and progressive profile capture have their own tests. These
 fixtures retain all six modes, four lanes and twenty subjects per mode/lane;
 the SQL subjects, profile files and typed candidate publications are real.
 """
+from yt_playlist.core import content_work
 from yt_playlist.rec import home_vibe, musical_character, musical_profiles
 
 from tests.recommendation_support import seed_publication_subjects
@@ -19,12 +20,12 @@ def catalog(store, *, by_mode=False):
             for index, item in enumerate(items):
                 item['video_id'] = item['key']
                 energy = mid / 5 if by_mode else .1 if index >= 12 else .9
-                audio.append((energy, 70 if index >= 12 else 160, 1 - energy, item['key']))
+                audio.append((70 if index >= 12 else 160, 1 - energy, item['key']))
     items = [item for lane in bundles['all'].values() for item in lane]
     seed_publication_subjects(store, items,
                               discoveries=[item['key'] for item in bundles['all']['fresh']])
     with store.conn:
-        store.conn.executemany('UPDATE recordings SET energy=?,bpm=?,mood_relaxed=? WHERE identity_key=?', audio)
+        store.conn.executemany('UPDATE recordings SET bpm=?,mood_relaxed=? WHERE identity_key=?', audio)
     store._fixture_bundle_payload = bundles
     return bundles
 
@@ -34,14 +35,15 @@ def profiles(store, bundles):
     # bodies and real digest-checked FAO chunks, rather than mocking profile reads.
     cache, rows = {}, []
     subjects = {row['identity_key']: row for row in store.conn.execute(
-        'SELECT id,identity_key,energy,bpm,mood_relaxed FROM recordings')}
+        'SELECT identity_key,bpm,mood_relaxed FROM recordings')}
     for lane in bundles['all'].values():
         for item in lane:
             subject = subjects[item['key']]
-            identity = item['genre'], subject['energy'], subject['bpm'], subject['mood_relaxed']
+            identity = item['genre'], subject['bpm'], subject['mood_relaxed']
             if identity not in cache:
-                profile = musical_profiles.resolve([], genre=item['genre'], selected={
-                    name: subject[name] for name in ('energy', 'bpm', 'mood_relaxed')})
+                profile = musical_profiles.resolve([], genre=item['genre'], overrides={
+                    'intensity': 1 - subject['mood_relaxed'], 'bpm': subject['bpm'],
+                    'mood_relaxed': subject['mood_relaxed']})
                 profile['sources_truncated'] = False
                 cache[identity] = musical_profiles.canonical(profile), musical_profiles.digest(profile)
             raw, digest = cache[identity]
@@ -49,7 +51,7 @@ def profiles(store, bundles):
     store.musical_profiles.publish_recordings(rows, 1000)
     # This is completed lower capture input; no metadata worker is owned here.
     with store.conn:
-        store.conn.execute('DELETE FROM rec_content_pending')
+        content_work.acknowledge(store.conn, content_work.pending(store.conn, -1))
 
 
 def publish(store, bundles):

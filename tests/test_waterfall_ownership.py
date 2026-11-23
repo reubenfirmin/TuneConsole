@@ -39,8 +39,8 @@ def test_in_flight_answer_cannot_enter_corrected_recording_or_completed_reuse(st
     recording = store.tracks.catalog_subject(target)['recording_id']
     def probe(track, _store):
         move(store, target)
-        evidence = (MetadataObservation('energy', .9, 'recording', 'old-mbid', 'prediction'),) if observations else ()
-        return EnrichmentResult('acousticbrainz', {'energy': .9}, evidence)
+        evidence = (MetadataObservation('danceability', .9, 'recording', 'old-mbid', 'prediction'),) if observations else ()
+        return EnrichmentResult('acousticbrainz', {'danceability': .9}, evidence)
     events = []
     assert run(store, original, provider(probe), on_progress=events.append) == []
     assert store.enrichment_state.enrichment_provider_state(recording) == {}
@@ -87,8 +87,8 @@ def test_reassociation_between_result_publication_and_attempt_keeps_evidence_on_
     armed = []
     def probe(track, _store):
         armed.append(True)
-        return EnrichmentResult('acousticbrainz', {'energy': .9}, (
-            MetadataObservation('energy', .9, 'recording', 'old-mbid', 'prediction'),))
+        return EnrichmentResult('acousticbrainz', {'danceability': .9}, (
+            MetadataObservation('danceability', .9, 'recording', 'old-mbid', 'prediction'),))
     def tripped():
         if armed:
             armed.clear()

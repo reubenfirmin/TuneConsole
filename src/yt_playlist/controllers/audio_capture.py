@@ -13,7 +13,7 @@ def annotation_prediction(playback, samples, previous, sample_ids, vibes, versio
         raise ValueError('Feedback must reference saved excerpts from this playback')
     if previous and set(previous['sample_ids']) == set(sample_ids):
         return previous['prediction']
-    return predict([by_id[sample_id] for sample_id in sample_ids], metadata=metadata)
+    return predict([by_id[sample_id] for sample_id in sample_ids], metadata=metadata, require_complete=False)
 
 
 class AudioCapture:
@@ -38,7 +38,7 @@ class AudioCapture:
             legacy = self.captures.earlier_feedback(run_id)
         return dict(run_id=run_id, playback=playback, samples=samples, choices=self.choices,
             taxonomy_version=audio_vibe_prediction.TAXONOMY_VERSION,
-            prediction=self.predict(samples, metadata=metadata), feedback=feedback,
+            prediction=self.predict(samples, metadata=metadata, require_complete=False), feedback=feedback,
             previous_feedback=previous, legacy_feedback=legacy)
 
     def started(self, value):

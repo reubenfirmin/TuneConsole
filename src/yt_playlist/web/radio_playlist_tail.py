@@ -35,7 +35,8 @@ class TailDecision:
 
 
 class RadioPlaylistTail:
-    def __init__(self, tracks, proposed, slot, *, choice_id=None, play=None, excluded=(), play_prefix=None):
+    def __init__(self, tracks, proposed, slot, *, choice_id=None, play=None, excluded=(),
+                 play_prefix=None, resequence_after=None):
         self.allowed = {tuple(t["video_id"] for t in tracks)}
         self.proposed = list(proposed)
         self.slot = slot
@@ -45,6 +46,7 @@ class RadioPlaylistTail:
         # Queue repair survives a restart; the command to start playback does not.
         self.play_prefix = tuple(play_prefix) if play_prefix is not None else None
         self.excluded = list(excluded)
+        self.resequence_after = resequence_after
         self.confirmed = next(iter(self.allowed))
         self.write: PendingWrite | None = None
         self.saved = False
@@ -93,6 +95,8 @@ class RadioPlaylistTail:
         self.proposed = [accepted if t["video_id"] == requested["video_id"] else t for t in self.proposed]
         if self.play and self.play['video_id'] == requested['video_id']:
             self.play = {**self.play, 'video_id': accepted['video_id']}
+        if self.resequence_after == requested['video_id']:
+            self.resequence_after = accepted['video_id']
         self.allowed.add(ids)
         self.write = PendingWrite(PlaylistEdit('add', ids, track=accepted),
                                   self.write.started_at if self.write else None)

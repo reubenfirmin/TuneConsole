@@ -1,14 +1,20 @@
 // Collection belongs to the extension. This document observes it and owns human drafts.
+// On Home the module can arrive while the first card is still being parsed.
+if (document.readyState === 'loading') {
+  await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once: true}));
+}
 const version = new URL(import.meta.url).search;
 const root = document.querySelector('[data-audio-vibe-collection]');
 const ratingRoot = document.querySelector('[data-audio-vibe-banner]');
 const RUN = 'tuneconsole.audio-vibes.run.1', VIEW = 'tuneconsole.audio-vibes.view.1';
+const RECENT = 'tuneconsole.audio-vibes.recent.1';
 const OUTBOX = 'tuneconsole.audio-vibes.outbox.1';
 const TAXONOMY = root?.dataset.taxonomyVersion;
 const diagnosticPage = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const diagnostics = new Map();
 let run = read(RUN), view = read(VIEW), closed = false, port = null, retryAt = 0;
 let receivedAt = Date.now(), signature = null, lastReceipt = null;
+let recentSignature = JSON.stringify(read(RECENT, []));
 let status = {phase: 'connecting', message: 'Connecting to the TuneConsole extension…'};
 const connecting = new Map(), requests = new Set(), loading = new Set(), reloads = new Set(), restored = new Set();
 
@@ -127,10 +133,17 @@ function receive(data) {
     write(OUTBOX, read(OUTBOX, []).filter(sample => !ids.has(sample.id)));
   } else if (data.type === 'collection' && data.protocol === 1) {
     status = data.status || null;
-    const recent = new Set([data.run?.id, ...(data.recent || []).map(previous => previous.id)]);
+    const previousRuns = data.recent || [];
+    const recent = new Set([data.run?.id, ...previousRuns.map(previous => previous.id)]);
+    const previousChecks = previousRuns.filter(previous => previous.sampling_complete)
+      .map(({id, points, sampling_complete}) => ({id, points, sampling_complete}));
+    const next = JSON.stringify(previousChecks);
+    const refresh = recentSignature !== next && write(RECENT, previousChecks);
+    if (refresh) recentSignature = next;
     for (const id of restored) if (!recent.has(id)) restored.delete(id);
     if (data.run) changed(data.run);
-    for (const previous of data.recent || []) if (!restored.has(previous.id)) loadRun(previous.id, previous);
+    for (const previous of previousRuns) if (!restored.has(previous.id)) loadRun(previous.id, previous);
+    if (refresh) cards?.render();
     if (data.receipt && data.receipt.id !== lastReceipt) {
       lastReceipt = data.receipt.id;
       loadRun(data.receipt.run_id);
@@ -240,6 +253,7 @@ window.addEventListener('app-before-auto-reload', event => { if (cards?.interact
 window.addEventListener('storage', event => {
   if (event.key === RUN && !port) { const value = read(RUN); if (value) changed(value); }
   if (event.key === VIEW) { const value = read(VIEW); if (value) merge(value); }
+  if (event.key === RECENT) cards?.render();
 });
 let timer = setInterval(tick, 2000);
 window.addEventListener('pagehide', () => {

@@ -103,6 +103,9 @@ class RecommendationQuery:
     def track_decades(self, keys):
         return self.repository.track_decades(keys)
 
+    def track_genres_and_decades(self, keys):
+        return self.repository.track_genres_and_decades(keys)
+
     def track_last_played(self, keys):
         return self.repository.track_last_played(keys)
 

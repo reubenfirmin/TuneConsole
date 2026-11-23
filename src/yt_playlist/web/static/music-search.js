@@ -6,6 +6,7 @@ function musicSearch() {
   return {
     query: '', onboarding: false, sourceTab: 'library', songs: [], artists: [], albums: [], playlists: [], selected: [],
     loading: false, sectionsLoading: false, libraryLoading: false, catalogDone: false,
+    searchTimer: null,
     sectionsDone: false, libraryDone: false, libraryCount: 0, version: 0, libraryVersion: 0, statuses: {}, intents: {}, artistBusy: '', artistNote: '',
     get catalogCount() { return this.songs.length + this.artists.length + this.albums.length + this.playlists.length; },
     get catalogReady() { return this.catalogCount > 0 || (this.catalogDone && this.sectionsDone); },
@@ -34,6 +35,7 @@ function musicSearch() {
       // Finish this search synchronously. The native close event is queued and
       // may arrive after the user focuses the player or opens another search.
       this.version++; this.controller?.abort();
+      clearTimeout(this.searchTimer);
       this.loading = this.sectionsLoading = this.libraryLoading = false;
       if (this.source?.isConnected) this.source.focus({preventScroll: true});
     },
@@ -43,7 +45,13 @@ function musicSearch() {
       if (!response.ok) throw new Error('Music action response ' + response.status);
       return response.json();
     },
+    scheduleSearch() {
+      clearTimeout(this.searchTimer);
+      this.searchTimer = setTimeout(() => this.search(), 300);
+    },
     search() {
+      clearTimeout(this.searchTimer);
+      if (!this.$root.open) return;
       const version = ++this.version, query = this.query.trim();
       this.controller?.abort(); this.controller = new AbortController();
       this.songs = []; this.artists = []; this.albums = []; this.playlists = []; this.artistNote = '';
@@ -56,7 +64,10 @@ function musicSearch() {
       // Independent reads keep library navigation useful during catalog recovery.
       this.refreshLibrary();
       this.json('/search/catalog?q=' + encodeURIComponent(query), {signal})
-        .then(body => { if (version === this.version) { this.songs = body.songs; this.catalogDone = true; } })
+        .then(body => { if (version === this.version) {
+          this.songs = body.songs.map(item => ({...item, searchQuery: query}));
+          this.catalogDone = true;
+        } })
         .catch(error => console.debug('[Music search] catalog read unavailable', error))
         .finally(() => { if (version === this.version) this.loading = false; });
       this.sectionsLoading = true;
@@ -95,7 +106,7 @@ function musicSearch() {
         retry: this.intents[item.video_id] === false ? 'Retry removal' : 'Add to library'}[this.state(item)];
     },
     async save(item) {
-      const previous = this.state(item), query = this.query.trim(), onboarding = this.onboarding;
+      const previous = this.state(item), onboarding = this.onboarding;
       const key = this.key(item);
       if (['saving', 'checking', 'unavailable'].includes(previous) || (previous === 'saved' && !item.can_remove)) return;
       if (item.kind) {
@@ -113,12 +124,25 @@ function musicSearch() {
         return;
       }
       if (!['pending', 'retry'].includes(previous)) this.intents[item.video_id] = previous !== 'saved';
+      if (previous === 'pending' && typeof item.pending_saved === 'boolean') {
+        this.intents[item.video_id] = item.pending_saved;
+      }
       this.statuses[item.video_id] = previous === 'pending' ? 'checking' : 'saving';
       try {
         const result = await this.json('/search/songs/save', {method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({video_id: item.video_id, query, onboarding, saved: this.intents[item.video_id] !== false, check: previous === 'pending'})});
+          body: JSON.stringify({video_id: item.video_id, query: item.searchQuery, onboarding, saved: this.intents[item.video_id] !== false, check: previous === 'pending'})});
+        if (result.state === 'unavailable') {
+          // A fresh result can offer the song again. Only this row is unavailable.
+          delete this.statuses[item.video_id];
+          item.action_state = 'unavailable';
+          return;
+        }
         this.statuses[item.video_id] = result.state;
+        if (result.state !== 'pending') {
+          delete item.action_state;
+          delete item.pending_saved;
+        }
         if (['saved', 'removed'].includes(result.state)) {
           const {state, ...membership} = result;
           Object.assign(item, membership);
@@ -175,12 +199,13 @@ function musicSearch() {
         if (this.$root.open) this.$refs.query.focus();
         else openMusicSearch();
       };
-      document.addEventListener('app-page-leaving', this.onLeaving);
+      window.addEventListener('app-page-leaving', this.onLeaving);
       document.addEventListener('keydown', this.onShortcut);
       window.addEventListener('song-playlist-updated', this.onPlaylistUpdated);
     },
     destroy() {
-      this.controller?.abort(); document.removeEventListener('app-page-leaving', this.onLeaving);
+      clearTimeout(this.searchTimer);
+      this.controller?.abort(); window.removeEventListener('app-page-leaving', this.onLeaving);
       document.removeEventListener('keydown', this.onShortcut);
       window.removeEventListener('song-playlist-updated', this.onPlaylistUpdated);
     },

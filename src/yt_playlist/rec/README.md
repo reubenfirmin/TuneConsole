@@ -61,18 +61,19 @@ hypotheses, shared candidate facts, Apply lifecycle and performance measurements
 
 ## Vibes
 
-`vibe_requests` saves each explicit selection and runs one generation thread
-outside the HTTP request lifetime, without an overall generation deadline.
-New selections supersede pending work; only the current request may switch
-cache heads. Incomplete preparation keeps the previous complete board.
-The existing Vibe control observes the saved request with GET requests, including
-after reload or restart, and never replays a selection POST to recover a lost reply.
-Completed mixes wait until the listener closes an open mix before replacing it.
+Home assembles Mix Tapes from ranked song pools and track groups when the listener
+opens the tab. The Vibe request saves the selection and returns the replacement
+cards in one response. Its progress indicator clears when the request finishes.
+Replacement cards wait until the listener closes an open mix or its save settles.
 
-`vibe_preparation` uses direct capture/provider measurements, then conservative
-predictions from distinct measured recordings with matching canonical credits and
-specific subgenres. Broad genres do not form prediction cohorts. Predictions and
-repeated uploads never add measurement votes; missing evidence uses the heuristic.
+`vibe_preparation` selects a direct specialist measurement, then a fitted
+AcousticBrainz estimate, then a Bayesian estimate trained on sampled audio.
+Missing scores stay unknown and rank at the midpoint. The bundled AcousticBrainz
+fit uses eight native classifier probabilities from a verified recording match.
+The worker checks once a day for changes to paired AcousticBrainz inputs and
+compatible direct measurements from played recordings. It fits an adjustment to
+the bundled coefficients and updates the stored AcousticBrainz estimates when the
+coefficients change.
 
 The joint model lives in `vibe_joint_model` and `vibe_joint_calibrated`;
 `vibe_joint_state` admits the reviewed configuration, and the preparation
@@ -85,23 +86,27 @@ Six independent specialists supply within-vibe suitability. Their scores are not
 comparable probabilities and never produce an overall six-way winner. Radio
 intensity keeps the stronger activation/force policy, using the Energize and
 Release specialists and retaining both components' support and provenance.
+Their Bayesian estimates can fill missing components. The AcousticBrainz mapping
+supplies the six Vibes and does not supply radio intensity.
 Human popup labels are development targets, excluded
 from runtime preferences, inference and propagation.
 
 [Audio experiment history](../../../experiments/audio_lab/README.md)
 owns recipes, training inputs, adoption decisions and rejected
 alternatives. An unavailable specialist leaves its measurement absent; other
-specialists continue independently. Provider evidence, qualified pooling and
-supported metadata remain available. Model identity changes queue bounded
+specialists continue independently. Fitted AcousticBrainz and audio-trained
+Bayesian estimates remain available for missing Vibes. Model identity changes queue bounded
 rescoring without audio extraction. Retired shared-model artifacts and code
 live only in `experiments/audio_lab_tools/legacy/` for historical research.
 
 | Relation | Purpose |
 | --- | --- |
 | `sample_attributes` | Immutable sample-file references |
-| `measurements`, `measurement_samples` | Original scores and sampled inputs |
-| `predictions`, `prediction_artists`, `prediction_inputs` | Predictions, conditioning credits and original contributors |
-| `recording_vibes` | Current serving scores and indexed ranking |
+| `measurements`, `measurement_samples` | Original scores, exact versions, sampled inputs, and a flag retaining originals used by a model |
+| `predictions`, `provenance_file_writes` | Predictions, model generations and verified files identifying conditioning credits and original contributors |
+| `recording_vibes` | Selected direct measurements and Bayesian predictions |
+| `rec_musical_links.acousticbrainz_classifiers`, `acousticbrainz_vibe_estimates` | Verified classifier inputs and fitted estimates |
+| `served_vibe_fits` | Current Vibe scores for serving and ranking |
 
 Legacy incomplete lineage remains explicit. Exact-video reassociation changes
 current sample links without rewriting historical prediction ownership.
@@ -121,20 +126,18 @@ source mapping and artifact contract. Controllers capture models once, then run
 detached inference independently. Retired correction formats remain available
 only in the historical research tools.
 
-`audio_vibe_arc` owns all temporal heuristics and their version. Production runs
-the shared classifier and each eligible specialist separately on every excerpt,
-then applies this policy in actual song-position order. Independent model sources
-may be combined within one excerpt. Their native evidence and excerpt scores
-remain separate until temporal scoring; no song-level mean embedding or native
-attribute mean supplies this production path. The shared classification is
-normalized after temporal scoring; independent specialist suitability is not.
+`audio_vibe_arc` owns the ordered-excerpt scoring rules and their version. Each
+eligible specialist scores every compatible MusiCNN excerpt embedding, then
+combines the scores in actual song-position order. Independent model sources
+may be combined within one excerpt. Each specialist keeps its native evidence
+and its independent suitability scale.
 The multi-excerpt `score()` helpers retain the historical research replay API;
 production invokes those helpers with exactly one excerpt at a time.
 
-The initial policy reuses the provisional heuristic: Relax, Focus and Cruise
+Relax, Focus and Cruise
 retain the least suitable observed excerpt; Release retains its observed peak;
 Energize and Uplift use the greater of the upper median and final fit, minus a
-quarter of any first-to-last decline. Shape classification uses a .1 change.
+quarter of any first-to-last decline, with a lower bound of zero.
 These are adjustable product rules, not validated musical truth or probabilities.
 They describe sampled passages and never interpolate the unheard gaps. Changing
 the policy version queues existing bounded recording preparation and downstream
@@ -142,7 +145,7 @@ prediction refresh while compatible installed scores remain readable.
 
 Capture timing remains a heuristic at 30 seconds, halfway and two-thirds, using
 ten-second excerpts. This does not establish a preferred 20/30-second cutoff or
-an optimal schedule. The [extension contract](../../../extension/README.md#audio-collection-and-preview)
+an optimal schedule. The [extension contract](../../../extension/README.md#audio-collection)
 defines bounded lateness, partial coverage and interruption handling.
 
 ## Road Trip and setup
@@ -213,7 +216,7 @@ other transient failures retry after a minute. Deferred work retains inputs,
 checkpoints and last-good output. Estimates cover working data, not total RSS;
 native operations can finish after a cooperative deadline.
 
-Playback telemetry does not queue model fits. Track exits, disconnects and
+Playback events do not queue model fits. Track exits, disconnects and
 ended events retain their distinct signals. Candidate expiry requests ranking
 only. Hourly checks compare preferences, relevant Home/mode impressions and
 decay with the last captured round. An unchanged account skips ranking. Updates

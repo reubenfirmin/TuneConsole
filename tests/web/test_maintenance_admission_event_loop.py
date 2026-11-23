@@ -1,8 +1,6 @@
 """A busy durable-feedback inbox must not stall unrelated foreground requests."""
 import asyncio
-from contextlib import closing
 import threading
-import time
 
 import httpx
 import pytest
@@ -12,13 +10,11 @@ from yt_playlist.web.app import create_app
 
 
 @pytest.mark.parametrize('maintenance_active', [False, True])
-def test_state_change_waits_for_maintenance_off_event_loop(file_backed_store, maintenance_active):
+def test_requests_do_not_wait_for_feedback_inbox(file_backed_store, maintenance_active):
     store = file_backed_store
-    inbox = playback_feedback.inbox(store)
-    with closing(inbox.connect()):
-        pass
+    inbox = playback_feedback.inbox(store).file
     app = create_app(store, lambda: {}, background_work=False)
-    app.state.ctx.storage_maintenance.active = maintenance_active
+    file_backed_store.activity_paused = maintenance_active
     entered, release, expired = threading.Event(), threading.Event(), threading.Event()
     changed = []
 
@@ -46,20 +42,14 @@ def test_state_change_waits_for_maintenance_off_event_loop(file_backed_store, ma
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url='http://127.0.0.1') as client:
-            pending = asyncio.create_task(client.post('/_test/state-change'))
-            started = time.monotonic()
             try:
-                await asyncio.sleep(.05)
+                result = await asyncio.wait_for(client.post('/_test/state-change'), 1)
                 for path in ('/_test/event-loop', '/bridge/status'):
                     response = await client.get(path)
                     assert response.status_code == 200, response.text
                 assert not expired.is_set(), 'Feedback admission blocked the event loop until its safety gate expired'
-                assert time.monotonic() - started < 1
-                assert not changed, 'The state change must await the maintenance decision'
-                assert not pending.done()
             finally:
                 release.set()
-                result = await asyncio.wait_for(pending, 5)
             assert result.status_code == (503 if maintenance_active else 200)
             assert bool(changed) is not maintenance_active
 

@@ -53,7 +53,7 @@ def prepare_owner(store, key, state):
 
 
 def seed_feedback_writers(store):
-    store.accounts.upsert_account('Main', 'main.json', None, True)
+    store.accounts.upsert_account('Main', None, True)
     for browse in ('baseline-release', 'first-release', 'second-release'):
         document = deepcopy(release())
         document['title'] = browse
@@ -95,8 +95,8 @@ def feedback_writer_prefix(installed, feedback_writer_templates):
 @pytest.mark.parametrize('operation', ['flag', 'clear'])
 def test_existing_context_updates_keep_other_accounts(context_installed, operation, state):
     store, version = context_installed
-    first = store.accounts.upsert_account('First', 'first.json', None, True)
-    second = store.accounts.upsert_account('Second', 'second.json', None, False)
+    first = store.accounts.upsert_account('First', None, True)
+    second = store.accounts.upsert_account('Second', None, False)
     if operation == 'clear':
         context(store).flag_auth_expired(first, 'First')
     baseline = {}
@@ -106,7 +106,7 @@ def test_existing_context_updates_keep_other_accounts(context_installed, operati
     prepare_owner(store, 'auth_expired_identities', state)
     other = Store(store._db_path)
     try:
-        other.init_schema(defer_metadata=True)
+        other.init_schema()
         earlier, later = context(store), context(other)
         if operation == 'flag':
             earlier.flag_auth_expired(first, 'First')
@@ -132,7 +132,7 @@ def test_overlapping_normal_feedback_writers_keep_each_release(
     store, version = installed
     prepare_owner(store, 'album_feedback', state)
     other = Store(store._db_path)
-    other.init_schema(defer_metadata=True)
+    other.init_schema()
     assert not other.activity_paused
     assert other.rec_ledger.evidence().get('opportunity', 'second-release') is not None
     entered, resume, second_started = threading.Event(), threading.Event(), threading.Event()
@@ -191,7 +191,6 @@ def test_overlapping_normal_feedback_writers_keep_each_release(
         assert sorted((row['opportunity_id'], row['kind']) for row in responses) == [
             ('baseline-release', 'feedback'), ('first-release', 'feedback'), ('second-release', 'feedback')], {
                 'responses': responses, 'other_responses': other.rec_ledger.evidence().records('response'),
-                'group_files': getattr(other, '_compact_group_files', None),
                 'paused': other.activity_paused}
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
@@ -207,7 +206,7 @@ def test_feedback_writer_prefix_has_private_sql_and_evidence(
     other = Store(tmp_path / 'other.db')
     try:
         template.restore(other)
-        other.init_schema(defer_metadata=True)
+        other.init_schema()
         before = album_feedback_storage.original(store.conn)
         assert set(before) == {'baseline-release'}
         original = template.source.rec_ledger.evidence().records('response')
@@ -233,7 +232,7 @@ def test_feedback_writer_prefix_has_private_sql_and_evidence(
 @pytest.mark.parametrize('installed', [107], indirect=True)
 def test_failed_feedback_sql_does_not_emit_response_and_retry_keeps_withdrawals_unique(installed, monkeypatch):
     store, _ = installed
-    store.accounts.upsert_account('Main', 'main.json', None, True)
+    store.accounts.upsert_account('Main', None, True)
     choice_evidence.issue(store, 'albums', [{'id': 'release'}], 0, context={}, opportunity_id='offer')
     album_feedback.set_feedback(store, 'release', 'more', 1, 'offer')
     before = album_feedback_storage.original(store.conn)

@@ -2,7 +2,7 @@
 
 
 def test_upsert_playlist_tracks_seen_and_changed(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t1 = store.tracks.upsert_track("v1", "Song A", "Artist", "Alb", 200)
     t2 = store.tracks.upsert_track("v2", "Song B", "Artist", "Alb", 210)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "hash1", 1000.0)
@@ -23,16 +23,15 @@ def test_upsert_playlist_tracks_seen_and_changed(store):
     assert pl.last_changed == 3000.0
 
 def test_upsert_identity_is_idempotent(store):
-    a = store.accounts.upsert_account("main", "cred", "B1", True)
-    b = store.accounts.upsert_account("main", "cred2", "B1", True)  # same account, rotated credential
+    a = store.accounts.upsert_account("main", "B1", True)
+    b = store.accounts.upsert_account("main", "B1", True)
     assert a == b
     ids = store.accounts.get_accounts()
     assert len(ids) == 1
-    assert ids[0].credential_ref == "cred2"
     assert ids[0].brand_account_id == "B1"
 
 def test_set_playlist_tracks_replace_semantics(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t1 = store.tracks.upsert_track("v1", "Song A", "Artist", "Alb", 200)
     t2 = store.tracks.upsert_track("v2", "Song B", "Artist", "Alb", 210)
     t3 = store.tracks.upsert_track("v3", "Song C", "Artist", "Alb", 220)
@@ -49,7 +48,7 @@ def test_upsert_track_null_video_id_dedup(store):
     store.tracks.upsert_track(None, "T", "X", None, None)
     store.tracks.upsert_track(None, "T", "X", None, None)
     rows = store.conn.execute(
-        "SELECT COUNT(*) AS cnt FROM tracks WHERE identity_key=?",
+        "SELECT COUNT(*) AS cnt FROM catalog_tracks WHERE identity_key=?",
         ("t|x",)).fetchone()
     assert rows["cnt"] == 1
 
@@ -60,7 +59,7 @@ def test_upsert_track_backfills_duration_on_resync(store):
     t = store.tracks.upsert_track("v1", "Song A", "Artist X", "Alb", None, 1)
     again = store.tracks.upsert_track("v1", "Song A", "Artist X", "Alb", 250, 1)
     assert again == t  # same row reused, not a duplicate
-    dur = store.conn.execute("SELECT duration_s FROM tracks WHERE id=?", (t,)).fetchone()["duration_s"]
+    dur = store.conn.execute("SELECT duration_s FROM catalog_tracks WHERE id=?", (t,)).fetchone()["duration_s"]
     assert dur == 250
 
 def test_get_action_roundtrip(store):
@@ -91,7 +90,7 @@ def test_update_action_sets_undo(store, tmp_path):
     assert store.actions.get_action(aid).executed_at == 30.0
 
 def test_get_playlist_tracks_with_meta_includes_duration(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Artist", None, 207, True)
     pid = store.playlists.upsert_playlist(iid, "PL", "p", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(pid, [t])
@@ -113,7 +112,7 @@ def test_concurrent_access_is_serialized(store, monkeypatch):
     # workers must actually contend before each round; scheduling luck and 200
     # repeated publications are not needed to exercise the shared connection.
     count, rounds = 4, 3
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     condition = threading.Condition()
     start, finish = (threading.Barrier(count + 1) for _ in range(2))
     phase = threading.Barrier(count)
@@ -212,12 +211,12 @@ def test_concurrent_access_is_serialized(store, monkeypatch):
         f"PL{n}": (iid, f"Mix {n} 2", 2, f"h{n}_2", 1000, 1002, 1002)
         for n in range(count)}
     assert [tuple(row) for row in store.conn.execute(
-        "SELECT video_id,title,artist,duration_s FROM tracks ORDER BY video_id")] == [
+        "SELECT video_id,title,artist,duration_s FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL) ORDER BY video_id")] == [
         (f"v{n}_{i}", f"Song {n} {i}", "Artist", 200 + i)
         for n in range(count) for i in range(rounds)]
     assert [tuple(row) for row in store.conn.execute(
         "SELECT p.provider_playlist_id,t.video_id,pt.position FROM playlist_tracks pt "
-        "JOIN playlists p ON p.id=pt.playlist_id JOIN tracks t ON t.id=pt.track_id "
+        "JOIN active_playlists p ON p.id=pt.playlist_id JOIN catalog_tracks t ON t.id=pt.track_id "
         "ORDER BY p.provider_playlist_id,pt.position")] == [
         (f"PL{n}", f"v{n}_{i}", position)
         for n in range(count) for position, i in enumerate((2, 1))]
@@ -264,6 +263,6 @@ def test_orig_title_artist_columns_exist_and_backfill(store):
     # a fresh insert carries the originals; reset relies on these columns.
     t = store.tracks.upsert_track("v1", "Bad Title", "Bad Artist", "Al", 100)
     row = store.conn.execute(
-        "SELECT title, artist, orig_title, orig_artist FROM tracks WHERE id=?", (t,)).fetchone()
+        "SELECT title, artist, orig_title, orig_artist FROM catalog_tracks WHERE id=?", (t,)).fetchone()
     assert row["orig_title"] == "Bad Title"
     assert row["orig_artist"] == "Bad Artist"

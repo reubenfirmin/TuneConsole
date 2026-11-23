@@ -13,15 +13,16 @@ import pytest
 
 from experiments.retained_copy import playback_feedback_backup
 from tests.playback_feedback_support import event
-from yt_playlist.core import fao, playback_feedback
+from yt_playlist.core import fao, playback_feedback, playback_inbox_file
 from yt_playlist.core.store import Store
+from yt_playlist.library.playback_inbox_composition import inbox_for_database
 
 
 @pytest.fixture
 def source(tmp_path):
     store = Store(tmp_path / 'source.db')
     store.init_schema()
-    account = store.accounts.upsert_account('Main', 'bridge', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     store.tracks.upsert_track('song', 'Song', 'Artist', None, 180)
     yield store, account
     store.conn.close()
@@ -56,22 +57,14 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
     playback_feedback.capture(store, 'player', account, event(30), 102)
     assert queue.pending() == 3
     assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
-    for index, path in enumerate(sorted(queue.directory.glob('*/*.json'))):
-        encoded = fao.read(path).bytes
-        age = replace(fao.read(path).info, mtime_ns=1_000_000_000_000 + index, ctime_ns=2_000_000_000_000 + index)
-        if compressed:
-            fao.write(path, fao.Content(encoded, metadata=age))
-        else:
-            path.write_bytes(encoded)
-            os.utime(path, ns=(age.mtime_ns, age.mtime_ns))
-
-    def clocks(inbox):
-        with closing(inbox.connect()) as conn:
-            return {row['capture_id']: (info.mtime_ns, info.ctime_ns)
-                    for row in conn.execute('SELECT capture_id,filename FROM playback_feedback_inbox')
-                    for info in [fao.read(row['filename']).info]}
-
-    expected_clocks = clocks(queue)
+    encoded = fao.read(queue.path).bytes
+    age = replace(fao.read(queue.path).info, mtime_ns=1_000_000_000_000, ctime_ns=2_000_000_000_000)
+    if compressed:
+        fao.write(queue.path, fao.Content(encoded, metadata=age))
+    else:
+        queue.path.write_bytes(encoded)
+        os.utime(queue.path, ns=(age.mtime_ns, age.mtime_ns))
+    expected_age = fao.read(queue.path).info
     store.conn.close()
     original = digest(store._db_path), digest(queue.path)
     backup_path = tmp_path / 'snapshot.db'
@@ -86,15 +79,17 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
         with closing(readonly(backup_path)) as backup, closing(sqlite3.connect(database)) as target:
             backup.backup(target)
             playback_feedback_backup.restore(target, manifest)
-    shutil.rmtree(queue.directory)
+    shutil.rmtree(queue.path.parent)
     for database in databases:
         candidate = Store(database)
         try:
             candidate.init_schema()
             pending = playback_feedback.inbox(candidate)
             assert pending.pending() == 3
-            assert clocks(pending) == expected_clocks
-            assert Path(pending.next()['filename']).is_relative_to(pending.directory)
+            restored = fao.read(pending.path)
+            assert restored.bytes == encoded
+            assert (restored.info.mtime_ns, restored.info.ctime_ns) == (expected_age.mtime_ns, expected_age.ctime_ns)
+            assert not database.with_name(database.name + '.playback-feedback.sqlite3').exists()
             assert playback_feedback.drain(candidate) == 3
             assert playback_feedback.drain(candidate) == 0
             assert candidate.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 2
@@ -117,7 +112,7 @@ def test_capture_and_replay_continue_after_backup_pins_main(source, tmp_path):
                 worker.submit(queue.capture, 'player', account, event(20), 101).result(timeout=2)
             assert playback_feedback.drain(store) == 2
             assert not queue.pending()
-            assert not list(queue.directory.glob('*/*.json'))
+            assert playback_inbox_file.read(queue.path)['captures'] == []
             with closing(sqlite3.connect(destination)) as target:
                 reader.backup(target)
                 playback_feedback_backup.restore(target, manifest)
@@ -137,7 +132,7 @@ def test_independent_inboxes_share_the_snapshot_fence(source, tmp_path, monkeypa
     store, account = source
     queue = playback_feedback.inbox(store)
     playback_feedback.capture(store, 'player', account, event(10), 100)
-    independent = playback_feedback.Inbox(store._db_path, None)
+    independent = inbox_for_database(store._db_path, None)
     attempted = threading.Event()
     copy = playback_feedback_backup._copy
 
@@ -168,12 +163,12 @@ def test_corrupt_pending_observation_prevents_a_successful_recovery(source, tmp_
     store, account = source
     playback_feedback.capture(store, 'player', account, event(10), 100)
     queue = playback_feedback.inbox(store)
-    Path(queue.next()['filename']).write_bytes(b'corrupt')
+    queue.path.write_bytes(b'corrupt')
     output = tmp_path / 'rejected'
-    with pytest.raises(ValueError, match='retained content'):
+    with pytest.raises(ValueError):
         with closing(readonly(store._db_path)) as reader:
             with playback_feedback_backup.pinned(reader, output):
                 pytest.fail('Corrupt observation was accepted')
     assert not output.exists()
-    assert queue.pending() == 1
+    assert queue.path.read_bytes() == b'corrupt'
     assert store.conn.execute('SELECT count(*) FROM playback_feedback_receipts').fetchone()[0] == 0

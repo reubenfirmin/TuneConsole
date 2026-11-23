@@ -50,7 +50,6 @@
       <div><dt>Length</dt><dd>{% if track.duration %}{{ '%d:%02d'|format(track.duration // 60, track.duration % 60) }}{% else %}Unknown{% endif %}</dd></div>
       {% if track.bpm is defined and track.bpm is not none %}<div><dt>Tempo</dt><dd>{{ '%.0f'|format(track.bpm) }} BPM</dd></div>{% endif %}
       {% if track.music_key %}<div><dt>Key</dt><dd>{{ track.music_key }} {{ track.music_scale or '' }}</dd></div>{% endif %}
-      {% if track.energy is defined and track.energy is not none %}<div><dt>Energy</dt><dd>{{ '%.0f'|format(track.energy * 100) }}%</dd></div>{% endif %}
       {% if track.danceability is defined and track.danceability is not none %}<div><dt>Danceability</dt><dd>{{ '%.0f'|format(track.danceability * 100) }}%</dd></div>{% endif %}
     </dl>
     {% include '_partials/track_musical_evidence.html' %}
@@ -66,12 +65,12 @@
         <button type="button" class="btn-ghost track-text-action" data-song='{{ track|tojson }}' data-song-action="add" data-song-context='{"refresh_on_save":true}'>Add to playlist</button>
       </div>
     </section>
-  {% if track.playback_alternates %}
-  <section class="track-detail-section" aria-labelledby="track-alternates-title">
-    <h2 id="track-alternates-title">Playback alternatives</h2>
-    <ul class="track-memberships">{% for alternate in track.playback_alternates %}
-      <li><a href="{{ track_url(alternate.video_id) }}">{{ alternate.title }}</a><span class="muted">{{ alternate.artist }}</span></li>
-    {% endfor %}</ul>
+  {% if track.playback_upload %}
+  <section class="track-detail-section" aria-labelledby="track-playback-upload-title">
+    <h2 id="track-playback-upload-title">Playback upload</h2>
+    <ul class="track-memberships">
+      <li><a href="{{ track_url(track.playback_upload.video_id) }}">{{ track.playback_upload.title }}</a><span class="muted">{{ track.playback_upload.artist }}</span></li>
+    </ul>
   </section>
   {% endif %}
   </div>

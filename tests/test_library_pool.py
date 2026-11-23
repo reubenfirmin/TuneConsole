@@ -81,64 +81,45 @@ def two_ready_cards(store, monkeypatch, *, bundles=None):
 
 
 @pytest.fixture(scope='module')
-def two_ready_menu(clicked_schema):
+def two_ready_pools(clicked_schema):
     def seed(store):
         returning_listener(store, 'mixes', now=1000)
-        parameters = {'include_genres': ['jazz', 'techno', 'trance'], 'avoid_genres': []}
-        options = [{'family': genre, 'label': genre.title()} for genre in parameters['include_genres']]
+        genres = ['jazz', 'techno', 'trance']
+        options = [{'family': genre, 'label': genre.title()} for genre in genres]
         library = [{'key': f'ready {i}|artist', 'title': f'Ready {i}', 'artist': 'Artist',
                     'video_id': f'ready-{i}', 'genre': 'Jazz'} for i in range(4)]
         fresh = [{'key': f'new {genre} {i}|fresh {genre} {i}', 'title': f'New {genre} {i}',
                   'artist': f'Fresh {genre} {i}',
                   'video_id': f'new-{genre}-{i}', 'genre': genre.title()}
-                 for genre in parameters['include_genres'] for i in range(2)]
+                 for genre in genres for i in range(2)]
         seed_publication_subjects(store, library)
         seed_bundle_subjects(store, {}, fresh=fresh)
-        publish_bundles(store, {}, 1, fresh=fresh)
-        service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__),
-                                       genre_options=options)
-        wheelhouse = home_cards._proto(store, 'wheelhouse', 'More in your wheelhouse', library, 1000)
-        wheelhouse['recipe'] = {'lane': 'wheelhouse'}
-        protos = [wheelhouse, service.built_fresh(parameters, 1000)]
-        by_lane = {proto['lane']: proto for proto in protos}
-        slots = [{'proto': by_lane.get(lane), 'pool': None if lane in by_lane else
-                  service.pool_view({**parameters, 'lane': lane, 'epoch': 0})}
-                 for lane in ('wheelhouse', 'explore', 'fresh', 'comfort')]
-        result = home_cards.CardsResult(protos, slots, None, None, options, [], 0, None)
-        home_prepared.remember(store, None, result, 1000)
-        payload = home_cache.read(store, 'home_tuned')
-        home_cache.put(store, home_prepared.SURFACE, payload, 1000)
-        home_cache.put(store, 'home_tuned', {}, 1000)
-        home_cache.put(store, 'home_choice', {}, 1000)
-        return wheelhouse
+        publish_bundles(store, {'all': {'wheelhouse': library}}, 1, fresh=fresh)
+        store.rec_proposals.publish_library_taste_summary({
+            'breadth': {'families': {}, 'breadth': 0, 'n_families': 0, 'n_tagged': 0},
+            'eras': [], 'genre_plays': {}, 'genre_options': options,
+        }, 1000)
 
     with prepared_template(clicked_schema, seed) as template:
         yield template
 
 
-def test_two_ready_menu_has_real_library_and_fresh_inputs_with_two_unbuilt_slots(two_ready_menu):
-    store = two_ready_menu.source
-    payload = home_cache.read(store, home_prepared.SURFACE)
-    slots = payload['menus'][0]['slots']
-    assert [slot['proto']['lane'] if slot['proto'] else slot['pool']['lane'] for slot in slots] == [
-        'wheelhouse', 'explore', 'fresh', 'comfort']
-    assert sum(bool(slot['pool']) for slot in slots) == 2
+def test_two_ready_pools_have_ranked_library_and_fresh_inputs(two_ready_pools):
+    store = two_ready_pools.source
+    for lane, expected in [('wheelhouse', 4), ('explore', 0), ('comfort', 0)]:
+        assert len(store.recommendations.page('home', 'all', lane)) == expected
     assert len(store.rec_query.library_keys()) == 4
     assert len(fresh_pool.pick(store, 1000, ['jazz', 'techno', 'trance'])) == 6
 
 
 @pytest.mark.parametrize('operation', ['select', 'refresh'])
-def test_two_ready_mixes_keep_all_four_slots_without_starting_work(two_ready_menu, monkeypatch, operation):
+def test_two_ready_mixes_keep_all_four_slots_without_starting_work(two_ready_pools, monkeypatch, operation):
     def unexpected(*args, **kwargs):
         raise AssertionError("Only a click may rank the missing pools")
     from yt_playlist.library import pool_composition
     monkeypatch.setattr(pool_composition, 'library', lambda database: SimpleNamespace(prepare=unexpected))
     monkeypatch.setattr(surfaces, "explore_for_you", unexpected)
-    with two_ready_menu.open(':memory:') as store:
-        completed = {**two_ready_menu.result, 'mode_id': None, 'ranker': 'completed-library-selection'}
-        monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: [completed])
-        monkeypatch.setattr(home_cards, '_complete_card', lambda *args: deepcopy(completed))
-        monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
+    with two_ready_pools.open(':memory:') as store:
         client = _client(store, prepare=False)
         response = (client.post('/home/mix-genres', data={'genres': ['jazz', 'techno', 'trance']})
                     if operation == 'select' else client.get('/home/cards'))
@@ -148,12 +129,12 @@ def test_two_ready_mixes_keep_all_four_slots_without_starting_work(two_ready_men
         assert response.text.count('class="fresh-pool-art"') == 2
         assert 'aria-label="Build from your catalog"' in response.text
         assert 'aria-label="Build comfort listening"' in response.text
-        assert 'hx-trigger="every 2s"' not in response.text
+        assert '/home/library-pool/' not in response.text
+        assert '/home/fresh-pool/' not in response.text
         assert not client.app.state.ctx.jobs.has_active()
         if operation == 'select':
-            slots = home_cache.read(store, 'home_tuned')['menus'][0]['slots']
-            assert [slot['proto']['lane'] if slot['proto'] else slot['pool']['lane'] for slot in slots] == [
-                'wheelhouse', 'explore', 'fresh', 'comfort']
+            request = store.rec_proposals.get_proposals('home_genre_request')
+            assert request['include_genres'] == ['jazz', 'techno', 'trance']
 
 
 @pytest.fixture(scope='module')
@@ -201,6 +182,10 @@ def clicked_catalog(tmp_path, clicked_schema, monkeypatch):
         parameters = {'lane': 'explore', 'epoch': 1,
                       'include_genres': ['jazz', 'techno', 'trance'], 'avoid_genres': []}
         options = [{'family': genre, 'label': genre} for genre in parameters['include_genres']]
+        store.rec_proposals.publish_library_taste_summary({
+            'breadth': {'families': {}, 'breadth': 0, 'n_families': 0, 'n_tagged': 0},
+            'eras': [], 'genre_plays': {}, 'genre_options': options,
+        }, 1000.)
         # A completed sibling menu is a lower-layer input to clicked-pool
         # handling. Its producers and typed publication have separate owners.
         protos = [home_cards._proto(store, lane, lane.title(), tracks, 1000.) |
@@ -237,8 +222,11 @@ def test_catalog_click_leaves_requests_available_while_ranking(clicked_catalog, 
     monkeypatch.setattr(surfaces, "explore_for_you", rank)
     client = case.client
     response = client.post("/home/library-pool", data=case.data)
-    job_id = re.search(r'hx-get="/home/library-pool/(\d+)"', response.text)[1]
     try:
+        assert response.status_code == 200
+        match = re.search(r'hx-get="/home/library-pool/(\d+)"', response.text)
+        assert match, response.text
+        job_id = match[1]
         assert started.wait(1)
         assert 'aria-busy="true"' in response.text
         assert f'/home/library-pool/{job_id}' in client.get("/home/cards").text

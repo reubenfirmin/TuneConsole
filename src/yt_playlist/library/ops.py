@@ -217,11 +217,12 @@ class PlaylistOps:
         self.set_rating(video_id, "LIKE" if on else "INDIFFERENT")
         return {"liked": bool(on)}
 
-    def set_rating(self, video_id, status, *, after_confirmed=None, acquisition=None) -> dict:
+    def set_rating(self, video_id, status, *, after_confirmed=None, acquisition=None, playback=None) -> dict:
         """Rate the exact requested video in the main account, including the playing song."""
         account_id,client = client_for(self.store,self._clients())
         native = ratings.set_rating(self.store, account_id, video_id, status, client, self.now_fn(),
-                                    after_confirmed=after_confirmed, now_fn=self.now_fn, acquisition=acquisition)
+                                    after_confirmed=after_confirmed, now_fn=self.now_fn, acquisition=acquisition,
+                                    playback=playback)
         if self._rating_updated is not None:
             self._rating_updated()
         return {"likeStatus": status, **(native or {})}

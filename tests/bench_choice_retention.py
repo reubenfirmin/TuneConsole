@@ -34,11 +34,8 @@ def test_actual_library_report_refresh_and_unanswered_retirement_keep_full_menus
         # Begin without prepared Home menus; complete source pools are retained.
         # This proves incremental Home startup, not cold catalog/model processing.
         store.rec_proposals.put_proposals(home_prepared.SURFACE, {}, now)
-        pools = ('mode_bundles', 'fresh_pool', group_serving.SURFACE)
-        before = {name: store.rec_proposals._proposal_json(name) for name in pools}
-        adaptive = group_serving.checkpoint(store)
-        bundles = store.rec_proposals.group_pools_json() if adaptive else None
-        generation = home_prepared._proposal_generation(store, bundles, now)
+        before = store.recommendations.heads(), store.rec_proposals._proposal_json(group_serving.SURFACE)
+        generation = home_prepared._proposal_generation(store)
         preferences = candidate_refresh.preferences(store, now)
         attempts = []
         # This outer budget isolates history reuse from cold preparation latency;
@@ -56,14 +53,14 @@ def test_actual_library_report_refresh_and_unanswered_retirement_keep_full_menus
             assert store.rec_ledger.evidence().get('opportunity', expired) is None
             assert store.rec_ledger.evidence().get('opportunity', current)
             choices.refresh_report(store, now)
-            assert home_prepared._proposal_generation(store, bundles, now) == generation
+            assert home_prepared._proposal_generation(store) == generation
             with work_budget(30):
                 payload = home_prepared._prepare(store, now)
             assert payload and payload['menus']
             if attempts:
                 assert len(payload['menus']) >= attempts[-1]
             attempts.append(len(payload['menus']))
-            assert before == {name: store.rec_proposals._proposal_json(name) for name in pools}
+            assert before == (store.recommendations.heads(), store.rec_proposals._proposal_json(group_serving.SURFACE))
             assert candidate_refresh.preferences(store, now) == preferences
         assert attempts[-1] == home_prepared.MAX_MENUS
         assert {menu['epoch'] for menu in payload['menus']} == set(range(home_prepared.MAX_MENUS))

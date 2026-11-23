@@ -71,7 +71,8 @@ def test_live_provenance_and_replay_windows_are_controller_policy(history, playl
     history.record_play_event(3, 'song', 'video', 100, playlist, 'LIKE', context_choice=context)
     history.repository.append_event.assert_called_once_with(3, 'song', 100, video_id='video',
         playlist_ytm_id=playlist, like_status='LIKE', is_generated=expected, subject='song', recording=None)
-    history.repository.matching_event.assert_called_once_with(3, 'song', 'video', 100, 2.0)
+    history.repository.matching_event.assert_called_once_with(
+        3, 'song', 'video', 100, 2.0, verified_playlist=None, selected_at=None)
 
 
 def test_spotify_artist_admission_finishes_before_receipt_write(history):

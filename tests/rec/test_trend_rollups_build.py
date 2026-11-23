@@ -14,7 +14,7 @@ def test_last_complete_month(now, expected):
 
 
 def test_build_only_publishes_live_recap_and_preserves_first_play(store):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     store.tracks.upsert_track("video", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("video")
     for day in (0, 1, 2, 31):
@@ -32,8 +32,8 @@ def test_build_only_publishes_live_recap_and_preserves_first_play(store):
     assert trend_rollups.build(store, 90 * 86400)["story"] is None
 
 
-def test_backfill_and_reset_still_rebuild_first_play(store):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+def test_backfill_and_reset_change_the_first_play_day(store):
+    iid = store.accounts.upsert_account("Main", None, True)
     store.history.record_history_plays(iid, 5 * 86400, ["song"], source_timezone="UTC")
     trend_rollups.build(store, 6 * 86400)
     assert store.trends.first_play_map("track")["song"] == 5
@@ -42,7 +42,7 @@ def test_backfill_and_reset_still_rebuild_first_play(store):
     store.settings.set_setting("takeout_imported_at", "12345")
     trend_rollups.build(store, 6 * 86400)
     assert store.trends.first_play_map("track")["song"] == 2
-    assert store.settings.get_setting("trend_first_play_takeout_seen") == "12345"
+    assert store.settings.get_setting("trend_first_play_takeout_seen") is None
 
 
 def test_month_statistics_keep_streak_discovery_diversity_and_calendar():

@@ -12,8 +12,8 @@ def seed(store, *, distinct_albums=False, track_count=96, mode_count=3):
                   genre=('Techno', 'Jazz', 'Rock')[i * 3 // track_count]) for i in range(track_count)]
     seed_publication_subjects(store, items)
     with atomic_write(store):
-        iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
-        tids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+        iid = store.accounts.upsert_account('Listener', None, True)
+        tids = [row[0] for row in store.conn.execute('SELECT id FROM track_sources ORDER BY id')]
         first_artist = store.conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM artists').fetchone()[0]
         credits = [(first_artist + i, tid, item['artist']) for i, (tid, item) in enumerate(zip(tids, items))]
         store.conn.executemany('INSERT INTO artists(id,name,provisional) VALUES (?,?,1)',
@@ -22,7 +22,7 @@ def seed(store, *, distinct_albums=False, track_count=96, mode_count=3):
                                [(artist, name.lower()) for artist, _, name in credits])
         store.conn.executemany("INSERT INTO entry_artists VALUES (?,0,?,?,'fixture')",
                                [(tid, artist, name) for artist, tid, name in credits])
-        store.conn.executemany('UPDATE recordings SET bpm=?,energy=? WHERE id=?',
+        store.conn.executemany('UPDATE recordings SET bpm=?,danceability=? WHERE id=?',
                                [(80 + i, (i % 10) / 10, tid) for i, tid in enumerate(tids)])
         for i in range(8):
             size, offset = track_count // 4, i * (track_count // 8)

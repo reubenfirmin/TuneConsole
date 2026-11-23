@@ -1,15 +1,17 @@
 """DAO suite for ActionRepo (the undoable action log)."""
 import json
+import sqlite3
+from contextlib import closing
 
 import pytest
 
+from tests.core.test_action_work_migration import backup
 from tests.core.test_predecessor_writes import installed
 
 
 def deletion_accounts(store):
     with store.conn:
-        store.conn.executemany('INSERT INTO accounts(id,label,credential_ref) VALUES (?,?,?)',
-                              [(7, 'Seven', 'seven.json'), (8, 'Eight', 'eight.json')])
+        store.conn.executemany('INSERT INTO accounts(id,label) VALUES (?,?)', [(7, 'Seven'), (8, 'Eight')])
 
 
 def test_record_get_update(store):
@@ -129,3 +131,34 @@ def test_failed_deletion_lookup_matches_one_entry_and_preserves_manual_pending_l
     store.actions.update_action(newest, "undoing", 2)
     store.actions.update_action(newest, "undone", 3)
     assert store.actions.get_failed_deletion(7, "SOURCE").id == older
+
+
+def test_pending_deletion_keeps_header_and_children_in_the_same_snapshot(installed, tmp_path):
+    store, _ = installed
+    deletion_accounts(store)
+    store.playlists.upsert_playlist(7, 'SOURCE', 'Source', 2, '', 1)
+    entry = {'identity': 7, 'ytm': 'SOURCE', 'phase': 'pending', 'backup': backup(tmp_path, 7, 'SOURCE')}
+    action = store.actions.record_action('delete_playlist', '{}', '{}', 'delete_pending',
+                                         json.dumps({'deletions': [entry]}), 2)
+    claim = store.actions.begin_deletion(action, 7, 'SOURCE', 3)
+    store.actions.release_deletion(claim)
+
+    writes = []
+    with closing(sqlite3.connect(store._db_path, timeout=1)) as writer:
+        def change_status_before_reading_targets(sql):
+            if not writes and sql.startswith('SELECT * FROM action_targets WHERE'):
+                with writer:
+                    updated = writer.execute("UPDATE actions SET status='delete_failed' WHERE id=?", (action,))
+                writes.append(updated.rowcount)
+
+        store.conn.set_trace_callback(change_status_before_reading_targets)
+        try:
+            pending = store.actions.get_pending_deletion(7, 'SOURCE')
+        finally:
+            store.conn.set_trace_callback(None)
+
+    assert writes == [1]
+    assert pending.id == action and pending.status == 'delete_pending'
+    assert json.loads(pending.undo_json)['deletions'][0]['phase'] == 'uncertain'
+    assert not store.conn.in_transaction
+    assert store.actions.get_pending_deletion(7, 'SOURCE') is None

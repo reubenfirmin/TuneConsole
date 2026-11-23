@@ -42,7 +42,7 @@ def _free_port():
 @pytest.fixture
 def live_road_trip_app(monkeypatch, unlocked_home_controls, store):
     store.genres.configure_catalog()
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     # A handful of songs of your own, not one: your side of the mix is the whole collection, so a
     # one-song library leaves nothing to swap in when a slot is crossed out.
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 6, "h", 1.0)
@@ -429,7 +429,7 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
 
 
 
-@pytest.mark.parametrize("addition", ["artist"])
+@pytest.mark.parametrize("addition", ["artist", "canonical-artist"])
 def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_trip_app, page, monkeypatch, addition):
     base_url, store = live_road_trip_app
     errors = []
@@ -450,16 +450,21 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
+    channel = 'UCSelectedJourney'
+    artist = (f'@artist:{store.artists.ensure_artist("Journey", provider="youtube", provider_id=channel)}'
+              if addition == 'canonical-artist' else 'Journey')
     monkeypatch.setattr(candidates, "artist_genre",
-                        lambda store, name: "Classic Rock" if name == "Journey" else None)
+                        lambda store, name: "Classic Rock" if name == artist else None)
     page.route("**/road_trip/autocomplete/artists?*",
-               lambda route: route.fulfill(json={"results": ["Journey"]}))
+               lambda route: route.fulfill(json={"results": [
+                   {'key': artist, 'name': 'Journey'} if addition == 'canonical-artist' else artist]}))
 
-    def songs(client, kind, name, cap, store=None, decade=None):
+    def songs(client, kind, name, cap, store=None, decade=None, *, browse_id=None):
         genre = "Classic Rock" if kind == "artist" else name
         return ([{"video_id": f"new-{name}-{i}", "title": f"New song {i}",
                   "artist": name if kind == "artist" else f"{name} Artist {i}", "album": "",
-                  "thumbnail": None, "duration": 300, "genre": genre} for i in range(8)], [])
+                  "thumbnail": None, "duration": 300, "genre": genre, "artist_browse_id": browse_id}
+                 for i in range(8)], [])
 
     monkeypatch.setattr(candidates, "other_input_songs", songs)
     page.goto(f"{base_url}/road_trip")
@@ -480,7 +485,8 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
         assert waiting["building"]
         assert not any(c["genre"] == new_genre for c in waiting["pool"])
         assert new_genre in {canonical_genre(g) for g in store.road_trip.get_road_trip_recipe(rid)["genres"]}
-        if addition == "artist":
+        if addition != "genre":
+            assert waiting["inputs"]["artists"] == [artist]
             expect(passenger.locator(".genre-chip.is-theirs").filter(has_text="Classic Rock like Journey")).to_be_visible()
             expect(passenger.locator(".rt-axis-context").filter(has_text="Like Journey")).to_be_visible()
         for genre, pct in zip(genres + [new_genre], [45, 23, 7, 25]):
@@ -496,7 +502,8 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
     page.reload()
     for genre, pct in zip(genres + [new_genre], [45, 23, 7, 25]):
         expect(passenger.get_by_role("slider", name=genre, exact=True)).to_have_value(str(pct))
-    if addition == "artist":
+    if addition != "genre":
+        expect(passenger.get_by_role('button', name='Remove Journey')).to_be_visible()
         expect(passenger.locator(".genre-chip.is-theirs").filter(has_text="Classic Rock like Journey")).to_be_visible()
         expect(passenger.locator(".rt-axis-context").filter(has_text="Like Journey")).to_be_visible()
 

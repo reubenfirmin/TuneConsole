@@ -112,7 +112,8 @@ class StoryQueries:
         story = (self.proposals.get_proposals('trend_rollups') or {}).get('story')
         if not story or story.get('month') != month:
             return None
-        if any('groups' in beat for beat in story['beats']):
+        if any('groups' in beat or (beat['kind'] == 'personality' and 'audio_plays' not in beat)
+               for beat in story['beats']):
             self.refresh()
         return story
 

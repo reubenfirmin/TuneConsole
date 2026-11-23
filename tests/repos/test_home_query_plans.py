@@ -6,6 +6,7 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.historical_captures import retained_capture
 from yt_playlist.core import catalog, listening
+from yt_playlist.core.catalog_query import PLAYABLE_LIBRARY_SQL
 from yt_playlist.rec import taste_analysis
 
 
@@ -15,7 +16,7 @@ def _legacy_metadata(store, keys):
                      'video_id': r['vid'], 'thumbnail': r['thumb']}
             for r in store.conn.execute(
                 'SELECT identity_key k,MIN(title) title,MIN(artist) artist,MIN(album) album,'
-                'MIN(video_id) vid,MIN(thumbnail) thumb FROM playable_library_tracks '
+                f'MIN(video_id) vid,MIN(thumbnail) thumb FROM ({PLAYABLE_LIBRARY_SQL}) '
                 f'WHERE identity_key IN ({placeholders}) GROUP BY identity_key', keys)}
 
 
@@ -64,11 +65,9 @@ def test_small_metadata_lookup_does_not_scan_unrequested_library(store):
         for n in range(1500):
             rid = store.conn.execute('INSERT INTO recordings(identity_key,title,artist) VALUES (?,?,?)',
                                      (f'unrelated-{n}', 'Other', 'Artist')).lastrowid
-            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
-                               (f'other-{n}', rid, 'Other', 'Artist'))
-            eid = store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
-                                     (rid, f'other-{n}')).lastrowid
-            store.conn.execute("INSERT INTO library_memberships VALUES (?,'fixture',NULL)", (eid,))
+            eid = store.conn.execute('INSERT INTO track_sources(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
+                                     (f'other-{n}', rid, 'Other', 'Artist')).lastrowid
+            store.conn.execute("UPDATE track_sources SET library_origin='fixture',library_added_at=NULL WHERE id=? AND library_origin IS NULL", (eid,))
     after, large = _work(store, lambda: store.rec_query.tracks_by_keys(['wanted']))
     assert after == before
     assert large <= small * 2 + 500
@@ -80,7 +79,7 @@ def test_small_metadata_lookup_does_not_scan_unrequested_library(store):
 @pytest.mark.parametrize('independent', [False, True])
 def test_indexed_evidence_matches_original_projection(store, generated, independent):
     for account in ('main', 'other'):
-        store.accounts.upsert_account(account, 'bridge', None, account == 'main')
+        store.accounts.upsert_account(account, None, account == 'main')
     ts = 1792497600  # a fixed UTC noon
     for account in (1, 2):
         store.history.import_listening_events(account, [('song', None, ts), ('song', None, ts + 3600)],
@@ -116,15 +115,15 @@ WHERE (e.event_id IS NOT NULL AND e.is_generated=0)
     assert counts['song'] == (1 if generated == 1 and not independent else 2)
 
 
-def test_shared_facets_keep_independent_song_genre_and_song_year_deduplication(store):
-    iid = store.accounts.upsert_account('main', 'bridge', None, True)
+def test_shared_facets_use_canonical_genre_and_keep_upload_years(store):
+    iid = store.accounts.upsert_account('main', None, True)
     a = store.tracks.upsert_track('a', 'Song', 'Artist', 'First', 200)
     b = store.tracks.upsert_track('b', 'Song', 'Artist', 'Second', 200)
     store.tracks.associate_youtube_item('b', store.tracks.catalog_subject(a)['recording_id'],
                                         source='verified', evidence={'same': True}, now=1)
     key = store.tracks.catalog_subject(a)['identity_key']
     store.tracks.set_track_genre(a, 'Techno')
-    # Entry choices preserve deliberately different upload facets.
+    # The latest genre applies to the recording. Release years belong to the uploads.
     with store.conn:
         catalog.choose_field(store.conn, b, 'genre', 'Ambient')
         catalog.choose_field(store.conn, a, 'mb_year', '1990')
@@ -134,6 +133,6 @@ def test_shared_facets_keep_independent_song_genre_and_song_year_deduplication(s
     facets = store.rec_query.play_weighted_facets(plays)
     assert facets == {'genres': store.rec_query.genre_play_distribution(),
                       'eras': store.rec_query.era_play_distribution()}
-    assert facets == {'genres': {'Ambient': 3, 'Techno': 3}, 'eras': {'1990': 3, '2000': 3}}
+    assert facets == {'genres': {'Ambient': 3}, 'eras': {'1990': 3, '2000': 3}}
     assert taste_analysis.taste_breadth(store, genre_plays=facets['genres']) == taste_analysis.taste_breadth(store)
     assert taste_analysis.era_distribution(store, era_plays=facets['eras']) == taste_analysis.era_distribution(store)

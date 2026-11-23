@@ -3,12 +3,16 @@ import math
 
 
 SCOPES = ('library', 'discovered')
-AUDIO = ('bpm', 'energy', 'danceability', 'mood_happy', 'mood_sad', 'mood_relaxed',
+AUDIO = ('bpm', 'danceability', 'mood_happy', 'mood_sad', 'mood_relaxed',
          'mood_acoustic', 'instrumental', 'loudness', 'dynamic_complexity', 'music_key', 'music_scale')
+# Keep the persisted bit positions of the remaining fields.
+AUDIO_BITS = dict(zip(AUDIO, (1, *(1 << i for i in range(2, 12)))))
 FIELDS = tuple(field for scope in SCOPES for field in (
     scope + '_present', scope + '_genre', scope + '_year', scope + '_audio_fields',
     *(scope + '_' + audio for audio in AUDIO)))
 COLUMNS = (*FIELDS, 'input_revision', 'digest', 'built_at')
+RECORDING_WRITES = 'write_prepared_recording_inputs'
+UNRESOLVED_WRITES = 'write_unresolved_preparation_inputs'
 
 
 def flatten(payload):
@@ -33,7 +37,7 @@ def flatten(payload):
                     raise ValueError('Prepared musical key and scale must be text or absent')
             elif value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
                 raise ValueError('Prepared audio measurements must be finite numbers or absent')
-        mask = sum(1 << i for i, field in enumerate(AUDIO) if field in audio)
+        mask = sum(AUDIO_BITS[field] for field in audio)
         values.extend((1, features['genre'], features['year'], mask, *(audio.get(field) for field in AUDIO)))
     return tuple(values)
 
@@ -42,8 +46,8 @@ def payload(row):
     result = {}
     for scope in SCOPES:
         result[scope] = ({'genre': row[scope + '_genre'], 'year': row[scope + '_year'],
-                          'audio': {field: row[scope + '_' + field] for i, field in enumerate(AUDIO)
-                                    if row[scope + '_audio_fields'] & (1 << i)}}
+                          'audio': {field: row[scope + '_' + field] for field, bit in AUDIO_BITS.items()
+                                    if row[scope + '_audio_fields'] & bit}}
                          if row[scope + '_present'] else None)
     return result
 
@@ -55,22 +59,21 @@ def upsert(conn, key, inputs, digest, now, revision):
 def upsert_values(conn, key, fields, digest, now, revision, *, empty):
     """Persist validated columns against their current relational owner."""
     values = (*fields, revision, digest, now)
-    row = conn.execute('SELECT r.id FROM recordings r WHERE r.identity_key=? AND NOT EXISTS('
-                       'SELECT 1 FROM recording_redirects d WHERE d.retired_id=r.id)', (key,)).fetchone()
+    row = conn.execute('SELECT id FROM recordings WHERE identity_key=? AND redirect_recording_id IS NULL',
+                       (key,)).fetchone()
     columns = ','.join(COLUMNS)
-    updates = ','.join(f'{field}=excluded.{field}' for field in COLUMNS)
+    placeholders = ','.join('?' for _ in values)
+    updates = ','.join(f'{column}=excluded.{column}' for column in COLUMNS)
     if row:
-        conn.execute(f'INSERT INTO prepared_recording_inputs(recording_id,{columns}) VALUES ('
-                     + ','.join('?' for _ in range(1 + len(values))) + ') '
+        conn.execute(f'INSERT INTO prepared_recording_inputs(recording_id,{columns}) VALUES (?,{placeholders}) '
                      f'ON CONFLICT(recording_id) DO UPDATE SET {updates}', (row[0], *values))
         # An admitted owner can replace its disposable accepted retraction.
-        conn.execute("DELETE FROM unresolved_preparation_inputs WHERE raw_key=? AND reason='empty_retraction'", (key,))
+        conn.execute("DELETE FROM prepared_recording_inputs WHERE raw_key=? AND reason='empty_retraction'", (key,))
     else:
         reason = ('empty_retraction' if empty else
                   'retired_owner' if conn.execute('SELECT 1 FROM recordings WHERE identity_key=?', (key,)).fetchone()
                   else 'missing_owner')
-        conn.execute(f'INSERT INTO unresolved_preparation_inputs(raw_key,reason,{columns}) VALUES ('
-                     + ','.join('?' for _ in range(2 + len(values))) + ') '
+        conn.execute(f'INSERT INTO prepared_recording_inputs(raw_key,reason,{columns}) VALUES (?,?,{placeholders}) '
                      f'ON CONFLICT(raw_key) DO UPDATE SET reason=excluded.reason,{updates}', (key, reason, *values))
 
 

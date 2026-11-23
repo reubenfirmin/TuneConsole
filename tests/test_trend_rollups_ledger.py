@@ -18,7 +18,7 @@ DAY = 86400
 
 @pytest.fixture
 def store(store):
-    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
+    store.conn.execute("INSERT INTO accounts(id,label,is_master) VALUES (1,'me',1)")
     store.conn.commit()
     return store
 
@@ -34,8 +34,8 @@ def _ev(store, key, when, playlist=None):
 
 def _generated(store, pid, ytm, title="Radio"):
     from yt_playlist.core.playlist_scopes import ensure
-    store.conn.execute("INSERT INTO playlists(id,account_id,provider_playlist_id,title,playlist_scope_id) VALUES (?,1,?,?,?)",
-                       (pid, ytm, title,ensure(store.conn,ytm,1)))
+    store.conn.execute("INSERT INTO playlists(id,account_id,title,playlist_scope_id) VALUES (?,1,?,?)",
+                       (pid, title,ensure(store.conn,ytm,1)))
     store.playlists.set_playlist_group(ytm,'Generated',account_id=1)
     store.playlists.mark_generated_playlist(ytm)
     store.conn.commit()
@@ -66,13 +66,11 @@ def test_day_counts_source_applies_the_generated_quarantine(store):
 def test_first_play_index_retains_earlier_coarse_evidence_when_a_ledger_exists(store):
     store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
     _ev(store, "a", 20 * DAY)
-    store.trends.refresh_first_play()
     assert store.trends.first_play_map("track")["a"] == 10
 
 
 def test_first_play_index_uses_history_without_a_ledger(store):
     store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
-    store.trends.refresh_first_play()
     assert store.trends.first_play_map("track")["a"] == 10
 
 
@@ -131,8 +129,8 @@ def test_month_review_falls_back_to_history_without_a_ledger(store):
 
 def _owned(store, pid, tid, key, artist, ytm="PL_own", generated=False):
     from yt_playlist.core.playlist_scopes import ensure
-    store.conn.execute("INSERT OR IGNORE INTO playlists(id,account_id,provider_playlist_id,title,playlist_scope_id) "
-                       "VALUES (?,1,?,'p',?)", (pid, ytm,ensure(store.conn,ytm,1)))
+    store.conn.execute("INSERT OR IGNORE INTO playlists(id,account_id,title,playlist_scope_id) "
+                       "VALUES (?,1,'p',?)", (pid, ensure(store.conn,ytm,1)))
     if generated:
         store.playlists.set_playlist_group(ytm,'Generated',account_id=1)
         store.playlists.mark_generated_playlist(ytm)
@@ -174,7 +172,6 @@ def test_build_treats_a_migrated_library_as_known(store):
     _owned(store, 1, 1, "a", "Underworld")
     _ev(store, "a", 10 * DAY)
     _ev(store, "a", 11 * DAY)
-    store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
     weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
@@ -189,7 +186,6 @@ def test_build_still_finds_a_true_discovery(store):
     seed_catalog_track(store,'fresh','t','Newcomer',track_id=2,video_id='vfresh')
     store.conn.commit()
     _ev(store, "fresh", 10 * DAY)
-    store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
     weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),
@@ -202,7 +198,6 @@ def test_a_generated_playlist_does_not_make_an_artist_familiar(store):
     """The app putting an artist in front of you is not you knowing them (repos/base.py quarantine)."""
     _owned(store, 1, 1, "sug", "Suggested Act", ytm="PL_gen", generated=True)
     _ev(store, "sug", 10 * DAY)                     # played, but NOT from the generated playlist
-    store.trends.refresh_first_play()
     dc = tr.day_counts_source(store)
     weeks = stats.compute_months(dc, store.trends.track_meta(),
                              store.trends.first_play_map("artist"),

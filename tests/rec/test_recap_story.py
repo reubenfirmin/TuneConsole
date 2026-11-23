@@ -29,21 +29,22 @@ def test_wide_net_is_the_honest_counterpart():
 # ── personality axes ───────────────────────────────────────────────────────────────────────────
 def test_energy_axis_falls_back_to_genre_when_no_acoustic():
     # No acoustic rows at all: energy comes purely from the genre prior (techno is high-energy).
-    val, src = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "techno")},
-                              genre_axes={'techno': ('techno', None)})
-    assert src == "genre" and val > 0.7
+    val, covered, total = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "techno")},
+                                        genre_axes={'techno': ('techno', None)})
+    assert (covered, total) == (0, 10)
+    assert val > 0.7
     # ambient with no acoustic -> low
-    val2, _ = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "ambient")},
-                             genre_axes={'ambient': ('ambient', None)})
+    val2, _, _ = rs.energy_axis({"k": 10}, audio={}, meta={"k": ("A", "ambient")},
+                                genre_axes={'ambient': ('ambient', None)})
     assert val2 < 0.3
 
 
 def test_energy_axis_uses_acoustic_when_present():
     audio = {"k": {"energy": 0.9, "bpm": 140, "dance": 0.8}}
-    val, src = rs.energy_axis({"k": 20}, audio, meta={"k": ("A", "ambient")},
-                              genre_axes={'ambient': ('ambient', None)})
-    assert val > 0.7   # acoustic 0.9 dominates the ambient prior once coverage is full
-    assert src in ("acoustic", "genre")
+    val, covered, total = rs.energy_axis({"k": 20}, audio, meta={"k": ("A", "ambient")},
+                                        genre_axes={'ambient': ('ambient', None)})
+    assert val == pytest.approx(0.9)
+    assert (covered, total) == (20, 20)
 
 
 def test_rhythm_axis_counts_the_night_window():

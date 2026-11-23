@@ -1,4 +1,4 @@
-# Tests run only on PRs. Releases build and publish independently.
+# Tests run only on PRs. Maintainer PRs retain the final packages for deployment.
 #
 # Unit tests use eight isolated runners; browser tests use four. Each runs serial pytest.
 name: PR checks
@@ -195,9 +195,50 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  release-version:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Plan the next patch version from the PR base
+        id: version
+        run: git tag --merged HEAD^1 | python3 packaging/release_policy.py --next-patch
+
+  release-candidate:
+    needs: [checks, release-version]
+    if: >-
+      !cancelled() && needs.checks.result == 'success' &&
+      needs.release-version.result == 'success'
+    uses: ./.github/workflows/prepared-candidates.yml
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    with:
+      version: ${{ needs.release-version.outputs.version }}
+      tag: ${{ needs.release-version.outputs.tag }}
+      revision: ${{ github.sha }}
+    secrets:
+      FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+      SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+
   containers:
-    needs: checks
-    if: github.event_name == 'pull_request'
+    needs: [checks, release-version]
+    if: >-
+      !cancelled() && needs.checks.result == 'success' &&
+      needs.release-version.result == 'skipped'
     uses: ./.github/workflows/container.yml
     with:
       version: '0.0.0.dev0'
@@ -229,16 +270,20 @@ jobs:
         run: python3 packaging/rehearse_publisher.py "$REHEARSAL_TAG" --cleanup-only
 
   macos:
-    needs: checks
-    if: github.event_name == 'pull_request'
+    needs: [checks, release-version]
+    if: >-
+      !cancelled() && needs.checks.result == 'success' &&
+      needs.release-version.result == 'skipped'
     uses: ./.github/workflows/macos.yml
     with:
       version: '0.0.0.dev0'
       tag: ''
 
   wheel:
-    needs: checks
-    if: github.event_name == 'pull_request'
+    needs: [checks, release-version]
+    if: >-
+      !cancelled() && needs.checks.result == 'success' &&
+      needs.release-version.result == 'skipped'
     runs-on: ubuntu-latest
     env:
       SETUPTOOLS_SCM_PRETEND_VERSION: '0.0.0.dev0'
@@ -255,7 +300,6 @@ jobs:
 
   flatpak:
     needs: [checks, wheel]
-    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/flatpak.yml
     with:
       version: '0.0.0.dev0'

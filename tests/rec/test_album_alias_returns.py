@@ -1,5 +1,7 @@
 """Deliberate returns follow verified releases without multiplying shared dates."""
 from copy import deepcopy
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from tests.enrichment_support import use_existing_album_tracks
 
 import numpy as np
@@ -45,8 +47,7 @@ def seed_return_catalog(store, first, before, saved):
     # Fetching a release caches catalog entries; it does not own its tracks.
     # Both vector spaces need actual library inputs for this scoring check.
     with store.conn:
-        store.conn.execute("INSERT OR IGNORE INTO library_memberships "
-                           "SELECT id,'fixture',NULL FROM catalog_entries")
+        store.conn.execute("UPDATE track_sources SET library_origin='fixture' WHERE library_origin IS NULL")
     if saved:
         store.collection.add_saved_album({'browse': first, 'title': payload['title'], 'artist': 'All Them Witches'})
     if not before:
@@ -131,3 +132,38 @@ def test_distinct_editions_do_not_pool_days_and_withdrawals_recompute_returns(st
     choice_evidence.refresh_report(store, now + 2)
     assert store.rec_proposals.get_proposals('choice_interests')['album_track_days'] == {
         OLD: {'track 0|all them witches': 1}}
+
+
+@pytest.mark.parametrize('starts,days', [
+    pytest.param(('2026-11-20T16:00', '2026-11-20T19:00'), 1, id='utc-midnight'),
+    pytest.param(('2026-11-20T23:00', '2026-11-21T02:00'), 2, id='local-midnight'),
+    pytest.param(('2026-11-20T09:00', '2026-11-21T09:00'), 2, id='separate-days'),
+])
+def test_album_return_report_and_standing_support_use_the_listener_calendar(store, starts, days):
+    timezone = 'America/Costa_Rica'
+    account = store.accounts.upsert_account('listener', None, True)
+    payload, keys = seed_return_catalog(store, OLD, before=True, saved=False)
+    tracks = [{'key': key, 'video_id': row['videoId']} for key, row in zip(keys, payload['tracks'])]
+    video = tracks[0]['video_id']
+    for episode, start in enumerate(starts):
+        at = datetime.fromisoformat(start).replace(tzinfo=ZoneInfo(timezone)).timestamp()
+        offer = choice_evidence.issue(store, 'albums', [{'id': OLD, 'tracks': tracks}], at - 2,
+                                      context={}, episode_id=f'episode-{episode}')
+        choice_evidence.respond(store, offer, 'choice', at - 1, option_id=OLD)
+        store.history.record_play_event(account, keys[0], video, at, context_choice=True, source_timezone=timezone)
+        choice_evidence.respond(store, offer, 'start', at, option_id=OLD,
+                                details={'video_id': video, 'account_id': account})
+
+    now = at + 60
+    report = choice_evidence.refresh_report(store, now)['formats']['albums']
+    projection = store.rec_proposals.get_proposals('choice_interests')
+    context, = projection['contexts']
+    assert (report['starts'], report['return_days'], context['episodes'], context['days']) == (2, days - 1, 2, days)
+    assert projection['album_track_days'] == {OLD: {keys[0]: days}}
+    taste = scoring.content_taste(store, now=now)
+    album_contexts = [row for row in getattr(taste, 'sources', ()) if row['kind'] == 'album']
+    if days == 2:
+        album, = album_contexts
+        assert album['return_weight'] == pytest.approx(np.log(2) / len(tracks))
+    else:
+        assert album_contexts == []

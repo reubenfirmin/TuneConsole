@@ -8,9 +8,9 @@ from yt_playlist.util.navigation import playlist_url
 
 
 class ClusterQuery:
-    def __init__(self, query, discovery, genres, evidence, *, expand, geometry):
+    def __init__(self, query, discovery, genres, evidence, *, rank_candidates, geometry):
         self.query, self.discovery, self.genres, self.evidence = query, discovery, genres, evidence
-        self.expand, self.geometry = expand, geometry
+        self.rank_candidates, self.geometry = rank_candidates, geometry
 
     def expansion(self, body):
         pos, neg, exclude = (body.get(key) or [] for key in ('pos_keys', 'neg_keys', 'exclude'))
@@ -24,7 +24,7 @@ class ClusterQuery:
         preferred = {key for s in artists for key in s['keys']} - songs
         size = int(body.get('k') or 6)
         include_new = bool(body.get('include_new'))
-        neighbors = self.expand(pos_keys=pos, neg_keys=neg, exclude=exclude,
+        neighbors = self.rank_candidates(pos_keys=pos, neg_keys=neg, exclude=exclude,
             topn=len(preferred) + max(size * 4, size + 12), allow=allow, include_new=include_new,
             seed_groups=groups, candidate_seed_keys=preferred, artist_groups=artist_keys)
         basis = body.get('count_keys')
@@ -33,7 +33,7 @@ class ClusterQuery:
         existing = self.query.tracks_by_keys(basis)
         keys = [key for key, _ in neighbors]
         metadata = self.query.tracks_by_keys(keys)
-        discovered = self.discovery.discovered_tracks_by_keys(keys) if include_new else {}
+        discovered = self.discovery.playable_discoveries_by_keys(keys) if include_new else {}
         genres = self.query.track_genres(keys)
         axes = self.genres.feature_axes([*genres.values(), *(m.get('genre') for m in discovered.values())])
         check_stopping()
@@ -99,16 +99,23 @@ class Clusters:
     def admit_save(self):
         return self.generated().admit()
 
+    def _playable_tracks(self, keys):
+        library = self.query.tracks_by_keys(keys)
+        discoveries = self.discovery.playable_discoveries_by_keys([key for key in keys if key not in library])
+        return {**discoveries, **library}
+
+    def playable_uploads(self, keys):
+        return {key: row['video_id'] for key, row in self._playable_tracks(keys).items()}
+
     def save(self, name, keep, central, labels, families, journey, canvas, intent):
-        keep = list(keep) + [k for k in central if k not in keep]
-        recipe, order = self.recipe(keep, labels, families, journey=journey)
-        metadata = self.query.tracks_by_keys(keep)
-        metadata = {**self.discovery.discovered_tracks_by_keys(keep), **metadata}
+        keep = list(dict.fromkeys([*keep, *central]))
+        metadata = self._playable_tracks(keep)
+        if not metadata:
+            return {'name': name, 'error': 'Keep at least one track to create a playlist.'}
+        recipe, order = self.recipe([key for key in keep if key in metadata], labels, families, journey=journey)
         tracks = [{field: metadata[key][field] for field in ('video_id', 'title', 'artist', 'album', 'thumbnail')}
-                  for key in order if key in metadata and metadata[key].get('video_id')]
+                  for key in order]
         result = {'name': name}
-        if not tracks:
-            return {**result, 'error': 'Keep at least one track to create a playlist.'}
         try:
             saved = self.generated().create(name, tracks, recipe=recipe, navigate=True, intent=intent, canvas=canvas)
             result.update(ytm=saved['new_ytm'], pid=saved['pid'], added=saved['added'])

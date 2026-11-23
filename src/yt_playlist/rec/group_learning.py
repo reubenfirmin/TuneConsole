@@ -107,12 +107,22 @@ def verified_state(stats, generation, now, parameters):
     return stats
 
 
-def current_allocation(store, preview, now):
+def current_allocation(store, preview, now, *, prior=None, recent=None):
     """The effective serving input, excluding report timestamps and diagnostics."""
-    return allocation({'groups': preview['groups']}, current_state(store, preview, now))
+    from yt_playlist.rec import scoring
+
+    return allocation(preview, current_state(store, preview, now),
+                      scoring.group_preferences(store, preview, now, prior=prior, recent=recent))
 
 
-def allocation(head, stats=None):
+def mix_allocation(store, preview, now):
+    from yt_playlist.library import mix_listening
+
+    return current_allocation(store, preview, now,
+                              prior=mix_listening.group_prior(store, preview, now), recent={})
+
+
+def allocation(head, stats=None, preferences=None):
     """Conserve musical-area mass while refining within each area; no independent sibling tickets."""
     groups = {group['group_id']: group for group in head['groups'] if not group.get('legacy')}
     by_version = {group['version']: group for group in groups.values()}
@@ -121,6 +131,7 @@ def allocation(head, stats=None):
         parent = by_version.get(group['parent_version'])
         children.setdefault(parent['group_id'] if parent else None, []).append(group)
     estimates = {row['group_id']: row['estimate'] for row in (stats or {}).get('rows', [])}
+    preferences = preferences or {}
     weights = {}
 
     def visit(parent, mass):
@@ -129,7 +140,8 @@ def allocation(head, stats=None):
             if parent is not None:
                 weights[parent] = mass
             return
-        raw = {g['group_id']: g['size'] * estimates.get(g['group_id'], .5) for g in siblings}
+        raw = {g['group_id']: g['size'] * estimates.get(g['group_id'], .5) *
+               preferences.get(g['group_id'], 1.) for g in siblings}
         total = sum(raw.values())
         for group in siblings:
             visit(group['group_id'], mass * raw[group['group_id']] / total if total else 0)

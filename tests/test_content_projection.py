@@ -2,12 +2,13 @@ import numpy as np
 from tests.enrichment_support import seed_audio
 import pytest
 
-from yt_playlist.rec import content_model, discover, embedding_vectors as embed, eval_recs
+from yt_playlist.rec import artist_model, content_model, discover, embedding_vectors as embed, eval_recs
 from tests import model_support
+from tests.musical_support import publish_intensities
 
 
 def test_content_projection_lands_in_right_cluster(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:
@@ -33,7 +34,7 @@ def test_content_projection_lands_in_right_cluster(store):
 
 
 def test_projection_none_without_enough_tags(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     assert discover.ContentProjection.fit(store) is None
 
 
@@ -53,10 +54,10 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
     active_training = set()
     tested = []
 
-    def model(content, audio, *, genre_axes=None):
+    def model(content, audio, *, genre_axes=None, policy=None):
         assert set(content) == active_training
         assert set(audio) == active_training
-        return original_model(content, audio, genre_axes=genre_axes)
+        return original_model(content, audio, genre_axes=genre_axes, policy=policy)
 
     def solve(lhs, rhs):
         # Orthogonal reference targets make any held-out row entering Y observable here.
@@ -83,7 +84,7 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
 
     monkeypatch.setattr(content_model, "build_content_model", model)
     monkeypatch.setattr(np.linalg, "solve", solve)
-    monkeypatch.setattr(discover.artist_model, "load_artist_vectors",
+    monkeypatch.setattr(artist_model, "load_artist_vectors",
                         lambda s: pytest.fail("evaluation must not use shared artist features"))
     monkeypatch.setattr(discover.ContentProjection, "fit_from_inputs", classmethod(fit))
     result = eval_recs.projection_recall(store, k=5)
@@ -109,7 +110,7 @@ def test_projection_reports_insufficient_fold_evidence(store, monkeypatch):
 # --- §2: enriched feature basis (audio + subgenre) and graceful degradation ---
 
 def _two_playlists(store, A, B):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", len(A), "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", len(B), "h2", 0.0), B)
     model_support.build_track_model(store, dim=8)
@@ -134,7 +135,7 @@ def _toward(proj, ca, cb, **content):
 
 
 def test_projection_uses_audio_to_separate_same_genre_year(store):
-    # Two clusters with IDENTICAL genre + year, separable ONLY by audio (tempo / energy), in separate
+    # Two clusters with IDENTICAL genre + year, separable ONLY by recording intensity, in separate
     # playlists so the collaborative embedding pulls them apart. Genre+year alone predicts ONE vector for
     # both, so it cannot lean a candidate toward its own cluster. Audio must. (Genre+year-only would make
     # the two predictions identical, so the strict inequalities below fail without the audio block.)
@@ -142,18 +143,18 @@ def test_projection_uses_audio_to_separate_same_genre_year(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(10)]
     for t in A:
         store.tracks.set_track_genre(t, "Techno"); store.tracks.set_track_year(t, "2015")
-        seed_audio(store, t, bpm=172.0, energy=0.92, danceability=0.88)
     for t in B:
         store.tracks.set_track_genre(t, "Techno"); store.tracks.set_track_year(t, "2015")
-        seed_audio(store, t, bpm=88.0, energy=0.18, danceability=0.20)
+    publish_intensities(store, {store.tracks.catalog_subject(track)['identity_key']: intensity
+                               for tracks, intensity in ((A, .92), (B, .18)) for track in tracks})
     _two_playlists(store, A, B)
 
     proj = discover.ContentProjection.fit(store)
     ca, cb = _cluster_dirs(store)
-    fast = {"genre": "Techno", "year": "2015", "audio": {"bpm": 172.0, "energy": 0.92, "danceability": 0.88}}
-    slow = {"genre": "Techno", "year": "2015", "audio": {"bpm": 88.0, "energy": 0.18, "danceability": 0.20}}
-    assert _toward(proj, ca, cb, **fast) > 0, "high-energy audio should ground into cluster A"
-    assert _toward(proj, ca, cb, **slow) < 0, "low-energy audio should ground into cluster B"
+    high = {"genre": "Techno", "year": "2015", "audio": {"character": {"intensity": (.92, 1.)}}}
+    low = {"genre": "Techno", "year": "2015", "audio": {"character": {"intensity": (.18, 1.)}}}
+    assert _toward(proj, ca, cb, **high) > 0, "high intensity should ground into cluster A"
+    assert _toward(proj, ca, cb, **low) < 0, "low intensity should ground into cluster B"
 
 
 def test_projection_uses_subgenre_to_separate_same_family(store):
@@ -180,10 +181,10 @@ def test_projection_grounds_genre_only_track(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(10)]
     for t in A:
         store.tracks.set_track_genre(t, "Techno"); store.tracks.set_track_year(t, "2015")
-        seed_audio(store, t, bpm=172.0, energy=0.92, danceability=0.88)
     for t in B:
         store.tracks.set_track_genre(t, "Folk"); store.tracks.set_track_year(t, "1995")
-        seed_audio(store, t, bpm=92.0, energy=0.22, danceability=0.25)
+    publish_intensities(store, {store.tracks.catalog_subject(track)['identity_key']: intensity
+                               for tracks, intensity in ((A, .92), (B, .22)) for track in tracks})
     _two_playlists(store, A, B)
 
     proj = discover.ContentProjection.fit(store)

@@ -17,8 +17,8 @@ pytestmark = pytest.mark.browser
 
 @pytest.fixture
 def live_move_app(store):
-    i1 = store.accounts.upsert_account("Main", "c1", None, True)
-    i2 = store.accounts.upsert_account("Alt", "c2", None, False)
+    i1 = store.accounts.upsert_account("Main", None, True)
+    i2 = store.accounts.upsert_account("Alt", None, False)
     tracks = {}
     for n, title in enumerate(("Evening", "Mix", "Weekend")):
         pid = store.playlists.upsert_playlist(i1, f"PL{n}", title, 1, "h", 1.0)

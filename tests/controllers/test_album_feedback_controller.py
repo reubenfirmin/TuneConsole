@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-import json
 import sqlite3
 from unittest.mock import Mock, create_autospec
 import uuid
@@ -10,7 +9,6 @@ from tests.repository_mock_support import no_database
 from yt_playlist.controllers.album_feedback import AlbumFeedback
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.repos.album_feedback import AlbumFeedbackRepo
-from yt_playlist.controllers.collection import Collection
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -18,7 +16,6 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def feedback():
     repository = create_autospec(AlbumFeedbackRepo, instance=True, spec_set=True)
-    collection = create_autospec(Collection, instance=True, spec_set=True)
     writing = False
 
     @contextmanager
@@ -35,21 +32,10 @@ def feedback():
         assert not writing
         yield
 
-    def preferred(sources):
-        assert not writing, 'Alias lookup must not join another repository transaction'
-        return {source: 'release' if source in ('old', 'new') else source for source in sources}
-
-    def read_original(plan):
-        assert not writing, 'Prepared feedback files must be read before the write'
-        return json.dumps({'old': {'kind': 'more', 'at': 1}})
-
     repository.transaction.side_effect = transaction
-    repository.uses_rows.return_value = True
     repository.account.return_value = (1, True)
     repository.replacement_facts.return_value = (3, [])
-    repository.save_legacy.return_value = True
-    collection.preferred_album_ids.side_effect = preferred
-    return AlbumFeedback(repository, collection, Mock(side_effect=fence), Mock(side_effect=read_original))
+    return AlbumFeedback(repository, Mock(side_effect=fence))
 
 
 def previous(**values):
@@ -63,15 +49,7 @@ def test_alias_merge_selects_latest_response_per_account_and_keeps_response_line
         dict(id=3, account_id=5, created_at=20, source_browse_id='A')]
     feedback.merge_albums(1, 2, 9)
     feedback.repository.apply_merge.assert_called_once_with(1, 2, [(10, 2)])
-    feedback.collection.preferred_album_ids.assert_not_called()
     feedback.fence.assert_not_called()
-
-
-def test_alias_merge_leaves_installed_legacy_feedback_in_its_original_form(feedback):
-    feedback.repository.uses_rows.return_value = False
-    feedback.merge_albums(1, 2, 9)
-    feedback.repository.transaction.assert_not_called()
-    feedback.repository.apply_merge.assert_not_called()
 
 
 def test_replacement_withdraws_each_original_action_once_and_supplies_new_response(feedback):
@@ -90,7 +68,6 @@ def test_replacement_withdraws_each_original_action_once_and_supplies_new_respon
         {'action_id': action, 'opportunity_id': 'new-offer', 'kind': 'feedback', 'now': 20,
          'option_id': 'new', 'feedback_kind': 'known'}]
     feedback.repository.account.assert_called_once_with(2)
-    feedback.collection.preferred_album_ids.assert_not_called()
 
 
 def test_clear_withdraws_previous_action_without_issuing_new_feedback(feedback):
@@ -125,58 +102,12 @@ def test_native_observation_time_is_validated_before_transaction(feedback, now):
     feedback.repository.transaction.assert_not_called()
 
 
-def test_native_read_preserves_original_ids_and_ignores_recovery_files(feedback):
-    feedback.repository.original_facts.return_value = {'rows': [
+def test_read_preserves_original_ids(feedback):
+    feedback.repository.original_rows.return_value = [
         {'source_browse_id': 'old', 'response': 'known', 'created_at': 10,
-         'opportunity_id': 'original-offer', 'action_id': 'original-action'}]}
+         'opportunity_id': 'original-offer', 'action_id': 'original-action'}]
     assert feedback.original() == {'old': {'kind': 'known', 'at': 10,
         'opportunity_id': 'original-offer', 'action_id': 'original-action'}}
-    feedback.read_original.assert_not_called()
-
-
-def test_legacy_replacement_combines_aliases_outside_the_sql_write(feedback):
-    feedback.repository.uses_rows.return_value = False
-    old = {'old': {'kind': 'more', 'at': 10, 'opportunity_id': 'offer', 'action_id': 'original'},
-           'unrelated': {'kind': 'known', 'at': 11}}
-    raw = json.dumps(old)
-    feedback.repository.original_facts.return_value = {'raw': raw, 'selected': False, 'plan': None}
-    feedback.replace('new', 'reject', 20, 'new-offer')
-    before, updated, intents = feedback.repository.save_legacy.call_args.args
-    assert before == raw
-    result = json.loads(updated)
-    assert set(result) == {'new', 'unrelated'}
-    assert result['new']['kind'] == 'reject' and result['unrelated'] == old['unrelated']
-    assert [intent['kind'] for intent in intents] == ['withdraw', 'feedback']
-    feedback.repository.transaction.assert_not_called()
-
-
-def test_prepared_legacy_document_is_read_before_sql_replacement(feedback):
-    feedback.repository.uses_rows.return_value = False
-    feedback.repository.original_facts.return_value = {'raw': 'original source bytes', 'selected': True, 'plan': 'plan'}
-    feedback.replace('new', 'clear', 20)
-    feedback.read_original.assert_called_once_with('plan')
-    assert feedback.repository.save_legacy.call_args.args == ('original source bytes', '{}', [])
-
-
-def test_legacy_compare_and_save_reloads_after_a_changed_original(feedback):
-    feedback.repository.uses_rows.return_value = False
-    feedback.repository.original_facts.side_effect = [
-        {'raw': '{}', 'selected': False, 'plan': None},
-        {'raw': '{"unrelated":{"kind":"known","at":11}}', 'selected': False, 'plan': None}]
-    feedback.repository.save_legacy.side_effect = [False, True]
-    feedback.replace('new', 'clear', 20)
-    assert feedback.repository.save_legacy.call_count == 2
-    assert json.loads(feedback.repository.save_legacy.call_args.args[1]) == {
-        'unrelated': {'kind': 'known', 'at': 11}}
-
-
-def test_legacy_compare_and_save_has_a_bounded_retry(feedback):
-    feedback.repository.uses_rows.return_value = False
-    feedback.repository.original_facts.return_value = {'raw': None, 'selected': False, 'plan': None}
-    feedback.repository.save_legacy.return_value = False
-    with pytest.raises(WorkBudgetExceeded, match='changed during replacement'):
-        feedback.replace('new', 'clear', 20)
-    assert feedback.repository.save_legacy.call_count == 3
 
 
 def test_protection_combines_durable_and_in_memory_pins_under_the_fence(feedback):

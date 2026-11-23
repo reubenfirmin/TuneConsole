@@ -1,22 +1,16 @@
 """SQLite coverage, conflict facts and references to retained provider evidence."""
 import json
 
-from yt_playlist.core import catalog, metadata, metadata_runtime
-from yt_playlist.repos.base import Repo, snapshot_read, synchronized
+from yt_playlist.core import metadata, metadata_runtime, recording_library
+from yt_playlist.core.album_queries import TRACK_LINKS
+from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
 from yt_playlist.repos.enrichment_sql import TRACKS_CTE, pending_coverage
 from yt_playlist.repos import metadata_file_writes
 
 
 class EnrichmentReportsRepo(Repo):
-    @property
-    def _conflict_table(self):
-        if metadata_runtime.active(self.conn):
-            return 'enrichment_conflict'
-        return 'enrichment_conflict'
-
     @synchronized
     def genre_provenance_facts(self, track_id):
-        track_id = catalog.resolve_entry(self.conn, track_id)
         track = self.conn.execute(
             "SELECT id, recording_id, video_id, title, artist, COALESCE(genre, '') genre FROM catalog_tracks WHERE id=?", (track_id,)
         ).fetchone()
@@ -25,7 +19,7 @@ class EnrichmentReportsRepo(Repo):
         rows = self.conn.execute(
             "WITH relevant AS (SELECT * FROM enrichment_log WHERE field='genre' AND "
             "((field_scope='recording' AND (recording_id=? OR input_video_id IN "
-            "(SELECT video_id FROM youtube_items WHERE recording_id=?))) OR "
+            "(SELECT video_id FROM track_sources WHERE recording_id=?))) OR "
             "(field_scope='legacy_item' AND (input_video_id=? OR track_id=?)))) "
             "SELECT provider,value FROM relevant e WHERE id=(SELECT MAX(id) FROM relevant newer "
             "WHERE newer.provider=e.provider) ORDER BY id",
@@ -34,14 +28,15 @@ class EnrichmentReportsRepo(Repo):
         candidates = [{'provider': row['provider'], 'value': row['value'] or ''} for row in rows]
         runtime = metadata_runtime.active(self.conn)
         references = [dict(row) for row in self.conn.execute(
-            'SELECT s.recording_id,s.provider,p.id provider_id,s.at FROM enrichment_provider_state s '
-            'JOIN metadata_runtime_providers p ON p.name=s.provider WHERE s.recording_id=?',
+            'SELECT s.recording_id,s.provider,p.metadata_provider_id provider_id,s.at FROM enrichment_provider_state s '
+            'JOIN enrichment_provider_config p ON p.provider=s.provider AND p.metadata_provider_id IS NOT NULL '
+            "WHERE s.recording_id=? AND s.status<>'queued'",
             (track['recording_id'],))] if runtime else []
         for reference in references:
             reference['file'] = metadata_file_writes.reference(self.conn, 'alternatives',
                 (reference['recording_id'], reference['provider_id']), float(reference['at']))
         conflict = self.conn.execute(
-            f"SELECT candidates FROM {self._conflict_table} WHERE track_id=? AND field='genre'", (track_id,)
+            "SELECT candidates FROM enrichment_conflict WHERE track_id=? AND field='genre'", (track_id,)
         ).fetchone()
         return {'track': dict(track), 'candidates': candidates, 'runtime': runtime,
                 'provider_references': references,
@@ -57,18 +52,18 @@ class EnrichmentReportsRepo(Repo):
     @synchronized
     def conflict_count_for_playlist(self, playlist_id) -> int:
         row = self.conn.execute(
-            f"SELECT COUNT(*) n FROM {self._conflict_table} c "
+            "SELECT COUNT(*) n FROM enrichment_conflict c "
             "JOIN playlist_tracks pt ON pt.track_id=c.track_id "
-            "WHERE pt.playlist_id=? AND c.resolved=0", (playlist_id,)).fetchone()
+            "WHERE pt.playlist_id=? AND c.resolved=0 AND c.field<>'energy'", (playlist_id,)).fetchone()
         return row["n"]
 
     @synchronized
     def conflict_count_for_album(self, album_browse_id) -> int:
         row = self.conn.execute(
-            f"SELECT COUNT(*) n FROM {self._conflict_table} c "
+            "SELECT COUNT(*) n FROM enrichment_conflict c "
             "JOIN catalog_tracks t ON t.id=c.track_id "
-            f"WHERE EXISTS(SELECT 1 FROM {self.album_track_links_table} a WHERE a.entry_id=t.id AND a.browse_id=?) "
-            "AND c.resolved=0", (album_browse_id,)).fetchone()
+            f"WHERE EXISTS(SELECT 1 FROM {TRACK_LINKS} a WHERE a.entry_id=t.id AND a.browse_id=?) "
+            "AND c.resolved=0 AND c.field<>'energy'", (album_browse_id,)).fetchone()
         return row["n"]
 
     def _conflicts(self, rows) -> list:
@@ -80,10 +75,10 @@ class EnrichmentReportsRepo(Repo):
     def unresolved_conflicts_for_playlist(self, playlist_id) -> list:
         rows = self.conn.execute(
             "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
-            f"FROM {self._conflict_table} c "
+            "FROM enrichment_conflict c "
             "JOIN playlist_tracks pt ON pt.track_id=c.track_id "
             "JOIN catalog_tracks t ON t.id=c.track_id "
-            "WHERE pt.playlist_id=? AND c.resolved=0 ORDER BY t.title, c.field",
+            "WHERE pt.playlist_id=? AND c.resolved=0 AND c.field<>'energy' ORDER BY t.title, c.field",
             (playlist_id,)).fetchall()
         return self._conflicts(rows)
 
@@ -91,27 +86,24 @@ class EnrichmentReportsRepo(Repo):
     def unresolved_conflicts_for_album(self, album_browse_id) -> list:
         rows = self.conn.execute(
             "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
-            f"FROM {self._conflict_table} c JOIN catalog_tracks t ON t.id=c.track_id "
-            f"WHERE EXISTS(SELECT 1 FROM {self.album_track_links_table} a WHERE a.entry_id=t.id AND a.browse_id=?) "
-            "AND c.resolved=0 ORDER BY t.title, c.field",
+            "FROM enrichment_conflict c JOIN catalog_tracks t ON t.id=c.track_id "
+            f"WHERE EXISTS(SELECT 1 FROM {TRACK_LINKS} a WHERE a.entry_id=t.id AND a.browse_id=?) "
+            "AND c.resolved=0 AND c.field<>'energy' ORDER BY t.title, c.field",
             (album_browse_id,)).fetchall()
         return self._conflicts(rows)
 
     @snapshot_read
     def coverage_stats(self, include_discovery=False) -> dict:
-        # Onboarding measures the library; the enrichment page measures every queued source.
-        prefix = "WITH " + TRACKS_CTE if include_discovery else ""
-        table = "enrichment_tracks" if include_discovery else "tracks"
+        # Onboarding measures the library; the enrichment page also includes discovery.
+        scope = "" if include_discovery else " WHERE t.in_library"
         r = self.conn.execute(
-            prefix + " SELECT COUNT(*) total,SUM(processed) processed,SUM(genre) genre,"
-            "SUM(year) year,SUM(bpm) bpm,SUM(energy) energy,SUM(danceability) danceability FROM ("
-            "SELECT recording_id,MAX(first_enriched_at IS NOT NULL AND NOT " +
-            pending_coverage() + ") processed,"
-            "MAX(genre IS NOT NULL AND genre<>'') genre,MAX(mb_year IS NOT NULL AND mb_year<>'') year,"
-            "MAX(bpm IS NOT NULL) bpm,MAX(energy IS NOT NULL) energy,"
-            f"MAX(danceability IS NOT NULL) danceability FROM {table} t GROUP BY recording_id)").fetchone()
+            "WITH " + TRACKS_CTE + " SELECT COUNT(*) total,"
+            "SUM(first_enriched_at IS NOT NULL AND NOT " + pending_coverage() + ") processed,"
+            "SUM(genre IS NOT NULL AND genre<>'') genre,SUM(mb_year IS NOT NULL AND mb_year<>'') year,"
+            "SUM(bpm IS NOT NULL) bpm,SUM(danceability IS NOT NULL) danceability "
+            "FROM enrichment_tracks t" + scope).fetchone()
         return {k: (r[k] or 0) for k in
-                ("total", "processed", "genre", "year", "bpm", "energy", "danceability")}
+                ("total", "processed", "genre", "year", "bpm", "danceability")}
 
     @snapshot_read
     def queue_remaining(self) -> int:
@@ -119,6 +111,19 @@ class EnrichmentReportsRepo(Repo):
             "WITH " + TRACKS_CTE +
             " SELECT COUNT(*) n FROM enrichment_tracks t WHERE first_enriched_at IS NULL OR " +
             pending_coverage()).fetchone()["n"]
+
+    @lookup_read
+    def has_pending_tracks(self) -> bool:
+        # Pending status needs a usable input, but does not choose which one.
+        return self.conn.execute(f'''
+            WITH scope AS ({recording_library.ENRICHMENT_SQL})
+            SELECT 1 FROM scope JOIN recordings r ON r.id=scope.recording_id
+            JOIN track_sources input ON input.recording_id=r.id AND (scope.in_library OR input.id=r.discovery_entry_id)
+            LEFT JOIN enrichment_provider_state s ON s.recording_id=r.id AND s.queued=1
+            LEFT JOIN enrichment_provider_config c ON c.provider=s.provider AND c.status='available'
+            WHERE r.first_enriched_at IS NULL OR c.provider IS NOT NULL
+            LIMIT 1
+        ''').fetchone() is not None
 
     @snapshot_read
     def queue_stats(self) -> dict:
@@ -133,7 +138,7 @@ class EnrichmentReportsRepo(Repo):
     @synchronized
     def outstanding_conflicts(self) -> int:
         return self.conn.execute(
-            f"SELECT COUNT(*) n FROM {self._conflict_table} WHERE resolved=0").fetchone()["n"]
+            "SELECT COUNT(*) n FROM enrichment_conflict WHERE resolved=0 AND field<>'energy'").fetchone()["n"]
 
     @synchronized
     def activity_stats(self, since) -> dict:
@@ -148,7 +153,7 @@ class EnrichmentReportsRepo(Repo):
         """Completed passes, newest first; missing metadata does not imply a failed pass."""
         rows = self.conn.execute(
             "WITH " + TRACKS_CTE +
-            " SELECT id, title, artist, genre, mb_year, bpm, energy, danceability, last_enriched_at "
+            " SELECT id, title, artist, genre, mb_year, bpm, danceability, last_enriched_at "
             "FROM enrichment_tracks t WHERE first_enriched_at IS NOT NULL AND NOT " + pending_coverage() + " "
             "ORDER BY last_enriched_at DESC, queue_order DESC, source ASC LIMIT ? OFFSET ?",
             (limit, offset)).fetchall()
@@ -157,7 +162,7 @@ class EnrichmentReportsRepo(Repo):
     @synchronized
     def unresolved_enrichment_conflicts(self, limit, offset, *, fields):
         rows = self.conn.execute(
-            self._review_select(fields) + " WHERE c.resolved=0 "
+            self._review_select(fields) + " WHERE c.resolved=0 AND c.field<>'energy' "
             "ORDER BY t.title COLLATE NOCASE, t.id, c.field LIMIT ? OFFSET ?",
             (limit, offset)).fetchall()
         return self._review_facts(rows, fields)
@@ -166,7 +171,7 @@ class EnrichmentReportsRepo(Repo):
         columns = ", ".join("t." + col for col in sorted(set(fields.values())))
         return ("SELECT c.track_id, c.field, c.candidates, c.resolved_value, "
                 "t.title, t.artist, t.video_id, t.mb_recording_id, "
-                f"{columns} FROM {self._conflict_table} c JOIN catalog_tracks t ON t.id=c.track_id")
+                f"{columns} FROM enrichment_conflict c JOIN catalog_tracks t ON t.id=c.track_id")
 
     def _review_facts(self, rows, fields):
         result = self._conflicts(rows)
@@ -179,14 +184,13 @@ class EnrichmentReportsRepo(Repo):
             conflict['findings'] = [dict(finding) for finding in self.conn.execute(
                 "SELECT provider,value FROM enrichment_log "
                 'WHERE track_id=? AND field=? ORDER BY id', (conflict['track_id'], conflict['field']))]
-            override = self.conn.execute('SELECT 1 FROM entry_field_choices WHERE entry_id=? AND field=?',
-                                         (conflict['track_id'], column or conflict['field'])).fetchone()
-            conflict['overridden'] = override is not None
+            conflict['overridden'] = metadata.has_choice(self.conn, conflict['track_id'], column or conflict['field'])
         return result
 
     @synchronized
     def enrichment_conflict_detail(self, track_id, field, *, fields):
-        track_id = catalog.resolve_entry(self.conn, track_id)
+        if field not in fields:
+            return None
         rows = self.conn.execute(self._review_select(fields) + " WHERE c.track_id=? AND c.field=?",
                                  (track_id, field)).fetchall()
         return self._review_facts(rows, fields)[0] if rows else None

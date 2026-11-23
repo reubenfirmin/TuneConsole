@@ -1,15 +1,13 @@
 import importlib.util
 import inspect
-import sqlite3
 from pathlib import Path
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 import time
-from contextlib import ExitStack, closing
+from contextlib import ExitStack
 
 import pytest
-from tests.compaction_fixture_support import compaction_inputs
 from tests.audio_model_support import disable_models
 from tests.genre_catalog_support import use_shipped_catalog
 from tests.store_fixture_support import consumer_schema, initialize_consumer, native_sql_calls
@@ -159,7 +157,7 @@ def radio_genre_template(_pristine_current_schema):
     from tests.prepared_fixture_support import prepared_template
     from tests.test_radio_genres import seed_genre_pools
 
-    # Keep all nine modes, 108 recordings, metadata and typed publications.
+    # Keep all nine musical leaves, 108 recordings, metadata and typed publications.
     # Each consumer receives private SQL, retained files and detached rows.
     with prepared_template(_pristine_current_schema, seed_genre_pools) as template:
         yield template
@@ -200,7 +198,7 @@ def measured_home_templates(_pristine_current_schema, measured_sounds_template):
                         prepare_tuning_home(source, 1000)
                     else:
                         from tests.measured_home_support import prepare
-                        identity = source.accounts.upsert_account('main', 'cred', None, True)
+                        identity = source.accounts.upsert_account('main', None, True)
                         # Match live_app's pre-preparation state, including its
                         # existing playlist. live_app later upserts these same
                         # identities while creating the private application.
@@ -301,7 +299,7 @@ def mode_cards_home_template(_pristine_current_schema, mode_cards_inputs_templat
         mode_cards_inputs_template.restore(source)
         # Match _client's account-before-preparation order, without creating
         # an app or recording any route's offer on the shared source.
-        source.accounts.upsert_account('main', 'cred', None, True)
+        source.accounts.upsert_account('main', None, True)
         prepare_home(source)
         return source.rec_proposals.get_proposals(home_prepared.SURFACE)
 
@@ -347,7 +345,7 @@ def fresh_home_template(_pristine_current_schema, fresh_genre_candidates_templat
     def build(source):
         fresh_genre_candidates_template.restore(source)
         returning_listener(source, 'mixes', now=1000)
-        source.accounts.upsert_account('main', 'cred', None, True)
+        source.accounts.upsert_account('main', None, True)
         prepare_home(source)
         return source.rec_proposals.get_proposals(home_prepared.SURFACE)
 
@@ -388,7 +386,7 @@ def _admitted_installed_schema(tmp_path_factory, _pristine_installed_schema):
             if version not in templates:
                 admitted = resources.enter_context(prepared_template(
                     _pristine_installed_schema(version), lambda source: None,
-                    database=root / f'{version}.db', defer_metadata=True))
+                    database=root / f'{version}.db', run_migrations=True))
                 assert admitted.source.conn.execute(
                     'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
                 # PreparedTemplate owns the admitted source's revision tracker
@@ -402,35 +400,21 @@ def _admitted_installed_schema(tmp_path_factory, _pristine_installed_schema):
 @pytest.fixture(scope='session')
 def _bounded_installed_schema(tmp_path_factory):
     """Build empty publication inputs below admission, with real TEMP guards."""
-    from tests.genre_catalog_support import bound_catalog
-    from tests.prepared_fixture_support import capture_template
-    from tests.store_fixture_support import PristineSchema, install_numbered_input
-    from yt_playlist.core.db_revisions import Revisions
-    from yt_playlist.core.migrations import registry
+    from tests.prepared_fixture_support import prepared_template
+    from tests.store_fixture_support import bounded_consumer_schema
+    from yt_playlist.core.migrations.runner import RELEASE_VERSION
 
     root = tmp_path_factory.mktemp('bounded-installed-schemas')
     templates = {}
     with ExitStack() as resources:
         def template(version):
+            assert version == RELEASE_VERSION, 'Pre-release schemas are reset rather than converted'
             if version not in templates:
-                with pytest.MonkeyPatch.context() as patch:
-                    bound_catalog(patch)
-                    patch.setenv('YT_PLAYLIST_HOME', str(root / f'{version}-home'))
-                    patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-                    disable_models(patch)
-                    patch.delenv('DEEPSEEK_API_KEY', raising=False)
-                    source = resources.enter_context(closing(sqlite3.connect(
-                        ':memory:', factory=PristineSchema)))
-                    install_numbered_input(source, version)
-                    source.capture_revisions(Revisions(source))
-                    source.execute('PRAGMA query_only=ON')
-                    store = Store(root / f'{version}.db')
-                    resources.callback(store.conn.close)
-                    store.conn.execute('PRAGMA synchronous=OFF')
-                    initialize_consumer(store, source, compatibility=version < len(registry.MIGRATIONS))
-                    templates[version] = capture_template(store, None)
-                    assert templates[version].source.conn.execute(
-                        'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+                with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'))) as schema:
+                    templates[version] = resources.enter_context(prepared_template(
+                        schema, lambda source: None, database=root / f'{version}.db'))
+                assert templates[version].source.conn.execute(
+                    'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
             return templates[version]
 
         yield template
@@ -511,20 +495,28 @@ def only_provider(store, name):
 
 def seed_catalog_track(store, key, title, artist, *, video_id=None, track_id=None, **metadata):
     """Seed explicit catalog subjects for tests whose opaque keys/IDs are part of the fixture."""
+    from yt_playlist.core.track_sources import folded, save_to_library
+
     with store.conn:
         rid = store.conn.execute(
             'INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
             (track_id,key,title,artist)).lastrowid
-        if video_id:
-            store.conn.execute(
-                'INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?,?)',
-                (video_id,rid,title,artist,title,artist))
-        store.conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id,source_ref) VALUES (?,?,?,?)',
-                           (rid,rid,video_id,None if video_id else 'fixture:'+key))
-        if not video_id:
-            store.conn.execute('INSERT INTO unresolved_items(entry_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?)',
-                               (rid,title,artist,title,artist))
-        store.conn.execute("INSERT INTO library_memberships VALUES (?,'fixture',NULL)", (rid,))
+        ref = None if video_id else 'fixture:'+key
+        if folded(store.conn):
+            store.conn.execute('INSERT INTO track_sources(id,recording_id,video_id,source_ref,title,artist,orig_title,orig_artist) '
+                               'VALUES (?,?,?,?,?,?,?,?)', (rid,rid,video_id,ref,title,artist,title,artist))
+            save_to_library(store.conn, (rid,), None, origin='fixture')
+        else:
+            if video_id:
+                store.conn.execute(
+                    'INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?,?)',
+                    (video_id,rid,title,artist,title,artist))
+            store.conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id,source_ref) VALUES (?,?,?,?)',
+                               (rid,rid,video_id,ref))
+            if not video_id:
+                store.conn.execute('INSERT INTO unresolved_items(entry_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?)',
+                                   (rid,title,artist,title,artist))
+            store.conn.execute("INSERT INTO library_memberships(entry_id,origin) VALUES (?,'fixture')", (rid,))
         store.conn.execute("INSERT INTO recording_aliases VALUES (?,?,'fixture')", (key,rid))
         if metadata:
             from yt_playlist.core import metadata as metadata_owner
@@ -570,9 +562,10 @@ class FakeClient:
     def get_album(self, browseId): return self._albums.get(browseId, {})
     def get_library_upload_album(self, browseId): return self._uploads.get(browseId, {})
     def get_artist(self, browseId): return self._artists.get(browseId, {})
-    def create_playlist(self, title, description):  # description required, matching real YTMusic API
+    def create_playlist(self, title, description, *, video_ids=None):
         pid = f"PL_NEW_{len(self.created)}"; self.created.append((pid, title, description))
-        self._tracks.setdefault(pid, []); return pid
+        self._tracks[pid] = [self._catalog[vid] for vid in video_ids or () if vid in self._catalog]
+        return pid
     def add_playlist_items(self, playlistId, videoIds, *, duplicates=False):
         self.added.append((playlistId, list(videoIds)))
         dst = self._tracks.setdefault(playlistId, [])

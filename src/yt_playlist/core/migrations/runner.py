@@ -13,9 +13,14 @@ RELEASE_CHANGES = 37
 NOTICE = 'early_adopter_notice'
 
 
+class PreparationChanged(Exception):
+    """The pending change must finish or refresh preparation before it can install."""
+
+
 @dataclass(frozen=True)
 class Context:
     now: float
+    prepared: object = None
 
 
 @dataclass(frozen=True)
@@ -50,7 +55,7 @@ def validate_version(conn, version, *, foreign_keys=True, data=True):
     current.validate(conn, foreign_keys=foreign_keys, data=data)
 
 
-def _release_changes(conn):
+def _release_changes(conn, changes=None):
     """Read the ledger before choosing reset; unknown/newer histories fail closed."""
     from . import regular
     from ..schema_contract import tokens
@@ -59,7 +64,7 @@ def _release_changes(conn):
         return 0
     if row[0] != 'table' or tokens(row[1]) != tokens(regular.HISTORY_SQL):
         raise MigrationError('Incompatible schema_changes layout')
-    return history_table(conn, 'schema_changes', regular.CHANGES)
+    return history_table(conn, 'schema_changes', regular.CHANGES if changes is None else changes)
 
 
 def history_table(conn, table, registry):
@@ -74,28 +79,29 @@ def history_table(conn, table, registry):
 
 def _account_bindings(conn):
     """Keep the IDs referenced by config files and durable playback observations."""
-    required = ('id', 'label', 'credential_ref', 'brand_account_id', 'is_master')
+    required = ('id', 'label', 'brand_account_id', 'is_master')
     for table in ('accounts', 'identities'):
         columns = {row[1] for row in conn.execute('PRAGMA table_info('+table+')')}
         if set(required) <= columns:
-            fields = required + tuple(name if name in columns else default for name, default in
-                                      (('last_auth_ok', 'NULL'), ('active', '1')))
+            fields = required + ('active' if 'active' in columns else '1',
+                                 'bindings_saved' if 'bindings_saved' in columns else '0')
             return conn.execute('SELECT '+','.join(fields)+' FROM '+table+' ORDER BY id').fetchall()
     return []
 
 
 def _initialize(conn, clock, *, reset=False):
-    from . import current, regular
+    from . import account_binding_receipt, current, rebuild_history, regular
     from .registry import MIGRATIONS
     from .. import schema_bootstrap
-    provenance = {}
     highwaters = []
-    accounts, pairing = [], []
+    accounts, account_settings = [], {}
     if reset:
+        provenance = rebuild_history.snapshot(conn)
         accounts = _account_bindings(conn)
         columns = {row[1] for row in conn.execute('PRAGMA table_info(settings)')}
         if {'key', 'value'} <= columns:
-            pairing = conn.execute("SELECT key,value FROM settings WHERE key='bridge_paired'").fetchall()
+            account_settings = dict(conn.execute("SELECT key,value FROM settings WHERE key IN ('bridge_paired',?)",
+                                                 (account_binding_receipt.OLD_KEY,)))
         if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='sqlite_sequence'").fetchone():
             highwaters = conn.execute('SELECT name,seq FROM sqlite_sequence').fetchall()
         for table in ('schema_migrations', 'schema_changes'):
@@ -111,9 +117,12 @@ def _initialize(conn, clock, *, reset=False):
     schema_bootstrap.bootstrap(conn, MIGRATIONS, regular.CHANGES, clock(), validation=current.validate)
     regular.validate(conn)
     if reset:
-        conn.executemany('INSERT INTO accounts(id,label,credential_ref,brand_account_id,is_master,last_auth_ok,active) '
-                         'VALUES (?,?,?,?,?,?,?)', accounts)
-        conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', pairing)
+        conn.executemany('INSERT INTO accounts(id,label,brand_account_id,is_master,active,bindings_saved) '
+                         'VALUES (?,?,?,?,?,?)', accounts)
+        if account_binding_receipt.OLD_KEY in account_settings:
+            account_settings.pop(account_binding_receipt.OLD_KEY)
+            conn.execute('UPDATE accounts SET bindings_saved=1 WHERE id=(SELECT min(id) FROM accounts)')
+        conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', account_settings.items())
         # File receipts use monotonically allocated SQL IDs. Orphaned files
         # from the discarded database must never acquire a new owner after reset.
         for table, value in highwaters:
@@ -122,17 +131,22 @@ def _initialize(conn, clock, *, reset=False):
                 conn.execute('DELETE FROM sqlite_sequence WHERE name=?', (table,))
                 conn.execute('INSERT INTO sqlite_sequence VALUES (?,?)', (table, value))
         conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', (
-            (NOTICE, uuid4().hex), ('early_adopter_previous_history', json.dumps(provenance))))
+            (NOTICE, uuid4().hex), (rebuild_history.KEY, json.dumps(provenance))))
 
 
-def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
+def migrate(conn, *, registry=None, clock=time.time):
     from . import current, regular
     from .registry import MIGRATIONS
+    from .. import destination_schema
     from ..schema_inspection import reuse_objects, reuse_tables
     if registry is not None and tuple(registry) != MIGRATIONS:
         raise MigrationError('Historical migration replay has been retired')
     if conn.in_transaction:
         raise MigrationError('Cannot migrate with an outstanding caller transaction')
+    planned = [[change.version, change.name] for change in regular.CHANGES]
+    if planned != destination_schema.definition()['regular_history'][:len(planned)]:
+        raise MigrationError('The shipped destination definition does not match the regular schema registry')
+    regular.finish_source_table_upgrade(conn, clock=clock)
     foreign_keys = conn.execute('PRAGMA foreign_keys').fetchone()[0]
     try:
         with reuse_tables(conn) as inspections:
@@ -146,7 +160,7 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
                     validate_version(conn, version, foreign_keys=False, data=False)
                     regular.validate(conn)
                 conn.rollback()
-                if not defer_validation and changes < len(regular.CHANGES):
+                if changes < len(regular.CHANGES):
                     regular.migrate(conn, clock=clock)
                 return False
             conn.rollback()
@@ -160,7 +174,7 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
             # Recheck under the write reservation in case another startup won.
             if history(conn, MIGRATIONS) == RELEASE_VERSION and _release_changes(conn) >= RELEASE_CHANGES:
                 conn.rollback()
-                return migrate(conn, clock=clock, defer_validation=defer_validation)
+                return migrate(conn, clock=clock)
             _initialize(conn, clock, reset=not fresh)
             if conn.execute('PRAGMA foreign_key_check').fetchone():
                 raise MigrationError('Invalid initialized foreign-key reference')

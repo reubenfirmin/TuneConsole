@@ -42,7 +42,7 @@ def dependency_versions():
 
 
 def configuration(*, initial=INITIAL):
-    from . import home_vibe, musical_profiles
+    from . import musical_profiles, vibe_presets
 
     numpy_version, scipy_version = dependency_versions()
     return {'version': VERSION, 'numpy': numpy_version, 'scipy': scipy_version,
@@ -51,8 +51,8 @@ def configuration(*, initial=INITIAL):
             'gradient': 'central-relative', 'gradient_step': 1e-5,
             'prediction_source': 'canonical-original-empirical-mixture',
             'masked_metadata': dict(RECIPE),
-            'metadata_profile_version': musical_profiles.VERSION,
-            'metadata_heuristic_sha256': hashlib.sha256(canonical(home_vibe.PRESETS)).hexdigest(),
+            'metadata_profile_version': musical_profiles.MASKED_VERSION,
+            'metadata_heuristic_sha256': hashlib.sha256(canonical(vibe_presets.PRESETS)).hexdigest(),
             'missing_groups': 'new-group-prior',
             'max_rows': MAX_ROWS, 'memory_bytes': MEMORY_BYTES}
 

@@ -119,8 +119,8 @@ def test_checkpoint_stage_uses_multiple_prefixes_then_resumes_after_restart(libr
     monkeypatch.setattr(choice_retention, 'acknowledge', cutoff)
     assert choice_evidence.maintain_storage(library, 100)['deferred']
     assert len(calls) == 4 and len(library.rec_ledger.evidence().records('checkpoint')) == 3
-    assert library.settings.get_setting(choice_evidence.STORAGE_PHASE) == 'checkpoint'
-    assert library.settings.get_setting(choice_retention.AFTER)
+    assert library.evidence_files.maintenance_state()['phase'] == 'checkpoint'
+    assert library.evidence_files.maintenance_state()['checkpoint_after']
     assert not library.activity_paused
     monkeypatch.setattr(choice_retention, 'acknowledge', acknowledge)
     reopened = Store(library._db_path)
@@ -131,7 +131,7 @@ def test_checkpoint_stage_uses_multiple_prefixes_then_resumes_after_restart(libr
         assert not result.get('deferred')
         assert result['compacted_contexts'] == 9
         assert len(reopened.rec_ledger.evidence().records('checkpoint')) == 9
-        assert reopened.settings.get_setting(choice_evidence.STORAGE_PENDING) == '0'
+        assert not reopened.evidence_files.maintenance_state()['pending']
     finally:
         reopened.conn.close()
 
@@ -139,11 +139,11 @@ def test_checkpoint_stage_uses_multiple_prefixes_then_resumes_after_restart(libr
 def test_reader_contention_keeps_retention_stage_and_allows_writes_and_feedback(library, monkeypatch):
     app = create_app(library, lambda: {}, background_work=False)
     maintenance = app.state.ctx.storage_maintenance
-    account = library.accounts.upsert_account('Main', 'credential', None, True)
+    account = library.accounts.upsert_account('Main', None, True)
     with library.read_view():
         assert choice_evidence.maintain_storage(library, 100)['deferred']
-        assert library.settings.get_setting(choice_evidence.STORAGE_PHASE) == 'retention'
-        assert library.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
+        assert library.evidence_files.maintenance_state()['phase'] == 'retention'
+        assert library.evidence_files.maintenance_state()['pending']
         playback_feedback.capture(library, 'player', account, {'kind': 'state', 'state': 'paused'}, 100)
         status = maintenance.status()
         assert status['pending_feedback'] == 1
@@ -170,7 +170,7 @@ def test_expired_slice_returns_to_next_queued_worker_job(library, monkeypatch):
         raise WorkBudgetExceeded('Controlled worker slice exhausted')
 
     def ratings():
-        assert library.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
+        assert library.evidence_files.maintenance_state()['pending']
         assert not library.activity_paused
         events.append('ratings')
         entered.set()

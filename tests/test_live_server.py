@@ -20,6 +20,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence
 from yt_playlist.web.app import create_app
 from yt_playlist.web import app as webapp
+from yt_playlist.web.routes import app_update
 
 
 @pytest.mark.parametrize('ending', ['normal', 'failure', 'interrupt'])
@@ -32,8 +33,8 @@ def test_teardown_drains_real_response_before_removing_its_store(
     observations = {}
     original_sync = evidence_ledger._sync_directory
     # The real lifespan, request admission and native writer remain in use.
-    # Register only this test's endpoint, rather than every application route.
-    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [])
+    # The update routes supply the pending restart owner used at shutdown.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [app_update.build(ctx)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
@@ -77,7 +78,7 @@ def test_teardown_drains_real_response_before_removing_its_store(
                 with socket.socket() as listener:
                     listener.bind(('127.0.0.1', 0))
                     port = listener.getsockname()[1]
-                    server = uvicorn.Server(uvicorn.Config(app, log_level='warning',
+                    server = uvicorn.Server(uvicorn.Config(app, log_config=None,
                                                           ws='none', loop='asyncio', http='h11'))
 
                     def send_request():
@@ -167,7 +168,7 @@ def test_startup_failure_stops_its_server_thread():
         yield
 
     app = FastAPI(lifespan=failed_startup)
-    server = uvicorn.Server(uvicorn.Config(app, log_level='critical'))
+    server = uvicorn.Server(uvicorn.Config(app, log_config=None))
     before = set(threading.enumerate())
     with pytest.raises(RuntimeError, match='did not start'):
         LiveServer(server, startup_timeout=1)

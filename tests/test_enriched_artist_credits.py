@@ -12,7 +12,6 @@ def credit_store(request):
         from yt_playlist.core import metadata_runtime
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
-            metadata_runtime.install(store.conn)
             metadata_runtime.activate(store.conn)
     return store
 

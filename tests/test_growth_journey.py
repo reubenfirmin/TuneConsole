@@ -1,9 +1,11 @@
 """Preparation can run ahead; onboarding access follows the same serial path."""
+import json
+
 import pytest
 from tests.derived_rating_support import remove_rating, seed_dislike
 
 from tests.conftest import seed_catalog_track
-from tests.onboarding_support import publish_personal_mix
+from tests.onboarding_support import publish_live_mix_inputs
 from tests.test_growth_readiness import fresh_reserve, prepared_taste
 from tests.store_fixture_support import bounded_consumer_schema
 from tests.web_consumer_support import install_routes, route_store
@@ -44,7 +46,7 @@ def test_first_sounds_agrees_with_the_actual_owned_playback_selector(store, kind
                        duration_s=9000 if kind == 'overlong' else None)
     if kind == 'unavailable':
         with store.conn:
-            store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='first'")
+            store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='first'")
     assert store.rec_query.tracks_total() == 1
     playable = kind == 'playable'
     first = stops(store)['first']
@@ -57,7 +59,7 @@ def test_first_sounds_agrees_with_the_actual_owned_playback_selector(store, kind
 
 
 def test_later_output_cannot_skip_foundation_or_albums_and_only_frontier_prepares(store):
-    publish_personal_mix(store)
+    publish_live_mix_inputs(store)
     initial = stops(store)
     assert initial['listening']['usable']
     assert not initial['listening']['ready'] and not initial['listening']['unlocked']
@@ -69,15 +71,15 @@ def test_later_output_cannot_skip_foundation_or_albums_and_only_frontier_prepare
 
 
 def test_early_pool_then_small_discover_interlude_precede_four_playable_mixes(store):
-    early_journey(store)
+    reserve = early_journey(store)
+    # The earlier Fresh reserve can supply one live lane while the library ranks arrive.
     before = stops(store)
     assert all(before[key]['ready'] for key in ('first', 'foundation', 'albums', 'discover'))
     assert before['listening']['state'] == 'preparing'
     assert before['radio']['state'] == 'untouched'
-    tracks = publish_personal_mix(store)
+    tracks = publish_live_mix_inputs(store, fresh_reserve=reserve, tracks_per_lane=5)
     assert stops(store)['listening']['ready']
-    # Readiness follows the complete worker publication. Feedback must not
-    # make serving trim that board or revoke an already usable destination.
+    # The live mix uses the remaining eligible tracks after feedback.
     seed_dislike(store, tracks[0]['key'], until=None, now=1000)
     assert stops(store)['listening']['ready']
     remove_rating(store, tracks[0]['key'], 'dislike')
@@ -85,8 +87,8 @@ def test_early_pool_then_small_discover_interlude_precede_four_playable_mixes(st
 
 
 def test_optional_revisit_and_provider_work_do_not_block_the_main_formats(store):
-    early_journey(store)
-    publish_personal_mix(store)
+    reserve = early_journey(store)
+    publish_live_mix_inputs(store, fresh_reserve=reserve)
     current = stops(store)
     assert current['listening']['ready']
     assert current['rediscover']['optional'] and not current['rediscover']['ready']
@@ -100,7 +102,7 @@ def test_routes_and_remembered_vibe_cannot_bypass_the_serial_gate(route_store, m
     store = route_store
     install_routes(monkeypatch, 'home')
     _, client = _client(store)
-    publish_personal_mix(store)
+    publish_live_mix_inputs(store)
     store.settings.set_setting('home_format', 'mixes')
     store.settings.set_setting(home_vibe.SETTING, 'relax')
     assert home_vibe.current(store, 1000) == ''
@@ -119,7 +121,7 @@ def test_routes_and_remembered_vibe_cannot_bypass_the_serial_gate(route_store, m
 
 
 def test_confirmed_existing_format_use_restores_it_without_a_forced_tour(store):
-    publish_personal_mix(store)
+    publish_live_mix_inputs(store)
     store.rec_proposals.put_proposals('listening_choices', {'home_format': {
         'episodes': {'mixes': 1}}}, 1000)
     state = account_growth.view(store, 1000)
@@ -137,7 +139,7 @@ def test_previously_used_destination_is_preparing_when_its_output_is_missing(sto
         store.rec_proposals.put_proposals('listening_choices', {
             'home_format': {'vibe_episodes': 1}}, 1000)
     else:
-        store.settings.set_setting('tv_draw', '1')
+        store.tv_preparation.record_draw([])
     current = stops(store)
     assert current[used]['used']
     assert current[used]['unlocked']
@@ -213,9 +215,11 @@ def test_previously_used_mix_remains_home_and_fragment_destination_without_ready
         'episodes': {'mixes': 1}}}, 1000)
     store.settings.set_setting('home_format', 'mixes')
     html = client.get('/').text
-    assert "|| 'directions'" in html
+    assert "panel: 'directions'" in html
     response = client.get('/home/cards')
     assert response.status_code == 200
+    assert client.get('/?panel=directions&fragment=1').status_code == 200
+
     def no_growth_scan(*_args, **_kwargs):
         raise AssertionError('Remembering an earned section must not rebuild the growth map')
 
@@ -268,9 +272,13 @@ def test_radio_starter_exception_requires_the_current_offer_and_incomplete_setup
     install_routes(monkeypatch, 'home', 'radio_session')
     _, client = _client(store)
     radio = client.app.state.ctx.radio
-    monkeypatch.setattr(radio, 'bootstrap', lambda: {
-        'state': {'active': False}, 'seeds': [{'key': 'offered|artist', 'video_id': 'offered'}], 'seedMenu': 'current'})
+    seed_catalog_track(store, 'offered|artist', 'Offered', 'Artist', video_id='offered')
+    seed_catalog_track(store, 'unrelated|artist', 'Unrelated', 'Artist', video_id='unrelated')
+    store.settings.set_setting('radio_seed_offer', json.dumps({
+        'menu_id': 'current', 'tracks': [{'key': 'offered|artist', 'video_id': 'offered'}],
+    }))
     starts = []
+
     def start(*args, **kwargs):
         starts.append(args)
         return {'ok': True}
@@ -281,10 +289,13 @@ def test_radio_starter_exception_requires_the_current_offer_and_incomplete_setup
     for invalid in ({**offered, 'menu_id': 'stale'}, {**offered, 'video_id': 'unrelated'}):
         assert client.post('/radio/start', json=invalid).status_code == 409
     assert not starts
-    assert client.post('/radio/start', json=offered).json()['ok']
+    response = client.post('/radio/start', json=offered)
+    assert response.status_code == 200, response.text
+    assert response.json()['ok']
     assert len(starts) == 1
     store.settings.set_setting(onboarding.SETUP_COMPLETE, '1')
     assert client.post('/radio/start', json=offered).status_code == 409
+    assert len(starts) == 1
 
 
 def test_radio_energy_cannot_bypass_vibes_but_can_be_reset(store, monkeypatch):

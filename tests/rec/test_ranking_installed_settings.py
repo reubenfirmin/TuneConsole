@@ -111,7 +111,8 @@ def test_real_installed_rankings_publish_after_listening_index_invalidation(inst
     assert result['all']['wheelhouse']
     assert store.recommendations.head('home')['id'] == store.recommendations.head('fresh')['id']
     with store.read_view() as reader:
-        assert mode_surfaces.assemble_cards(reader, 2001, 0)
+        page = reader.recommendations.candidate_page('home', 'all', 'wheelhouse', limit=10)
+        assert page['tracks']
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -128,7 +129,7 @@ def change_owner(store, key, change, now):
     else:
         with store.conn:
             if change != 'insert':
-                store.conn.execute('DELETE FROM radio_playlist_origins')
+                store.conn.execute('DELETE FROM settings WHERE key=?', (radio_provenance.UNRESOLVED,))
             if change != 'delete':
                 radio_provenance.remember(store.conn, 'radio-' + str(now))
 
@@ -138,7 +139,7 @@ def change_owner(store, key, change, now):
 @pytest.mark.parametrize('change', ['insert', 'update', 'delete'])
 def test_installed_feedback_and_radio_owners_reject_changed_inputs(installed, key, change):
     store, _ = installed
-    store.accounts.upsert_account('Main', 'main.json', None, True)
+    store.accounts.upsert_account('Main', None, True)
     if change != 'insert':
         change_owner(store, key, 'insert', 1000)
     with store.read_snapshot() as snapshot:
@@ -151,7 +152,7 @@ def test_installed_feedback_and_radio_owners_reject_changed_inputs(installed, ke
 @pytest.mark.parametrize('key', ['album_feedback', 'radio_origins'])
 def test_installed_owner_readers_ignore_unrelated_index_settings(installed, key):
     store, _ = installed
-    store.accounts.upsert_account('Main', 'main.json', None, True)
+    store.accounts.upsert_account('Main', None, True)
     store.settings.set_setting('trend_first_play_source', 'canonical_listening')
     with store.read_snapshot() as snapshot:
         read_setting_owner(snapshot.store, key)

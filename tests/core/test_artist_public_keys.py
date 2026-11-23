@@ -9,8 +9,8 @@ def test_bulk_public_keys_preserve_alias_ambiguity_redirects_and_missing_ids(sto
     retired = store.artists.ensure_artist("Retired")
     target = store.artists.ensure_artist("Artist 0", provider="youtube", provider_id="canonical")
     with store.conn:
-        store.conn.execute("INSERT INTO artist_redirects VALUES (?,?,?,?)",
-                           (retired, target, "test", 1))
+        store.conn.execute("UPDATE artists SET redirect_artist_id=?,redirect_source=?,redirect_created_at=? WHERE id=?",
+                           (target, "test", 1, retired))
         store.conn.execute("INSERT INTO artist_aliases VALUES (?,?,?)",
                            (retired, "ARTIST 0", "test"))
     ids.extend([first, second, retired, target, 999999])

@@ -147,7 +147,9 @@ function roadTripForm(initial, context) {
     familiarity: initial.familiarity_pct != null ? initial.familiarity_pct : 50,
     hours: Math.floor(mins / 60),
     minutes: mins % 60,
-    artists: initial.artists || [],
+    artists: initial.artist_refs ? Object.keys(initial.artist_refs) : (initial.artists || []),
+    artistLabels: Object.fromEntries(Object.entries(initial.artist_refs || {})
+      .map(([key, artist]) => [key, artist.name])),
     genres: initial.genres || [],
     artistGenres: Object.fromEntries(Object.entries(context.artist_contexts || {})
       .map(([name, facts]) => [name, facts.genre || ''])),
@@ -164,7 +166,7 @@ function roadTripForm(initial, context) {
     editorOwner: null,
     savedValues: '',
     recoveryFields: ['name', 'renaming', 'ownPct', 'familiarity', 'hours', 'minutes',
-      'artists', 'genres', 'artistGenres', 'blendPct', 'blacklist', 'artistQuery',
+      'artists', 'artistLabels', 'genres', 'artistGenres', 'blendPct', 'blacklist', 'artistQuery',
       'genreQuery', 'blacklistQuery', 'ownGenreQuery', 'savedValues'],
     valuesSignature() {
       return JSON.stringify([this.name, this.ownPct, this.familiarity, this.hours, this.minutes,
@@ -218,9 +220,11 @@ function roadTripForm(initial, context) {
           return d.genre || '';
         }).catch(() => '');
     },
+    artistLabel(key) { return this.artistLabels[key] || key; },
     genreArtists(genre) {
       const key = value => (value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      return this.artists.filter(name => key(this.artistGenres[name]) === key(genre));
+      return this.artists.filter(name => key(this.artistGenres[name]) === key(genre))
+        .map(name => this.artistLabel(name));
     },
     genreLabel(genre) {
       const artists = this.genreArtists(genre);
@@ -264,12 +268,16 @@ function roadTripForm(initial, context) {
       if (!q) { this.artistSuggestions = []; return; }
       this.artistTimer = setTimeout(() => {
         fetch('/road_trip/autocomplete/artists?q=' + encodeURIComponent(q))
-          .then(r => r.json()).then(d => { this.artistSuggestions = d.results || []; }).catch(() => {});
+          .then(r => r.json()).then(d => {
+            this.artistSuggestions = (d.results || []).map(item =>
+              typeof item === 'string' ? { key: item, name: item } : item);
+          }).catch(() => {});
       }, 250);
     },
     // Keep the artist-to-genre link visible in the chip and slider while discovery is pending.
     // The steer waits for the genre lookup so both additions arrive in one request.
-    addArtist(name) {
+    addArtist({ key: name, name: label }) {
+      this.artistLabels[name] = label;
       if (!this.artists.includes(name)) this.artists.push(name);
       this.artistQuery = ''; this.artistSuggestions = [];
       // Keep completion attached to the persistent screen even if a draft poll replaces this
@@ -298,7 +306,7 @@ function roadTripForm(initial, context) {
     },
     reset() {
       this.id = null; this.name = ''; this.artists = []; this.genres = []; this.blacklist = [];
-      this.artistGenres = {};
+      this.artistGenres = {}; this.artistLabels = {};
       this.renaming = false;
       this.artistQuery = ''; this.genreQuery = ''; this.blacklistQuery = '';
       this.artistSuggestions = [];

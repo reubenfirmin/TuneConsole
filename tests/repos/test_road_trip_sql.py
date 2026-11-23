@@ -7,7 +7,7 @@ from yt_playlist.core.store import Store
 
 
 def recipe(store):
-    store.accounts.upsert_account('Main', 'unused.json', None, True)
+    store.accounts.upsert_account('Main', None, True)
     return store.road_trip.save_road_trip_recipe(None, 'Trip', 50, [], [], 60, 1)
 
 
@@ -69,13 +69,14 @@ def test_duplicate_genre_rejection_cannot_create_custom_identities_or_replace_re
     assert store.conn.execute("SELECT 1 FROM genre_catalog WHERE key='new genre'").fetchone() is None
 
 
-def test_failed_selection_insert_rolls_back_the_draft_reference_and_previous_choices(store):
+def test_failed_selection_update_rolls_back_the_draft_reference_and_previous_choices(store):
     identity = recipe(store)
     store.road_trip.save_road_trip_draft(identity, {'revision':'held', 'picks':['old-video']}, 2)
-    before = dict(store.conn.execute('SELECT * FROM road_trip_drafts WHERE recipe_id=?', (identity,)).fetchone())
-    store.conn.execute("CREATE TEMP TRIGGER reject_new_selection BEFORE INSERT ON road_trip_draft_entries "
-        "WHEN NEW.video_id='new-video' BEGIN SELECT RAISE(ABORT,'controlled selection failure'); END")
+    before = dict(store.conn.execute('SELECT * FROM road_trip_recipes WHERE id=?', (identity,)).fetchone())
+    store.conn.execute("CREATE TEMP TRIGGER reject_new_selection BEFORE UPDATE OF draft_selections ON road_trip_recipes "
+        "WHEN json_extract(NEW.draft_selections,'$[0][1]')='new-video' "
+        "BEGIN SELECT RAISE(ABORT,'controlled selection failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match='controlled selection failure'):
         store.road_trip.save_road_trip_draft(identity, {'revision':'next', 'picks':['new-video']}, 3)
-    assert dict(store.conn.execute('SELECT * FROM road_trip_drafts WHERE recipe_id=?', (identity,)).fetchone()) == before
+    assert dict(store.conn.execute('SELECT * FROM road_trip_recipes WHERE id=?', (identity,)).fetchone()) == before
     assert store.road_trip.get_road_trip_draft(identity)['picks'] == ['old-video']

@@ -24,6 +24,17 @@ def test_setting_persists_on_the_shared_connection(store):
     assert store.settings.get_setting("lastfm_api_key") == "abc"
 
 
+@pytest.mark.parametrize('method', ['set_setting', 'set_values', 'publish_values'])
+def test_import_stamps_use_named_setting_through_all_settings_writers(store, method):
+    write = getattr(store.settings, method)
+    if method == 'set_setting':
+        write('takeout_imported_at', '123')
+    else:
+        write({'takeout_imported_at': '123'})
+    assert store.settings.get_setting('takeout_imported_at') == '123'
+    assert store.conn.execute("SELECT value FROM settings WHERE key='takeout_imported_at'").fetchone()[0] == '123'
+
+
 def test_namespace_lookup_treats_sql_pattern_characters_literally(store):
     for key in ("gc_!%:one", "gc_!%:two", "gcX!%:one", "gc_!anything:one", "other"):
         store.settings.set_setting(key, key)
@@ -32,8 +43,11 @@ def test_namespace_lookup_treats_sql_pattern_characters_literally(store):
 
 
 def test_saved_output_file_failure_preserves_both_output_and_ordinary_settings(store, monkeypatch):
+    from yt_playlist.core.recommendation_outputs import autotune_reference
+
     store.settings.set_values({'rec_autotune_result': '{"ran_at": 10}', 'personal': 'before'})
-    original = store.conn.execute('SELECT * FROM model_autotune_output').fetchone()
+    original = autotune_reference(store.conn)
+    assert original['observed_at'] == 10
     def failed(*args, **kwargs):
         assert not store.conn.in_transaction
         raise OSError('disk full')
@@ -41,7 +55,7 @@ def test_saved_output_file_failure_preserves_both_output_and_ordinary_settings(s
         patch.setattr(store.settings.files, 'publish_reserved', failed)
         with pytest.raises(OSError, match='disk full'):
             store.settings.set_values({'rec_autotune_result': '{"ran_at": 11}', 'personal': 'after'})
-    assert tuple(store.conn.execute('SELECT * FROM model_autotune_output').fetchone()) == tuple(original)
+    assert autotune_reference(store.conn) == original
     assert store.settings.get_setting('rec_autotune_result') == '{"ran_at": 10}'
     assert store.settings.get_setting('personal') == 'before'
     assert not store.conn.in_transaction
@@ -54,7 +68,7 @@ def test_saved_output_file_failure_preserves_both_output_and_ordinary_settings(s
 
 
 def test_replaced_import_job_cannot_be_overwritten_after_its_file_write(store, monkeypatch):
-    account = store.accounts.upsert_account('Main', 'main.json', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     store.settings.save_spotify_import_job({'status': 'running', 'account_id': account})
     completion = {**store.settings.spotify_import_job(), 'status': 'complete'}
     publish = store.settings.recovery.publish_reserved
@@ -79,7 +93,7 @@ def test_replaced_import_job_cannot_be_overwritten_after_its_file_write(store, m
 
 
 def test_transfer_revision_is_rechecked_after_its_file_write(store, monkeypatch):
-    account = store.accounts.upsert_account('Main', 'main.json', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     initial = {'creation_phase': 'created', 'marker': 'marker', 'ytm_playlist_id': 'remote',
                'source_video_ids': ['first'], 'complete': False}
     store.settings.save_spotify_transfer(account, 'fingerprint', initial)
@@ -110,29 +124,16 @@ def test_transfer_revision_is_rechecked_after_its_file_write(store, monkeypatch)
     assert not store.conn.in_transaction
 
 
-def test_experiment_history_is_rechecked_after_its_evidence_write(store, monkeypatch):
+def test_experiment_history_rejects_a_stale_append_with_other_settings(store):
     key = 'ppr_experiment_decisions'
     first = {'decision': 'retire', 'cohort': 'all', 'reason': 'first observation', 'at': 10,
              'powered': False, 'basis': 'observation', 'live_evidence': {'ppr': {}, 'cosine': {}}}
     store.settings.set_setting(key, json.dumps([first]))
     second = {**first, 'reason': 'newer observation', 'at': 11}
     stale = {**first, 'reason': 'stale observation', 'at': 12}
-    publish = store.settings.recovery.publish_reserved
-    appended = False
-
-    def race(*args, **kwargs):
-        nonlocal appended
-        assert not store.conn.in_transaction
-        reference = publish(*args, **kwargs)
-        if not appended:
-            appended = True
-            store.settings.set_setting(key, json.dumps([first, second]))
-        return reference
-
-    with monkeypatch.context() as patch:
-        patch.setattr(store.settings.recovery, 'publish_reserved', race)
-        with pytest.raises(ValueError, match='history changed'):
-            store.settings.set_values({key: json.dumps([first, stale]), 'personal': 'stale'})
+    store.settings.set_setting(key, json.dumps([first, second]))
+    with pytest.raises(ValueError, match='cannot be rewritten'):
+        store.settings.set_values({key: json.dumps([first, stale]), 'personal': 'stale'})
     assert json.loads(store.settings.get_setting(key)) == [first, second]
     assert store.settings.get_setting('personal') is None
     assert not store.conn.in_transaction

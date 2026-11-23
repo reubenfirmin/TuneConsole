@@ -1,166 +1,47 @@
 """Bounded SQL facts and immutable identities for shared vibe models."""
-from yt_playlist.core import vibe_versions
+import json
+from itertools import batched
+
 from yt_playlist.core.activity import check_stopping
-from yt_playlist.core.vibe_model_files import HEAD_PREFIX, REVISION
-
-
-def album_tables(conn):
-    names = {row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name IN "
-        "('album_tracks','album_track_occurrences','album_item_observations','album_occurrence_sources')")}
-    current = {'album_track_occurrences','album_item_observations','album_occurrence_sources'}
-    if current <= names:
-        return sorted(current)
-    if names == {'album_tracks'}:
-        return ['album_tracks']
-    raise ValueError('Unsupported album conditioning owners')
-
-
-def schema(conn):
-    yield 'prediction_model_generations', (
-        'CREATE TABLE prediction_model_generations ('
-        'prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,'
-        "generation BLOB NOT NULL CHECK(typeof(generation)='blob' AND length(generation)=32)) WITHOUT ROWID")
-    yield 'prediction_model_generation', (
-        'CREATE INDEX prediction_model_generation ON prediction_model_generations(generation,prediction_id)')
-    yield 'prediction_model_immutable', (
-        'CREATE TRIGGER prediction_model_immutable BEFORE UPDATE ON prediction_model_generations '
-        "BEGIN SELECT RAISE(ABORT,'Prediction model identity is immutable'); END")
-    yield 'prediction_model_delete', (
-        'CREATE TRIGGER prediction_model_delete BEFORE DELETE ON prediction_model_generations '
-        'WHEN EXISTS(SELECT 1 FROM predictions WHERE id=OLD.prediction_id) '
-        "BEGIN SELECT RAISE(ABORT,'Prediction model identity requires its calculation'); END")
-    yield from conditioning_guards(conn)
-
-
-def conditioning_guards(conn):
-    bump = ("INSERT INTO settings(key,value) VALUES ('" + REVISION + "','1') "
-            "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT);")
-    for operation, condition in (
-            ('insert', 'NEW.measurement_id IS NOT NULL'),
-            ('delete', 'OLD.measurement_id IS NOT NULL'),
-            ('update', '(NEW.measurement_id IS NOT NULL OR OLD.measurement_id IS NOT NULL) AND '
-             '(NEW.measurement_id IS NOT OLD.measurement_id OR NEW.artist_key IS NOT OLD.artist_key '
-             'OR NEW.subgenre_key IS NOT OLD.subgenre_key)')):
-        name = 'recording_vibes_joint_' + operation
-        yield name, (f'CREATE TRIGGER {name} AFTER {operation.upper()} ON recording_vibes '
-                     f'WHEN {condition} BEGIN {bump} END')
-    owners = album_tables(conn)
-    for table in owners:
-        for operation in ('insert', 'update', 'delete'):
-            name = table + '_joint_' + operation
-            yield name, f'CREATE TRIGGER {name} AFTER {operation.upper()} ON {table} BEGIN {bump} END'
-    if 'album_track_occurrences' in owners:
-        yield 'albums_joint_current', ('CREATE TRIGGER albums_joint_current AFTER UPDATE OF current_tracklist_id '
-            f'ON albums WHEN NEW.current_tracklist_id IS NOT OLD.current_tracklist_id BEGIN {bump} END')
-    yield 'catalog_entries_joint_recording', ('CREATE TRIGGER catalog_entries_joint_recording AFTER UPDATE OF recording_id '
-        f'ON catalog_entries WHEN NEW.recording_id IS NOT OLD.recording_id BEGIN {bump} END')
-
-
-def install(conn, context=None):
-    for _, sql in schema(conn):
-        conn.execute(sql)
-
-
-def install_conditioning_guards(conn):
-    """Follow album-owner replacements without replacing model identities."""
-    for name, sql in conditioning_guards(conn):
-        conn.execute('DROP TRIGGER IF EXISTS ' + name)
-        conn.execute(sql)
-
-
-def metadata_guards(conn):
-    """Invalidate masked conditioning without depending on derived predictions.
-
-    The accepted raw inputs and source profile/link owners precede vibe scoring.
-    Listening, annotations and publication of a derived target cannot feed back
-    into this revision. These guards do not convert or scan the library.
-    """
-    bump = ("INSERT INTO settings(key,value) VALUES ('" + REVISION + "','1') "
-            "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT);")
-    for table in ('rec_musical_source_profiles', 'rec_musical_links', 'prepared_recording_inputs'):
-        for operation in ('insert', 'update', 'delete'):
-            condition = ''
-            if table == 'prepared_recording_inputs':
-                reference = 'OLD' if operation == 'delete' else 'NEW'
-                condition = ('EXISTS(SELECT 1 FROM recording_vibes WHERE recording_id='
-                             + reference + '.recording_id AND measurement_id IS NOT NULL)')
-                if operation == 'update':
-                    condition += ' AND NEW.digest IS NOT OLD.digest'
-            elif table == 'rec_musical_source_profiles' and operation == 'update':
-                condition = 'NEW.digest IS NOT OLD.digest OR NEW.version IS NOT OLD.version'
-            name = table + '_joint_metadata_' + operation
-            yield name, (f'CREATE TRIGGER {name} AFTER {operation.upper()} ON {table} '
-                         + ('WHEN ' + condition + ' ' if condition else '') + 'BEGIN ' + bump + ' END')
-
-
-def install_metadata_guards(conn, context=None):
-    for _name, sql in metadata_guards(conn):
-        conn.execute(sql)
-
-
-def validate_metadata_guards(conn):
-    from yt_playlist.core.schema_contract import tokens
-
-    for name, sql in metadata_guards(conn):
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or tokens(row[0]) != tokens(sql):
-            raise ValueError('Incompatible shared vibe metadata guard: ' + name)
-
-
-def validate(conn):
-    from yt_playlist.core.schema_contract import tokens
-    for name, sql in schema(conn):
-        saved = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if saved is None or tokens(saved[0]) != tokens(sql):
-            raise ValueError('Incompatible shared vibe model reference: ' + name)
-
-
-def available(conn):
-    return bool(conn.execute("SELECT 1 FROM sqlite_schema WHERE name='prediction_model_generations'").fetchone())
+from yt_playlist.core import vibe_versions
+from yt_playlist.core.audio_vibe_contract import fit_family_prefix
 
 
 def album_facts(conn, recordings):
     """Album identity and distinct-owner count in bounded indexed batches."""
     identities, result = list(recordings), {}
-    legacy = 'album_tracks' in album_tables(conn)
     for start in range(0, len(identities), 128):
         check_stopping()
         batch = identities[start:start+128]
         marks = ','.join('?' for _ in batch)
-        if legacy:
-            sql = ('SELECT recording_id,album_id FROM album_tracks WHERE recording_id IN (' + marks + ') '
-                'UNION ALL SELECT e.recording_id,t.album_id FROM album_tracks t JOIN catalog_entries e ON e.id=t.entry_id '
-                'WHERE e.recording_id IN (' + marks + ')')
-            args = batch * 2
-        else:
-            sql = ('SELECT o.recording_id,t.album_id FROM album_track_occurrences o '
-                'JOIN album_tracklists t ON t.id=o.tracklist_id JOIN albums a ON a.current_tracklist_id=t.id '
-                'WHERE o.recording_id IN (' + marks + ') '
-                'UNION ALL SELECT recording_id,album_id FROM album_item_observations WHERE recording_id IN (' + marks + ') '
-                'UNION ALL SELECT e.recording_id,i.album_id FROM catalog_entries e '
-                'JOIN album_item_observations i ON i.entry_id=e.id WHERE e.recording_id IN (' + marks + ')')
-            args = batch * 3
+        sql = ('SELECT o.recording_id,t.album_id FROM album_track_occurrences o '
+            'JOIN album_tracklists t ON t.id=o.tracklist_id JOIN albums a ON a.current_tracklist_id=t.id '
+            'WHERE o.recording_id IN (' + marks + ') '
+            'UNION ALL SELECT recording_id,album_id FROM album_item_observations WHERE recording_id IN (' + marks + ') '
+            'UNION ALL SELECT e.recording_id,i.album_id FROM track_sources e '
+            'JOIN album_item_observations i ON i.entry_id=e.id WHERE e.recording_id IN (' + marks + ')')
         result.update((row[0], (row[1], row[2])) for row in conn.execute(
-            'SELECT recording_id,min(album_id),count(DISTINCT album_id) FROM (' + sql + ') GROUP BY recording_id', args))
+            'SELECT recording_id,min(album_id),count(DISTINCT album_id) FROM (' + sql + ') GROUP BY recording_id', batch * 3))
     return result
 
 
-def training_rows(conn, vibe, limit):
+def training_rows(conn, vibe, limit, *, pattern=None):
     """Return at most limit plus one original rows so callers detect overflow."""
-    from yt_playlist.core.audio_vibe_contract import serving_prefix
+    measurement = ' AND version.value GLOB ?' if pattern is not None else ''
+    versions = (pattern, pattern) if pattern is not None else (fit_family_prefix() + '*',)
     return [dict(row) for row in conn.execute('SELECT v.recording_id,v.measurement_id,v.artist_key,v.subgenre_key,'
-        'm.score,m.support,m.source,m.input_digest,' + vibe_versions.expression(conn, 'measurements', 'm') +
-        ' AS exact_version FROM recording_vibes v JOIN measurements m ON m.id=v.measurement_id '
-        'WHERE v.vibe=? AND m.support>0 AND ' + vibe_versions.expression(conn, 'recording_vibes', 'v') +
-        ' GLOB ? ORDER BY v.recording_id LIMIT ?', (vibe, serving_prefix() + '*', limit + 1))]
+        'm.score,m.support,m.source,m.input_digest,version.value AS exact_version '
+        'FROM vibe_recording_fits v JOIN measurements m ON m.id=v.measurement_id '
+        'JOIN vibe_versions version ON version.id=m.model_version_id '
+        "WHERE v.vibe=? AND m.source='audio_measurement' AND v.source='audio_measurement' "
+        'AND m.support>0 AND v.inputs_version GLOB ?' + measurement +
+        ' ORDER BY v.recording_id LIMIT ?', (vibe, *versions, limit + 1))]
 
 
 def linked(conn, prediction):
-    if not available(conn):
-        return None
-    row = conn.execute('SELECT generation FROM prediction_model_generations WHERE prediction_id=?',
+    row = conn.execute('SELECT model_generation FROM predictions WHERE id=?',
                        (prediction,)).fetchone()
-    return row[0].hex() if row else None
+    return row[0].hex() if row and row[0] is not None else None
 
 
 def subject(conn, prediction):
@@ -168,36 +49,42 @@ def subject(conn, prediction):
 
 
 def receipt_marker(conn, prediction):
-    row = conn.execute('SELECT input_fingerprint,state FROM prediction_provenance WHERE prediction_id=?',
-                       (prediction,)).fetchone()
-    return (row[0], row[1], linked(conn, prediction)) if row else None
+    row = conn.execute('SELECT provenance_fingerprint,provenance_state,model_generation FROM predictions '
+                       'WHERE id=? AND provenance_state IS NOT NULL', (prediction,)).fetchone()
+    return (row[0], row[1], row[2].hex() if row[2] is not None else None) if row else None
 
 
-def root_measurements(conn, identities):
-    conn.executemany('INSERT OR IGNORE INTO prediction_measurement_roots VALUES (?)', [(mid,) for mid in identities])
+def insert_measurements(conn, rows):
+    versions = {value: vibe_versions.intern(conn, value) for value in dict.fromkeys(row[6] for row in rows)}
+    conn.executemany('INSERT INTO measurements '
+                     '(id,recording_id,vibe,score,support,source,model_version_id,input_digest,measured_at) '
+                     'VALUES (?,?,?,?,?,?,?,?,?)',
+                     ((*row[:6], versions[row[6]], *row[7:]) for row in rows))
 
 
-def referenced_generations(conn):
-    if available(conn):
-        seen = set()
-        # Expired history no longer requires its model. The SQL identity remains
-        # until bounded prediction-history retirement removes that calculation.
-        for generation, in conn.execute("SELECT DISTINCT g.generation FROM prediction_model_generations g "
-                "JOIN prediction_provenance p ON p.prediction_id=g.prediction_id WHERE p.state='ready'"):
-            seen.add(generation.hex())
-            yield generation.hex()
-        for generation, in conn.execute("SELECT value FROM settings WHERE key GLOB ?", (HEAD_PREFIX + '*',)):
-            if generation and generation not in seen:
-                seen.add(generation)
-                yield generation
+def retain_measurements(conn, identities):
+    for batch in batched(dict.fromkeys(identities), 128):
+        slots = ','.join('?' for _ in batch)
+        found = conn.execute(f'SELECT count(*) FROM measurements WHERE id IN ({slots})', batch).fetchone()[0]
+        if found != len(batch):
+            raise ValueError('Model evidence requires existing original measurements')
+        conn.execute(f'UPDATE measurements SET used_by_model=1 WHERE used_by_model=0 AND id IN ({slots})', batch)
 
 
-def referenced(conn, generation):
-    return (conn.execute('SELECT 1 FROM settings WHERE key GLOB ? AND value=? LIMIT 1',
-                         (HEAD_PREFIX + '*', generation)).fetchone()
-            or conn.execute("SELECT 1 FROM prediction_model_generations g JOIN prediction_provenance p "
-                            "ON p.prediction_id=g.prediction_id WHERE g.generation=? AND p.state='ready' LIMIT 1",
+def referenced(conn, generation, *, inline_heads=True):
+    from .vibe_model_files import HEAD_PREFIX
+
+    head = (conn.execute('SELECT 1 FROM vibe_definitions WHERE joint_head=? LIMIT 1', (generation,)).fetchone()
+            if inline_heads else conn.execute('SELECT 1 FROM settings WHERE key GLOB ? AND value=? LIMIT 1',
+                                               (HEAD_PREFIX + '*', generation)).fetchone())
+    return (head
+            or conn.execute("SELECT 1 FROM predictions WHERE model_generation=? AND provenance_state='ready' LIMIT 1",
                             (bytes.fromhex(generation),)).fetchone())
+
+
+def joint_state(conn, vibe):
+    row = conn.execute('SELECT joint_head,joint_outcome FROM vibe_definitions WHERE vibe=?', (vibe,)).fetchone()
+    return (row[0], json.loads(row[1] or '{}')) if row else (None, {})
 
 
 def measurement_rows(conn, identities):
@@ -205,7 +92,7 @@ def measurement_rows(conn, identities):
         raise ValueError('Shared model measurements require a bounded batch')
     return [dict(row) for row in conn.execute(
         'SELECT m.id,m.recording_id,m.vibe,m.score,m.support,m.source,m.input_digest,'
-        + vibe_versions.expression(conn, 'measurements', 'm') + ' AS exact_version FROM measurements m '
+        'version.value AS exact_version FROM measurements m JOIN vibe_versions version ON version.id=m.model_version_id '
         'WHERE m.id IN (' + ','.join('?' for _ in identities) + ')', identities)]
 
 
@@ -223,12 +110,19 @@ class VibeModelQueries:
         from yt_playlist.repos import vibe_model_file_writes
         return vibe_model_file_writes.selected(self.conn, generation)
 
+    def file_digest(self, identity):
+        from yt_playlist.repos import vibe_model_file_writes
+        return vibe_model_file_writes.digest(self.conn, identity)
+
     def measurements(self, identities):
         return measurement_rows(self.conn, identities)
 
     def receipt_facts(self, prediction, artists):
-        return {'prediction': tuple(row) if (row := subject(self.conn, prediction)) else None,
-                'generation': linked(self.conn, prediction), 'marker': receipt_marker(self.conn, prediction),
+        row = self.conn.execute('SELECT vibe,recording_id,model_generation,provenance_fingerprint,provenance_state '
+                                'FROM predictions WHERE id=?', (prediction,)).fetchone()
+        generation = row[2].hex() if row and row[2] is not None else None
+        return {'prediction': tuple(row[:2]) if row else None, 'generation': generation,
+                'marker': (row[3], row[4], generation) if row and row[4] is not None else None,
                 'artists': {artist for artist in artists if type(artist) is int and self.conn.execute(
                     'SELECT 1 FROM artists WHERE id=?', (artist,)).fetchone()}}
 
@@ -237,19 +131,19 @@ class VibeModelQueries:
         # publication uses the prediction repository's ordered publication.
         if not self.conn.in_transaction:
             raise RuntimeError('Receipt rebuild requires its SQL batch')
-        root_measurements(self.conn, roots)
-        self.conn.executemany('INSERT OR IGNORE INTO prediction_model_generations VALUES (?,?)', generations)
-        self.conn.executemany('INSERT INTO prediction_provenance(prediction_id,input_fingerprint,byte_size,state) '
-                             "VALUES (?,?,?,'ready') "
-                             'ON CONFLICT(prediction_id) DO NOTHING', markers)
+        retain_measurements(self.conn, roots)
+        models = dict(generations)
+        self.conn.executemany("UPDATE predictions SET model_generation=?,provenance_fingerprint=?,"
+                              "provenance_bytes=?,provenance_state='ready' WHERE id=? AND provenance_state IS NULL",
+                              ((models[pid], fingerprint, size, pid) for pid, fingerprint, size in markers))
 
-    def referenced(self, generation):
+    def referenced(self, generation, *, inline_heads=True):
         if type(generation) is int:
-            row = self.conn.execute('SELECT generation FROM vibe_model_file_writes WHERE id=?', (generation,)).fetchone()
-            if row is None:
+            digest = self.file_digest(generation)
+            if digest is None:
                 return False
-            digest = row[0].hex()
-            return self.file_reference(digest) == generation and bool(referenced(self.conn, digest))
+            return self.file_reference(digest) == generation and bool(
+                referenced(self.conn, digest, inline_heads=inline_heads))
         if self.file_reference(generation) is not None:
             return False
-        return bool(referenced(self.conn, generation))
+        return bool(referenced(self.conn, generation, inline_heads=inline_heads))

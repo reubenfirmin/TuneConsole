@@ -16,7 +16,8 @@ APP = "com.tuneconsole.TuneConsole"
 IDENTITY_PROBE = """
 import importlib.metadata as m, json, os
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
-from yt_playlist.core import destination_schema, schema_definition, updatecheck
+from yt_playlist.core import destination_schema, updatecheck
+from yt_playlist.core.migrations import schema_definition
 from yt_playlist.core.migrations import regular
 from yt_playlist.core.migrations.registry import MIGRATIONS
 assert os.environ.get('FLATPAK_ID') == 'com.tuneconsole.TuneConsole'

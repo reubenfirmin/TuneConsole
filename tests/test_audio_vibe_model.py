@@ -364,8 +364,8 @@ def test_base_metadata_can_improve_identical_audio_without_a_source_discount():
 
 def test_missing_metadata_imputes_only_training_means_and_preserves_observed_zero():
     records = examples()
-    value_index = model.FEATURES.index('base.energy')
-    present_index = model.FEATURES.index('base.present.energy')
+    value_index = model.FEATURES.index('base.danceability')
+    present_index = model.FEATURES.index('base.present.danceability')
     for i, row in enumerate(records):
         row['values'][value_index] = None if i < 5 else 0.
         row['values'][present_index] = float(i >= 5)
@@ -380,23 +380,23 @@ def test_missing_metadata_imputes_only_training_means_and_preserves_observed_zer
     records[-1]['values'][value_index] = 1e9
     assert trainer.fit(records[:-1])['center'][value_index] == 0.
     absent = dict(zip(audio_vibe_metadata.FEATURES, audio_vibe_metadata.vector(), strict=True))
-    zero = dict(zip(audio_vibe_metadata.FEATURES, audio_vibe_metadata.vector({'energy': 0}), strict=True))
-    assert absent['base.energy'] is None and absent['base.present.energy'] == 0
-    assert zero['base.energy'] == 0 and zero['base.present.energy'] == 1
+    zero = dict(zip(audio_vibe_metadata.FEATURES, audio_vibe_metadata.vector({'danceability': 0}), strict=True))
+    assert absent['base.danceability'] is None and absent['base.present.danceability'] == 0
+    assert zero['base.danceability'] == 0 and zero['base.present.danceability'] == 1
 
 
 def test_exact_catalog_metadata_joins_readonly_training_and_runtime_and_freezes_answer(store, tmp_path, monkeypatch):
     samples = excerpts()
     tid = store.tracks.upsert_track(samples[0]['video_id'], 'Song', 'Artist', '', 240)
     with store.conn:
-        for field, value in {'bpm': 170., 'energy': 0., 'music_key': 'Bb', 'music_scale': 'Minor',
+        for field, value in {'bpm': 170., 'danceability': 0., 'music_key': 'Bb', 'music_scale': 'Minor',
                              'genre': 'Ambient', 'mb_year': '2001'}.items():
             catalog.choose_field(store.conn, tid, field, value)
     store.enrichment_state.record_metadata_observations(tid, 'acousticbrainz', [MetadataObservation(
         'mood_aggressive', .8, 'recording', 'recording-mbid', 'prediction',
         match_evidence={'method': 'supplied_recording_mbid'})], run_id='provider', now=1)
     metadata = store.audio_vibes.base_metadata(samples[0]['video_id'])
-    assert metadata['bpm'] == 170. and metadata['energy'] == 0.
+    assert metadata['bpm'] == 170. and metadata['danceability'] == 0.
     assert metadata['mood_aggressive'] == .8
     assert store.audio_vibes.base_metadata('not-the-same-video') == {}
     values = model.vector(samples, heuristic.predict(samples, use_model=False), metadata)

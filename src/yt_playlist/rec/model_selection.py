@@ -46,12 +46,6 @@ def recover_interrupted(store):
         if run["status"] == "running":
             if run.get('kind') == 'daily':
                 continue  # Detached comparisons resume from their saved predictions.
-            if run.get('kind') == 'product':
-                # Observing is durable work, not an interrupted fit. Preparation
-                # is also safe to retry because it never replaces live vectors.
-                from yt_playlist.rec import product_comparison
-                if product_comparison.state(store).get('run_id') == run['id']:
-                    continue
             run.update(status="failed", reason="The app stopped during the comparison. Your current model was kept.")
             store.model_selection.save_selection(run["id"], run)
 
@@ -93,10 +87,10 @@ def view(store, now, *, limit=6):
         run["followup"] = followup
     if state.get("next_at"):
         state["next_date"] = date(state["next_at"])
-    return {**state, "runs": runs, "last": displayed or latest, "latest": latest, 'product': {}, 'daily': True,
+    return {**state, "runs": runs, "last": displayed or latest, "latest": latest, 'daily': True,
             "current": current_setup(store), "min_trials": MIN_TRIALS, "min_windows": 1,
             "min_active_days": 7,
-            "restore_id": store.settings.get_setting("rec_selection_active_run"),
+            "restore_id": store.model_selection.active_run_id(),
             "version": f"{latest['id'] if latest else 0}:{latest['status'] if latest else 'waiting'}:"
                        f"{len(latest.get('_evaluations', [])) if latest else 0}:"
                        f"{store.rec_model.rec_vectors_count()}:{current_setup(store)['dim']}:{state['state']}:"

@@ -1,5 +1,6 @@
 """Small published Home menus for tests of consumers, not preparation."""
 import logging
+from copy import deepcopy
 
 import pytest
 
@@ -25,10 +26,10 @@ def install_home_routes(monkeypatch):
     """Use the same real Home routers in consumers and prepared HTTP inputs."""
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home
+    from yt_playlist.web.routes import app_update, audio_vibes, home
 
     monkeypatch.setattr(webapp, 'build_all',
-                        lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
+                        lambda ctx: [app_update.build(ctx), audio_vibes.build(ctx), home.build(ctx)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
@@ -60,10 +61,10 @@ def home_pages_only(monkeypatch, home_page_bytecode):
     """Real Home and the pages used to check its shared layout and setup state."""
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, charts, collection, home, playlists, sync
+    from yt_playlist.web.routes import app_update, audio_vibes, charts, collection, home, playlists, sync
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, charts, collection, home, playlists, sync)])
+        for module in (app_update, audio_vibes, charts, collection, home, playlists, sync)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     templates = webapp.Jinja2Templates
@@ -118,7 +119,7 @@ def prepared_client(store, now=1000, *, background_work=True, backend_options=No
     from yt_playlist.web.app import create_app
 
     assert home_prepared._valid(home_cache.read(store, home_prepared.SURFACE))
-    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     return TestClient(create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: now,
                                  background_work=background_work),
                       base_url='http://127.0.0.1', backend_options=backend_options)
@@ -137,6 +138,20 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
     result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
                                    None, None, list(genre_options), [], home_cards._epoch(store, 'cards'), vibe)
     return publish_cards(store, result, now, surface=surface)
+
+
+def serve_home_offers(monkeypatch, offers):
+    """Supply completed selection output to the live Home board."""
+    def cards(service, request):
+        protos = deepcopy(offers)
+        for proto in protos:
+            choice = home_cards.experiment_id(proto)
+            proto['experiment_id'] = choice
+            proto['recipe']['experiment_id'] = choice
+        return home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                      None, None, [], [], home_cards._epoch(service.store, 'cards'), None)
+
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
 
 
 def seed_menu_cards(store, now=1000, *, prefix='prepared', count=4, tracks_per_card=4,

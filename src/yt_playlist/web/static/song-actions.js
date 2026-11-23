@@ -111,7 +111,7 @@ function songActions() {
   return {
     song: {}, context: {}, mode: 'create', name: '', query: '', selected: '',
     playlists: [], multipleIdentities: false, loading: false, busy: false, error: '', result: null,
-    artworkFailed: false, readOnly: document.documentElement.dataset.storageCompacting === 'true',
+    artworkFailed: false, readOnly: document.documentElement.dataset.libraryWritesPaused === 'true',
     metadata: { title: '', artist: '', genre: '', year: '' }, initialMetadata: {}, originals: {},
     metadataLoaded: false, metadataPending: false, trackId: null, genreOptions: [], genres: [],
     lookupRunning: false, lookupStatus: '',
@@ -119,9 +119,9 @@ function songActions() {
               ['own_it', 'Already know it'], ['artist', 'Not this artist']],
     init() {
       maintenanceObserver = new MutationObserver(() => {
-        this.readOnly = document.documentElement.dataset.storageCompacting === 'true';
+        this.readOnly = document.documentElement.dataset.libraryWritesPaused === 'true';
       });
-      maintenanceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-storage-compacting'] });
+      maintenanceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-library-writes-paused'] });
     },
     show(detail) {
       if (this.$refs.dialog.open) return;
@@ -213,7 +213,7 @@ function songActions() {
       this.busy = false;
     },
     async openDialog(mode) {
-      if (document.documentElement.dataset.storageCompacting === 'true') return;
+      if (document.documentElement.dataset.libraryWritesPaused === 'true') return;
       stopLookup();
       this.closeMenu();
       this.mode = mode;

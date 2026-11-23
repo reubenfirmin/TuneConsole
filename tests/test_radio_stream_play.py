@@ -11,6 +11,8 @@ from tests.radio_session_support import (
     controlled_radio_checkpoints,
 )
 from tests.store_fixture_support import without_query_timing
+from yt_playlist.core.rec_model_policy import CHOICE_SUPPORT_SURFACE
+from yt_playlist.rec import choice_evidence
 from yt_playlist.rec.radio_directions import DEPTH
 from yt_playlist.web import radio_persistence
 from yt_playlist.web.routes import radio_session as radio_routes
@@ -35,6 +37,7 @@ def test_song_play_confirms_saved_target_before_navigation_and_refills_stream(po
     continuation = [t['video_id'] for t in branch['tracks'][index:]]
     skipped = {t['video_id'] for t in branch['tracks'][:index]}
     heard = list(c.session.heard)
+    assert c.seen(state['menu_id'])['ok']
     c.ctx.bridge.auto_adopt = False
     assert c.select(branch['id'], state['menu_id'], target)['ok']
     assert len(frames) == 1 and remote.ids == ['v1', 'v2', 'v3']
@@ -54,11 +57,18 @@ def test_song_play_confirms_saved_target_before_navigation_and_refills_stream(po
     assert c.session.heard == heard, 'Choosing a future song must not manufacture listened history'
     c.advance(c.session)
     assert len(frames) == 2, 'Waiting for the navigation heartbeat must not repeat navigation'
+    store = c.ctx.store
+    choice_evidence.compile_report(store, c.ctx.now_fn() + 1)
+    assert store.rec_proposals.get_proposals(CHOICE_SUPPORT_SURFACE)['tracks'] == {}
     c.ctx.bridge.auto_adopt = True
     play(c, target)
     assert c.status()['ahead'] == 1
     assert remote.ids[:3] == ['v1', 'v2', target]
     assert remote.ids[3] == future[1]['video_id']
+    play(c, future[1]['video_id'])
+    choice_evidence.compile_report(store, c.ctx.now_fn() + 1)
+    assert set(store.rec_proposals.get_proposals(CHOICE_SUPPORT_SURFACE)['tracks']) == {
+        store.tracks.identity_key_for_video(target)}
 
 
 @pytest.mark.parametrize('replacement', ['another-song', 'heading', 'external-playback', 'stop'])
@@ -381,8 +391,8 @@ def test_song_arriving_during_monitor_work_preempts_the_next_maintenance_phase(p
         chosen.append(target)
         assert c.select(branch['id'], state['menu_id'], target)['ok']
 
-    def observation(session):
-        result = observe(session)
+    def observation(session, **kwargs):
+        result = observe(session, **kwargs)
         if arrives_during == 'observation':
             choose()
         return result

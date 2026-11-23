@@ -9,6 +9,10 @@ def bind(store, account_id, playlist, video, opportunity, option, now):
     return playback(store).bind(account_id, playlist, video, opportunity, option, now)
 
 
+def started(store, account_id, playlist, video, opportunity, option, now, **details):
+    return playback(store).started(account_id, playlist, video, opportunity, option, now, **details)
+
+
 def observe(store, account_id, playlist, video, kind, position, duration, event_id, now):
     return playback(store).observe(account_id, playlist, video, kind, position, duration, event_id, now)
 

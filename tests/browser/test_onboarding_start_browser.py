@@ -12,7 +12,7 @@ from yt_playlist.library.sync import sync_identity
 
 @pytest.mark.parametrize('width', [1440])
 def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichment(live_app, store, page, width):
-    from tests.onboarding_support import finish_partial_import, publish_personal_mix
+    from tests.onboarding_support import finish_partial_import, publish_live_mix_inputs
 
     finish_partial_import(store, now=1)
     page.route('**/bridge/status', lambda route: route.fulfill(json={
@@ -28,8 +28,8 @@ def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichm
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     page.evaluate('window.arrivalDocument = document; window.arrivalPlayer = document.querySelector(".global-now-playing")')
     from tests.test_growth_journey import early_journey
-    early_journey(store)
-    publish_personal_mix(store, now=1)
+    reserve = early_journey(store)
+    publish_live_mix_inputs(store, now=1, fresh_reserve=reserve)
     expect(page.locator('#onboarding-feed')).to_have_count(0, timeout=12000)
     expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
     expect(page.locator('#home-mode-cards .gen-card')).to_have_count(4)
@@ -51,8 +51,7 @@ def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichm
 
 def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, store, page, tmp_path):
     from tests.conftest import seed_catalog_track
-    from tests.onboarding_support import publish_personal_mix
-    from yt_playlist.rec import home_cards, home_prepared
+    from tests.onboarding_support import publish_live_mix_inputs
     from tests.home_fixture_support import returning_listener
 
     store.settings.set_setting('last_sync_at', '1')
@@ -69,6 +68,7 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     page.clock.install()
     page.goto(f'{live_app}/?prepare_attempt=10#directions')
     board = page.locator('#home-mode-cards')
+    ready_cards = board.locator('.gen-card:has(.gen-row)')
     expect(board).to_have_attribute('hx-trigger', 'every 30s')
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('.setup-banner')).to_be_hidden()
@@ -85,10 +85,10 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     # them before the next poll so its replacement element owns the timer.
     page.clock.run_for(2000)
     expect(board).to_have_attribute('hx-trigger', 'every 30s')
-    comfort_tracks = publish_personal_mix(store, now=1, count=1)
+    publish_live_mix_inputs(store, now=1, count=1)
     with page.expect_response('**/home/cards?prepare_attempt=10'):
         page.clock.fast_forward(30_000)
-    expect(board.locator('.gen-card')).to_have_count(1)
+    expect(ready_cards).to_have_count(1)
     expect(board.locator('.gen-row')).to_have_count(4)
     expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
     expect(page.locator('.mix-preparation-note')).to_be_hidden()
@@ -98,40 +98,20 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     expect(board).to_have_attribute('hx-trigger', 'every 30s')
     page.clock.run_for(2000)
 
-    # Publish a complete worker-style board through the real cache boundary.
-    # Fresh candidates remain outside the library; the other lanes are owned.
-    protos = []
-    for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
-        tracks = comfort_tracks if lane == 'comfort' else []
-        if lane != 'comfort':
-            for i in range(4):
-                title, video_id = f'Recovery {lane} {i}', f'recovery-{lane}-{i}'
-                key = f'{title.lower()}|artist'
-                if lane == 'fresh':
-                    key = store.discovery.upsert_discovered_track(
-                        key, video_id, title, 'Artist', '', None, 'house', None, None, 1)
-                else:
-                    seed_catalog_track(store, key, title, 'Artist', video_id=video_id, genre='house')
-                tracks.append({'key': key, 'title': title, 'artist': 'Artist',
-                               'video_id': video_id, 'album': '', 'thumbnail': None, 'genre': 'house'})
-        proto = home_cards._proto(store, lane, f'Recovered {lane}', tracks, 1)
-        proto['recipe'] = {'lane': lane}
-        protos.append(proto)
-    result = home_cards.CardsResult(
-        protos, [{'proto': proto, 'pool': None} for proto in protos],
-        None, None, [], [], home_cards._epoch(store, 'cards'), None)
-    home_prepared.remember(store, store.rec_proposals.get_proposals('home_prepared'), result, 1)
+    # Publish the remaining ranks so the next ordinary request can assemble all four cards.
+    publish_live_mix_inputs(store, now=2)
     with page.expect_response('**/home/cards?prepare_attempt=10'):
         page.clock.fast_forward(30_000)
-    expect(board.locator('.gen-card')).to_have_count(4)
+    expect(ready_cards).to_have_count(4)
     expect(board.locator('.gen-row')).to_have_count(16)
     expect(page.locator('#home-mode-cards[hx-get]')).to_have_count(0)
     expect(page.locator('#home-mode-cards[hx-trigger]')).to_have_count(0)
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     assert page.evaluate('startupDocument === document && startupPlayer === document.querySelector(".global-now-playing")')
-    with page.expect_response('**/home/growth'):
+    with page.expect_response('**/home/growth?navigation=true') as growth:
         page.clock.fast_forward(15_000)
+    assert growth.value.ok
     page.get_by_role('tab', name='Mix tapes', exact=True).click()
     # Settle HTMX's JavaScript timers, then await the actual CSS timeline. The
     # simulated clock does not establish that browser animations have finished.

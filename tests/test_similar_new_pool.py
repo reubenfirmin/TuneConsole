@@ -5,6 +5,8 @@ only tracks that are already in your playlists: the out-of-corpus discovered poo
 it, no matter how close a match. The content space (genre/era/audio) is where that pool lives, so the
 seed's neighbours are now merged across both.
 """
+import re
+
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import embed, embedding_vectors as vectors
@@ -55,7 +57,7 @@ def _eye(n):
 def test_modal_renders_a_neighbour_that_only_exists_in_the_new_pool(store, monkeypatch):
     """The end of the chain: a pool track is not in `tracks`, so resolving neighbours against the
     library alone silently dropped it even once the blend surfaced it."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tid = store.tracks.upsert_track("seedvid", "Painkiller", "Judas Priest", "Painkiller", 300)
     store.discovery.upsert_discovered_track("overkill|motorhead", "ovk1", "Overkill", "Motorhead",
                                   "Overkill (Expanded Edition)", "http://t/o.jpg", "metal", "1979",
@@ -69,3 +71,46 @@ def test_modal_renders_a_neighbour_that_only_exists_in_the_new_pool(store, monke
     assert "Overkill" in html and "Motorhead" in html
     assert "ovk1" in html            # the Play link + the add-to-playlist payload both need the vid
     assert tid is not None and seed_key
+
+
+def test_similar_modal_uses_an_available_discovery_upload_or_skips_the_recording(store, monkeypatch):
+    account = store.accounts.upsert_account('main', None, True)
+    store.tracks.upsert_track('seed-video', 'Seed', 'Seed Artist', None, 240)
+    preferred, other = [store.discovery.upsert_discovered_track(
+        f'{title.lower()}|artist', video, title, 'Artist', None, None, 'Metal', None, None, 1000.)
+        for video, title in [('preferred-video', 'Favorite'), ('other-video', 'Other')]]
+    representative = store.discovery.discovered_tracks_by_keys([preferred])[preferred]
+    store.tracks.upsert_track('alternate-video', 'Favorite (alternate upload)', 'Artist', library=False)
+    store.tracks.associate_youtube_item('alternate-video', representative['recording_id'], source='verified',
+                                        evidence={'isrc': 'same recording'}, now=1000., same_recording=True)
+    monkeypatch.setattr(embed, 'track_neighbors', lambda store, key, topn: [(preferred, .9), (other, .8)])
+    client = TestClient(create_app(store, lambda: {account: FakeClient()}, now_fn=lambda: 1000.),
+                        base_url='http://127.0.0.1')
+
+    def offered_uploads():
+        response = client.get('/track/seed-video/similar')
+        assert response.status_code == 200
+        return re.findall(r'music\.youtube\.com/watch\?v=([^"&]+)', response.text)
+
+    assert offered_uploads() == ['preferred-video', 'other-video']
+    with store.conn:
+        store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='preferred-video'")
+    assert offered_uploads() == ['alternate-video', 'other-video']
+    with store.conn:
+        store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='alternate-video'")
+    assert offered_uploads() == ['other-video']
+
+
+def test_similar_modal_uses_artist_credits_when_the_seed_has_no_vectors(store):
+    import numpy as np
+
+    iid = store.accounts.upsert_account("main", None, True)
+    store.tracks.upsert_track("seedvid", "Seed Song", "Shared Artist", None, 240)
+    store.tracks.upsert_track("neighborvid", "Modeled Neighbor", "Shared Artist", None, 240)
+    neighbor = store.tracks.identity_key_for_video("neighborvid")
+    store.rec_model.replace_rec_vectors([(neighbor, np.ones(1, dtype=np.float32).tobytes())])
+    client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
+                        base_url="http://127.0.0.1")
+    response = client.get("/track/seedvid/similar")
+    assert response.status_code == 200
+    assert "Modeled Neighbor" in response.text

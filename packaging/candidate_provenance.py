@@ -6,7 +6,12 @@ import os
 from pathlib import Path
 import tarfile
 
-from promote_release import classify, validate
+from promote_release import classify, release_payload_names, validate
+from macos.notarize import ARCHITECTURES as MACOS_ARCHITECTURES, receipt_name
+
+
+REPOSITORY_ARCHIVES = {"flatpak-repo-x86_64.tar", "flatpak-repo-aarch64.tar", "flatpak-repository.tar"}
+MACOS_NOTARIZATION_RECEIPTS = {receipt_name(arch) for arch in MACOS_ARCHITECTURES}
 
 
 def digest(path):
@@ -17,10 +22,11 @@ def digest(path):
     return checksum.hexdigest()
 
 
-def create(root, tag, revision, run_id, repository):
+def create(root, tag, revision, run_id, repository, *, tree=None, original_run=None):
     root = Path(root)
     release, _, manifest = validate(root, tag, "ghcr.io/" + repository.lower(), require_repository=False)
     files = dict(manifest["sha256"])
+    files.update({name: digest(root / name) for name in sorted(MACOS_NOTARIZATION_RECEIPTS)})
     for arch in ("x86_64", "aarch64"):
         name = f"flatpak-repo-{arch}.tar"
         with tarfile.open(root / name) as archive:
@@ -34,28 +40,41 @@ def create(root, tag, revision, run_id, repository):
                   "source_run": str(run_id), "repository": repository, "sha256": files,
                   "architectures": {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                                     "container": ["amd64", "arm64"]}}
+    if tree:
+        provenance["tree"] = tree
+    if original_run:
+        provenance["original_run"] = original_run
     (root / "release-provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     return provenance
 
 
-def check_identity(provenance, tag, revision, run_id, repository):
+def check_identity(provenance, tag, revision, run_id, repository, *, tree=None):
     if (provenance.get("schema"), provenance.get("tag"), provenance.get("version"),
             provenance.get("revision"), provenance.get("source_run"), provenance.get("repository")) != (
             1, tag, classify(tag).version, revision, str(run_id), repository):
         raise ValueError("Candidate provenance must match the exact version, tag, commit, source run and repository")
+    if tree and provenance.get("tree") != tree:
+        raise ValueError("Candidate source tree differs from the tagged source tree")
     if provenance.get("architectures") != {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                                           "container": ["amd64", "arm64"]}:
         raise ValueError("Candidate provenance is missing a supported architecture")
+    hashes = provenance.get("sha256")
+    if not isinstance(hashes, dict) or not MACOS_NOTARIZATION_RECEIPTS.issubset(hashes):
+        raise ValueError("Candidate provenance is missing macOS notarization receipts. Prepare signed release assets.")
 
 
-def verify(root, tag, revision, run_id, repository):
+def verify(root, tag, revision, run_id, repository, *, tree=None):
     root = Path(root)
     provenance = json.loads((root / "release-provenance.json").read_text())
-    check_identity(provenance, tag, revision, run_id, repository)
-    if not provenance.get("sha256"):
+    check_identity(provenance, tag, revision, run_id, repository, tree=tree)
+    hashes = provenance.get("sha256")
+    if not isinstance(hashes, dict):
         raise ValueError("Candidate provenance contains no payload hashes")
-    for name, expected in provenance["sha256"].items():
-        if Path(name).name != name or digest(root / name) != expected:
+    required = release_payload_names(provenance["version"]) | REPOSITORY_ARCHIVES | MACOS_NOTARIZATION_RECEIPTS
+    if missing := required.difference(hashes):
+        raise ValueError(f"Candidate provenance is missing payload hashes: {', '.join(sorted(missing))}")
+    for name, expected in hashes.items():
+        if Path(name).name != name or not (root / name).is_file() or digest(root / name) != expected:
             raise ValueError(f"Candidate differs from the release build's recorded bytes: {name}")
     return provenance
 
@@ -66,8 +85,13 @@ if __name__ == "__main__":
     parser.add_argument("directory", type=Path)
     parser.add_argument("tag")
     parser.add_argument("--revision", default=os.environ.get("GITHUB_SHA"))
+    parser.add_argument("--tree")
+    parser.add_argument("--original-run")
     parser.add_argument("--source-run", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     args = parser.parse_args()
+    kwargs = {"tree": args.tree}
+    if args.operation == "create":
+        kwargs["original_run"] = args.original_run
     operation = create if args.operation == "create" else verify
-    operation(args.directory, args.tag, args.revision, args.source_run, args.repository)
+    operation(args.directory, args.tag, args.revision, args.source_run, args.repository, **kwargs)

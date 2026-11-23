@@ -272,7 +272,7 @@ def test_fingerprint_is_stable_across_subset_reads_and_changes_with_new_content(
     seed_bundle_subjects(store, bundles)
     publish_bundles(store, bundles, 1)
     def generation():
-        return home_prepared._proposal_generation(store, None, 10)
+        return home_prepared._proposal_generation(store)
     before = generation()
     assert generation() == before
     bundles['all']['wheelhouse'].reverse()

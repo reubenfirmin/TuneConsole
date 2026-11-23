@@ -1,9 +1,22 @@
 """Resumable SQL ownership checks for a bounded collection-file batch."""
 from contextlib import contextmanager
 
+from yt_playlist.core import action_backup_inventory, model_state, spotify_records, sync_state
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.core.collection_owners import OWNERS
+from yt_playlist.core.collection_owners import OWNERS, OWNER_KEYS, PLAYLIST_DOCUMENTS, TASTE_CONTROLS
+from yt_playlist.core.collection_recovery_epoch import revision
 from .base import Repo, synchronized
+
+
+FILE_OWNERS = (
+    # Page recipes by their non-null primary key, including rows without drafts.
+    *((table, 'recovery_filename', ('id' if table == 'road_trip_recipes' else OWNER_KEYS.get(table, 'id'),))
+      for table in OWNERS if table not in ('taste_model_state', 'tv_append_intents', 'sync_cursors', 'experiment_decisions')
+      and table not in PLAYLIST_DOCUMENTS and table not in TASTE_CONTROLS
+      and table not in spotify_records.ARCHIVE_PREFIXES),
+    *(('playlist_scopes', f'{prefix}_recovery_filename', ('id',)) for prefix in PLAYLIST_DOCUMENTS.values()),
+    ('actions', action_backup_inventory.COLUMN, ('id',)),
+)
 
 
 class OwnershipScan:
@@ -12,60 +25,40 @@ class OwnershipScan:
 
     def reset(self):
         self._epoch = None
-        self._tables = ()
         self._table_index = 0
         self._after = None
         self._owned = set()
 
-    def _ownership_epoch(self, conn):
-        schema = conn.execute('PRAGMA main.schema_version').fetchone()[0]
-        if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='collection_recovery_epoch'").fetchone()
-                and conn.execute("SELECT 1 FROM main.schema_changes WHERE name='collection_recovery_scan_keys'").fetchone()):
-            revision = conn.execute('SELECT revision FROM main.collection_recovery_epoch WHERE id=1').fetchone()
-            if revision is None:
-                raise ValueError('Missing collection recovery ownership revision')
-            return id(conn), schema, revision[0]
-        tables = (*OWNERS, 'action_backups')
-        external = conn.execute('PRAGMA main.data_version').fetchone()[0]
-        if conn.execute("SELECT 1 FROM sqlite_temp_schema WHERE name='snapshot_revisions'").fetchone():
-            marks = ','.join('?' for _ in tables)
-            revisions = tuple(tuple(row) for row in conn.execute(
-                'SELECT table_name,revision FROM temp.snapshot_revisions '
-                f"WHERE record_key='' AND table_name IN ({marks}) ORDER BY table_name", tables))
-        else:
-            revisions = conn.total_changes
-        return id(conn), schema, external, revisions
-
-    def _start_scan(self, conn, epoch):
-        tables = []
-        for table, filename in [*((table, 'recovery_filename') for table in OWNERS),
-                                ('action_backups', 'retained_filename')]:
-            columns = list(conn.execute(f'PRAGMA table_info({table})'))
-            if not any(row[1] == filename for row in columns):
-                continue
-            keys = tuple(row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5])
-            if not keys:
-                raise ValueError('Collection owner requires a primary key: ' + table)
-            tables.append((table, filename, keys))
-        self.reset()
-        self._tables, self._epoch = tables, epoch
-
     def required(self, conn, names, page_size):
-        epoch = self._ownership_epoch(conn)
+        epoch = conn, revision(conn)
         if epoch != self._epoch:
-            self._start_scan(conn, epoch)
+            self.reset()
+            self._epoch = epoch
+        self._owned.update(reference[0] for _, reference in model_state.references(conn) if reference[0] in names)
+        self._owned.update(filename for filename, in conn.execute(
+            "SELECT value->>'recovery_filename' FROM settings WHERE key IN (?,?,?)",
+            (*TASTE_CONTROLS.values(), sync_state.ATTEMPT))
+            if filename in names)
+        self._owned.update(filename for prefix in spotify_records.ARCHIVE_PREFIXES.values()
+                           for _, _, filename, _, _ in spotify_records.references(conn, prefix) if filename in names)
         marks = ','.join('?' for _ in names)
-        while self._table_index < len(self._tables):
+        while self._table_index < len(FILE_OWNERS):
             check_cancellable_work()
-            table, filename, keys = self._tables[self._table_index]
+            table, filename, keys = FILE_OWNERS[self._table_index]
             fields = ','.join(keys)
             ordered = ','.join(key + ' DESC' for key in keys)
             seek = (f'WHERE ({fields}) > ({",".join("?" for _ in keys)}) '
                     if self._after is not None else '')
+            source = 'page'
+            retained = filename
+            if filename == action_backup_inventory.COLUMN:
+                source = f'page JOIN json_each(page.{filename}) AS item'
+                retained = "item.value->>'retained_filename'"
             rows = conn.execute(
                 f'WITH page AS MATERIALIZED (SELECT {fields},{filename} FROM {table} '
                 f'{seek}ORDER BY {fields} LIMIT ?) '
-                f'SELECT {fields},{filename},0 AS marker FROM page WHERE {filename} IN ({marks}) '
+                f'SELECT {",".join(f"page.{key}" for key in keys)},{retained},0 AS marker FROM {source} '
+                f'WHERE {retained} IN ({marks}) '
                 f'UNION ALL SELECT {fields},NULL,1 AS marker FROM '
                 f'(SELECT {fields} FROM page ORDER BY {ordered} LIMIT 1) ORDER BY marker',
                 (*(self._after or ()), page_size, *names)).fetchall()
@@ -83,8 +76,7 @@ class OwnershipScan:
 class CollectionRetentionRepo(Repo):
     @synchronized
     def active(self):
-        return not self._store.activity_paused and any(row[1] == 'recovery_filename'
-            for row in self.conn.execute('PRAGMA table_info(road_trip_drafts)'))
+        return not self._store.activity_paused
 
     @contextmanager
     def reservation(self):

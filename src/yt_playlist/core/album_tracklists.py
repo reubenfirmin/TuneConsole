@@ -1,4 +1,5 @@
-"""Release publications and frozen source choices; callers own transactions."""
+"""Release publications and cached shares. Callers own transactions."""
+import json
 import time
 
 
@@ -22,9 +23,8 @@ def begin(conn, album_id, provider_id, *, capture_kind='provider', order_status=
 
 def occurrence(conn, tracklist_id, *, entry_id=None, recording_id=None, raw_identity_key=None, raw_source_ref=None,
                position=None, disc_number=None, track_number=None, captured_title=None, captured_credit=None, captured_source=None, legacy_row_id=None, unavailable=False):
-    entry = conn.execute('SELECT e.*,coalesce(y.title,u.title) title,coalesce(y.artist,u.artist) artist '
-        'FROM catalog_entries e LEFT JOIN youtube_items y ON y.video_id=e.video_id '
-        'LEFT JOIN unresolved_items u ON u.entry_id=e.id WHERE e.id=?',(entry_id,)).fetchone() if entry_id is not None else None
+    entry = conn.execute('SELECT recording_id,video_id,source_ref,title,artist FROM track_sources WHERE id=?',
+                         (entry_id,)).fetchone() if entry_id is not None else None
     if entry_id is not None and entry is None:
         raise ValueError('Unknown album occurrence source')
     if entry is not None:
@@ -59,7 +59,7 @@ def cache(conn, album_id, provider_id, keys, *, entries=None, now=None, complete
         # Legacy callers did not capture order. Keep repetitions, without
         # interpreting iteration order as a musical position.
         for key in keys:
-            found = conn.execute('SELECT DISTINCT e.id FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id '
+            found = conn.execute('SELECT DISTINCT e.id FROM track_sources e JOIN recordings r ON r.id=e.recording_id '
                 'JOIN album_tracks t ON t.entry_id=e.id WHERE t.album_id=? AND r.identity_key=?',(album_id,key)).fetchall()
             recording = conn.execute('SELECT id FROM recordings WHERE identity_key=?',(key,)).fetchone()
             rows.append({'entry_id':found[0][0]} if len(found)==1 else
@@ -75,13 +75,12 @@ def cache(conn, album_id, provider_id, keys, *, entries=None, now=None, complete
 
 
 def collect(conn, *, provider, provider_id, keep=2):
-    """Bound this publication's unreferenced revisions; captures and frozen shares survive."""
+    """Bound this publication's unreferenced revisions."""
     if keep<0:
         raise ValueError('Retained revision count cannot be negative')
     unused = conn.execute("SELECT t.id,t.provider,t.provider_id,t.status FROM album_tracklists t "
         "WHERE t.provider=? AND t.provider_id=? AND t.capture_kind='provider' "
         "AND t.status IN ('complete','partial') AND NOT EXISTS(SELECT 1 FROM albums a WHERE a.current_tracklist_id=t.id) "
-        'AND NOT EXISTS(SELECT 1 FROM album_share_snapshots s WHERE s.tracklist_id=t.id) '
         'ORDER BY t.status,t.id DESC', (provider, provider_id)).fetchall()
     retained = {}
     for row in unused:
@@ -94,63 +93,33 @@ def collect(conn, *, provider, provider_id, keep=2):
         conn.execute('DELETE FROM album_tracklists WHERE id=?',(row['id'],))
 
 
-def freeze(conn, album_id, provider_id, title, videos, *, now=None, legacy=False):
-    """Freeze exact source order without inventing provider completeness."""
+def freeze(conn, album_id, provider_id, title, videos):
+    """Remember the last share for the exact provider ID."""
     if any(not isinstance(video,str) or not video.strip() for video in videos):
         raise ValueError('An album share requires exact source references')
-    published = conn.execute('SELECT t.id FROM albums a JOIN album_tracklists t ON t.id=a.current_tracklist_id '
-        "WHERE a.id=? AND t.order_status='known' AND t.expected_count=?",(album_id,len(videos))).fetchone()
-    items = []
-    if published:
-        for position,video in enumerate(videos):
-            row = conn.execute('SELECT o.id,s.entry_id FROM album_track_occurrences o JOIN album_occurrence_sources s ON s.occurrence_id=o.id '
-                'JOIN catalog_entries e ON e.id=s.entry_id WHERE o.tracklist_id=? AND o.position=? AND e.video_id=?',
-                (published[0],position,video)).fetchone()
-            if row is None:
-                items = []
-                break
-            items.append((position,row[0],row[1],video))
-    if published and len(items)==len(videos):
-        tracklist = published[0]
-    else:
-        tracklist = begin(conn,album_id,provider_id,capture_kind='legacy_share' if legacy else 'share',
-                          expected_count=len(videos),fetched_at=now)
-        for position,video in enumerate(videos):
-            entry = conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',(video,)).fetchone()
-            oid = occurrence(conn,tracklist,entry_id=entry[0] if entry else None,raw_source_ref=video,position=position)
-            items.append((position,oid,entry[0] if entry else None,video))
-        conn.execute("UPDATE album_tracklists SET status='snapshot' WHERE id=?",(tracklist,))
-    snapshot = conn.execute('INSERT INTO album_share_snapshots(album_id,tracklist_id,captured_provider_id,title,created_at) VALUES (?,?,?,?,?)',
-                            (album_id,tracklist,provider_id,title,now)).lastrowid
-    conn.executemany('INSERT INTO album_share_items VALUES (?,?,?,?,?,?)',
-                     [(snapshot,position,tracklist,oid,entry,raw) for position,oid,entry,raw in items])
-    return snapshot
+    payload = json.dumps({'title': title, 'video_ids': list(videos)}, separators=(',', ':'))
+    updated = conn.execute('UPDATE album_provider_ids SET share_json=?,share_order='
+        '(SELECT COALESCE(MAX(share_order),0)+1 FROM album_provider_ids) '
+        "WHERE provider='youtube' AND provider_id=? AND album_id=?",
+        (payload, provider_id, album_id))
+    if updated.rowcount != 1:
+        raise ValueError('Album share requires its exact provider release')
 
 
-def share(conn, album_id, provider_id):
-    frozen = conn.execute('SELECT id,title FROM album_share_snapshots WHERE album_id=? '
-        'ORDER BY captured_provider_id=? DESC,id DESC LIMIT 1',(album_id,provider_id)).fetchone()
-    if frozen:
-        return {'title':frozen['title'],'video_ids':[r[0] for r in conn.execute(
-            'SELECT coalesce(i.raw_source_ref,e.video_id) FROM album_share_items i LEFT JOIN catalog_entries e ON e.id=i.entry_id '
-            'WHERE i.snapshot_id=? ORDER BY i.position',(frozen['id'],))]}
-    rows = conn.execute('SELECT o.position,e.video_id FROM albums a JOIN album_track_occurrences o ON o.tracklist_id=a.current_tracklist_id '
-        "LEFT JOIN album_occurrence_sources s ON s.occurrence_id=o.id AND s.provider='youtube' AND s.entry_id="
-        "(SELECT min(entry_id) FROM album_occurrence_sources WHERE occurrence_id=o.id AND provider='youtube') "
-        'LEFT JOIN catalog_entries e ON e.id=s.entry_id WHERE a.id=? ORDER BY o.position',(album_id,)).fetchall()
-    if not rows or any(r['position']!=i or not r['video_id'] for i,r in enumerate(rows)):
-        return None
-    return {'title':conn.execute('SELECT title FROM albums WHERE id=?',(album_id,)).fetchone()[0],
-            'video_ids':[r['video_id'] for r in rows]}
+def cached_share(conn, album_id, provider_id):
+    row = conn.execute("SELECT p.share_json FROM albums a JOIN album_provider_ids p "
+        "ON p.album_id=COALESCE(a.canonical_album_id,a.id) WHERE a.id=? "
+        "AND p.provider='youtube' AND p.share_json IS NOT NULL "
+        "ORDER BY p.provider_id=? DESC,p.share_order DESC LIMIT 1", (album_id, provider_id)).fetchone()
+    return json.loads(row[0]) if row else None
 
 
 def merge(conn, target, retired):
-    """Retain every revision/share across a verified provider-alias merge."""
+    """Retain tracklist revisions across a verified provider-alias merge."""
     old = conn.execute('SELECT current_tracklist_id FROM albums WHERE id=?',(retired,)).fetchone()[0]
     current = conn.execute('SELECT current_tracklist_id FROM albums WHERE id=?',(target,)).fetchone()[0]
     conn.execute('UPDATE albums SET current_tracklist_id=NULL WHERE id=?',(retired,))
     conn.execute('UPDATE album_tracklists SET album_id=? WHERE album_id=?',(target,retired))
-    conn.execute('UPDATE album_share_snapshots SET album_id=? WHERE album_id=?',(target,retired))
     for row in conn.execute('SELECT * FROM album_item_observations WHERE album_id=?',(retired,)).fetchall():
         prior = conn.execute('SELECT id FROM album_item_observations WHERE album_id=? AND entry_id IS ? AND provider=?',
                              (target,row['entry_id'],row['provider'])).fetchone() if row['entry_id'] is not None else None

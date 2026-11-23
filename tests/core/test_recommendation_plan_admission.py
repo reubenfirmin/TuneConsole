@@ -8,7 +8,7 @@ from yt_playlist.core import recommendation_plan as plans, recommendation_pools 
 
 
 def prepared(container=list):
-    return pools.prepare('pool', 'policy', None, 'a' * 64, 'radio',
+    return pools.prepare('pool', 'policy', 'a' * 64, 'radio',
         container([pools.Candidate(7, 1, 12, 'house'), pools.UnresolvedCandidate('absent|artist', -0.0, 12, 'house')]))
 
 
@@ -55,7 +55,7 @@ def test_unknown_length_input_stops_at_its_first_excess_row(monkeypatch, limit):
     else:
         monkeypatch.setattr(pools, 'MAX_CANDIDATES', 1)
     with pytest.raises(ValueError, match='membership budget'):
-        pools.prepare('pool', 'policy', None, 'a' * 64, 'card', candidates)
+        pools.prepare('pool', 'policy', 'a' * 64, 'card', candidates)
     assert next(candidates) is unread
 
 

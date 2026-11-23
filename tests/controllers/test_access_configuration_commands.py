@@ -8,6 +8,7 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.access_configuration import AccessConfiguration, precedence
 from yt_playlist.controllers.account_configuration import AccountConfiguration, LastIdentity
+from yt_playlist.controllers.artists import Artists
 from yt_playlist.controllers.settings import Settings
 from yt_playlist.core.accounts import AccountAccess
 from yt_playlist.core.action_errors import ActionInputError
@@ -141,20 +142,41 @@ def test_artist_selection_owns_catalog_projection_persistence_refresh_and_state(
     discovery.starter_tracks.side_effect = lambda: tracks
     discovery.select_starter_artist.side_effect = lambda name, browse, thumb, enabled, now: selected.append(
         {'browse_id': browse, 'name': name, 'thumbnail': thumb})
-    discovery.upsert_discovered_track.side_effect = lambda *args, **kwargs: tracks.append({'video_id': args[1]})
+    discovery.upsert_discovered_track.side_effect = lambda key, video, *_args, **_kwargs: tracks.append(
+        {'identity_key': key, 'video_id': video})
     readiness = Mock(spec_set=['playable_owned'])
     readiness.playable_owned.return_value = True
-    store = SimpleNamespace(_read_only=True, discovery=discovery, readiness=readiness,
+    artists = Mock(spec_set=Artists)
+    artists.provider_identity.side_effect = {'UCartist1': 7, 'UCartistAlias': 7, 'UCrelated1': 8}.get
+    artists.key.side_effect = {'@artist:7': '@artist:7', '@artist:8': '@artist:8'}.get
+    artist_similarity = Mock(spec_set=['similar_edges_by_artist'])
+    artist_similarity.similar_edges_by_artist.return_value = {}
+    store = SimpleNamespace(_read_only=True, discovery=discovery, readiness=readiness, artists=artists,
+                            rec_model=SimpleNamespace(get_rec_artist_vectors=lambda: [],
+                                                      get_rec_artist_content_vectors=lambda: []),
+                            artist_similarity=artist_similarity,
                             settings=SimpleNamespace(get_setting=lambda key: None))
     client = Mock(spec_set=['get_artist'])
-    client.get_artist.return_value = {'name': 'Artist', 'songs': {'results': [
-        {'videoId': 'video', 'title': 'Song', 'duration': '3:00'}]}}
+    client.get_artist.return_value = {
+        'name': 'Artist',
+        'songs': {'results': [{'videoId': 'video', 'title': 'Song', 'duration': '3:00'}]},
+        'related': {'results': [{'browseId': 'UCartistAlias', 'title': 'Artist alias'},
+                                {'browseId': 'UCrelated1', 'title': 'Related artist'}]},
+    }
+
     def after_write():
-        assert selected and tracks
+        assert selected == [{'browse_id': 'UCartist1', 'name': 'Artist', 'thumbnail': ''}]
+        assert tracks == [{'identity_key': 'song|artist', 'video_id': 'video'}]
+
     refresh = Mock(side_effect=after_write)
     result = artist_start.ArtistCatalog(lambda: {1: client}, trigger_refresh=refresh).choose(
         store, 'UCartist1', True, 100)
     client.get_artist.assert_called_once_with('UCartist1')
+    discovery.select_starter_artist.assert_called_once_with('Artist', 'UCartist1', '', True, 100)
+    assert discovery.upsert_discovered_track.call_args.kwargs['duration_s'] == 180
+    artist_similarity.similar_edges_by_artist.assert_called_once_with({'@artist:7'})
     refresh.assert_called_once()
-    assert result['songs'] == 1 and result['selected'][0]['name'] == 'Artist'
+    assert result['songs'] == 1 and result['selected'] == selected
     assert result['ready'] is False and result['complete'] is True
+    assert [(row['browse_id'], row['name'], row['because']) for row in result['related']] == [
+        ('UCrelated1', 'Related artist', 'Artist')]

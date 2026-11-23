@@ -76,9 +76,9 @@ def build_app(*, updater=None):
     from yt_playlist import egress
     egress.install()
     store = Store(paths.db_path())
-    store.init_schema(defer_metadata=True)
+    store.init_schema()
     config_path = paths.config_path()
-    runtime = Runtime(store, config_path, config_path.parent)
+    runtime = Runtime(store, config_path)
     runtime.load()
     if not runtime.configured:
         logging.getLogger(__name__).warning("no usable config yet. Open /setup to finish setup")
@@ -151,20 +151,22 @@ def main(argv=None, *, updater=None, server_callback=None):
         print(f"TuneConsole is already running on {target}:{args.port} — opening it in your browser.")
         webbrowser.open(f"http://{target}:{args.port}/")
         return
-    if args.open_browser:
-        threading.Thread(target=_open_browser_when_ready, args=(args.host, args.port), daemon=True).start()
     if args.reload:
         # The reloader runs the app in a child process that re-imports this module on change,
         # so it needs an import string + factory, not an already-built app object. Watch only
         # src/ to avoid churning on node_modules/.venv. build_app() runs again in that child
         # process, so nothing account-specific needs to be computed here.
         src_dir = str(Path(__file__).resolve().parent.parent)
+        if args.open_browser:
+            threading.Thread(target=_open_browser_when_ready, args=(args.host, args.port), daemon=True).start()
         _print_bridge_banner(args.host, args.port)
         uvicorn.run("yt_playlist.__main__:build_app", factory=True, reload=True,
                     reload_dirs=[src_dir], host=args.host, port=args.port,
                     timeout_graceful_shutdown=2, log_config=None)
     else:
         app = build_app(updater=updater)
+        if args.open_browser:
+            threading.Thread(target=_open_browser_when_ready, args=(args.host, args.port), daemon=True).start()
         _print_bridge_banner(args.host, args.port)
         # bound graceful shutdown so a Ctrl-C lands promptly even with an open sync SSE stream
         server = AppServer(uvicorn.Config(

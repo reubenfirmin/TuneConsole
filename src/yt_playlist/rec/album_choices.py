@@ -1,4 +1,4 @@
-"""Album experiments prepared by the shared Home/model worker.
+"""Album recommendations prepared by the shared Home/model worker.
 
 Release features use the same content basis and interests as track recommendations. The request
 only filters/rotates the prepared pool. Missing metadata stays explicitly unscored.
@@ -11,7 +11,6 @@ from collections import Counter
 
 import numpy as np
 
-from yt_playlist.library import listening_composition as layers
 from yt_playlist.rec import content_model, embedding_vectors, rec_params, scoring
 from yt_playlist.rec.album_feedback import state as feedback_state, set_feedback
 from yt_playlist.util.matching import normalize, recording_title
@@ -37,17 +36,6 @@ def load(store, now, schedule=lambda: None):
         payload = None
     if payload is None or now - payload['built_at'] >= MAX_AGE_S:
         schedule()
-    from yt_playlist.rec import product_comparison
-    from yt_playlist.rec.home_cards import _epoch
-    epoch = _epoch(store, 'album_choices')
-    held = store.rec_proposals.get_proposals('model_album_assignment') or {}
-    previous = held.get('comparison') if held.get('epoch') == epoch else None
-    paired, comparison = product_comparison.prepared(store, 'albums', epoch, now, existing=previous)
-    if paired:
-        payload = {**paired, 'context': {**paired['context'], 'comparison': comparison}}
-        if (comparison != previous and not getattr(store, '_read_only', False)
-                and not getattr(store, 'activity_paused', False)):
-            store.rec_proposals.put_proposals('model_album_assignment', {'epoch': epoch, 'comparison': comparison}, now)
     return payload
 
 
@@ -59,22 +47,21 @@ def prepare_cached(store, now):
     """
     from yt_playlist.core.activity import WorkBudgetExceeded
     from yt_playlist.core.read_memo import preparation_memo
-    from yt_playlist.rec import choice_evidence, discover, mode_surfaces, transient
+    from yt_playlist.rec import choice_evidence, discover, mode_surfaces
     try:
         with store.read_snapshot(memo=preparation_memo(store, SURFACE)) as snapshot:
             reader = snapshot.store
 
             def calculate():
-                leans = transient.facet_leans(reader, now)
+                leans = scoring.facet_preferences(reader, now).recent
                 discoveries = discover.pick_discovered_albums(reader, 60, now, facet_leans=leans)
                 items = prepare(reader, now, discoveries)
                 payload = {'built_at': now, 'items': items,
                            'context': choice_evidence.freeze_context(reader,
                                choice_evidence.model_context(reader, now, facet_leans=leans))}
-                if getattr(reader, '_recommendation_files', False):
-                    from yt_playlist.rec import recommendation_roots
-                    payload['recommendation_generations'] = recommendation_roots.from_options(
-                        [{'tracks': item.get('companion', [])} for item in items])
+                from yt_playlist.rec import recommendation_roots
+                payload['recommendation_generations'] = recommendation_roots.from_options(
+                    [{'tracks': item.get('companion', [])} for item in items])
                 return payload
 
             payload = reader.memoized_read(('album-choices', 6, int(now // MAX_AGE_S)), calculate)
@@ -219,12 +206,8 @@ def prepare(store, now, discoveries):
             content_vecs=(ids, candidates_matrix, candidate_index) if is_content else None,
             content_snapshot=snapshot)
         if is_content:
-            posterior, _, modes = layers.now_mode_mix(store, now)
-            if posterior and modes and len(modes[0]['centroid']) == candidates_matrix.shape[1]:
-                centroids = np.asarray([mode['centroid'] for mode in modes])
-                nearest = np.argmax(candidates_matrix @ centroids.T, axis=1)
-                scores *= np.asarray([1 + rec_params.get_param(store, 'now_gain')
-                                      * posterior.get(modes[mid]['mode_id'], 0) for mid in nearest])
+            scores = scoring.album_group_scores(store, now, scores, [ranked[i] for i in positions],
+                                                candidates_matrix, matrix, index, genre_axes)
         fit = context.centroids @ candidates_matrix.T
         for local, i in enumerate(positions):
             if i in values:
@@ -373,27 +356,7 @@ def menu(items, controls, epoch=0, genres=(), *, exclude=(), genre_axes=None):
 
 def _companions(store, albums, features, matrix, index):
     """Bounded worker-only album anchors over existing prepared mix candidates."""
-    from yt_playlist.rec import home_cards, rec_params
-    if getattr(store, '_recommendation_files', False):
-        return _stored_companions(store, albums, features, matrix, index)
-    bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
-    pool = {track["key"]: track for tracks in bundles.get("all", {}).values()
-            for track in tracks if track.get("key") in index and track.get("video_id")}
-    keys = list(pool)
-    if not keys:
-        return [[] for album in albums]
-    vectors = matrix[[index[key] for key in keys]]
-    vectors = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
-    ranks = np.argsort(-(features @ vectors.T), axis=1, kind="stable")
-    cap = rec_params.get_param(store, "modes_artist_cap")
-    from yt_playlist.rec.artist_variety import select
-    pool = {track['key']: track for track in store.artists.credited_pages(pool.values())}
-    results = []
-    for album, order in zip(albums, ranks):
-        own = set(album.get('keys') or [])
-        ranked = (pool[keys[position]] for position in order if keys[position] not in own)
-        results.append(select(ranked, cap, home_cards.PROTO_SIZE, limit=home_cards.PROTO_SIZE))
-    return results
+    return _stored_companions(store, albums, features, matrix, index)
 
 
 def _stored_companions(store, albums, features, matrix, index):

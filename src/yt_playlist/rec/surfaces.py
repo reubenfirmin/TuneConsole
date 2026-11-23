@@ -10,9 +10,9 @@ from yt_playlist.library import analysis
 from yt_playlist.util.duration import ago as _ago
 from yt_playlist.util.matching import normalize
 from yt_playlist.rec import artist_variety, embedding_vectors as vectors, mix_tuning, rec_params, vector_math
-from yt_playlist.rec.discover import ContentProjection
-from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood, axis_adjusted_scores,
-                                     center_known_weights, content_taste, discovery_facet_weight, playlist_taste,
+from yt_playlist.rec.content_projection import ContentProjection, project_discoveries
+from yt_playlist.rec.scoring import (axis_adjusted_scores, center_known_weights, content_taste,
+                                     discovery_facet_weight, personalized_track_components, playlist_taste,
                                      score_with_traces)
 from yt_playlist.rec.surface_values import (ForYouItem, neighborhood_keys, wheelhouse_values,
     comfort_values, catalog_order, catalog_eligible, catalog_values, CATALOG_CONTENT_FRAC,
@@ -54,7 +54,7 @@ def _score_candidates(store, pt, keys, V, idx, now, include_traces=False):
 # HOME CARD: "Wheelhouse" ("More in your wheelhouse"). Deeper into what you already love.
 # Internal lanes here are 'neighbourhood' + 'deep_cut'. When naming new code/vars, prefer the home
 # heading "wheelhouse" over the legacy function name "for_you".
-def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
+def for_you(store, now, limit=24, include_traces=False, *, mix_listening=None) -> list[ForYouItem]:
     """Blended local recommendations from your taste model, interleaved and deduped, best-ranked
     first. Returns a deep, ranked pool; per-card rotation (a random epoch-seeded slice) happens at
     the surface, not here: for_you itself carries no anti-staleness state.
@@ -66,7 +66,7 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
       - deep cuts: the most-neglected track of each artist you play a lot
     """
     from yt_playlist.library.surface_composition import queries
-    return queries(store).wheelhouse(now, limit, include_traces)
+    return queries(store, mix_listening=mix_listening).wheelhouse(now, limit, include_traces)
 
 
 # HOME CARD: "Comfort" ("Comfort listening"). Most-played favourites that have gone quiet.
@@ -256,58 +256,71 @@ def _cap_per_artist(scored, cap):
     return capped + overflow
 
 
-def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
+def cold_candidates(store, now, limit=None, *, mix_listening=None) -> list[ForYouItem]:
     """Rank out-of-corpus (cold) tracks from the discovered pool by taste + the transient tilts (#50).
 
     Projects each pool track into the collaborative embedding via ContentProjection (so per-playlist
     taste fit and the collaborative mood tilt apply), folds in the audio tilt over the discovered
     content vectors (#45 cold), and applies the #18 discovery facet overlay on a positive percentile
-    scale, bounded by axis_weight_cap. A muted family is hard-excluded, consistent with discovered
-    albums/artists. Tracks with some metadata but no usable vector follow in discovery order.
+    scale, bounded by axis_weight_cap. Content-space fit can score tracks without a projection.
+    A muted family is hard-excluded, consistent with discovered albums/artists. Metadata-only
+    candidates follow ranked tracks.
     Without metadata or a usable artist projection there is no ranking evidence, so the track waits
     for enrichment instead of being surfaced. A missing model never masquerades as a scored result.
     """
     mix_tuning.expire(store, now)
     if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
         with store.read_view() as reader:
-            return cold_candidates(reader, now, limit=limit)
+            return cold_candidates(reader, now, limit=limit, mix_listening=mix_listening)
     rows = store.discovery.get_discovered_tracks()
     if not rows:
         return []
     identities = store.artists.track_keys(keys=[row['identity_key'] for row in rows])
     rows = [{**row, 'artist_ids': sorted(identities.get(row['identity_key'], ()))} for row in rows]
-    proj = ContentProjection.fit(store)
-    pt = playlist_taste(store, now=now) if proj is not None else None
-    keys, vecs = [], []
-    if proj is not None and pt:
-        for r in rows:
-            v = proj.predict(r.get("genre"), r.get("year"), r.get("audio"), artist=r.get("artist"))
-            if v is None or not np.any(v):
-                continue
-            keys.append(r["identity_key"])
-            vecs.append(np.asarray(v, dtype=np.float32))
+    warm = vectors.load_vectors(store)
+    pt = playlist_taste(store, now=now) if warm.matrix is not None else None
+    proj = ContentProjection.fit(store, reference=warm) if pt else None
+    projections = (project_discoveries(store, proj, rows, identities)
+                   if proj is not None else {})
+    keys = list(projections)
     scores = {}
+    content_snapshot = store.rec_model.content_generation()
+    discovered = vectors.load_discovered_content_vectors(store, snapshot=content_snapshot)
+    discovered_keys, _, _ = discovered
     if keys:
-        V = np.vstack(vecs)
+        V = np.stack(list(projections.values()))
         idx = {k: i for i, k in enumerate(keys)}
         # Library plays/mood must remain visible even though none of those keys is a candidate.
         # Keep projected discoveries too, so explicit feedback on a cold track still contributes.
         evidence_V, evidence_idx = V, idx
-        _, warm_V, warm_idx = vectors.load_vectors(store)
-        if warm_V is not None:
+        _, warm_V, warm_idx = warm
+        if mix_listening is None:
             evidence_V = np.vstack((warm_V, V))
             evidence_idx = {k: len(warm_V) + i for k, i in idx.items()}
             evidence_idx.update(warm_idx)  # prefer the actual library vector for overlapping keys
-        content_snapshot = store.rec_model.content_generation()
-        values = _apply_mood(pt.allocated_scores(V), store, now, V, idx,
-                             content_vecs=vectors.load_discovered_content_vectors(store, snapshot=content_snapshot),
-                             content_snapshot=content_snapshot,
-                             evidence_vecs=(evidence_V, evidence_idx))
-        scores = {k: float(values[i]) for i, k in enumerate(keys)}
+        components = personalized_track_components(store, pt, V, idx, now, content_vecs=discovered,
+            content_snapshot=content_snapshot, evidence_vecs=(evidence_V, evidence_idx), mix_listening=mix_listening)
+        scores.update(zip(keys, map(float, components['combined']), strict=True))
+
+    candidate_keys = {row['identity_key'] for row in rows}.difference(keys)
+    if candidate_keys.intersection(discovered_keys):
+        _, evidence, evidence_index = vectors.content_space(store, include_new=True, snapshot=content_snapshot)
+        content_keys = [key for key in discovered_keys if key in candidate_keys and key in evidence_index]
+        if content_keys:
+            matrix = evidence[[evidence_index[key] for key in content_keys]]
+            index = {key: i for i, key in enumerate(content_keys)}
+            taste = content_taste(store, snapshot=content_snapshot, now=now)
+            if taste or (mix_listening is not None and
+                         mix_listening.direction('content', now, matrix.shape[1]) is not None):
+                components = personalized_track_components(store, taste, matrix, index, now, content_only=True,
+                                                           evidence_vecs=(evidence, evidence_index),
+                                                           mix_listening=mix_listening)
+                scores.update(zip(content_keys, map(float, components['combined']), strict=True))
     suppressed = store.rec_model.suppressed_keys("for_you", now)
     muted = store.rec_model.muted_artists()
     genre_axes = store.genres.feature_axes(r.get('genre') for r in rows)
-    family_weights = {family: discovery_facet_weight(store, family, now)
+    family_weights = {family: discovery_facet_weight(store, family, now,
+                                                   leans={} if mix_listening is not None else None)
                       for family in {genre_axes[r['genre']][0] if r.get('genre') else None for r in rows}}
     return cold_values(rows, scores, suppressed, muted, genre_axes, family_weights,
                        rec_params.get_param(store, 'axis_weight_cap'),
@@ -318,7 +331,7 @@ def cold_values(rows, scores, suppressed, muted, genre_axes, family_weights, axi
     candidates, facet_weights = [], {}
     for r in rows:
         k = r["identity_key"]
-        if k in suppressed or r.get("artist") in muted:
+        if r.get("artist") in muted:
             continue
         has_metadata = (bool(r.get("genre")) or _as_year(r.get("year")) is not None
                         or any(value not in (None, "") for value in (r.get("audio") or {}).values()))
@@ -339,9 +352,8 @@ def cold_values(rows, scores, suppressed, muted, genre_axes, family_weights, axi
         {r["identity_key"]: bool(r.get("genre")) for r in candidates})
     scores = axis_adjusted_scores(rankable, facet_weights,
                                   cap=axis_cap)
-    scored = [(scores.get(r["identity_key"]), r) for r in candidates]
+    scored = [(scores.get(r["identity_key"]), r) for r in candidates if r["identity_key"] not in suppressed]
     # Keep unknown tracks after ranked tracks, even when a known taste score is negative.
-    # Stable sorting preserves discovery order within the fallback instead of inventing a fit score.
     scored.sort(key=lambda t: (t[0] is None, -(t[0] or 0.0)))
     scored = _cap_per_artist(scored, artist_cap)
     out: list[ForYouItem] = []
@@ -387,7 +399,7 @@ def _content_only_scores(store, plays, now) -> dict:
 # the source of the naming confusion. Home excludes tracks actually shown in Wheelhouse,
 # leaving the rest of this ranked pool available for Catalog. When naming new
 # code/vars, prefer the home heading "catalog" over "explore".
-def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
+def explore_for_you(store, now, limit=24, *, mix_listening=None) -> list[ForYouItem]:
     """Catalog: your OWN under-played tracks, surfaced primarily by LACK OF PLAYS and *weighted*
     (never filtered) by the taste model. So a never-played track that fits your taste tops the card,
     an off-taste never-played track still appears (just lower), and a heavily-played track stays low
@@ -395,10 +407,10 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     vectors remain eligible, ranked by novelty after the model-ranked candidates.
     """
     from yt_playlist.library.surface_composition import queries
-    return queries(store).catalog(now, limit)
+    return queries(store, mix_listening=mix_listening).catalog(now, limit)
 
 
-def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem]:
+def complete_playlist(store, playlist_id, limit=12, now=None, *, youtube=None) -> list[ForYouItem]:
     """Genre-compatible tracks by the playlist's own or artist-model-related artists.
 
     Genre is a hard eligibility boundary, evaluated against each genre region present in the
@@ -408,7 +420,7 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     """
     if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
         with store.read_view() as reader:
-            return complete_playlist(reader, playlist_id, limit=limit, now=now)
+            return complete_playlist(reader, playlist_id, limit=limit, now=now, youtube=youtube)
     from yt_playlist.rec import artist_model
 
     members = store.playlists.get_playlist_track_keys(playlist_id)
@@ -427,11 +439,15 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     if not seed_artists or not families:
         return []
 
-    related = artist_model.related_artist_scores(
-        store, seed_artists, topn=limit * 8, exclude_owned=False)
+    neighbors = artist_model.ranked_artist_neighbors(store, seed_artists, topn=limit * 8,
+        youtube=(row for seed in sorted(seed_artists) for row in (youtube or {}).get(seed, ())))
+    related = {neighbor.key: neighbor.score for neighbor in neighbors}
+    sources = {neighbor.key: neighbor.sources for neighbor in neighbors}
     candidates = artist_model.artist_track_candidates(
         store, seed_artists, topn=limit * 8, include_out_of_corpus=True,
         scores=related, artist_refs=artist_refs)
+    for row in candidates:
+        row['artist_sources'] = {key: sources[key] for key in sorted(artist_refs.get(row['key'], ())) if key in sources}
     # Same-artist catalog tracks are relevant without asking the model to rediscover the seed itself.
     for c in dao.tracks_by_artists(seed_artists):
         c["artist_score"] = 1.0
@@ -483,5 +499,6 @@ def completion_values(candidates, members, seed_artists, artist_refs, families, 
             reason = "New · " + reason
         out.append(ForYouItem(c.get("title") or "", artist, c.get("album") or "",
                               c.get("video_id"), c.get("thumbnail"), 0, reason, key,
-                              lane="related_artist", genre=c.get("genre") or "", score=_score))
+                              lane="related_artist", genre=c.get("genre") or "", score=_score,
+                              trace={'artist_sources': c['artist_sources']} if c.get('artist_sources') else None))
     return out

@@ -62,16 +62,20 @@ class RadioPolicy:
         return not GenrePolicy(view.candidates.tuning["theme"], [], current=history.current,
                                axes=getattr(view.candidates, 'axes', None)).allows(track)
 
-    def pick(self, view: CandidateView):
+    def next_track(self, view: CandidateView):
+        """Return the next eligible track for the current stream direction."""
         view.candidates.refresh_exclusions(self.now_fn())
-        if view.directions:
-            used = {t["video_id"] for t in view.selected} | view.directions.blocked | view.rejected
-            active = view.directions.slots[view.directions.active]
+        directions = view.directions
+        excluded = view.rejected
+        if directions:
+            excluded |= directions.blocked | directions.continuation_excluded
+        if directions and (active := directions.slots[directions.active]):
+            used = {t["video_id"] for t in view.selected} | excluded
             pick = next((t for t in active["tracks"] if t["video_id"] not in used
                          and t['key'] not in view.candidates.blocked
                          and (t.get('artist') or '').casefold() not in view.candidates.muted), None)
         else:
-            pick = view.candidates.next_track(list(view.selected), excluded=view.rejected,
+            pick = view.candidates.next_track(list(view.selected), excluded=excluded,
                 destination=[(t['key'], t['video_id']) for t in view.selected],
                 recipe={'surface': 'radio', 'tuning': dict(view.candidates.tuning)}, policy='upload')
         return pick
@@ -88,7 +92,7 @@ class RadioPolicy:
         position = max(0, history.furthest)
         view.directions.retired = {t["video_id"] for t in history.tracks[:position + 1] + history.heard}
         view.directions.update(list(history.heard or history.tracks[:1]), list(history.tracks[position + 1:]),
-                               history.transition, force=force)
+                               history.transition, force=force, **({'depth': 1} if view.directions.filling else {}))
 
     @staticmethod
     def metadata_tracks(view: CandidateView, history: PlaybackHistory, selected):
@@ -128,13 +132,11 @@ class RadioPolicy:
             or (t.get("artist") or "").casefold() in view.candidates.muted}
         if directions.blocked != blocked:
             changed = True
-        ratings = [(key, at, .45, "like") for key, at in facts['likes']]
-        ratings += [(key, at, -.7, "dislike") for key, at in facts['dislikes']]
-        for key, at, strength, kind in ratings:
-            token = (kind, key, at)
+        for key, at in facts['likes']:
+            token = ("like", key, at)
             if at >= context.started_at and key in view.candidates.by_key and token not in seen:
                 seen.add(token)
-                strengths[key] = strength
+                strengths[key] = .45
                 changed = True
         for event in facts['exits']:
             video, at = event["video_id"], event["at"]
@@ -165,6 +167,15 @@ class RadioPolicy:
             for key, strength in view.directions.feedback.items()
             if strength < 0 and key in view.candidates.by_key)
         return negative >= .32
+
+    @staticmethod
+    def selection_prefix(tracks, resequence_after, history):
+        """Keep the clicked song as the only fixed part when resequencing."""
+        if resequence_after is None:
+            return tracks
+        if any(track['video_id'] == resequence_after for track in history.tracks[:history.furthest + 1]):
+            return []
+        return [t for t in tracks if t['video_id'] == resequence_after]
 
     @staticmethod
     def replenish(view: CandidateView, history: PlaybackHistory, proposed, slot, *, excluded=()):

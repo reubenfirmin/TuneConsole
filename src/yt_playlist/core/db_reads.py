@@ -79,9 +79,9 @@ def read_sql_snapshot(source):
     Publication still rechecks its lease inside every writer transaction. These
     inspections do not publish by a revision guard, so constructing every domain
     controller and its temporary projections for each read serves no purpose.
-    Compatibility and memory stores retain their established snapshot setup.
+    Memory stores use a private SQLite copy.
     """
-    if source._db_path is None or getattr(source, '_schema_compatibility', False):
+    if source._db_path is None:
         with source.read_snapshot() as snapshot:
             yield snapshot.store.conn
         return
@@ -103,29 +103,29 @@ def read_sql_snapshot(source):
 
 
 @contextmanager
-def read_view(source, make_reader, *, tracked=False, seconds=...):
+def read_view(source, make_reader, *, retain_files, tracked=False, pinned=False,
+              preparation=False, seconds=...):
     """Bound admission and query time; never retain a connection after the call."""
     # Explicit worker computations may retain a snapshot while doing substantial
     # CPU work. Their cancellation owner, rather than an HTTP read deadline,
     # governs that lifetime. Ordinary request readers retain the default bound.
     if seconds is ...:
         seconds = None if source.priority.is_background else READ_SECONDS
-    with (work_budget(seconds) if seconds is not None else nullcontext()), _admission(source):
+    with (work_budget(seconds) if seconds is not None else nullcontext()), retain_files(), _admission(source):
         reader = None
         try:
             check_cancellable_work()
-            if tracked:
-                # Foreground composition keeps the same admission/deadline as
-                # ordinary views while reusing reads guarded by real revisions.
+            if tracked or (preparation and getattr(source, '_snapshot_revisions', None) is not None):
+                # Both callers reuse reads guarded by real revisions. Preparation
+                # shares its memo with worker snapshots, apart from foreground reads.
                 from yt_playlist.core.db_snapshot import read_snapshot, SnapshotBusy
-                # Long-running preparation must not evict interactive results.
                 # Reuse is optional: a busy writer must not delay committed
                 # file-backed reads just to capture or validate cache guards.
                 with ExitStack() as tracked_view:
                     try:
                         snapshot = tracked_view.enter_context(read_snapshot(
-                            source, make_reader, memo=source._foreground_read_memo,
-                            wait_for_writer=source._db_path is None, read_transaction=False))
+                            source, make_reader, memo=None if preparation else source._foreground_read_memo,
+                            wait_for_writer=source._db_path is None, read_transaction=pinned))
                     except SnapshotBusy:
                         pass
                     else:
@@ -138,15 +138,15 @@ def read_view(source, make_reader, *, tracked=False, seconds=...):
                 with source._lock:
                     if source.conn.in_transaction:
                         raise RuntimeError('Cannot copy uncommitted changes for analytics')
-                    source.conn.backup(reader.conn, pages=128,
-                        progress=lambda *_: check_cancellable_work())
-                    reader._bind_repositories()
+                    source._copy_memory_to(reader)
             reader.conn.execute('PRAGMA query_only=ON')
+            if pinned:
+                reader.conn.execute('BEGIN')
             # A composed Home response revisits the same readiness checks.
             # Reuse detached results for this request, without requiring all
             # reporting queries to share a database transaction.
             memo = OrderedDict()
-            def calculate(name, prepare):
+            def calculate(name, prepare, _owner=None):
                 if name in memo:
                     memo.move_to_end(name)
                     return deepcopy(memo[name])

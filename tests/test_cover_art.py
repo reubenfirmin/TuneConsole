@@ -162,7 +162,7 @@ def test_cover_art_archive_url_is_upgraded_to_https(monkeypatch):
 
 
 def _art_of(store, tid):
-    return store.conn.execute("SELECT thumbnail FROM tracks WHERE id=?", (tid,)).fetchone()["thumbnail"]
+    return store.conn.execute("SELECT thumbnail FROM catalog_tracks WHERE id=?", (tid,)).fetchone()["thumbnail"]
 
 
 def test_set_track_art_fills_when_there_is_no_art(store):
@@ -197,7 +197,7 @@ def test_waterfall_pending_includes_a_fully_enriched_track_with_placeholder_art(
     tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x",
                              thumbnail=_YT_TRACK_PH)
     seed_enrichment(store, tid, "Trance", "2000")
-    seed_audio(store, tid, bpm=138.0, energy=0.8, danceability=0.7)
+    seed_audio(store, tid, bpm=138.0, danceability=0.7)
     pending = store.tracks.album_tracks_for_waterfall("MPREb_x")
     assert [p["id"] for p in pending] == [tid]
 
@@ -205,5 +205,5 @@ def test_waterfall_pending_includes_a_fully_enriched_track_with_placeholder_art(
 def test_waterfall_pending_skips_a_fully_enriched_track_with_real_art(store):
     tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x", thumbnail=_REAL)
     seed_enrichment(store, tid, "Trance", "2000")
-    seed_audio(store, tid, bpm=138.0, energy=0.8, danceability=0.7)
+    seed_audio(store, tid, bpm=138.0, danceability=0.7)
     assert store.tracks.album_tracks_for_waterfall("MPREb_x") == []

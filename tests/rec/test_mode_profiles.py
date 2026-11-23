@@ -11,7 +11,7 @@ from yt_playlist.rec import content_model, mode_profiles
 
 def profile_inputs():
     model = {'cat': {'fam:house': 0, 'dec:2010': 1, 'dec:2020': 2},
-             'ncat': 3, 'cont': [['bpm', 120, 10], ['energy', .5, .2]]}
+             'ncat': 3, 'cont': [['bpm', 120, 10], ['danceability', .5, .2]]}
     space = content_model.content_model_fingerprint(model)
     centers = np.eye(5, dtype=np.float32)[:2]
     modes, vectors, content, audio = [], [], {}, {}
@@ -24,7 +24,7 @@ def profile_inputs():
             content[key] = genre, 2023 if group else 2013
             vectors.append((key, centers[group].tobytes()))
             if group and i < 8:
-                audio[key] = {'bpm': 128, 'energy': .9}
+                audio[key] = {'bpm': 128, 'danceability': .9}
         modes.append({'mode_id': group + 1, 'label': 'house', 'size': 20,
                       'families': [['house', 4]], 'centroid': centers[group],
                       'rep_keys': keys[:2], 'space': space})
@@ -52,7 +52,7 @@ def test_profiles_explain_same_label_groups_using_actual_membership():
     assert mixed['sound'] == []
     assert house['sound'] == [
         {'text': '128 BPM median', 'measured': 8, 'total': 10},
-        {'text': 'Higher energy', 'measured': 8, 'total': 10}]
+        {'text': 'More danceable', 'measured': 8, 'total': 10}]
 
 
 def test_profiles_preserve_missing_tags_and_dates_in_the_denominator():
@@ -70,7 +70,7 @@ def test_stale_profiles_do_not_compare_incompatible_vectors_or_guess_traits():
     reader = profile_inputs()
     reader.rec_model.content_generation.return_value['model'] = json.dumps({
         'cat': {'fam:house': 0, 'dec:2010': 1, 'dec:2020': 2, 'sub:house': 3},
-        'ncat': 4, 'cont': [['bpm', 120, 10], ['energy', .5, .2]]})
+        'ncat': 4, 'cont': [['bpm', 120, 10], ['danceability', .5, .2]]})
     profile = mode_profiles.describe_modes(reader)[1]
     assert not profile['current']
     assert profile['size'] == 20

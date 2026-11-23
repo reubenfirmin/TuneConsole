@@ -21,11 +21,15 @@ from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence
 
 @pytest.fixture
 def artist_flow_evidence(page, tmp_path):
+    from yt_playlist.web.fao_static import HOME_SHELL_SCRIPTS, HOME_SHELL_STYLES
+
     root = Path(__file__).resolve().parents[2]
     static = root / 'src/yt_playlist/web/static'
     assets = {name: (static / name).read_bytes() for name in (
         'artist-start.js', 'artist-start.css', 'account-growth.js',
-        'account-growth.css', 'home.js', 'onboarding.css', 'playlist-generation.js')}
+        'account-growth.css')}
+    script_paths = [static / (name + '.js') for name in HOME_SHELL_SCRIPTS]
+    style_paths = [static / (name + '.css') for name in HOME_SHELL_STYLES]
     paths = [root / name for name in (
         'src/yt_playlist/rec/artist_start.py',
         'src/yt_playlist/rec/onboarding.py',
@@ -40,7 +44,9 @@ def artist_flow_evidence(page, tmp_path):
         'src/yt_playlist/web/templates/home.html',
         'src/yt_playlist/web/templates/_partials/account_growth.html',
         'src/yt_playlist/web/templates/_partials/onboarding_start.html',
-    )] + [static / name for name in assets] + [Path(__file__).resolve()]
+    )] + [static / name for name in assets] + script_paths + style_paths + [Path(__file__).resolve()]
+    assets['home-shell.js'] = b'\n;\n'.join(path.read_bytes() for path in script_paths)
+    assets['home-shell.css'] = b'\n'.join(path.read_bytes() for path in style_paths)
     hashes = lambda: {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                       for path in paths}
     report = {'status': 'incomplete', 'source_before': hashes(), 'served_assets': {},
@@ -73,7 +79,7 @@ def artist_flow_evidence(page, tmp_path):
 
 @pytest.fixture
 def artist_app(store):
-    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     store.settings.set_setting('last_sync_at', '999')
     class SearchableCatalog(Catalog):
         def search(self, query, filter='songs', limit=8, ignore_spelling=False):

@@ -16,6 +16,7 @@ import pytest
 
 from yt_playlist.core import db_diagnostics as diagnostics
 from yt_playlist.core.activity import WorkClosing, cancellable_work
+from yt_playlist.core.catalog_query import EXPLICIT_TRACKS_SQL
 from yt_playlist.core.store import Store
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.rec import trend_rollups
@@ -84,18 +85,19 @@ def test_representative_trend_queries(tmp_path, monkeypatch):
                 with diagnostics.database_operation(name):
                     store.conn.execute(sql, values).fetchall()
 
-            run("legacy artist source lookup", lambda: reference("legacy artist source lookup", """
+            run("legacy artist source lookup", lambda: reference("legacy artist source lookup", f"""
+                WITH explicit_tracks AS ({EXPLICIT_TRACKS_SQL})
                 SELECT t.artist,MIN(fp.first_day),MIN(fp.first_ts),
                   (SELECT fp2.source FROM trend_first_play fp2
-                   JOIN tracks t2 ON t2.identity_key=fp2.id_key
+                   JOIN explicit_tracks t2 ON t2.identity_key=fp2.id_key
                    WHERE fp2.kind='track' AND t2.artist=t.artist
                    ORDER BY fp2.first_ts LIMIT 1)
-                FROM trend_first_play fp JOIN tracks t ON t.identity_key=fp.id_key
+                FROM trend_first_play fp JOIN explicit_tracks t ON t.identity_key=fp.id_key
                 WHERE fp.kind='track' AND t.artist<>'' GROUP BY t.artist"""))
             frag, values = store.trends._generated_filter(True)
             run("legacy artist ledger", lambda: reference("legacy artist ledger",
-                "SELECT a,COUNT(*) FROM ("
-                "SELECT (SELECT MIN(t.artist) FROM tracks t WHERE t.identity_key=pe.identity_key) a "
+                f"WITH explicit_tracks AS ({EXPLICIT_TRACKS_SQL}) SELECT a,COUNT(*) FROM ("
+                "SELECT (SELECT MIN(t.artist) FROM explicit_tracks t WHERE t.identity_key=pe.identity_key) a "
                 f"FROM play_events pe WHERE pe.played_at>=? AND pe.played_at<?{frag}) "
                 "WHERE a IS NOT NULL AND a<>'' GROUP BY a", [0, time.time(), *values]))
     finally:

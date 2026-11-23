@@ -27,8 +27,8 @@ from tests.web_consumer_support import install_routes
 def recipe_store(no_database):
     return repository_store(
         values={'_read_only': True},
-        rec_query={'track_genres': {}, 'track_decades': {}, 'track_last_played': {},
-                   'play_counts': {}, 'tracks_by_keys': {}},
+        rec_query={'track_genres_and_decades': ({}, {}), 'track_last_played': {},
+                   'play_counts': {}, 'artist_memberships': {}, 'track_artists': {}},
         genres={'feature_axes': {'goa trance': ('trance', 'goa-trance'),
                                  'psytrance': ('trance', 'psytrance'),
                                  'acid techno': ('techno', 'acid-techno'),
@@ -39,18 +39,17 @@ def recipe_store(no_database):
 
 def _recipe_tracks(store, rows):
     keys = [identity_key(title, artist) for title, artist, _, _ in rows]
-    store.rec_query.track_genres.return_value = {
-        key: genre for key, (_, _, genre, _) in zip(keys, rows) if genre}
-    store.rec_query.track_decades.return_value = {
-        key: str(int(year) // 10 * 10)
-        for key, (_, _, _, year) in zip(keys, rows) if year}
-    store.rec_query.tracks_by_keys.return_value = {
-        key: {'artist': artist} for key, (_, artist, _, _) in zip(keys, rows)}
+    store.rec_query.track_genres_and_decades.return_value = (
+        {key: genre for key, (_, _, genre, _) in zip(keys, rows) if genre},
+        {key: str(int(year) // 10 * 10) for key, (_, _, _, year) in zip(keys, rows) if year},
+    )
+    store.rec_query.track_artists.return_value = {
+        key: artist for key, (_, artist, _, _) in zip(keys, rows)}
     return keys
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient(catalog=library_catalog(store))}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -129,9 +128,9 @@ def test_cluster_recipe_shuffle_spaces_artists_for_track_keys(recipe_store):
                                  for artist, count in [('A', 3), ('B', 2), ('C', 2)]
                                  for i in range(count)])
     _, order = recipes.cluster_recipe(store, keys, journey="shuffle")
-    meta = store.rec_query.tracks_by_keys(keys)
+    artists = store.rec_query.track_artists(keys)
     assert sorted(order) == sorted(keys)
-    assert all(meta[a]["artist"] != meta[b]["artist"] for a, b in zip(order, order[1:]))
+    assert all(artists[a] != artists[b] for a, b in zip(order, order[1:]))
     assert order == recipes.cluster_recipe(store, keys, journey="shuffle")[1]
 
 

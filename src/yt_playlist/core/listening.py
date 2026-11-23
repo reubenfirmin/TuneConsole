@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from . import catalog_keys as catalog, first_play
+from . import catalog_keys as catalog
 from .listening_calendar import zone as _zone, day_at, reconcile_foreign_days
 
 logger = logging.getLogger(__name__)
@@ -30,15 +30,18 @@ def calendar(conn,account_id,source_timezone=None):
     explicit = _zone(source_timezone)
     if source_timezone and explicit is None:
         logger.warning('Ignoring invalid listening timezone %r',source_timezone)
-    row = conn.execute('SELECT timezone,confirmed FROM listening_calendars WHERE account_id=?',
+    row = conn.execute('SELECT listening_timezone, listening_timezone_confirmed FROM accounts WHERE id=?',
                        (account_id,)).fetchone()
     if row is None:
+        raise ValueError('Listening calendar requires a recorded account')
+    name, confirmed = row
+    if name is None:
         name = source_timezone if explicit else machine_timezone()
-        conn.execute('INSERT INTO listening_calendars VALUES (?,?,?)',
-                     (account_id,name,int(explicit is not None)))
-    elif not row['confirmed'] and explicit is not None:
+        conn.execute('UPDATE accounts SET listening_timezone=?,listening_timezone_confirmed=? WHERE id=?',
+                     (name,int(explicit is not None),account_id))
+    elif not confirmed and explicit is not None:
         name = source_timezone
-        conn.execute('UPDATE listening_calendars SET timezone=?,confirmed=1 WHERE account_id=?',
+        conn.execute('UPDATE accounts SET listening_timezone=?,listening_timezone_confirmed=1 WHERE id=?',
                      (name,account_id))
         for event in conn.execute('SELECT id,played_at FROM play_events WHERE account_id=?',
                                   (account_id,)).fetchall():
@@ -47,27 +50,31 @@ def calendar(conn,account_id,source_timezone=None):
                      "WHERE account_id=? AND precision='calendar_day'",
                      (name,account_id))
         reconcile_foreign_days(conn,account_id)
-        first_play.invalidate(conn)
-    else:
-        name = row['timezone']
     return name
 
 
 def project_event(conn,event_id,account_id,timestamp,*,timezone=None,source=None):
     name = timezone or calendar(conn,account_id)
-    conn.execute('INSERT INTO play_event_calendar(event_id,day,timezone) VALUES (?,?,?) '
-                 'ON CONFLICT(event_id) DO UPDATE SET day=excluded.day,timezone=excluded.timezone',
-                 (event_id,day_at(timestamp,name),name))
-    if source is not None:
-        conn.execute('INSERT OR IGNORE INTO play_event_sources VALUES (?,?)',(event_id,source))
+    store_event_day(conn, event_id, day_at(timestamp,name), source)
+
+
+def store_event_day(conn, event_id, day, source):
+    conn.execute('UPDATE play_events SET day=?,sources=CASE WHEN ? IS NULL OR EXISTS '
+                 '(SELECT 1 FROM json_each(sources) WHERE value=?) THEN sources '
+                 "ELSE json_insert(sources,'$[#]',?) END WHERE id=?",
+                 (day,source,source,source,event_id))
 
 
 def membership_reference(conn,account_id,playlist_ytm_id):
-    memberships = conn.execute('SELECT m.id FROM playlist_membership_refs m JOIN playlist_scopes s '
-        'ON s.id=m.playlist_scope_id WHERE m.account_id=? '
-        "AND (s.provider_playlist_id=? OR 'RDAMPL'||s.provider_playlist_id=?)",
-        (account_id,playlist_ytm_id,playlist_ytm_id)).fetchall()
-    return memberships[0][0] if len(memberships)==1 else None
+    if not playlist_ytm_id:
+        return None
+    memberships = conn.execute('SELECT p.id,p.is_current FROM playlists p '
+        'JOIN playlist_scopes s ON s.id=p.playlist_scope_id WHERE p.account_id=? '
+        'AND s.provider_playlist_id IN (?,?) ORDER BY p.is_current DESC LIMIT 2',
+        (account_id,playlist_ytm_id,playlist_ytm_id.removeprefix('RDAMPL'))).fetchall()
+    if len(memberships) == 1 or (len(memberships) == 2 and memberships[0][1] > memberships[1][1]):
+        return memberships[0][0]
+    return None
 
 
 def append_event(conn,account_id,key,timestamp,*,video_id=None,playlist_ytm_id=None,
@@ -128,19 +135,23 @@ def day_count(conn,account_id):
     return conn.execute('SELECT COUNT(*) FROM listening_days WHERE account_id=?',(account_id,)).fetchone()[0]
 
 
-def remove_source(conn,source,account_id=None):
-    """Remove only known contributions, preserving overlapping and unknown evidence."""
-    if source in {'unknown','independent',''}:
-        raise ValueError('Unknown legacy provenance cannot be assigned to a removable source')
+def delete_source(conn,source,account_id=None):
+    from .history_policy import removable_source
+    removable_source(source)
     scope = '' if account_id is None else ' AND account_id=?'
     args = (source,) if account_id is None else (source,account_id)
     conn.execute('DELETE FROM listening_observations WHERE source=?'+scope,args)
-    conn.execute('DELETE FROM play_event_sources WHERE source=? AND event_id IN '
-                 '(SELECT id FROM play_events WHERE 1=1'+scope+')',args)
-    conn.execute('DELETE FROM play_events WHERE NOT EXISTS '
-                 '(SELECT 1 FROM play_event_sources s WHERE s.event_id=play_events.id)'+scope,
-                 () if account_id is None else (account_id,))
-    for row in conn.execute('SELECT account_id FROM listening_calendars WHERE 1=1'+scope,
+    conn.execute('DELETE FROM play_events WHERE json_array_length(sources)=1 AND EXISTS '
+                 '(SELECT 1 FROM json_each(sources) WHERE value=?)'+scope,args)
+    conn.execute("UPDATE play_events SET sources=json_remove(sources,'$[' || "
+                 "(SELECT key FROM json_each(sources) WHERE value=?) || ']') WHERE EXISTS "
+                 '(SELECT 1 FROM json_each(sources) WHERE value=?)'+scope,(source,*args))
+
+
+def remove_source(conn,source,account_id=None):
+    """Remove only known contributions, preserving overlapping and unknown evidence."""
+    delete_source(conn,source,account_id)
+    for row in conn.execute('SELECT id FROM accounts WHERE listening_timezone IS NOT NULL' +
+                            ('' if account_id is None else ' AND id=?'),
                             () if account_id is None else (account_id,)).fetchall():
         reconcile_foreign_days(conn,row[0])
-    first_play.invalidate(conn)

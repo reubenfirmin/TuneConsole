@@ -18,7 +18,7 @@ def removal(accounts, account_id):
     if not remaining:
         raise LastIdentity('Keep at least one identity.')
     main = select_remaining_master(remaining)
-    rows = [{'id': row.id, 'label': row.label, 'credential_ref': row.credential_ref,
+    rows = [{'id': row.id, 'label': row.label,
              'brand_account_id': row.brand_account_id, 'is_master': row.id == main.id} for row in remaining]
     return removed, main.id, rows
 

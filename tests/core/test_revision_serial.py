@@ -204,7 +204,8 @@ def test_guard_construction_allows_external_writes_and_rebinds_changed_schema(tm
         if already_in_transaction:
             conn.commit()
         assert conn.execute('SELECT value FROM settings').fetchone() == ('saved',)
-        revisions.refresh()
+        Revisions.unbind(conn)
+        revisions = Revisions(conn)
         assert 'added' in revisions.tables
         before = revisions.capture({('added', '')})
         with conn:

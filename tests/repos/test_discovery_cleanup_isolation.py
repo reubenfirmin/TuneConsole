@@ -22,7 +22,8 @@ from yt_playlist.core import bundle_plan, fao, json_cache
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import bundle_storage, measurement
-from yt_playlist.repos import discovery_cache, proposal_cache
+from yt_playlist.repos import discovery_cache
+from yt_playlist.repos.rec_proposals import RecProposalsRepo
 from yt_playlist.core import discovery_cache_policy, discovery_provenance
 from yt_playlist.core.proposal_codec import encode_proposals
 from tests.prepared_fixture_support import prepared_template
@@ -98,16 +99,14 @@ def populate(store, count=4):
     with atomic_write(store):
         store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
             [(rid, item['key'], item['title'], item['artist']) for rid, item in subjects])
-        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) '
-            'VALUES (?,?,?,?,?,?)', [(video(item), rid, item['title'], item['artist'],
-                                    item['title'], item['artist']) for rid, item in subjects])
-        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-            [(rid, rid, video(item)) for rid, item in subjects])
-        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
+        store.conn.executemany('INSERT INTO track_sources(id,recording_id,video_id,title,artist,orig_title,orig_artist) '
+            'VALUES (?,?,?,?,?,?,?)', [(rid, rid, video(item), item['title'], item['artist'],
+                                      item['title'], item['artist']) for rid, item in subjects])
+        store.conn.executemany("UPDATE track_sources SET library_origin='fixture',library_added_at=NULL WHERE id=? AND library_origin IS NULL",
                                [(rid,) for rid, item in subjects if item['key'] != key])
         store.conn.executemany("INSERT INTO recording_aliases VALUES (?,?,'fixture')",
                                [(item['key'], rid) for rid, item in subjects])
-        store.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,0)',
+        store.conn.execute('UPDATE recordings SET discovery_entry_id=?,discovery_found_at=0 WHERE id=?',
                            (first_id, first_id))
         origin = discovery_provenance.origin(store.conn, 'old-album')
         discovery_provenance.retain(store.conn, first_id, origin, 'gone-video', 0)
@@ -185,7 +184,7 @@ def _published_state(store):
             'WHERE m.generation_id=? AND m.surface=? ORDER BY m.mode_key,m.purpose,c.rank',
             (generation, surface))]
         outputs = [(dict(row), Path(row['filename']).read_bytes()) for row in store.conn.execute(
-            'SELECT * FROM prepared_outputs WHERE generation_id=? AND surface=? ORDER BY chunk_key',
+            'SELECT * FROM recommendation_chunks WHERE generation_id=? AND surface=? ORDER BY chunk_key',
             (generation, surface))]
         result[surface] = {'head': head, 'slots': slots, 'outputs': outputs,
                            'framing': store.recommendations.framing(surface)}
@@ -334,7 +333,7 @@ def test_cleanup_does_not_read_or_rewrite_published_ranks_or_files(database, mon
         finally:
             database.conn.set_trace_callback(None)
 
-    immutable = r'(?:recommendation_candidates|unresolved_recommendation_candidates|prepared_outputs)\b'
+    immutable = r'(?:recommendation_candidates|unresolved_recommendation_candidates|recommendation_chunks)\b'
     assert not [sql for sql in statements if re.search(
         r'\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:main\.)?"?' + immutable, sql, re.IGNORECASE)]
     after, after_visible = observed_state(database)
@@ -443,7 +442,7 @@ def test_cleanup_failure_preserves_sources_membership_and_rankings(database, mon
         def read(*args, **kwargs):
             raise ValueError('injected invalid cache inventory')
 
-        monkeypatch.setattr(proposal_cache, 'logical_rows', read)
+        monkeypatch.setattr(RecProposalsRepo, 'cache_rows', read)
         error = ValueError
     with pytest.raises(error, match='injected'):
         cleanup(database)
@@ -455,7 +454,6 @@ def test_cleanup_failure_preserves_sources_membership_and_rankings(database, mon
 
 def test_cleanup_retry_finishes_after_earlier_repository_commits(database, monkeypatch):
     key, _bundles = populate(database)
-    database.settings.set_setting('enrich_attempts:' + key, 'old attempts')
 
     def fail(*args):
         assert not database.conn.in_transaction
@@ -465,7 +463,6 @@ def test_cleanup_retry_finishes_after_earlier_repository_commits(database, monke
         changes.setattr(database.discovery.repository, 'delete_pool_entries', fail)
         with pytest.raises(ValueError, match='membership deletion failure'):
             cleanup(database)
-    assert database.settings.get_setting('enrich_attempts:' + key) is None
     assert set(database.discovery.discovered_tracks_by_keys([key])) == {key}
     assert not database.conn.in_transaction
     assert cleanup(database) == {'albums': 0, 'artists': 0, 'tracks': 1}
@@ -520,11 +517,11 @@ def test_stale_discovery_retry_does_not_repeat_the_daily_generated_playlist_swee
     from yt_playlist.rec import discover, rec_worker
 
     clock, waits, collections, discoveries, client_discoveries = [0], [], [], [], []
-    account = database.accounts.upsert_account('cleanup', 'ref', None, True)
+    account = database.accounts.upsert_account('cleanup', None, True)
     if playlist_retry:
-        database.settings.set_setting(playlist_gc_retry.key(account, 'DUE'), json.dumps({
+        database.playlists.set_cleanup_attempt(account, 'DUE', {
             'identity': account, 'ytm': 'DUE', 'attempts': 1,
-            'last_attempt_at': 0, 'next_retry_at': 60}))
+            'last_attempt_at': 0, 'next_retry_at': 60})
         assert playlist_gc_retry.next_retry_at(database) == 60
 
     class Stop:

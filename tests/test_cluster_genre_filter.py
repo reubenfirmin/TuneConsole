@@ -10,14 +10,14 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from yt_playlist.core import embeddings
-from yt_playlist.rec import embed
+from yt_playlist.rec import cluster_ranking
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -41,14 +41,14 @@ def _track(store, title, artist, *, genre="", xy=None):
     return k
 
 
-# --- cluster_expand allow= ---------------------------------------------------------------------
+# --- rank_candidates allow= ---------------------------------------------------------------------
 
 def test_cluster_expand_allow_restricts_candidates(store):
     kp = _track(store, "Seed", "P", genre="goa trance", xy=_unit(0))
     ka = _track(store, "Near Trance", "A", genre="psytrance", xy=_unit(10))
     kb = _track(store, "Near Techno", "B", genre="acid techno", xy=_unit(12))
     allow = store.rec_query.keys_in_genre_selection(["trance"])
-    out = [k for k, _ in embed.cluster_expand(store, pos_keys=[kp], allow=allow, topn=5)]
+    out = [k for k, _ in cluster_ranking.rank_candidates(store, pos_keys=[kp], allow=allow, topn=5)]
     assert ka in out                      # trance candidate kept
     assert kb not in out                  # techno candidate filtered out
     assert kp not in out                  # seed still excluded

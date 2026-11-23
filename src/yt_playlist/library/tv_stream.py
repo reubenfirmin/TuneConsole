@@ -1,15 +1,11 @@
 """Checkpointed, bounded TV continuations through the generated-playlist writer."""
-import uuid
+from hashlib import sha224
 
-from yt_playlist.library.generated_composition import commands as generated_commands
+from yt_playlist.library.tv_launch import PendingTV, rollover
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.library.playlist_writes import account_additions, add_items, PlaylistAddUncertain
 from yt_playlist.library.playlist_policy import tv_continuation
 from yt_playlist.rec import tv
-
-
-class PendingTV(Exception):
-    """A provider read has not confirmed the previous write yet."""
 
 
 def refill(store, client, account_id, playlist, recipe, token, request_id, items, now, *,
@@ -18,19 +14,22 @@ def refill(store, client, account_id, playlist, recipe, token, request_id, items
     receipt_key = f'{playlist.id}:{token}:{request_id}'
     if receipt := store.tv.receipt(receipt_key):
         if receipt.get('pending'):
-            raise ValueError('YouTube has not confirmed the new TV playlist. Reset TV to start a fresh session.')
+            # Older requests did not save the provider playlist ID.
+            raise PendingTV()
         return receipt['playlist_id'], receipt['stream'], receipt['items']
-    result = _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key,
+    rollover_id = 'refill:' + sha224(receipt_key.encode()).hexdigest()
+    if store.tv.launch(rollover_id):
+        return rollover(store, client, account_id, rollover_id, items, now)
+    result = _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, rollover_id,
                      destination=destination, policy=policy)
-    # Retain the response at the original request address as well as the target
-    # playlist. Retrying a lost rollover response must not create another list.
     pid, stream, confirmed = result
-    store.tv.complete_receipt(receipt_key, {'playlist_id': pid, 'stream': stream, 'items': confirmed}, now)
-    tv.record_draw(store, confirmed)
+    if pid == playlist.id:
+        store.tv.complete_receipt(receipt_key, {'playlist_id': pid, 'stream': stream, 'items': confirmed}, now)
+        tv.record_draw(store, confirmed)
     return result
 
 
-def _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key, *,
+def _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, rollover_id, *,
             destination=None, policy='upload'):
     live = (token and token == recipe.get('tv_stream')
             and store.playlists.is_quarantined_playlist(playlist.playlist_scope_id))
@@ -49,20 +48,7 @@ def _refill(store, client, account_id, playlist, recipe, token, request_id, item
     if not live or len(old) + len(additions) > tv.MAX_POOL:
         # Opening a saved video playlist never grants permission to alter it.
         # A long stream rolls to another bounded Generated playlist as needed.
-        token = uuid.uuid4().hex
-        if not store.tv.begin_rollover(receipt_key, token, now):
-            raise PendingTV()
-        recipe = {'lane': 'tv', 'media': 'video', 'tv_stream': token,
-                  'max_minutes': tv.max_minutes(store), 'videos': items,
-                  'tv_refill': {'request_id': request_id, 'state': 'complete', 'items': items}}
-        limit = tv.max_minutes(store)
-        result = generated_commands(store, now).create('TV', items, client=client, account_id=account_id, recipe=recipe,
-                                           max_duration_s=float('inf') if limit is None else limit * 60)
-        confirmed = {t['video_id'] for t in store.charts.playlist_tracks_detail(result['pid'])}
-        accepted = [t for t in items if t['video_id'] in confirmed]
-        store.playlist_recipes.set_recipe(result['new_ytm'], {**recipe, 'videos': accepted,
-            'tv_refill': {'request_id': request_id, 'state': 'complete', 'items': accepted}}, now)
-        return result['pid'], token, accepted
+        return rollover(store, client, account_id, rollover_id, items, now)
     before = [t['video_id'] for t in store.charts.playlist_tracks_detail(playlist.id)]
     remote = validate_playlist(client.get_playlist(playlist.provider_playlist_id, limit=None))['tracks']
     if [t['videoId'] for t in remote] != before:

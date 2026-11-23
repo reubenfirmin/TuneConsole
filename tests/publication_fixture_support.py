@@ -17,7 +17,7 @@ def installed_reader(path, monkeypatch):
     with closing(database.conn), schema_inspection.reuse_tables(database.conn):
         # Disposable inputs keep real commits and rollback without power-loss sync.
         database.conn.execute('PRAGMA synchronous=OFF')
-        database.init_schema(defer_metadata=True)
+        database.init_schema()
         with reuse_reporting_reader(database, monkeypatch) as reader:
             with schema_inspection.reuse_tables(reader.conn):
                 yield database

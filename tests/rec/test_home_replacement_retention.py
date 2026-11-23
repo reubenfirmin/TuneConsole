@@ -51,7 +51,7 @@ def candidates(store, monkeypatch):
         proto['recipe'] = {'lane': lane, 'mode_id': mid}
         protos.append(proto)
     result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
-                                   None, None, [], [], 0, None)
+                                   None, None, [], [], 0, None, choice_context={'at': 1000})
     completed = publish_cards(store, result, 1000)
     completed['generation'] = 'completed-worker-generation'
     home_cache.put(store, home_prepared.SURFACE, completed, 1000)
@@ -110,21 +110,28 @@ def test_feedback_and_availability_do_not_discard_a_complete_worker_board(store,
     # Freeze the displayed choice; an unrecorded draw has new exposure metadata
     # and may select another worker menu after its mode evidence changes.
     before = home_prepared.cards(store, prepared, 1000, service(store))
-    keys = {track['key'] for menu in prepared['menus'] for card in menu['protos']
+    original = deepcopy(prepared)
+    comfort, = [card for card in before.protos if card['lane'] == 'comfort']
+    assert len(before.protos) == 4 and len(comfort['tracks']) == 4
+    assert before.choice_context == prepared['choice_context'] == {'at': 1000}
+    keys = {track['key'] for card in before.protos
             if card['lane'] != 'comfort' for track in card['tracks']}
-    assert keys
+    assert len(keys) == 12
     for key in keys:
         seed_dislike(store, key, until=None, now=1001)
     with store.conn:
-        store.conn.executemany('UPDATE youtube_items SET available=0 WHERE recording_id='
+        store.conn.executemany('UPDATE track_sources SET available=0 WHERE recording_id='
             '(SELECT id FROM recordings WHERE identity_key=?)', [(key,) for key in keys])
-    assert home_prepared.cards(store, prepared, 1001, service(store), record=False).protos == before.protos
+    filtered = home_prepared.cards(store, prepared, 1001, service(store), record=False)
+    assert filtered.protos == [comfort]
+    assert filtered.choice_context == before.choice_context
+    assert keys.isdisjoint(track['key'] for card in filtered.protos for track in card['tracks'])
     thin_candidates(store, candidates)
-    replacement = home_prepared.prepare_mixes(store, 1003)
-    assert replacement is None
-    current = home_prepared.cards(store, prepared, 1004, service(store), record=False)
-    assert current.protos == before.protos
-    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
+    assert home_prepared.prepare_mixes(store, 1003) is None
+    current = home_prepared.cards(store, home_prepared.load(store, 1004), 1004, service(store), record=False)
+    assert current.protos == filtered.protos
+    assert current.choice_context == filtered.choice_context
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == original
 
 
 def test_first_partial_menu_is_published_without_an_existing_complete_board(store, candidates, prepared):

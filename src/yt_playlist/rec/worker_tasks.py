@@ -1,16 +1,8 @@
 """Small job adapters for the existing recommendation and library owners."""
-
-
 class ServingTasks:
     def __init__(self, ctx, stage, *, checkpoint=None):
         self.ctx, self.stage = ctx, stage
         self.checkpoint = checkpoint
-        self._home_requested = self._home_prepared = 0
-
-    def request_home_refresh(self):
-        # Called under the worker lock. A request arriving during preparation
-        # must survive that publication, as must a deferred explicit attempt.
-        self._home_requested += 1
 
     def ratings(self):
         from yt_playlist.library import ratings
@@ -21,39 +13,24 @@ class ServingTasks:
         return keys
 
     def home(self):
-        from yt_playlist.rec import album_choices, choice_evidence, graduation, home_prepared, measurement
+        from yt_playlist.rec import album_choices, choice_evidence, home_prepared, measurement, permanent_taste
         from yt_playlist.library.home_album_composition import note_preparation
         now = self.ctx.now_fn()
-        requested = self._home_requested
-        prepare_mixes = (requested != self._home_prepared
-                         or not home_prepared.has_prepared_batch(self.ctx.store, now))
         self.stage('recommendation policy storage', measurement.maintain_storage, self.ctx.store, now)
         # Each producer captures/finalizes its context on its own snapshot.
         # A standalone prewarm is discarded by unchanged cached producers and
         # repeats the model read on every Home admission.
         albums = self.stage("Album choices", album_choices.prepare_cached, self.ctx.store, now)
-        result = (self.stage("Home collections", home_prepared.prepare_mixes, self.ctx.store, now)
-                  if prepare_mixes else None)
-        if result is not None:
-            self._home_prepared = requested
         discovery = self.stage("Home Discovery", home_prepared.prepare_discovery, self.ctx.store, now)
         revisit = self.stage("Home revisit", home_prepared.prepare_revisit, self.ctx.store, now)
         # Reporting has its own retryable publication. A failed report must not
         # prevent missing playable collections from being prepared first.
         self.stage("listening choices", choice_evidence.refresh_report, self.ctx.store, now)
+        taste_pending = self.stage("permanent listener evidence", permanent_taste.prepare, self.ctx.store, now)
         notes_pending = note_preparation(self.ctx.store,
             now_playing=lambda: getattr(getattr(self.ctx, 'bridge', None), 'now_playing', None) or {},
             clients=self.ctx.client_provider, now=self.ctx.now_fn, stage=self.stage).prepare(albums, now)
-        if prepare_mixes and result is None:
-            self.ctx.logger.debug("Home preparation deferred; retrying after preparation backoff")
-            return True
-        if result is not None:
-            self.stage("held steering exposure", graduation.graduate_slider_exposure, self.ctx.store, self.ctx.now_fn())
-            self.stage("listening exposure", graduation.graduate_play_exposure,
-                       self.ctx.store, self.ctx.now_fn(), prepared_leans=result["play_exposure"])
-        return (albums is None or notes_pending or discovery is None or revisit is False
-                or self._home_requested != self._home_prepared
-                or prepare_mixes and not home_prepared.batch_complete(result))
+        return albums is None or notes_pending or taste_pending or discovery is None or revisit is False
 
     def artwork(self, artist_ids):
         from yt_playlist.rec import discover
@@ -76,7 +53,7 @@ class ServingTasks:
     def choices(self):
         from yt_playlist.rec import choice_evidence, daily_model_selection, model_selection
         now = self.ctx.now_fn()
-        self.stage('model comparison storage', self.ctx.store.model_selection.maintain_selection, now)
+        self.stage('model selection storage', self.ctx.store.model_selection.maintain_selection, now)
         if choice_evidence.daily_due(self.ctx.store, now):
             self.stage("daily listening choices", choice_evidence.daily, self.ctx.store, now)
         self.stage("daily model forecasts", model_selection.update_followup, self.ctx.store,
@@ -87,3 +64,7 @@ class ServingTasks:
     def stories(self):
         from yt_playlist.rec import into_recently
         return self.stage("recent listening stories", into_recently.prepare, self.ctx.store, self.ctx.now_fn())
+
+    def stories_due(self):
+        from yt_playlist.rec import into_recently
+        return self.stage("recent story refresh check", into_recently.refresh_due, self.ctx.store, self.ctx.now_fn())

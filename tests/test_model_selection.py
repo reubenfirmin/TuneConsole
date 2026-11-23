@@ -62,9 +62,9 @@ def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(no_databa
     store = repository_store(
         values={'read_view': Mock()},
         settings={'get_setting': None},
-        rec_evidence={'evaluation_history_bounds': (None, None)},
+        rec_evidence={'evaluation_history_bounds': (None, None), 'evaluation_listening': []},
         rec_model={'rec_vectors_count': 0},
-        model_selection={'latest_daily_selection': None, 'comparison_activity': {}},
+        model_selection={'latest_daily_selection': None, 'restore_pending': False},
     )
     store.read_view.return_value = nullcontext(store)
     assert ms.readiness(store, 1000)["state"] == "waiting"
@@ -78,16 +78,19 @@ def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(no_databa
     assert "next_at" in ms.readiness(store, now)
     later = now + 2 * ms.DAY
     assert "freshly played" in ms.readiness(store, later)["reason"]
-    store.model_selection.comparison_activity.return_value = {
-        f'fresh{i}': later - 1 for i in range(30)}
+    day = (later - 1) // ms.DAY
+    fresh_plays = [(1, f'fresh{i}', '1970-02-18', day) for i in range(29)]
+    store.rec_evidence.evaluation_listening.return_value = [*fresh_plays, fresh_plays[0]]
+    assert ms.readiness(store, later)["state"] == "waiting"
+    store.rec_evidence.evaluation_listening.return_value.append((1, 'fresh29', '1970-02-18', day))
     assert ms.readiness(store, later)["state"] == "ready"
-    store.model_selection.comparison_activity.assert_called_with(now, later)
+    store.rec_evidence.evaluation_listening.assert_called_with(later, start=now)
     store.settings.get_setting.side_effect = lambda key: '1' if key == 'rec_selection_paused' else None
     assert ms.readiness(store, later)["state"] == "paused"
 
 
 def test_later_measurements_use_saved_forecasts_and_exact_future_play_times(store, monkeypatch):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     run_id = store.model_selection.start_selection(1000, _result())
     store.model_selection.save_model_forecast(run_id, 1000, {"eligible": ["a", "b", "gen"], "previous": ["a"], "selected": ["b"]})
     store.model_selection.save_model_forecast(run_id, 1000 + ms.DAY, {"eligible": ["a", "b", "c"], "previous": ["a"], "selected": ["c"]})
@@ -114,7 +117,7 @@ def test_later_measurements_use_saved_forecasts_and_exact_future_play_times(stor
 
 
 def test_forecast_has_same_universe_and_does_not_replace_live_vectors(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tracks = [store.tracks.upsert_track(str(i), f"Song{i}", "Artist", None, None, created_at=0) for i in range(40)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PL", "Mix", 40, "h", 0), tracks)
     store.history.record_play_event(iid,'song0|artist','0',100)
@@ -155,7 +158,7 @@ def test_startup_recovers_interrupted_comparison_and_unchanged_refresh_reuses_mo
 
 def test_real_history_drives_automatic_comparison_without_manual_action(file_consumer_store, monkeypatch):
     store = file_consumer_store
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     all_keys = []
     # 104 real recordings exceed the 100-track readiness threshold. The first
     # five per group are prior context; the other 64 give held-out first plays
@@ -165,7 +168,7 @@ def test_real_history_drives_automatic_comparison_without_manual_action(file_con
                      video_id=f'{group}-{i}', created_at=0)
                 for group in range(8) for i in range(13)]
     seed_publication_subjects(store, subjects)
-    entries = {row['video_id']: row['id'] for row in store.conn.execute('SELECT id,video_id FROM catalog_entries')}
+    entries = {row['video_id']: row['id'] for row in store.conn.execute('SELECT id,video_id FROM track_sources')}
     for group in range(8):
         rows = subjects[group * 13:(group + 1) * 13]
         tracks = [entries[row['video_id']] for row in rows]
@@ -216,7 +219,7 @@ def test_idle_worker_polls_daily_selection_without_library_changes(store, monkey
 
 
 def test_measurement_and_restore_survive_later_checks_that_keep_the_selected_setup(store, monkeypatch):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     incumbent = _owned_vector(store, 'old')
     challenger = _owned_vector(store, 'new', 64, 2)
     store.rec_model.replace_rec_vectors([incumbent])
@@ -255,5 +258,4 @@ def test_vector_publication_failure_preserves_configuration_and_restore_point(st
     assert store.settings.get_setting("rec_dim") is None
     assert store.settings.get_setting("rec_selection_active_run") is None
     assert store.model_selection.selection_run(run_id)['status'] == 'running'
-    assert [tuple(row) for row in store.conn.execute(
-        'SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?', (run_id,))] == [incumbent]
+    assert store.model_selection.repository.restore_facts(run_id)['vectors'] == [incumbent]

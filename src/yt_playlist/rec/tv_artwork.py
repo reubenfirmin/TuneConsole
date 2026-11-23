@@ -1,9 +1,9 @@
 """Bounded artist photography, prepared independently of TV playback."""
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
 from yt_playlist.providers import wikipedia
 from yt_playlist.util import net
 from yt_playlist.util.matching import search_squash
-from yt_playlist.util.thumbnails import best_thumb
 
 SURFACE = 'tv_artist_artwork'
 LIMIT = 60
@@ -53,7 +53,7 @@ def prepare(store, client, names, now):
 def _search(client, name):
     try:
         check_cancellable_work()
-        return client.search(name, filter='artists') or [], False
+        return YouTubeMusicAccess.for_client(client).artist_artwork(name), False
     except (WorkClosing, WorkBudgetExceeded):
         raise
     except Exception:

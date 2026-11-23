@@ -1,9 +1,12 @@
 """Generated playlist creation, quarantine, recipe materialization and unattended collection."""
 import json
 import logging
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.library.playlist_backups import backup_playlist
 from yt_playlist.library.action_claim import claim_deletion_target
 from yt_playlist.library.playlist_catalog import fetch_song_duration
@@ -15,6 +18,7 @@ from yt_playlist.library.playlist_writes import (
     account_additions, add_items as _add_items, retain_addition_snapshot)
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.library.undo_capture import capture_copy
+from yt_playlist.library.undo_conflicts import playlist_state
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.util.action_kinds import COPY_PLAYLIST, GC_GENERATED
 from yt_playlist.util.matching import track_album, track_artist
@@ -172,7 +176,7 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
 
 def create_generated_playlist(store, title, tracks, client, now, account_id=None, group=None,
                               recipe=None, *, max_duration_s=None, on_created=None,
-                              destination=(), policy='upload') -> dict:
+                              destination=(), policy='upload', radio_readback=None, defer_radio_publication=False) -> dict:
     """Create a NEW playlist on YouTube from recommendation tracks (dicts with video_id + metadata),
     record its generated origin and quarantine until explicit adoption, and optimistically
     materialize it into the store so it shows up in the Playlists tab right away (a later sync
@@ -199,7 +203,8 @@ def create_generated_playlist(store, title, tracks, client, now, account_id=None
         if dur is None:
             dur = store.tracks.known_duration(t.get("title") or "", t.get("artist") or "")
         if dur is None:
-            dur = fetch_song_duration(client, t["video_id"])
+            with (work_span('radio: provider duration', announce=True) if radio_readback else nullcontext()):
+                dur = fetch_song_duration(client, t["video_id"])
             if dur is not None and recording:
                 # Retain newly learned lengths even when every song is rejected,
                 # so the next preview does not offer the same unusable DJ mix.
@@ -223,25 +228,55 @@ def create_generated_playlist(store, title, tracks, client, now, account_id=None
         # so we persist the posted rows in the order the user actually saw: WYSIWYG. Re-ordering here
         # would diverge from the preview (the shuffle is seed-stable but its input differs once rows
         # are pruned). Pruning just drops rows; the survivors keep their already-good spacing.
-    new_pid = client.create_playlist(title, GENERATED_DESCRIPTION)
+    with (work_span('radio: provider create', announce=True) if radio_readback else nullcontext()):
+        new_pid = client.create_playlist(title, GENERATED_DESCRIPTION)
     if on_created is not None:
         on_created(new_pid, title)
     recording = recording and not getattr(store, 'activity_paused', False)
-    if recording:
+    if recording and radio_readback is None:
         store.playlists.mark_generated_playlist(new_pid)
         store.playlists.set_playlist_group(new_pid, group)
     handles = {}
-    addition = account_additions(_add_items, client, new_pid, [t["video_id"] for t in uniq],
-                                prior_tracks=[], set_video_ids=handles)
+    with (work_span('radio: provider add', announce=True) if radio_readback else nullcontext()):
+        addition = account_additions(_add_items, client, new_pid, [t["video_id"] for t in uniq],
+                                    prior_tracks=[], set_video_ids=handles)
     added, skipped = addition.added, addition.skipped
-    db_pid = None
     confirmed = set(addition.confirmed)
     confirmed_tracks = [t for t in uniq if t['video_id'] in confirmed]
+    snapshot = (radio_readback(client, new_pid, list(addition.confirmed))
+                if radio_readback is not None and not addition.failure else None)
+    publication = None
+    if radio_readback is not None and recording:
+        undo = _radio_undo(new_pid, account_id, title, confirmed_tracks, addition, snapshot)
+        if (defer_radio_publication and confirmed_tracks and not addition.failure and undo['post']
+                and all(row.get('isAvailable') is not False for row in snapshot['tracks'])):
+            from yt_playlist.library.radio_launch_publication import RadioLaunchPublication
+            publication = RadioLaunchPublication(_generated_copy_params(title, group, addition, handles, excluded),
+                                                  json.dumps(undo), group)
+            db_pid = None
+        else:
+            with work_span('radio: publish recovery copy', announce=True):
+                with atomic_write(store):
+                    db_pid = _publish_generated_radio(store, new_pid, account_id, title, group, confirmed_tracks,
+                                                      addition, now)
+                _record_generated_copy(store, title, group, addition, handles, excluded, undo, now)
+    else:
+        db_pid = _publish_generated(store, client, new_pid, account_id, title, group, confirmed_tracks,
+                                   addition, handles, excluded, now, recording)
+    if recording and recipe is not None:
+        store.playlist_recipes.set_recipe(new_pid, recipe, now)           # remember exactly how this one was made
+    addition.finish()
+    return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added,
+            "skipped": len(skipped) + excluded, "added_handles": handles, "tracks": confirmed_tracks,
+            **({'initial_snapshot': snapshot, 'launch_publication': publication} if radio_readback is not None else {})}
+
+
+def _publish_generated(store, client, new_pid, account_id, title, group, tracks, addition, handles,
+                       excluded, now, recording):
+    db_pid = None
     if recording and account_id is not None:            # optimistic local materialization
         track_ids, keys = [], []
-        for t in uniq:
-            if t["video_id"] not in confirmed:
-                continue
+        for t in tracks:
             ti, ar = t.get("title") or "", t.get("artist") or ""
             track_ids.append(store.tracks.upsert_track(
                 t["video_id"], ti, ar, t.get("album") or "", t["duration"], thumbnail=t.get("thumbnail")))
@@ -252,19 +287,54 @@ def create_generated_playlist(store, title, tracks, client, now, account_id=None
         store.playlists.ensure_playlist_thumbnail(db_pid)
         retain_addition_snapshot(store, db_pid, addition, now)
     if recording:
-        store.actions.record_action(COPY_PLAYLIST,
-                        json.dumps({"title": title, "source": "recommendations", "group": group,
-                                    "added": added, "skipped": len(skipped) + excluded,
-                                    "addition": addition.diagnostics(), "added_handles": handles,
-                                    "partial": bool(addition.failure)}),
-                        "{}", "executed", json.dumps(capture_copy(client, new_pid, account_id,
-                            [t["video_id"] for t in uniq if t["video_id"] not in skipped],
-                            title=title, description=GENERATED_DESCRIPTION, addition=addition)), now)
-    if recording and recipe is not None:
-        store.playlist_recipes.set_recipe(new_pid, recipe, now)           # remember exactly how this one was made
-    addition.finish()
-    return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added,
-            "skipped": len(skipped) + excluded, "added_handles": handles,
-            "tracks": confirmed_tracks}
+        undo = capture_copy(client, new_pid, account_id, title=title,
+                            description=GENERATED_DESCRIPTION, addition=addition)
+        _record_generated_copy(store, title, group, addition, handles, excluded, undo, now)
+    return db_pid
+
+
+def _publish_generated_radio(store, new_pid, account, title, group, tracks, addition, now):
+    videos = [t['video_id'] for t in tracks]
+    ids = store.tracks.track_ids_for_videos(videos)
+    for track in tracks:
+        video = track['video_id']
+        if video not in ids:
+            ids[video] = store.tracks.upsert_track(video, track.get('title') or '', track.get('artist') or '',
+                track.get('album') or '', track.get('duration'), thumbnail=track.get('thumbnail'))
+    keys = store.tracks.identity_keys_for_videos(videos)
+    for track in tracks:
+        track['key'] = keys.get(track['video_id'], track.get('key'))
+    db_pid = store.playlists.upsert_playlist(account, new_pid, title, len(videos),
+                                           content_hash(dict.fromkeys(keys.values())), now, created_at=now)
+    store.playlists.mark_generated_playlist(new_pid)
+    store.playlists.set_playlist_group(new_pid, group)
+    store.playlists.set_playlist_tracks(db_pid, [ids[video] for video in videos])
+    store.playlists.ensure_playlist_thumbnail(db_pid)
+    store.radio_checkpoints.remember_playlists([new_pid], account)
+    retain_addition_snapshot(store, db_pid, addition, now)
+    return db_pid
+
+
+def _radio_undo(new_pid, account, title, tracks, addition, snapshot):
+    snapshot = addition.failure.snapshot if addition.failure else snapshot
+    post = playlist_state(snapshot) if snapshot is not None and not snapshot.get('_radio_count_adjusted') else None
+    if post and (post['videos'] != [track['video_id'] for track in tracks] or post['title'] not in (None, title)
+                 or post['description'] not in (None, GENERATED_DESCRIPTION)):
+        post = None
+    undo = {'new_ytm': new_pid, 'target_identity': account, 'post': post}
+    if addition.failure:
+        undo['addition'] = addition.diagnostics()
+    return undo
+
+
+def _generated_copy_params(title, group, addition, handles, excluded):
+    return json.dumps({'title': title, 'source': 'recommendations', 'group': group, 'added': addition.added,
+                       'skipped': len(addition.skipped) + excluded, 'addition': addition.diagnostics(),
+                       'added_handles': handles, 'partial': bool(addition.failure)})
+
+
+def _record_generated_copy(store, title, group, addition, handles, excluded, undo, now):
+    store.actions.record_action(COPY_PLAYLIST, _generated_copy_params(title, group, addition, handles, excluded),
+                                '{}', 'executed', json.dumps(undo), now)
 
 

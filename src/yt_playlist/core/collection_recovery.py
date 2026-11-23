@@ -7,14 +7,14 @@ restore sequencing in controllers.collection_recovery.
 import hashlib
 from pathlib import Path
 import tempfile
-from functools import wraps
+from functools import partial, wraps
 
 from .policy_documents import _publish_encoded
 from . import policy_documents
 from .collection_files import FORMAT, KINDS, MAX_BYTES, RecoveryFiles, encode, read, record_id
-from .collection_owners import OWNERS, OWNER_KEYS
+from .collection_owners import OWNERS, OWNER_KEYS, PREDECESSOR_CLEANUP
 from .collection_backup import FORMAT as BACKUP_FORMAT
-from yt_playlist.repos.collection_recovery import references
+from yt_playlist.repos.collection_recovery import CollectionRecovery as Repository, WORKFLOW_PREDECESSORS, references
 
 
 def root_for_database(database, memory_key):
@@ -50,11 +50,21 @@ def publish_at(root, kind, owner, value, *, age=None):
     return filename, digest, len(encoded)
 
 
+def _backup_repository(conn):
+    # The installed database can be backed up before its first upgraded launch.
+    predecessors = {name for name, in conn.execute("SELECT name FROM main.sqlite_schema WHERE type='table'")}
+    return Repository(conn, predecessor_model_state='taste_model_state' in predecessors,
+                      predecessor_playlist_documents='rec_recipes' in predecessors,
+                      predecessor_playlist_cleanup=PREDECESSOR_CLEANUP[0] in predecessors,
+                      predecessor_taste_controls='taste_settings_checkpoints' in predecessors,
+                      predecessor_workflows=WORKFLOW_PREDECESSORS & predecessors)
+
+
 def _command(conn, root):
     from yt_playlist.controllers.collection_recovery import CollectionRecovery
-    from yt_playlist.repos.collection_recovery import CollectionRecovery as Repository
     from .collection_backup_files import BackupFiles
-    return CollectionRecovery(Repository(conn), BackupFiles(directory(conn), root))
+    return CollectionRecovery(_backup_repository(conn), BackupFiles(directory(conn), root),
+                              relocating=partial(policy_documents.coordinate_updates, conn))
 
 
 def export(conn, root):

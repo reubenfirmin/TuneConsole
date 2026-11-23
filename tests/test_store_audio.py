@@ -4,15 +4,26 @@ from yt_playlist.core.store import Store
 def test_fresh_schema_has_audio_columns():
     s = Store(":memory:")
     s.init_schema()
-    cols = {r["name"] for r in s.conn.execute("PRAGMA table_info(tracks)")}
-    assert {"bpm", "energy", "danceability", "mb_recording_id",
-            "music_key", "music_scale", "mood_happy", "mood_sad", "mood_relaxed",
-            "mood_acoustic", "instrumental", "loudness", "dynamic_complexity",
-            "popularity", "gain", "label"} <= cols
+    recording_fields = {
+        "bpm", "danceability", "mb_recording_id", "music_key", "music_scale",
+        "mood_happy", "mood_sad", "mood_relaxed", "mood_acoustic", "instrumental",
+    }
+    source_fields = {"loudness", "dynamic_complexity", "popularity", "gain", "label"}
+    expected_fields = {
+        "recordings": recording_fields | {f"effective_{name}" for name in recording_fields},
+        "track_sources": source_fields | {f"effective_{name}" for name in source_fields},
+        "catalog_tracks": recording_fields | source_fields,
+        "prepared_recording_inputs": {"recording_id", "library_bpm", "discovered_bpm"},
+    }
+    retired_fields = {"energy", "effective_energy", "library_energy", "discovered_energy"}
+    for table, expected in expected_fields.items():
+        fields = {row["name"] for row in s.conn.execute(f"PRAGMA table_info({table})")}
+        assert expected <= fields, table
+        assert fields.isdisjoint(retired_fields), table
 
 
 def _seed_playlist(store, titles):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tids = [store.tracks.upsert_track(f"v:{t}", t, "Artist", "Alb", 200) for t in titles]
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", len(tids), "h", 1000.0)
     store.playlists.set_playlist_tracks(pid, tids)
@@ -22,20 +33,20 @@ def _seed_playlist(store, titles):
 def test_provider_audio_priority_fills_gaps_without_overwriting(store):
     pid, (t1,) = _seed_playlist(store, ["A"])
     providers = ('deezer', 'acousticbrainz')
-    store.enrichment.apply_provider_fields(t1, 'deezer', {'bpm': 128.0, 'energy': .7, 'danceability': .9}, providers=providers)
-    assert store.tracks.get_track_audio(t1) == (128.0, 0.7, 0.9)
+    store.enrichment.apply_provider_fields(t1, 'deezer', {'bpm': 128.0, 'danceability': .9}, providers=providers)
+    assert store.tracks.get_track_audio(t1) == (128.0, 0.9)
     # A lower-priority provider fills gaps without replacing the preferred source.
-    store.enrichment.apply_provider_fields(t1, 'acousticbrainz', {'bpm': 999.0, 'energy': .1, 'danceability': .1}, providers=providers)
-    assert store.tracks.get_track_audio(t1) == (128.0, 0.7, 0.9)
+    store.enrichment.apply_provider_fields(t1, 'acousticbrainz', {'bpm': 999.0, 'danceability': .1}, providers=providers)
+    assert store.tracks.get_track_audio(t1) == (128.0, 0.9)
     # The selected source can refresh its own value; priority is not a permanent freeze.
     store.enrichment.apply_provider_fields(t1, 'deezer', {'bpm': 129.0}, providers=providers)
-    assert store.tracks.get_track_audio(t1) == (129.0, .7, .9)
+    assert store.tracks.get_track_audio(t1) == (129.0, .9)
     # but it fills a still-null column
     _, (t2,) = _seed_playlist(store, ["B"])
     store.enrichment.apply_provider_fields(t2, 'deezer', {'bpm': 120.0}, providers=providers)
-    assert store.tracks.get_track_audio(t2) == (120.0, None, None)
-    store.enrichment.apply_provider_fields(t2, 'acousticbrainz', {'energy': .5}, providers=providers)
-    assert store.tracks.get_track_audio(t2) == (120.0, 0.5, None)
+    assert store.tracks.get_track_audio(t2) == (120.0, None)
+    store.enrichment.apply_provider_fields(t2, 'acousticbrainz', {'danceability': .5}, providers=providers)
+    assert store.tracks.get_track_audio(t2) == (120.0, 0.5)
 
 
 def test_provider_audio_fills_extended_fields(store):
@@ -48,7 +59,7 @@ def test_provider_audio_fills_extended_fields(store):
     row = store.conn.execute(
         "SELECT music_key, music_scale, mood_happy, mood_sad, mood_relaxed, mood_acoustic, "
         "instrumental, loudness, dynamic_complexity, popularity, gain, label "
-        "FROM tracks WHERE id=?", (t1,)).fetchone()
+        "FROM catalog_tracks WHERE id=?", (t1,)).fetchone()
     assert row["music_key"] == "A"
     assert row["music_scale"] == "minor"
     assert row["mood_happy"] == 0.7
@@ -57,7 +68,7 @@ def test_provider_audio_fills_extended_fields(store):
     assert row["gain"] == -7.0
     assert row["label"] == "Because Music"
     store.enrichment.apply_provider_fields(t1, 'acousticbrainz', {'music_key': 'Z', 'label': 'Other'}, providers=providers)
-    row2 = store.conn.execute("SELECT music_key, label FROM tracks WHERE id=?", (t1,)).fetchone()
+    row2 = store.conn.execute("SELECT music_key, label FROM catalog_tracks WHERE id=?", (t1,)).fetchone()
     assert row2["music_key"] == "A"
     assert row2["label"] == "Because Music"
 
@@ -75,6 +86,6 @@ def test_waterfall_lists_tracks_with_missing_audio(store):
     for entry in (t1, t2):
         store.enrichment.apply_provider_fields(entry, 'musicbrainz', {'genre': 'House', 'year': '2001'})
         store.tracks.set_track_art(entry, 'https://example.com/cover.jpg')
-    store.enrichment.apply_provider_fields(t1, 'deezer', {'bpm': 128.0, 'energy': .7, 'danceability': .9})
+    store.enrichment.apply_provider_fields(t1, 'deezer', {'bpm': 128.0, 'danceability': .9})
     missing = [r["id"] for r in store.tracks.tracks_for_waterfall(pid)]
     assert missing == [t2]

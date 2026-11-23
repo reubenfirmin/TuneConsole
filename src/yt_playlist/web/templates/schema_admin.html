@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Schema map · TuneConsole{% endblock %}
+{% block page_class %}page-schema-admin{% endblock %}
+{% block page_styles %}
+<link rel="stylesheet" href="/static/schema-admin.css?v={{ asset_v }}">
+<script type="module" src="/static/schema-admin.js?v={{ asset_v }}"></script>
+{% endblock %}
+{% block body %}
+<section id="schema-map">
+  <header class="sd-header">
+    <div><h1>Schema map</h1><p id="sd-inventory"></p></div>
+    <div class="sd-tools" aria-label="Schema map controls">
+      <select id="sd-filter" aria-label="Filter by primary entity"><option value="">Full schema</option></select>
+      <div class="sd-search">
+        <input id="sd-search" type="search" placeholder="Find a table or view…" aria-label="Find a table or view"
+               aria-controls="sd-results" autocomplete="off">
+        <div id="sd-results" hidden></div>
+      </div>
+    </div>
+  </header>
+  <div class="sd-body">
+    <div class="sd-workspace">
+      <div class="sd-legend">
+        <span><i class="sd-primary-key"></i> Main entity</span>
+        <span><i class="sd-table-key"></i> Table</span>
+        <span><i class="sd-view-key"></i> View</span>
+        <span><i class="sd-line-key"></i> Foreign key</span>
+      </div>
+      <svg id="sd-canvas" xmlns="http://www.w3.org/2000/svg" tabindex="0" role="group"
+           aria-label="Entity relationship diagram. Scroll to zoom and drag the background to pan.">
+        <defs>
+          <marker id="sd-many" viewBox="0 -7 14 14" refX="0" refY="0" markerWidth="14" markerHeight="14"
+                  markerUnits="userSpaceOnUse" orient="auto"><path d="M2 -5 L12 0 L2 5"/></marker>
+          <marker id="sd-one" viewBox="-6 -7 12 14" refX="0" refY="0" markerWidth="12" markerHeight="14"
+                  markerUnits="userSpaceOnUse" orient="auto"><path d="M0 -5 V5"/></marker>
+          <marker id="sd-parent" viewBox="-14 -7 14 14" refX="0" refY="0" markerWidth="14" markerHeight="14"
+                  markerUnits="userSpaceOnUse" orient="auto"><path d="M-9 -5 V5"/></marker>
+        </defs>
+        <g id="sd-edges"></g><g id="sd-nodes"></g><g id="sd-labels"></g>
+      </svg>
+      <div class="sd-zoom" aria-label="Diagram zoom">
+        <button id="sd-zoom-out" type="button" aria-label="Zoom out">−</button>
+        <button id="sd-zoom-in" type="button" aria-label="Zoom in">+</button>
+        <button id="sd-fit" type="button">Fit diagram</button>
+      </div>
+    </div>
+    <aside id="sd-detail" aria-label="Entity details" hidden></aside>
+  </div>
+  <script type="application/json" id="sd-data">{{ diagram|tojson }}</script>
+</section>
+{% endblock %}

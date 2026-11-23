@@ -5,6 +5,7 @@ import pytest
 
 from tests.taste_support import _client
 from yt_playlist.rec import progressive
+from yt_playlist.core.model_state import RecordingModelUpdate
 
 
 @pytest.mark.parametrize('reason', ['matrix-memory-budget', 'corpus-memory-budget', 'fit-time-budget'])
@@ -12,7 +13,8 @@ from yt_playlist.rec import progressive
 def test_persistent_failure_is_visible_and_recovery_clears_it(store, monkeypatch, reason, existing_model):
     client = _client(store)
     if existing_model:
-        store.settings.set_setting('rec_content_model', '{"ncat":1,"cat":{"fam:techno":0},"cont":[]}')
+        store.rec_model.publish_model_state(recording=RecordingModelUpdate(
+            encoder='{"ncat":1,"cat":{"fam:techno":0},"cont":[]}'))
     store.settings.set_setting(progressive.FIT_STATE, json.dumps({
         'state': 'deferred', 'reason': reason, 'attempts': 3, 'next_attempt_at': 1900}))
 

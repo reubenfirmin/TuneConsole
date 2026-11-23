@@ -2,6 +2,7 @@
 import logging
 from tests.enrichment_support import seed_audio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -99,10 +100,10 @@ def test_worker_failure_retries_with_backoff(store, monkeypatch):
 
 
 def test_health_generation_tracks_enrichment_listening_and_model_settings(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     track = store.tracks.upsert_track('v', 'Song', 'Artist', None, 180)
     mutations = [
-        lambda: seed_audio(store, track, energy=0.8),
+        lambda: seed_audio(store, track, danceability=0.8),
         lambda: store.history.record_history_plays(iid, 1000, ['song'], source_timezone='UTC'),
         lambda: store.settings.set_setting('rec_cooc_weighting', '1'),
         lambda: store.rec_model.replace_rec_vectors([('song|artist', b'\0\0\0\0')]),
@@ -114,6 +115,55 @@ def test_health_generation_tracks_enrichment_listening_and_model_settings(store)
     before = model_health.input_key(store, 1000)
     store.player_events.record_player_event(iid, 'progress', 'v', 30, 200, None, '{}', 1000)
     assert model_health.input_key(store, 1000) == before
+
+
+def test_future_listening_excludes_date_only_plays_at_window_boundaries(store, monkeypatch):
+    day = 86400
+    cutoff = datetime(2025, 11, 1, 18, tzinfo=timezone.utc).timestamp()
+    end = cutoff + day
+    account = store.accounts.upsert_account('main', None, True)
+    titles = ['Earlier exact', 'Later exact', 'Cutoff date', 'Prior date',
+              'Second earlier exact', 'Latest exact', 'End date']
+    titles.extend(f'Unplayed song {i}' for i in range(53))
+    tracks = [store.tracks.upsert_track(str(i), title, 'Artist', None, 180,
+                                       created_at=cutoff - 4 * day)
+              for i, title in enumerate(titles)]
+    keys = [store.tracks.identity_key_for_video(str(i)) for i in range(len(tracks))]
+    for start in range(0, len(tracks), 12):
+        playlist = store.playlists.upsert_playlist(account, f'playlist-{start}', f'List {start}',
+                                                   12, 'unchanged', cutoff - 3 * day)
+        store.playlists.set_playlist_tracks(playlist, tracks[start:start + 12])
+    store.settings.set_setting('rec_cooc_weighting', '1')
+    for i, at in ((0, cutoff - 120), (1, cutoff + 120), (4, cutoff - 180), (5, end)):
+        store.history.record_play_event(account, keys[i], str(i), at, source_timezone='UTC')
+    for i, observed_at in ((2, cutoff + 7200), (3, cutoff - day), (6, end + 7200)):
+        store.history.record_history_plays(account, observed_at, [(keys[i], 'Today')],
+                                           source_timezone='UTC')
+
+    windows = []
+    score = eval_recs.causal_recall
+
+    def capture(**window):
+        windows.append(window)
+        return score(**window)
+
+    monkeypatch.setattr(eval_recs, 'causal_recall', capture)
+    now = end + 3 * 3600
+    worker = worker_for(store, monkeypatch)
+    worker.ctx.now_fn = lambda: now
+    worker.trigger_health_refresh()
+    worker._run_pending()
+
+    window = windows[0]
+    assert window['cutoff'] == cutoff + 1e-6
+    assert window['end'] == end + 1e-6
+    assert window['before'] == {keys[0], keys[3], keys[4]}
+    assert set(window['weights']) == window['before']
+    assert {keys[0], keys[4]} in [set(basket) for basket in window['baskets']]
+    assert window['after'] == {keys[1], keys[5]}
+    report = model_health.view(store, now)
+    assert report['health_ready'] and report['temporal']['causal']
+    assert report['temporal']['windows'][0]['trials'] == 2
 
 
 def test_new_embedding_publication_invalidates_report_and_rejects_stale_refresh(store, monkeypatch):

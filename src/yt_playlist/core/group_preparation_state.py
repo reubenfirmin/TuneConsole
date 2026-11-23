@@ -1,78 +1,63 @@
-"""Grouping progress and the exact generation checked by its worker."""
+"""Worker progress before grouping and checkpoints on their generations."""
 import json
+from math import isfinite
 
-KEYS = frozenset({'rec_group_shadow_progress','rec_group_shadow_checkpoint','rec_mode_fit_inputs'})
-
-
-def available(conn):
-    from . import checkpoint_reads as checkpoint_publication
-    return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='group_preparation_state'").fetchone() is not None
-            or checkpoint_publication.installed(conn, 'group-checkpoints'))
+from . import group_progress
+from .worker_settings import read, save
 
 
-def get(conn,key,default=None):
-    from . import group_progress
-    from . import checkpoint_reads as checkpoint_publication
-    revision = checkpoint_publication.selected(conn, 'group-checkpoints')
-    if revision is not None:
-        return checkpoint_publication.read(conn, 'group-checkpoints', revision, key, default)
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='group_preparation_state'").fetchone():
-        return checkpoint_publication.fallback(conn, key, default)
-    if key == 'rec_group_shadow_progress' and group_progress.available(conn):
+PROGRESS_KEY = 'rec_group_shadow_progress'
+CHECKPOINT_KEY = 'rec_group_shadow_checkpoint'
+FIT_KEY = 'rec_mode_fit_inputs'
+KEYS = frozenset({PROGRESS_KEY, CHECKPOINT_KEY, FIT_KEY})
+SERIAL = 'group_input_serial'
+ROOTS = 'group_retention_roots_complete'
+FIT = 'group_fit_fingerprint'
+UNRESOLVED = 'group_unresolved_checkpoint'
+
+
+def get(conn, key, default=None):
+    if key == PROGRESS_KEY:
         return group_progress.read(conn, default)
-    row = conn.execute('SELECT s.*,g.external_key FROM group_preparation_state s '
-                       'LEFT JOIN group_generations g ON g.id=s.generation_id WHERE singleton=1').fetchone()
+    if key == FIT_KEY:
+        return read(conn, FIT, default)
+    row = conn.execute('SELECT external_key,worker_input_serial,worker_checkpoint_at FROM group_generations '
+                       'WHERE worker_checkpoint_at IS NOT NULL').fetchone()
     if row is None:
-        return default
-    if key=='rec_mode_fit_inputs':
-        return row['fit_fingerprint'] if row['fit_fingerprint'] is not None else default
-    if key=='rec_group_shadow_progress':
-        return json.dumps({'phase':row['phase'],'at':row['reported_at'],'reason':row['reason']}) if row['phase'] else default
-    return json.dumps({'generation':row['external_key'] or row['unresolved_generation'],'serial':row['input_serial'],
-                       'at':row['checkpoint_at']}) if row['checkpoint_at'] is not None else default
+        return read(conn, UNRESOLVED, default)
+    return json.dumps(dict(zip(('generation', 'serial', 'at'), row, strict=True)))
 
 
-def put(conn,values,*,legacy=False):
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='group_preparation_state'").fetchone():
-        from .control_reads import retained_write
-        return retained_write(conn, values)
-    if legacy:
-        # Explicit frozen conversion may run without prior regular admission.
-        # Adopt the bounded replacement without changing the frozen v94 DDL.
-        from . import group_progress
-        group_progress.install(conn)
-    if not values:
-        return
-    conn.execute('INSERT INTO group_preparation_state(singleton) VALUES (1) ON CONFLICT(singleton) DO NOTHING')
-    for key,raw in values.items():
-        if key=='rec_mode_fit_inputs':
-            conn.execute('UPDATE group_preparation_state SET fit_fingerprint=? WHERE singleton=1',(raw,))
+def put(conn, values):
+    for key, raw in values.items():
+        if key == FIT_KEY:
+            save(conn, FIT, raw)
             continue
         value = json.loads(raw) if raw else {}
-        if not isinstance(value,dict):
+        if not isinstance(value, dict):
             raise ValueError('Grouping progress must be a supported object')
-        if key=='rec_group_shadow_progress':
-            if set(value)-{'phase','at','reason'}:
-                raise ValueError('Unsupported grouping progress; original retained')
-            from . import group_progress
-            # Deferred admission keeps continuing writers usable before the
-            # regular runner has adopted this bounded singleton replacement.
-            group_progress.install(conn)
+        if key == PROGRESS_KEY:
             group_progress.write(conn, value)
         else:
-            if set(value)-{'generation','serial','at'}:
-                raise ValueError('Unsupported grouping checkpoint; original retained')
-            checkpoint(conn,value.get('generation'),value.get('serial'),value.get('at'),legacy=legacy)
+            if set(value) - {'generation', 'serial', 'at'}:
+                raise ValueError('Unsupported grouping checkpoint')
+            checkpoint(conn, value.get('generation'), value.get('serial'), value.get('at'))
 
 
-def checkpoint(conn,generation,serial,now,*,legacy=False):
-    row = conn.execute('SELECT id FROM group_generations WHERE external_key=?',(generation,)).fetchone()
-    if generation is not None and row is None and not legacy:
-        raise ValueError('Grouping checkpoint requires its published generation')
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='group_preparation_state'").fetchone():
-        from .control_reads import retained_write
-        return retained_write(conn, {'rec_group_shadow_checkpoint': json.dumps(
-            {'generation': generation, 'serial': serial, 'at': now})})
-    conn.execute('INSERT INTO group_preparation_state(singleton) VALUES (1) ON CONFLICT(singleton) DO NOTHING')
-    conn.execute('UPDATE group_preparation_state SET generation_id=?,unresolved_generation=?,input_serial=?,checkpoint_at=? '
-                 'WHERE singleton=1',(row[0] if row else None,generation if row is None else None,serial,now))
+def checkpoint(conn, generation, serial, now):
+    if (generation, serial, now) != (None, None, None):
+        if (not isinstance(generation, str) or type(serial) is not int or not 0 <= serial < 2 ** 63
+                or type(now) not in (int, float) or not isfinite(now)):
+            raise ValueError('Grouping checkpoint requires a generation, input revision and time')
+        identity = conn.execute('SELECT id FROM group_generations WHERE external_key=?', (generation,)).fetchone()
+        if identity is None:
+            raise ValueError('Grouping checkpoint requires its published generation')
+        identity = identity[0]
+    else:
+        identity = None
+    conn.execute('UPDATE group_generations SET worker_input_serial=NULL,worker_checkpoint_at=NULL '
+                 'WHERE worker_checkpoint_at IS NOT NULL AND id IS NOT ?', (identity,))
+    if identity is not None:
+        conn.execute('UPDATE group_generations SET worker_input_serial=?,worker_checkpoint_at=? WHERE id=?',
+                     (serial, now, identity))
+    save(conn, UNRESOLVED, None)

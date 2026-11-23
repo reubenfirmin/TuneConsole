@@ -24,10 +24,12 @@ def atomic_write(store, *, wait_seconds=1):
 
 @contextmanager
 def _atomic_unit(conn):
+    borrowed = conn.in_transaction
     with conn.atomic(join=True):
         # A joined deferred transaction also needs admission before its first
         # read of the mutable owner.
-        conn.execute('UPDATE main.settings SET value=value WHERE 0')
+        if borrowed:
+            conn.execute('UPDATE main.settings SET value=value WHERE 0')
         yield
 
 

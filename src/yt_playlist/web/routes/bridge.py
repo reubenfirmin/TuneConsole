@@ -6,7 +6,9 @@ radio observes playback separately, so its writes never block this response pump
 import asyncio
 import json
 import logging
+import re
 import time
+from urllib.parse import parse_qs, urlsplit
 
 from anyio import CancelScope
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
@@ -73,7 +75,8 @@ def build(ctx, *, observations=None) -> APIRouter:
         if getattr(ctx, 'store', None) is None:
             return Ctx.playback_commands(ctx, monotonic=time.monotonic).status()
         with ctx.store.read_view() as reader:
-            return Ctx.playback_commands(ctx, monotonic=time.monotonic, reader=reader).status()
+            commands = Ctx.playback_commands(ctx, monotonic=time.monotonic, reader=reader)
+            return commands.status(reader=reader)
 
     @router.post("/play")
     async def play(request: Request):
@@ -129,8 +132,10 @@ def build(ctx, *, observations=None) -> APIRouter:
             return {"ok": False, "error": str(exc)}
 
     @router.post("/now-playing/toggle")
-    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = "", confirm: bool = False):
-        return await Ctx.playback_commands(ctx, monotonic=time.monotonic).toggle(action, resume, videoId, confirm)
+    async def now_playing_toggle(action: str = "toggle", resume: bool = False, videoId: str = "",
+                                 confirm: bool = False, playlist: str | None = None, queueIndex: int | None = None):
+        return await Ctx.playback_commands(ctx, monotonic=time.monotonic).toggle(
+            action, resume, videoId, confirm, playlist=playlist, queue_index=queueIndex)
 
     @router.websocket("/bridge/ws")
     async def bridge_ws(ws: WebSocket):
@@ -142,14 +147,29 @@ def build(ctx, *, observations=None) -> APIRouter:
         loop = asyncio.get_running_loop()
         send_lock = asyncio.Lock()
         send_failed = asyncio.Event()
+        radio_launch = None
+        radio_playing = False
 
         async def send(frame):
+            nonlocal radio_launch, radio_playing
             async with send_lock:
+                launch_id = frame.get('radioLaunchId')
+                sent_at = time.time_ns() // 1_000_000 if launch_id else None
                 try:
                     await ws.send_json(frame)
                 except Exception:
                     send_failed.set()
                     raise
+                if frame.get('type') == 'navigate':
+                    radio_launch = None
+                    radio_playing = False
+                    if launch_id:
+                        query = parse_qs(urlsplit(frame['url']).query)
+                        if query.get('v') and query.get('list'):
+                            video, playlist = query['v'][0], query['list'][0]
+                            radio_launch = (launch_id, video, playlist, sent_at)
+                            logger.info('Radio launch timing: launch=%r stage=websocket_sent at_ms=%d playlist=%s video=%s',
+                                        launch_id, sent_at, playlist, video)
 
         async def receive():
             frame = asyncio.create_task(ws.receive_json())
@@ -197,6 +217,42 @@ def build(ctx, *, observations=None) -> APIRouter:
                     logger.warning("malformed bridge frame, ignoring: %r", msg)
                     continue
                 kind = msg.get("type")
+                if kind == 'radio-launch-timing':
+                    if radio_launch and msg.get('launchId') == radio_launch[0] and msg.get('method') in (
+                            'loaded-tab', 'tab-update', 'new-tab', 'failed'):
+                        stamps = [msg.get(key) for key in ('receivedAt', 'admittedAt', 'selectedAt', 'dispatchedAt')]
+                        if all(type(stamp) is int and 0 < stamp < 2**53 for stamp in stamps[:3]) and (
+                                stamps[3] is None or type(stamps[3]) is int and 0 < stamps[3] < 2**53):
+                            logger.info('Radio launch timing: launch=%r stage=browser method=%s '
+                                        'received_at_ms=%s lock_at_ms=%s tab_at_ms=%s dispatch_returned_at_ms=%s',
+                                        radio_launch[0], msg['method'], *stamps)
+                    continue
+                if kind == 'radio-launch-recovery':
+                    action = msg.get('action')
+                    if radio_launch and msg.get('launchId') == radio_launch[0] and action in (
+                            'confirmed-native', 'confirmed-heartbeat', 'navigate', 'activate'):
+                        version = msg.get('extensionVersion')
+                        if not isinstance(version, str) or not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){0,3}', version):
+                            version = 'unknown'
+                        logger.info('Radio launch timing: launch=%r stage=recovery action=%s extension_version=%s',
+                                    radio_launch[0], action, version)
+                    continue
+                if kind == 'pevent' and msg.get('kind') == 'native-playing':
+                    if radio_launch and not radio_playing:
+                        launch_id, video, playlist, sent_at = radio_launch
+                        player_playlist = msg.get('playlist')
+                        at = msg.get('playingAt')
+                        source = msg.get('playingSource')
+                        now = time.time_ns() // 1_000_000
+                        if (msg.get('videoId') == video and isinstance(player_playlist, str)
+                                and player_playlist.removeprefix('RDAMPL') == playlist
+                                and type(at) is int and sent_at <= at <= now
+                                and source in ('media-event', 'media-sample')
+                                and not (msg.get('paused') or msg.get('muted') or msg.get('volume') == 0)):
+                            logger.info('Radio launch timing: launch=%r stage=playing at_ms=%d websocket_to_playing_ms=%d '
+                                        'player_to_server_ms=%d source=%s', launch_id, at, at - sent_at, now - at, source)
+                            radio_playing = True
+                    continue
                 if kind == "rating-reconciliation":
                     state = msg.get("state")
                     if state not in ("pending", "recovered", "cancelled", "failed"):

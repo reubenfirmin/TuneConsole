@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from yt_playlist.core.activity import interrupt_query
+from yt_playlist.core.activity import check_cancellable_work, interrupt_query
 from yt_playlist.core.db_reads import MAX_READERS, ReaderDiagnostics, read_view
 from yt_playlist.core.db_snapshot import read_snapshot
 from yt_playlist.core.db_revisions import Revisions
@@ -22,7 +22,6 @@ class SQLiteDatabase:
     def __init__(self, db_path, application):
         self._db_path = None if str(db_path) == ':memory:' else Path(db_path).resolve()
         self._application = application
-        application.recover(self._db_path)
         self.conn = sqlite3.connect(str(db_path), uri=True, check_same_thread=False,
                                     factory=DiagnosticConnection)
         try:
@@ -52,28 +51,34 @@ class SQLiteDatabase:
         self.conn.create_function('tastenorm', 1, normalize, deterministic=True)
 
     def _bind_repositories(self):
-        # Reopening storage and analytics preparation can replace either the
-        # handle or its serving lock. Connection-bound SQL ports share that owner.
+        # SQL repositories and the connection share the same serving lock.
         self.conn._repository_lock = self._lock
         self._application.bind(self)
 
     def _retained_readers(self):
         return self._application.readers(self)
 
+    def _copy_memory_to(self, reader):
+        """Copy the database and its connection-local state under the source lock."""
+        self.conn.backup(reader.conn, pages=128, progress=lambda *_: check_cancellable_work())
+        self._application.copy_memory_state(self, reader)
+        reader._bind_repositories()
+
     @contextmanager
-    def read_snapshot(self, *, dependencies=None, memo=None):
+    def read_snapshot(self, *, dependencies=None, memo=None, allow_stale_keys=frozenset()):
         with self._retained_readers():
-            with read_snapshot(self, self._make_reader, dependencies=dependencies, memo=memo) as snapshot:
+            with read_snapshot(self, self._make_reader, dependencies=dependencies, memo=memo,
+                               allow_stale_keys=allow_stale_keys) as snapshot:
                 yield snapshot
 
     @contextmanager
-    def read_view(self, *, tracked=False, seconds=...):
+    def read_view(self, *, tracked=False, pinned=False, preparation=False, seconds=...):
         if getattr(self, '_read_only', False):
             yield self
             return
-        with self._retained_readers():
-            with read_view(self, self._make_reader, tracked=tracked, seconds=seconds) as reader:
-                yield reader
+        with read_view(self, self._make_reader, retain_files=self._retained_readers,
+                       tracked=tracked, pinned=pinned, preparation=preparation, seconds=seconds) as reader:
+            yield reader
 
     def _make_reader(self, *, bind_repositories=True):
         reader = type(self).__new__(type(self))
@@ -99,9 +104,9 @@ class SQLiteDatabase:
             reader.conn.close()
             raise
 
-    def memoized_read(self, name, prepare):
+    def memoized_read(self, name, prepare, *, owner=None):
         calculate = getattr(self, '_memoized_read', None)
-        return calculate(name, prepare) if calculate is not None else prepare()
+        return calculate(name, prepare, owner) if calculate is not None else prepare()
 
     @classmethod
     def open_current(cls, db_path):
@@ -110,10 +115,9 @@ class SQLiteDatabase:
         store = cls(db_path)
         try:
             current.validate(store.conn)
-            regular.validate(store.conn)
-            store._schema_compatibility = False
-            store._rebuild_source_version = None
-            store._schema_recovery_pending = False
+            if regular.validate(store.conn) != len(regular.CHANGES):
+                from yt_playlist.core.schema_contract import MigrationError
+                raise MigrationError('Domain preparation requires all regular schema changes')
             store._bind_repositories()
             if store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() != 'wal':
                 raise RuntimeError('Domain preparation requires WAL readers')
@@ -124,18 +128,17 @@ class SQLiteDatabase:
             raise
 
     @synchronized
-    def init_schema(self, *, defer_metadata=False):
+    def init_schema(self):
         from yt_playlist.core.migrations import migrate
         try:
-            self._schema_compatibility = bool(migrate(
-                self.conn, defer_validation=defer_metadata and self._db_path is not None))
-            self._rebuild_source_version = None
-            self._schema_recovery_pending = False
-            if ('settings' not in self.__dict__ or self._repository_schema_version !=
-                    self.conn.execute('PRAGMA schema_version').fetchone()[0]):
+            if getattr(self, '_snapshot_revisions', None) is not None:
+                Revisions.unbind(self.conn)
+            # Complete bounded schema changes before any application owner binds.
+            migrate(self.conn)
+            if 'settings' not in self.__dict__:
                 self._bind_repositories()
             self._application.repair(self)
-            if self._db_path is not None and not self._rebuild_source_version:
+            if self._db_path is not None:
                 mode = self.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
                 if mode.lower() != 'wal':
                     raise RuntimeError('Database requires WAL for nonblocking background readers')

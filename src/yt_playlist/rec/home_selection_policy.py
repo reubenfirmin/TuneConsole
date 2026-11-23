@@ -25,7 +25,7 @@ class CandidateQuery:
     mode: str | None = None
 
 
-def query(selected, *, mode=None, ranker='rank', family=None, scale=1):
+def query(selected, *, mode=None, ranker='rank', family=None):
     parts, values = ['c.pool=?'], [selected.pool]
     if selected.year_band is not None:
         low, high = selected.years
@@ -51,12 +51,10 @@ def query(selected, *, mode=None, ranker='rank', family=None, scale=1):
     if ranker != 'rank':
         if ranker not in ('ppr', 'cosine'):
             raise ValueError('Unknown Home ordering')
-        order = 'COALESCE(p.rank,1073741824)/? - c.delta' if ranker == 'ppr' else '-c.tilt-c.delta'
+        order = 'COALESCE(p.rank,1073741824)' if ranker == 'ppr' else '-c.tilt'
         if family:
             order = "(SELECT d.distance FROM distances d WHERE d.source=? AND d.target=COALESCE(c.family,''))," + order
             parameters.append(family)
-        if ranker == 'ppr':
-            parameters.append(float(scale))
         order += ',c.rank'
     return CandidateQuery(' AND '.join(parts), tuple(values), order, tuple(parameters),
                           str(mode) if ranker != 'rank' else None)

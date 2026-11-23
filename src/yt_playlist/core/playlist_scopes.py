@@ -9,7 +9,7 @@ def key(account_id, provider_playlist_id):
 def resolve(conn, provider_playlist_id, account_id=None):
     if provider_playlist_id in SYSTEM_IDS:
         if account_id is None:
-            owners = [r[0] for r in conn.execute('SELECT DISTINCT account_id FROM playlists '
+            owners = [r[0] for r in conn.execute('SELECT DISTINCT account_id FROM active_playlists '
                                                 'WHERE provider_playlist_id=?', (provider_playlist_id,))]
             if len(owners)!=1:
                 raise ValueError('Choose an account for this system playlist')

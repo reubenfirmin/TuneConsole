@@ -64,7 +64,7 @@ def test_upsert_conflict_then_resolve_overwrites_column(store):
     assert store.enrichment_reports.conflict_count_for_playlist  # method exists
     store.enrichment.resolve_conflict(tid, "genre", "Art Pop")
     # canonical column overwritten...
-    assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (tid,)).fetchone()["genre"] == "Art Pop"
+    assert store.conn.execute("SELECT genre FROM catalog_tracks WHERE id=?", (tid,)).fetchone()["genre"] == "Art Pop"
     # ...and the conflict marked resolved
     row = store.conn.execute("SELECT resolved, resolved_value FROM enrichment_conflict "
                              "WHERE track_id=? AND field=?", (tid, "genre")).fetchone()
@@ -94,7 +94,7 @@ def test_resolved_conflict_reopens_on_new_value(store):
 
 
 def test_conflict_count_and_list_scoped_to_playlist(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tid = _track(store, title="A")
     other = _track(store, title="B")
     plid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 1000.0)

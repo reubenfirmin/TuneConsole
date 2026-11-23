@@ -1,5 +1,5 @@
 """Sample and annotation workflows use repository and file-object mocks."""
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import quote
 from unittest.mock import Mock, create_autospec
@@ -9,7 +9,6 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.audio_vibes import AudioVibes
 from yt_playlist.controllers.prepared_content import PreparedContent
-from yt_playlist.core.audio_annotation_files import AnnotationFiles
 from yt_playlist.core.audio_metadata_files import AudioMetadataFiles
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.sample_files import SampleFiles
@@ -22,40 +21,17 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def audio():
     repository = create_autospec(AudioVibesRepo, instance=True, spec_set=True)
     samples = create_autospec(SampleFiles, instance=True, spec_set=True)
-    annotations = create_autospec(AnnotationFiles, instance=True, spec_set=True)
     prepared = create_autospec(PreparedContent, instance=True, spec_set=True)
     metadata = create_autospec(AudioMetadataFiles, instance=True, spec_set=True)
     metadata.retained.side_effect = nullcontext
     repository.playback.return_value = dict(video_id='video', title='Song', artist='Artist')
     repository.sample_conflicts.return_value = []
     repository.sample_facts.return_value = []
-    repository.sample_owners.return_value = {'sample': 'run'}
     repository.annotation.return_value = None
-    repository.taxonomy.return_value = True, {'cruise', 'relax'}
     samples.retained.side_effect = nullcontext
-    annotations.retained.side_effect = nullcontext
-    annotations.describe.return_value = ('digest', 20)
-    repository.reserve_annotation_file.return_value = 41
     samples.reference.return_value = dict(filename='sample-file', content_digest='digest')
     samples.matches_reference.return_value = True
-    leased = False
-
-    @contextmanager
-    def write(identity, document, *, expected):
-        nonlocal leased
-        leased = True
-        try:
-            yield 'annotation-file', 'digest', 20
-        finally:
-            leased = False
-
-    def publish(*args, **kwargs):
-        assert leased
-        return 7
-
-    annotations.write_reserved.side_effect = write
-    repository.publish_annotation.side_effect = publish
-    return AudioVibes(repository, samples, annotations, prepared, metadata)
+    return AudioVibes(repository, samples, prepared, metadata)
 
 
 def sample(**values):
@@ -168,82 +144,19 @@ def test_identical_retry_repairs_evidence_and_retries_a_failed_queue_notificatio
     audio.repository.reserve_sample.assert_not_called()
 
 
-@pytest.mark.parametrize('old_state,labels,state', [(None, [], 'empty'), (None, ['cruise'], 'labeled'),
-    ('labeled', [], 'withdrawn'), ('withdrawn', [], 'withdrawn'), ('empty', [], 'empty')])
-def test_annotation_state_preserves_empty_and_withdrawn_meanings(audio, old_state, labels, state):
-    if old_state is not None:
-        value = previous()
-        value['state'] = old_state
-        audio.repository.annotation.return_value = value
-        audio.annotation_files.read.return_value = {'prediction': {'older': True}}
-    audio.save_feedback('run', ['sample'], labels, TAXONOMY_VERSION, None, 20)
-    kwargs = audio.repository.publish_annotation.call_args.kwargs
-    assert kwargs['state'] == state
-    assert kwargs['expected'] == (7 if old_state is not None else None)
-    assert kwargs['revision'] == (3 if old_state is not None else 1)
-    assert kwargs['reference'] == ('annotation-file', 'digest', 20)
-    assert kwargs['file_id'] == 41
-
-
-@pytest.mark.parametrize('state,labels', [('labeled', ['cruise']), ('withdrawn', []), ('empty', [])])
-def test_an_identical_annotation_retry_does_not_create_a_revision(audio, state, labels):
-    value = previous()
-    value.update(state=state, vibes=labels)
-    audio.repository.annotation.return_value = value
-    audio.annotation_files.read.return_value = {'prediction': None}
-    audio.save_feedback('run', ['sample'], labels, TAXONOMY_VERSION, None, 20)
-    audio.annotation_files.write_reserved.assert_not_called()
-    audio.repository.reserve_annotation_file.assert_not_called()
-    audio.repository.publish_annotation.assert_not_called()
-
-
-@pytest.mark.parametrize('invalid', ['run', 'taxonomy', 'labels', 'samples'])
-def test_invalid_annotation_membership_is_rejected_before_file_publication(audio, invalid):
-    if invalid == 'run':
-        audio.repository.playback.return_value = None
-    elif invalid == 'taxonomy':
-        audio.repository.taxonomy.return_value = False, set()
-    elif invalid == 'labels':
-        audio.repository.taxonomy.return_value = True, {'relax'}
-    else:
-        audio.repository.sample_owners.return_value = {'sample': 'another-run'}
-    with pytest.raises(ValueError):
-        audio.save_feedback('run', ['sample'], ['cruise'], TAXONOMY_VERSION, None, 20)
-    audio.annotation_files.write_reserved.assert_not_called()
-    audio.repository.reserve_annotation_file.assert_not_called()
-    audio.repository.publish_annotation.assert_not_called()
-
-
-def test_annotation_reservation_precedes_file_and_sealed_judgment(audio):
-    calls = Mock()
-    calls.attach_mock(audio.repository.reserve_annotation_file, 'reserve')
-    calls.attach_mock(audio.annotation_files.write_reserved, 'write')
-    calls.attach_mock(audio.repository.publish_annotation, 'complete')
-    audio.save_feedback('run', ['sample'], ['cruise'], TAXONOMY_VERSION, None, 20)
-    assert [call[0] for call in calls.mock_calls] == ['reserve', 'write', 'complete']
-    audio.repository.reserve_annotation_file.assert_called_once_with('run', TAXONOMY_VERSION, 1, ('digest', 20))
-    args, kwargs = audio.annotation_files.write_reserved.call_args
-    assert args[0] == 41 and kwargs['expected'] == ('digest', 20)
-
-
-@pytest.mark.parametrize('failure', ['reserve', 'file'])
-def test_annotation_interruption_does_not_publish_a_judgment(audio, failure):
-    operation = (audio.repository.reserve_annotation_file if failure == 'reserve'
-                 else audio.annotation_files.write_reserved)
-    operation.side_effect = OSError('interrupted annotation')
-    with pytest.raises(OSError, match='interrupted annotation'):
-        audio.save_feedback('run', ['sample'], ['cruise'], TAXONOMY_VERSION, None, 20)
-    audio.repository.publish_annotation.assert_not_called()
-    if failure == 'reserve':
-        audio.annotation_files.write_reserved.assert_not_called()
+def test_feedback_saves_the_complete_judgment(audio):
+    prediction = {'frozen': True}
+    audio.save_feedback('run', ['sample'], ['cruise'], TAXONOMY_VERSION, prediction, 20)
+    audio.repository.save_annotation.assert_called_once_with(
+        'run', ['sample'], ['cruise'], TAXONOMY_VERSION, prediction, 20)
 
 
 def test_feedback_displays_preserved_legacy_sample_ids_without_admitting_memberships(audio):
-    audio.repository.annotation.return_value = previous()
-    audio.annotation_files.read.return_value = dict(prediction=None, legacy={'sample_ids': '["unresolved"]'})
+    audio.repository.annotation.return_value = previous(
+        archive=dict(prediction=None, legacy={'sample_ids': '["unresolved"]'}))
     assert audio.feedback('run') == dict(taxonomy_version=TAXONOMY_VERSION, vibes=['cruise'],
         prediction=None, updated_at=10, sample_ids=['unresolved'])
-    audio.repository.publish_annotation.assert_not_called()
+    audio.repository.save_annotation.assert_not_called()
 
 
 @pytest.mark.parametrize('values,choices,expected', [

@@ -1,12 +1,13 @@
-"""Compact delivery receipts and explicitly enabled artist-capture retirement.
+"""Retire old artist captures while retaining exact delivery identities.
 
-Only heads/selections are live observation owners. Immutable ordered content is
-retained independently; a replay receipt must never reapply an old selection.
+Heads and selections remain active. Retired deliveries retain their credit,
+with no ownership of the metadata delivery or current selection.
 """
-import sqlite3
+import json
 
 BATCH = 128
 RETENTION_SECONDS = 30 * 86400
+CHECKPOINT = 'artist_credit_retention'
 
 
 def statements():
@@ -45,76 +46,42 @@ def validate(conn):
         raise MigrationError('Missing artist credit retention state')
 
 
-def receipt(conn, entry, source, key, observation, credit, *, metadata_bound=False):
-    """Publish in the capture's transaction; retries cannot replace an outcome."""
-    if not conn.in_transaction:
-        raise RuntimeError('Artist replay receipts require an outer transaction')
-    old = conn.execute('SELECT observation_id,credit_id,metadata_bound FROM artist_credit_replays '
-                       'WHERE entry_id=? AND source=? AND delivery_key=?', (entry, source, key)).fetchone()
-    if old is not None and tuple(old) != (observation, credit, int(metadata_bound)):
-        raise sqlite3.IntegrityError('Artist delivery replay outcome changed')
-    if old is None:
-        conn.execute('INSERT INTO artist_credit_replays VALUES (?,?,?,?,?,?)',
-                     (entry, source, key, observation, credit, int(metadata_bound)))
-
-
-def prepare_receipt(conn, observation):
-    """Adopt a capture without erasing a previously verified custody binding.
-
-    Compact metadata can release the nullable delivery FK after a bound replay
-    receipt has been published. A later retention scan must keep that outcome.
-    """
-    key = observation['delivery_key']
-    if key is None:
-        return
-    bound = observation['metadata_delivery_id'] is not None
-    if not bound:
-        old = conn.execute('SELECT metadata_bound FROM artist_credit_replays WHERE entry_id=? AND source=? '
-                           'AND delivery_key=?', (observation['entry_id'], observation['source'], key)).fetchone()
-        bound = old is not None and bool(old[0])
-    receipt(conn, observation['entry_id'], observation['source'], key, observation['id'],
-            observation['credit_id'], metadata_bound=bound)
-
-
-def _owners(conn):
-    """Refuse destructive preparation if a later owner has not been audited."""
-    owners = set()
-    for (name,) in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'"):
-        owners.update(name for row in conn.execute('PRAGMA foreign_key_list("' + name.replace('"', '""') + '")')
-                      if row[2] == 'artist_credit_observations')
-    if owners != {'artist_credit_capture_heads', 'entry_artist_selections'}:
-        raise ValueError('Artist observation owners require a new retention audit: ' + repr(owners))
+def state(conn):
+    row = conn.execute('SELECT value FROM settings WHERE key=?', (CHECKPOINT,)).fetchone()
+    return json.loads(row[0]) if row else {'enabled': 0, 'cursor': 0, 'completed': 0, 'next_scan_at': 0}
 
 
 def step(conn, now, *, activate=False):
-    """Inspect at most BATCH IDs; commit cursor, receipts and retirement together."""
+    """Inspect at most BATCH active captures and commit retirement with the cursor."""
     if not conn.in_transaction:
         raise RuntimeError('Artist capture retirement requires an outer transaction')
     if type(now) not in (int, float) or not -1.7976931348623157e308 <= now <= 1.7976931348623157e308:
         raise ValueError('Artist credit capture time must be finite')
-    state = conn.execute('SELECT enabled,cursor,next_scan_at FROM artist_credit_retention WHERE id=1').fetchone()
-    if not state[0]:
+    checkpoint = state(conn)
+    if not checkpoint['enabled']:
         if not activate:
             return False
-        _owners(conn)
-        conn.execute('UPDATE artist_credit_retention SET enabled=1 WHERE id=1')
-    if not activate and now < state[2]:
+        checkpoint['enabled'] = 1
+    if not activate and now < checkpoint['next_scan_at']:
         return False
-    rows = conn.execute('SELECT o.* FROM artist_credit_observations o WHERE o.id>? ORDER BY o.id LIMIT ?',
-                        (state[1], BATCH)).fetchall()
+    rows = conn.execute('SELECT o.* FROM artist_credit_observations o WHERE retired=0 AND o.id>? ORDER BY o.id LIMIT ?',
+                        (checkpoint['cursor'], BATCH)).fetchall()
     for row in rows:
-        prepare_receipt(conn, row)
         # Unknown-time conversion duplicates have no independent runtime use.
         # Reconciliation and unknown-time fresh evidence remain conservative.
         obsolete = row['capture_kind'] in ('legacy_capture', 'selection_snapshot')
         expired = (row['capture_kind'] in ('capture', 'provider_delivery') and row['last_seen'] is not None
                    and row['last_seen'] < now - RETENTION_SECONDS)
         if obsolete or expired:
-            conn.execute('DELETE FROM artist_credit_observations WHERE id=? '
-                'AND NOT EXISTS(SELECT 1 FROM artist_credit_capture_heads WHERE observation_id=?) '
-                'AND NOT EXISTS(SELECT 1 FROM entry_artist_selections WHERE observation_id=?)',
-                (row['id'], row['id'], row['id']))
-    cursor = rows[-1]['id'] if rows else 0
-    conn.execute('UPDATE artist_credit_retention SET cursor=?,completed=CASE WHEN ?=0 THEN 1 ELSE completed END,'
-                 'next_scan_at=? WHERE id=1', (cursor, cursor, now + 86400 if not rows else 0))
+            if row['delivery_key'] is None:
+                conn.execute('DELETE FROM artist_credit_observations WHERE id=? '
+                             'AND is_capture_head=0 AND is_selected=0', (row['id'],))
+            else:
+                conn.execute('UPDATE artist_credit_observations SET retired=1,metadata_delivery_id=NULL '
+                             'WHERE id=? AND is_capture_head=0 AND is_selected=0', (row['id'],))
+    if rows:
+        checkpoint.update(cursor=rows[-1]['id'], next_scan_at=0)
+    else:
+        checkpoint.update(cursor=0, completed=1, next_scan_at=now + 86400)
+    conn.execute('UPDATE settings SET value=? WHERE key=?', (json.dumps(checkpoint), CHECKPOINT))
     return bool(rows)

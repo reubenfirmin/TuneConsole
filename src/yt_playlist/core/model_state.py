@@ -1,87 +1,111 @@
-"""Content encoders and their admission fingerprints have explicit owners.
-
-The finite settings API adapter admits old callers without retaining a second
-SQL copy. New model publications can use these functions directly.
-"""
+"""Published recording and artist model state in the current schema."""
 import json
+from dataclasses import dataclass
+from enum import Enum
 
-from . import collection_recovery
-from .model_contract import FIELDS
-
-
-def available(conn):
-    from . import model_reads as model_publication
-    return model_publication.native(conn) or model_publication.installed(conn)
+from .db_revisions import setting_reads
 
 
-@collection_recovery.pinned_read
-def get(conn,key,default=None):
-    from . import checkpoint_reads as checkpoint_publication, model_reads as model_publication
-    if not model_publication.native(conn):
-        selected = model_publication.selected(conn)
-        return (model_publication.read(conn, selected, key, default) if selected is not None
-                else checkpoint_publication.fallback(conn, key, default))
-    owner,column = FIELDS[key]
-    row = conn.execute('SELECT * FROM taste_model_state WHERE id=?',(owner,)).fetchone()
-    if row is None:
-        return default
-    if column!='model':
-        return row[column] if row[column] is not None else default
-    if row['recovery_filename'] is None:
-        return default
-    return collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],
-                                     kind='taste-settings',owner=owner)
+KEYS = {'recording': 'recording_model_state', 'artist': 'artist_model_state'}
+REFERENCE_FIELDS = ('recovery_filename', 'recovery_digest', 'recovery_bytes')
 
 
-def prepare_models(values):
-    result = {}
-    for key, value in values.items():
-        owner, column = FIELDS[key]
-        if column == 'model' and value:
-            if not isinstance(value, str) or not isinstance(json.loads(value), dict):
-                raise ValueError('Content encoder must be a supported JSON object')
-            result[owner] = value
-    return result
+class ModelField(Enum):
+    UNCHANGED = 0
 
 
-def put(conn,values):
-    from . import model_reads
-    references = {owner: collection_recovery.publish(conn, 'taste-settings', owner, value)
-                  for owner, value in prepare_models(values).items()} if model_reads.native(conn) else {}
-    register(conn, values, references)
+UNCHANGED = ModelField.UNCHANGED
+Reference = tuple[str, str, int]
 
 
-def register(conn, values, references):
-    """Persist model fields using references prepared outside the SQL owner."""
-    from . import model_reads as model_publication
-    if not model_publication.native(conn):
-        conn.executemany('INSERT INTO main.settings(key,value) VALUES (?,?) '
-            'ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value', values.items())
+@dataclass(frozen=True)
+class RecordingModelState:
+    generation: str | None = None
+    input_fingerprint: str | None = None
+    genre_revision: str | None = None
+    fit_fingerprint: str | None = None
+    reference: Reference | None = None
+
+
+@dataclass(frozen=True)
+class ArtistModelState:
+    fit_fingerprint: str | None = None
+    reference: Reference | None = None
+
+
+@dataclass(frozen=True)
+class RecordingModelUpdate:
+    encoder: str | None | ModelField = UNCHANGED
+    generation: str | None | ModelField = UNCHANGED
+    input_fingerprint: str | None | ModelField = UNCHANGED
+    genre_revision: str | None | ModelField = UNCHANGED
+    fit_fingerprint: str | None | ModelField = UNCHANGED
+
+
+@dataclass(frozen=True)
+class ArtistModelUpdate:
+    encoder: str | None | ModelField = UNCHANGED
+    fit_fingerprint: str | None | ModelField = UNCHANGED
+
+
+def validate_encoder(encoder: str | None | ModelField) -> None:
+    if encoder is UNCHANGED or encoder is None or encoder == '':
         return
-    conn.execute('UPDATE taste_model_state SET revision=revision WHERE 0')
-    for owner in sorted({FIELDS[key][0] for key in values}):
-        current = conn.execute('SELECT * FROM taste_model_state WHERE id=?',(owner,)).fetchone()
-        fields = dict(current) if current else dict(generation=None,input_fingerprint=None,genre_revision=None,fit_fingerprint=None,
-            recovery_filename=None,recovery_digest=None,recovery_bytes=None)
-        for key,value in values.items():
-            kind,column = FIELDS[key]
-            if kind!=owner:
-                continue
-            if column=='model':
-                if value:
-                    fields['recovery_filename'],fields['recovery_digest'],fields['recovery_bytes'] = references[owner]
-                else:
-                    fields.update(recovery_filename=None,recovery_digest=None,recovery_bytes=None)
-            else:
-                fields[column] = value
-        conn.execute('INSERT INTO taste_model_state(id,revision,generation,input_fingerprint,genre_revision,fit_fingerprint,'
-            'recovery_filename,recovery_digest,recovery_bytes) VALUES (?,1,?,?,?,?,?,?,?) '
-            'ON CONFLICT(id) DO UPDATE SET revision=revision+1,generation=excluded.generation,'
-            'input_fingerprint=excluded.input_fingerprint,genre_revision=excluded.genre_revision,fit_fingerprint=excluded.fit_fingerprint,'
-            'recovery_filename=excluded.recovery_filename,recovery_digest=excluded.recovery_digest,recovery_bytes=excluded.recovery_bytes',
-            (owner,*(fields[column] for column in ('generation','input_fingerprint','genre_revision','fit_fingerprint',
-                                                  'recovery_filename','recovery_digest','recovery_bytes'))))
+    if not isinstance(encoder, str) or not isinstance(json.loads(encoder), dict):
+        raise ValueError('Content encoder must be a supported JSON object')
 
 
-def clear(conn,key):
-    put(conn,{key:None})
+def recording(conn) -> RecordingModelState:
+    state = _read(conn, 'recording')
+    return RecordingModelState(state.get('generation'), state.get('input_fingerprint'),
+                               state.get('genre_revision'), state.get('fit_fingerprint'), _reference(state))
+
+
+def artist(conn) -> ArtistModelState:
+    state = _read(conn, 'artist')
+    return ArtistModelState(state.get('fit_fingerprint'), _reference(state))
+
+
+def _read(conn, kind):
+    key = KEYS[kind]
+    with setting_reads(conn, (key,)):
+        row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _reference(state):
+    return tuple(state[field] for field in REFERENCE_FIELDS) if state.get('recovery_filename') is not None else None
+
+
+def references(conn):
+    for kind in KEYS:
+        reference = _reference(_read(conn, kind))
+        if reference is not None:
+            yield kind, reference
+
+
+def relocate(conn, kind, filename):
+    conn.execute("UPDATE settings SET value=json_set(value, '$.recovery_filename', ?) WHERE key=?",
+                 (filename, KEYS[kind]))
+
+
+def _updated(current, update):
+    return current if update is UNCHANGED else update
+
+
+def save_recording(conn, update: RecordingModelUpdate, reference: Reference | None | ModelField) -> None:
+    _save(conn, 'recording', vars(update), reference)
+
+
+def save_artist(conn, update: ArtistModelUpdate, reference: Reference | None | ModelField) -> None:
+    _save(conn, 'artist', vars(update), reference)
+
+
+def _save(conn, kind, updates, reference):
+    state = _read(conn, kind)
+    state.update({field: _updated(state.get(field), value) for field, value in updates.items() if field != 'encoder'})
+    state.update(zip(REFERENCE_FIELDS, _updated(_reference(state), reference) or (None, None, None)))
+    state['revision'] = state.get('revision', 0) + 1
+    conn.execute(
+        'INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        (KEYS[kind], json.dumps(state, allow_nan=False)))

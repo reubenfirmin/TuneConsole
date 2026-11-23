@@ -69,7 +69,7 @@ def _offer(store, opportunity, now=100, share=.5):
             "comparison_id": opportunity, "cluster": opportunity + ":mode"})
 
 
-def test_discovery_video_lookup_uses_membership_primary_key(store):
+def test_discovery_video_lookup_uses_recording_candidate_index(store):
     store.discovery.upsert_discovered_track(
         "target|artist", "target", "Target", "Artist", "", None, None, None, "source", 1)
     statements = []
@@ -79,10 +79,10 @@ def test_discovery_video_lookup_uses_membership_primary_key(store):
             assert view.discovery.identity_keys_for_video("target") == ["target|artist"]
         finally:
             view.conn.set_trace_callback(None)
-        query = next(sql for sql in statements if 'SELECT DISTINCT' in sql and 'identity_key' in sql and 'discovery_memberships' in sql)
+        query = next(sql for sql in statements if 'SELECT r.identity_key' in sql and 'r.discovery_entry_id=e.id' in sql)
         plan = [row[3] for row in view.conn.execute("EXPLAIN QUERY PLAN " + query)]
-    assert not any("SCAN d" in row or "SCAN e" in row for row in plan), plan
-    assert any("SEARCH d USING" in row and ("PRIMARY KEY" in row or "INDEX" in row) for row in plan), plan
+    assert not any("SCAN r" in row or "SCAN e" in row for row in plan), plan
+    assert any("SEARCH r USING" in row and "ix_recording_discovery_candidate" in row for row in plan), plan
 
 
 def test_experiment_policy_reuses_definition_and_retains_opportunity_linkage(store, monkeypatch):
@@ -108,7 +108,7 @@ def test_experiment_policy_reuses_definition_and_retains_opportunity_linkage(sto
     assert store.conn.execute("SELECT COUNT(*) FROM recommendation_policies").fetchone()[0] == 2
 
 
-def test_policy_captures_aggregate_evidence_without_lifetime_playlist_handles(store):
+def test_retired_mode_pick_history_stays_readable_without_changing_active_policy(store):
     store.modes.replace_modes([{"mode_id": 7, "label": "Rock", "families": [],
         "centroid": [1., 0.], "size": 1, "rep_keys": []}], [], 1)
     for i in range(100):
@@ -116,13 +116,12 @@ def test_policy_captures_aggregate_evidence_without_lifetime_playlist_handles(st
     store.modes.log_impressions(1, [("wheelhouse", 7)], 1)
 
     version, config = measurement.serving_policy(store, 100)
-    assert config["modes"]["picks"] == {7: 100}
+    assert store.modes.pick_counts() == {7: 100}
     for i in range(100, 200):
         store.modes.log_pick(i + 1, 7, i + 1)
     changed, updated = measurement.serving_policy(store, 100)
-    assert changed != version
-    assert updated["modes"]["picks"] == {7: 200}
-    assert len(json.dumps(updated)) == len(json.dumps(config))
+    assert changed == version and updated == config
+    assert store.modes.pick_counts() == {7: 200}
     assert store.modes.pick_counts(50, before=100) == {7: 50}
 
 

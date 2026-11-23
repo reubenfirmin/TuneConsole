@@ -40,23 +40,24 @@ def custom_genre_key(label):
     return key
 
 
-def membership_rows(artists, genres):
-    result = {'artists':[], 'genres':[], 'unresolved_artists':[], 'unresolved_genres':[]}
+def recipe_selections(artists, genres):
+    result = {'artists': [], 'genres': []}
     seen = set()
     for position, (label, identity) in enumerate(artists):
+        selection = dict(position=position, artist_id=identity, label=label)
         if identity is None:
-            result['unresolved_artists'].append((position, label, 'unknown_or_ambiguous_artist'))
+            selection['reason'] = 'unknown_or_ambiguous_artist'
         elif identity in seen:
             raise ValueError('A recipe cannot select the same artist twice')
         else:
-            result['artists'].append((identity, position))
             seen.add(identity)
+        result['artists'].append(selection)
     for role, selections in genres:
         seen = set()
-        for position, identity in enumerate(selections):
+        for position, (label, identity) in enumerate(selections):
             if identity in seen:
                 raise ValueError('A recipe cannot select the same genre twice in one role')
-            result['genres'].append((identity, role, position))
+            result['genres'].append(dict(role=role, position=position, genre_key=identity, label=label))
             seen.add(identity)
     return result
 
@@ -71,10 +72,10 @@ def draft_document(state):
                        if isinstance(row, dict) and row.get('video_id')})
     selections = []
     for kind, values in (('picked', state.get('picks', [])), ('excluded', state.get('banned', []))):
-        for position, video in enumerate(values):
+        for video in values:
             if not isinstance(video, str) or not video:
                 raise ValueError('A draft selection requires an exact upload ID')
-            selections.append((kind, position, video, candidates.get(video, {})))
+            selections.append((kind, video, candidates.get(video, {})))
     recovery = {key:value for key, value in state.items() if key not in ('picks', 'banned')}
     return revision, 'building' if state.get('building') else 'ready', recovery, selections
 

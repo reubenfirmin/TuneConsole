@@ -11,7 +11,7 @@ import pytest
 from tests.prepared_fixture_support import capture_template, coordinates, historical_template, prepared_template, roots
 from tests.rec.test_home_prepared import service
 from tests.store_fixture_support import bounded_consumer_schema, without_query_timing
-from yt_playlist.core import evidence_ledger, file_collection, profile_files
+from yt_playlist.core import evidence_ledger, file_collection, policy_bodies, policy_config, profile_files
 from yt_playlist.core.profile_paths import record_path
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_prepared, musical_profiles
@@ -144,7 +144,6 @@ def test_open_prepared_consumer_keeps_private_writes_and_real_snapshot_guards(
                         assert not allowed
                 with file_collection.collector(prepared_root) as allowed:
                     assert allowed
-            assert not target._schema_compatibility
             with target.read_snapshot() as snapshot:
                 assert snapshot.store.settings.get_setting('private_input') == 'prepared'
                 target.settings.set_setting('private_input', 'private write')
@@ -163,7 +162,9 @@ def test_cloning_replaced_schema_does_not_copy_guards_for_retired_owners(
         tmp_path, _pristine_current_schema):
     def seed(source):
         source.conn.execute('CREATE TABLE fixture_retired_owner (value TEXT)')
-        source._snapshot_revisions.refresh()
+        from yt_playlist.core.db_revisions import Revisions
+        Revisions.unbind(source.conn)
+        source._snapshot_revisions = Revisions(source.conn)
         # A genuine schema replacement can leave unreachable TEMP trigger
         # catalog rows for the vanished owner. Do not forge migration history.
         _pristine_current_schema.backup(source.conn)
@@ -225,6 +226,8 @@ def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guard
     target = request.getfixturevalue(fixture_name)
     target.settings.set_setting('fixture_input', 'before restore')
     calculations, statements = [], []
+    base = policy_config.base_record({'weights': {'genre:rock': 1.4}}, 1000)
+    variant = policy_config.variant_record(base[0], {'ranker': 'fixture'}, 1000)
 
     def value(reader):
         def calculate():
@@ -235,6 +238,7 @@ def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guard
     def seed(source):
         source.settings.set_setting('fixture_input', 'template value')
         source.rec_ledger.record_serving_policy('fixture-policy', {'ranker': 'fixture'}, 1000)
+        source.rec_ledger.record_prepared_policies([variant], [base])
 
     with prepared_template(_pristine_current_schema, seed) as template:
         assert template.coordinates, 'Exercise real immutable-file relocation'
@@ -249,6 +253,12 @@ def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guard
             with target.read_snapshot() as current:
                 assert value(current.store) == 'template value'
                 assert current.store.rec_ledger.policy_configuration('fixture-policy') == {'ranker': 'fixture'}
+                assert current.store.rec_ledger.policy_configuration(variant[0]) == {
+                    'weights': {'genre:rock': 1.4}, 'ranker': 'fixture'}
+                private_body = Path(policy_bodies.read(current.store.conn, base[0])['configuration_filename'])
+                source_body = Path(policy_bodies.read(template.source.conn, base[0])['configuration_filename'])
+                assert private_body != source_body
+                assert private_body.read_bytes() == source_body.read_bytes()
                 target.settings.set_setting('fixture_input', 'after restore')
                 assert not current.publish(lambda: pytest.fail('Missed a real post-restore write'))
             with target.read_snapshot() as current:
@@ -387,8 +397,8 @@ def test_shared_home_templates_use_the_test_model(home_seed_template, home_prepa
     from yt_playlist.rec import home_vibe
 
     for template in (home_seed_template, home_prepared_template):
-        assert template.source.settings.get_setting('rec_vibe_version') is None
-        assert template.source.rec_proposals.has_proposals('mode_bundles')
+        assert template.source.vibe_predictions.rebuild_policy() is None
+        assert template.source.recommendations.head('home') is not None
         heads = template.source.recommendations.heads()
         assert {head['surface'] for head in heads} >= {'vibe:' + preset for preset in home_vibe.PRESETS}
     assert home_seed_template.source.rec_proposals.get_proposals(home_prepared.SURFACE) is None
@@ -438,10 +448,11 @@ def test_home_seed_templates_keep_matching_unprepared_inputs(
             assert reader.discovery.discovered_tracks_by_keys(keys) == discovery
             assert reader.musical_profiles.by_keys(keys) == profiles
             assert reader.recommendations.heads() == heads
-            assert reader.rec_proposals.has_proposals('mode_bundles') == published
+            assert (reader.recommendations.head('home') is not None) == published
             assert reader.rec_proposals.get_proposals(home_prepared.SURFACE) is None
-            assert reader.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 18 * tracks_per_lane
-            assert reader.conn.execute('SELECT count(*) FROM discovery_memberships').fetchone()[0] == 6 * tracks_per_lane
+            assert reader.conn.execute('SELECT count(*) FROM track_sources WHERE library_origin IS NOT NULL').fetchone()[0] == 18 * tracks_per_lane
+            assert reader.conn.execute(
+                'SELECT count(*) FROM recordings WHERE discovery_entry_id IS NOT NULL').fetchone()[0] == 6 * tracks_per_lane
             modes = reader.modes.list_modes()
             assert len(modes) == 6
             for mid, (mode, genre) in enumerate(zip(modes, genres)):
@@ -563,47 +574,36 @@ def test_home_candidate_templates_keep_private_complete_inputs(
 
 def test_radio_genre_template_keeps_complete_private_inputs(
         radio_genre_template, store, file_backed_store, request):
-    import numpy as np
-
-    from yt_playlist.rec import embedding_vectors
-
     template = radio_genre_template
     first, second = template.restore(store), template.restore(file_backed_store)
     assert first == second == template.result
-    assert set(first) == set(map(str, range(1, 10)))
+    assert len(first) == 9
     assert all(len(rows) == 12 for rows in first.values())
-    keys = {row['key'] for rows in first.values() for row in rows}
+    membership = {row['key']: version for version, rows in first.items() for row in rows}
+    keys = set(membership)
     assert len(keys) == 108
     library = template.source.rec_query.tracks_by_keys(keys)
     assert set(library) == keys
-    labels = ['Electronic'] * 5 + ['Synthwave', 'Jazz', 'Rock', 'Ambient']
     metadata = [tuple(row) for row in template.source.conn.execute(
         'SELECT video_id,genre,mb_year FROM catalog_tracks ORDER BY video_id')]
-    assert len(metadata) == 108
-    assert {row[2] for row in metadata} == {'2001'}
-    assert {row[1] for row in metadata} == set(labels)
+    assert metadata == sorted((row['video_id'], row['genre'], row['year'])
+                              for rows in first.values() for row in rows)
     heads = template.source.recommendations.heads()
+    group_head = template.source.taste_groups.head(members=True)
+    assert {group['version'] for group in group_head['groups'] if group['leaf']} == set(first)
     for target in (template.source, store, file_backed_store):
         assert target._fixture_bundle_payload == template.bundles
         # Compare each complete immutable copy through one real private reader.
-        # Opening a new database copy for every mode/field adds no isolation check.
         with target.read_view() as reader:
             assert reader.rec_query.tracks_by_keys(keys) == library
             assert reader.recommendations.heads() == heads
             assert [tuple(row) for row in reader.conn.execute(
                 'SELECT video_id,genre,mb_year FROM catalog_tracks ORDER BY video_id')] == metadata
-            assert reader.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 108
-            modes = reader.modes.list_modes()
-            assert len(modes) == 9
-            space = embedding_vectors.content_space_id(reader)
-            for index, (mode, label) in enumerate(zip(modes, labels)):
-                assert (mode['mode_id'], mode['label'], mode['size']) == (index + 1, label, 12)
-                assert mode['families'] == [[label, 12]]
-                assert mode['rep_keys'] == []
-                assert mode['space'] == space
-                angle = index * .01 if index < 6 else (index - 5) * 1.2
-                np.testing.assert_array_equal(mode['centroid'], np.array(
-                    [np.cos(angle), np.sin(angle)], dtype=np.float32))
+            assert reader.conn.execute('SELECT count(*) FROM track_sources WHERE library_origin IS NOT NULL').fetchone()[0] == 108
+            assert reader.taste_groups.head(members=True) == group_head
+            assert reader.taste_groups.leaf_members(group_head['generation']) == membership
+            assert {row['mode_key']: row['eligible_count']
+                    for row in reader.recommendations.selections('radio', 'membership')} == dict.fromkeys(first, 12)
             assert reader.conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     with pytest.raises(sqlite3.OperationalError, match='readonly'):
@@ -630,8 +630,9 @@ def test_radio_genre_template_keeps_complete_private_inputs(
     paths[1].write_bytes(b'Private radio genre file mutation')
     assert paths[0].read_bytes() == paths[2].read_bytes() == exact
     store.settings.set_setting('private_radio_genre', 'first clone')
-    first['1'][0]['genre'] = 'Private genre row'
-    store._fixture_bundle_payload['1']['wheelhouse'][0]['title'] = 'Private bundle row'
+    group = next(iter(first))
+    first[group][0]['genre'] = 'Private genre row'
+    store._fixture_bundle_payload[group]['wheelhouse'][0]['title'] = 'Private bundle row'
     assert second == template.result
     for target in (template.source, file_backed_store):
         assert target.settings.get_setting('private_radio_genre') is None
@@ -641,7 +642,7 @@ def test_radio_genre_template_keeps_complete_private_inputs(
 @pytest.mark.parametrize('variant', ['inputs', 'backend', 'browser'])
 def test_measured_sounds_template_keeps_complete_private_inputs(
         variant, measured_sounds_template, measured_home_templates, store, file_backed_store):
-    from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces
+    from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces, musical_character
 
     template = (measured_sounds_template if variant == 'inputs'
                 else measured_home_templates(variant))
@@ -654,8 +655,7 @@ def test_measured_sounds_template_keeps_complete_private_inputs(
         for lane in mode_surfaces.CARD_SURFACES:
             items = bundle[str(mid)][lane]
             assert len(items) == 20
-            assert sum(item['musical']['dimensions']['intensity']['value'] < .5
-                       for item in items) == 8
+            assert sum(musical_character.intensity_evidence(item)[0] < .5 for item in items) == 8
     keys = {item['key'] for items in bundle['all'].values() for item in items}
     assert len(keys) == 480
     assert template.source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == (
@@ -711,8 +711,8 @@ def test_measured_sounds_template_keeps_complete_private_inputs(
     assert copied
 
     owned = [profile_files.directory(target.conn) / record_path('recording',
-                target.conn.execute('SELECT file_id FROM recording_profile_files '
-                    'ORDER BY recording_id LIMIT 1').fetchone()[0])
+                target.conn.execute('SELECT musical_profile_file_id FROM recordings '
+                    'WHERE musical_profile_file_id IS NOT NULL ORDER BY id LIMIT 1').fetchone()[0])
              for target in (first, second, template.source)]
     original = owned[1].read_bytes()
     owned[0].write_bytes(b'Private corrupted profile')

@@ -10,6 +10,7 @@ import pytest
 
 from yt_playlist.core import fao, policy_documents, served_facts as facts
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core.served_files import ServedFiles
 from yt_playlist.rec import scorecard
 from yt_playlist.controllers.recommendation_ledger import RESPONSE_RETAIN_DAYS
 
@@ -29,20 +30,14 @@ def offer(store, request, at=100, *, shadow=False, controlled=True):
     return trace
 
 
-def activate(store):
-    while not facts.active(store.conn):
-        with store.conn:
-            facts.prepare_batch(store.conn, limit=1)
-
-
 def reports(store):
     return (scorecard.recommendation_scorecard(store, 90, 200),
             scorecard.experiment_report(store, 90, 200, 100000),
             store.rec_ledger.lane_impression_counts())
 
 
-def test_partial_preparation_continuing_writes_and_expiry_preserve_reports(store, monkeypatch):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+def test_reports_preserve_captured_attribution_after_diagnostic_expiry(store, monkeypatch):
+    iid = store.accounts.upsert_account('main', None, True)
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     first = offer(store, 'first')
     offer(store, 'shadow', shadow=True)
@@ -50,78 +45,19 @@ def test_partial_preparation_continuing_writes_and_expiry_preserve_reports(store
     store.player_events.record_player_event(iid, 'ended', 'video', 190, 200, None, None, 170)
     baseline = reports(store)
     assert baseline[0]['played'] == baseline[0]['completion'] == 1
-    with store.conn:
-        assert facts.prepare_batch(store.conn, limit=1) == 1
-    assert not facts.active(store.conn)
-    assert reports(store) == baseline
-    offer(store, 'late', at=180, controlled='true')
-    baseline = reports(store)
-    activate(store)
-    assert reports(store) == baseline
     assert scorecard.served_recommendation(store, 1)['provenance'] == first
-    # Prepared reports must never load external traces, including attribution.
-    monkeypatch.setattr(facts, 'diagnostic', lambda *args: pytest.fail('report opened diagnostic JSON'))
+    files = store.rec_ledger.impressions.files
+    monkeypatch.setattr(files, 'diagnostic', lambda *args: pytest.fail('report opened diagnostic JSON'))
     assert reports(store) == baseline
-    with store.conn:
-        facts.expire(store.conn, facts.RETAIN_SECONDS + 201)
+    store.rec_ledger.maintain_impressions(facts.RETAIN_SECONDS + 201)
     assert reports(store) == baseline
-
-
-def test_staged_diagnostics_prepare_without_sql_writer_and_publish_atomically(store, monkeypatch):
-    trace = offer(store, 'first')
-    before = reports(store)
-    stage = fao.prepare
-    calls = []
-    def checked(*args, **kwargs):
-        assert not store.conn.in_transaction
-        calls.append(args[0])
-        return stage(*args, **kwargs)
-    monkeypatch.setattr(fao, 'prepare', checked)
-    with facts.staged_batch(store.conn, 1) as publish:
-        assert calls and not store.conn.in_transaction
-        assert reports(store) == before
-        with pytest.raises(RuntimeError, match='writer reservation'):
-            publish()
-        with pytest.raises(RuntimeError, match='rollback'):
-            with store.conn:
-                store.conn.execute('BEGIN IMMEDIATE')
-                assert publish() == 1
-                raise RuntimeError('rollback')
-    assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 0
-    assert reports(store) == before
-    with facts.staged_batch(store.conn, 1) as publish:
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            assert publish() == 1
-    assert scorecard.served_recommendation(store, 1)['provenance'] == trace
-    assert reports(store) == before
-    assert not list(facts.directory(store.conn).rglob('.fao-pending-*'))
-
-
-def test_staged_diagnostics_retry_changed_inputs_and_do_not_activate_early(store):
-    offer(store, 'first')
-    with facts.staged_batch(store.conn, 1) as publish:
-        with store.conn:
-            store.conn.execute('DELETE FROM rec_served_impressions')
-            assert publish() is None
-    assert not facts.active(store.conn)
-    assert not list(facts.directory(store.conn).rglob('.fao-pending-*'))
-    with facts.staged_batch(store.conn, 1) as publish:
-        offer(store, 'arrived-during-staging')
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            assert publish() is None
-    assert not facts.active(store.conn)
-    activate(store)
-    assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 1
 
 
 def test_foreground_write_completes_while_diagnostic_file_is_staging(file_backed_store, monkeypatch):
     from yt_playlist.core.store import Store
     store = file_backed_store
-    trace = offer(store, 'first')
     entered, written = threading.Event(), threading.Event()
-    failures = []
+    traces, failures = [], []
     stage = fao.prepare
     def delayed(*args, **kwargs):
         entered.set()
@@ -131,10 +67,7 @@ def test_foreground_write_completes_while_diagnostic_file_is_staging(file_backed
     def analytics():
         prepared = Store.open_current(store._db_path)
         try:
-            with facts.staged_batch(prepared.conn, 1) as publish:
-                with prepared.conn:
-                    prepared.conn.execute('BEGIN IMMEDIATE')
-                    assert publish() == 1
+            traces.append(offer(prepared, 'first'))
         except BaseException as error:
             failures.append(error)
         finally:
@@ -150,24 +83,20 @@ def test_foreground_write_completes_while_diagnostic_file_is_staging(file_backed
         worker.join(10)
     assert not worker.is_alive() and not failures
     assert store.settings.get_setting('during-diagnostic-compression') == 'accepted'
-    assert scorecard.served_recommendation(store, 1)['provenance'] == trace
+    assert scorecard.served_recommendation(store, 1)['provenance'] == traces[0]
 
 
 def test_compact_writes_deduplicate_and_keep_policy_subject_facts(store):
-    activate(store)
     trace = offer(store, 'one')
     offer(store, 'one')
-    assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 1
-    assert store.conn.execute('SELECT file_status FROM impression_file_writes').fetchone()[0] == 'ready'
+    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions WHERE policy_kind IS NOT NULL').fetchone()[0] == 1
     row = store.conn.execute('SELECT * FROM rec_served_impressions').fetchone()
     assert json.loads(row['provenance']) == {'pool_policy': 42}
     assert row['raw_identity_key'] == 'song|artist' and row['recording_id'] is None
-    links = store.conn.execute('SELECT kind,raw_version,resolution_reason FROM recommendation_impression_policies '
-                               'ORDER BY kind').fetchall()
-    assert [tuple(r) for r in links] == [('pool', '42', 'missing_policy'), ('primary', 'missing', 'missing_policy')]
+    assert row['model_version'] == 'missing'
+    assert row['primary_policy_reason'] == row['pool_policy_reason'] == 'missing_policy'
     assert scorecard.served_recommendation(store, row['id'])['provenance'] == trace
-    with store.conn:
-        facts.expire(store.conn, facts.RETAIN_SECONDS + 101)
+    store.rec_ledger.maintain_impressions(facts.RETAIN_SECONDS + 101)
     expired = scorecard.served_recommendation(store, row['id'])
     assert expired['diagnostic_status'] == 'expired'
     assert expired['provenance']['candidate']['genre'] == 'Captured genre'
@@ -176,7 +105,6 @@ def test_compact_writes_deduplicate_and_keep_policy_subject_facts(store):
 
 
 def test_missing_corrupt_diagnostic_are_errors_but_reports_work(store):
-    activate(store)
     offer(store, 'one')
     baseline = reports(store)
     path = facts.directory(store.conn) / facts.relative(1)
@@ -191,24 +119,61 @@ def test_missing_corrupt_diagnostic_are_errors_but_reports_work(store):
 
 
 def test_idle_retention_defers_for_reader_and_keeps_monotonic_ids(store):
-    activate(store)
     offer(store, 'one')
     path = facts.directory(store.conn) / facts.relative(1)
     now = max(facts.RETAIN_SECONDS, RESPONSE_RETAIN_DAYS * 86400) + 101
     with policy_documents.retained_reader(facts.directory(store.conn)):
         store.rec_ledger.maintain_impressions(now)
         assert path.exists()
-        assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 1
+        assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 1
     store.rec_ledger.maintain_impressions(now)
     assert not path.exists()
-    assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 0
+    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
     offer(store, 'next', at=now)
     assert store.conn.execute('SELECT id FROM rec_served_impressions').fetchone()[0] == 2
 
 
+def test_file_scan_recovers_interrupted_expiry(store, monkeypatch):
+    now = time.time()
+    offer(store, 'kept-for-report', at=now)
+    path = facts.directory(store.conn) / facts.relative(1)
+    files = store.rec_ledger.impressions.files
+    cutoff = now + facts.RETAIN_SECONDS + 10
+
+    def fail(_):
+        raise OSError('interrupted')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(files, 'delete_many', fail)
+        with pytest.raises(OSError, match='interrupted'):
+            store.rec_ledger.maintain_impressions(cutoff)
+    assert path.exists()
+    assert store.rec_ledger.impressions.facts(1)['diagnostic_status'] == 'expired'
+    store.rec_ledger.maintain_impressions(cutoff)
+    assert not path.exists()
+
+
+def test_orphan_scan_skips_disappeared_file_and_keeps_later_candidates(tmp_path, monkeypatch):
+    files = ServedFiles(tmp_path / 'served')
+    files.publish_many([(1, 100, {}), (2, 100, {})])
+    missing = files.root / facts.relative(1)
+    remaining = files.root / facts.relative(2)
+    original = fao.read
+    expected = original(remaining).info.identity
+
+    def remove_before_stat(path):
+        if path == missing:
+            missing.unlink()
+        return original(path)
+
+    monkeypatch.setattr(fao, 'read', remove_before_stat)
+    assert set(files.orphan_candidates(time.time() + 10, limit=256)) == {(2, expected)}
+    assert not missing.exists()
+    assert remaining.is_file()
+
+
 @pytest.mark.parametrize('retry', (True, False))
 def test_failed_file_publication_keeps_allocated_ids_and_recovers(store, monkeypatch, retry):
-    activate(store)
     files = store.rec_ledger.impressions.files
     original = files.publish_many
     def fail(rows):
@@ -220,8 +185,7 @@ def test_failed_file_publication_keeps_allocated_ids_and_recovers(store, monkeyp
         with pytest.raises(OSError, match='interrupted'):
             offer(store, 'one')
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM served_facts').fetchone()
-    assert store.conn.execute('SELECT file_status FROM impression_file_writes').fetchone()[0] == 'pending'
+    assert store.conn.execute("SELECT seq FROM sqlite_sequence WHERE name='rec_served_impressions'").fetchone()[0] == 1
     path = facts.directory(store.conn) / facts.relative(1)
     assert path.exists()
     if retry:
@@ -233,9 +197,8 @@ def test_failed_file_publication_keeps_allocated_ids_and_recovers(store, monkeyp
         with policy_documents.retained_reader(facts.directory(store.conn)):
             store.rec_ledger.maintain_impressions(now)
             assert path.exists()
-        # Collection rediscovers the pending diagnostic without a retirement queue entry.
+        # Collection rediscovers the file after the interrupted publication.
         store.rec_ledger.maintain_impressions(time.time())
-        from yt_playlist.core.served_files import ServedFiles
         # A fresh file accessor resumes its bounded cursor after restart.
         store.rec_ledger.impressions.files = ServedFiles(files.root)
         for _ in range(3):
@@ -244,43 +207,39 @@ def test_failed_file_publication_keeps_allocated_ids_and_recovers(store, monkeyp
 
 
 def test_failed_reporting_owner_write_keeps_id_and_file_for_bounded_orphan_collection(store):
-    import sqlite3
-    activate(store)
-    store.conn.execute("CREATE TEMP TRIGGER reject_served_fact BEFORE INSERT ON served_facts "
+    store.conn.execute("CREATE TEMP TRIGGER reject_served_fact BEFORE INSERT ON rec_served_impressions "
                        "BEGIN SELECT RAISE(ABORT,'late SQL failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match='late SQL failure'):
         offer(store, 'one')
     assert not store.conn.in_transaction
-    assert store.conn.execute('SELECT next_id FROM served_fact_state').fetchone()[0] == 2
+    assert store.conn.execute("SELECT seq FROM sqlite_sequence WHERE name='rec_served_impressions'").fetchone()[0] == 1
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
     assert (facts.directory(store.conn) / facts.relative(1)).exists()
-    assert store.conn.execute('SELECT file_status FROM impression_file_writes').fetchone()[0] == 'pending'
     store.conn.execute('DROP TRIGGER reject_served_fact')
     offer(store, 'one')
     assert scorecard.served_recommendation(store, 2)['diagnostic_status'] == 'available'
 
 
-def test_new_diagnostic_has_a_committed_pending_record_before_fao_preparation(file_backed_store, monkeypatch):
+def test_new_diagnostic_has_a_committed_id_before_file_preparation(file_backed_store, monkeypatch):
     store = file_backed_store
-    activate(store)
     prepare = fao.prepare
     observed = []
     def checked(path, *args, **kwargs):
         assert not store.conn.in_transaction
         with closing(sqlite3.connect(store._db_path)) as observer:
-            identity, status = observer.execute('SELECT impression_id,file_status FROM impression_file_writes').fetchone()
-        assert status == 'pending' and path == facts.directory(store.conn) / facts.relative(identity)
+            identity, = observer.execute("SELECT seq FROM sqlite_sequence WHERE name='rec_served_impressions'").fetchone()
+            assert not observer.execute('SELECT 1 FROM rec_served_impressions').fetchone()
+        assert path == facts.directory(store.conn) / facts.relative(identity)
         observed.append(identity)
         return prepare(path, *args, **kwargs)
     monkeypatch.setattr(fao, 'prepare', checked)
     offer(store, 'one')
     assert observed == [1]
-    assert store.conn.execute('SELECT file_status FROM impression_file_writes').fetchone()[0] == 'ready'
+    assert store.rec_ledger.impressions.facts(1)['diagnostic_status'] == 'available'
 
 
 @pytest.mark.parametrize('damage', ('checksum', 'meaning', 'incomplete'))
 def test_backup_checks_all_members_before_restoring_trace(store, tmp_path, damage):
-    activate(store)
     trace = offer(store, 'one')
     second = offer(store, 'two')
     manifest = facts.export(store.conn, tmp_path / 'backup')

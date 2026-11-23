@@ -1,5 +1,6 @@
 import pytest
 
+from yt_playlist.core.album_queries import TRACK_LINKS
 from yt_playlist.library.album_catalog import remember_album
 
 
@@ -10,9 +11,9 @@ def album():
 
 def test_complete_tracklist_is_separate_from_incidental_tracks(store):
     store.tracks.upsert_track("v", "Track 0", "Artist", "Release", 100, album_browse_id="MPRE")
-    assert store.collection.cached_album_tracklist_ids() == set()
+    assert not store.collection.has_published_album_tracklist("MPRE")
     remember_album(store, "MPRE", album())
-    assert store.collection.cached_album_tracklist_ids() == {"MPRE"}
+    assert store.collection.has_published_album_tracklist("MPRE")
 
 
 def test_partial_album_responses_cannot_set_a_denominator(store):
@@ -23,7 +24,7 @@ def test_partial_album_responses_cannot_set_a_denominator(store):
     value["continuations"] = ["next page"]
     remember_album(store, "continuation", value)
     remember_album(store, "empty", {})
-    assert store.collection.cached_album_tracklist_ids() == set()
+    assert not store.conn.execute('SELECT 1 FROM albums WHERE current_tracklist_id IS NOT NULL').fetchone()
 
 
 def test_metadata_only_album_entries_keep_source_links_without_ownership(store):
@@ -31,9 +32,9 @@ def test_metadata_only_album_entries_keep_source_links_without_ownership(store):
     remember_album(store,'release-a',album())
     remember_album(store,'release-b',album())
     assert store.conn.execute('SELECT COUNT(*) FROM unresolved_items').fetchone()[0] == 8
-    assert store.conn.execute('SELECT COUNT(*) FROM album_track_links').fetchone()[0] == 8
+    assert store.conn.execute(f'SELECT COUNT(*) FROM {TRACK_LINKS}').fetchone()[0] == 8
     assert not store.rec_query.library_keys()
-    assert not store.conn.execute('SELECT 1 FROM youtube_items').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM track_sources WHERE video_id IS NOT NULL').fetchone()
 
 
 @pytest.mark.parametrize('order', [(None, 'release'), ('release', None)])

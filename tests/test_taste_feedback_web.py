@@ -16,16 +16,16 @@ from tests.home_fixture_support import without_metadata_providers
 def retained_rating_routes(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, taste
+    from yt_playlist.web.routes import app_update, audio_vibes, taste
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, taste)])
+        module.build(ctx) for module in (app_update, audio_vibes, taste)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
 def test_taste_page_lists_and_clears_bans(store):
     store.tracks.upsert_track("banned-video", "Song", "Band", "An Album", None,
                        thumbnail="/static/banned-cover.jpg")
-    main = store.accounts.upsert_account('main', 'cred', None, True)
+    main = store.accounts.upsert_account('main', None, True)
     ratings.record_confirmed(store, main, 'banned-video', 'DISLIKE', 1.0)
     c = _client(store)
     html = c.get("/taste/panels/feedback").text
@@ -96,8 +96,8 @@ def test_unban_survives_retained_ratings_sync_and_restart_then_accepts_new_disli
         tmp_path, clock, consumer_store, native_sql_calls, without_query_timing, retained_rating_routes):
     path = tmp_path / 'unban.db'
     store = consumer_store(path)
-    main = store.accounts.upsert_account('main', 'cred', None, True)
-    other = store.accounts.upsert_account('Other', 'cred', 'other', False)
+    main = store.accounts.upsert_account('main', None, True)
+    other = store.accounts.upsert_account('Other', 'other', False)
     seed_publication_subjects(store, [dict(key=title.lower() + '|artist', video_id=video,
         title=title, artist='Artist', album='') for video, title in
         (('banned', 'Banned'), ('unrelated', 'Unrelated'))])

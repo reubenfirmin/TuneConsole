@@ -27,7 +27,7 @@ def _free_port():
 @pytest.fixture
 def live_album_app(store):
     s = store
-    iid = s.accounts.upsert_account("Main", "cred", None, True)
+    iid = s.accounts.upsert_account("Main", None, True)
     album = {"title": "The Album", "year": "2001", "artists": [{"name": "Artist X"}], "thumbnails": [],
              "tracks": [{"title": "One", "videoId": "v1", "duration": "3:01",
                          "artists": [{"name": "Artist X"}]}]}

@@ -49,12 +49,14 @@ def home_store(no_database):
     return transient_repository_store(
         rec_ledger={'card_views': 0},
         rec_proposals={'group_checkpoint': None},
-        recommendations={'head': None, 'framing': None},
-        rec_query={'artist_genre_years': {}, 'artist_genre_years_for': {},
+        taste_groups={'head_generation': None},
+        recommendations={'head': None, 'framing': None, 'home_genre_candidates': [],
+                         'complete_candidates': ({}, {})},
+        rec_query={'artist_genre_years': {}, 'artist_genre_years_for': {}, 'track_genres_and_decades': ({}, {}),
                    'genre_play_distribution': {}, 'era_play_distribution': {}},
+        musical_profiles={'by_keys': {}},
         modes={'log_impressions': None},
         discovery={'mark_offered': None},
-        values={'_recommendation_files': True},
     )
 
 
@@ -106,18 +108,22 @@ def test_chosen_genres_reach_ranker_and_stay_on_final_recipe(home_store, monkeyp
     home = service(home_store)
     calls = []
 
-    def assemble(store, now, epoch, **filters):
+    def assemble(store, now, epoch, groups, include, avoid, batch):
+        filters = {'include': include, 'avoid': avoid}
         calls.append((now, epoch, filters))
-        return [{**proto(), "mode_id": 7, "ranker": "lane"}]
+        return {'cards': [{**proto(), 'mode_id': None, 'ranker': 'musical-group', 'group_id': 'group',
+                           'group_version': 'version', 'group_generation': 'generation'}],
+                'context': {'group_generation': 'generation'}}
 
-    monkeypatch.setattr(mode_surfaces, "assemble_cards", assemble)
+    monkeypatch.setattr(home_cards, "_group_cards", assemble)
     monkeypatch.setattr(home_cards, "_order_by_journey", lambda store, tracks, journey, seed, data=None: tracks)
     result = home.cards(home_cards.CardsRequest(1000))
-    assert calls == [(1000, 0, {"include_genres": {"jazz"}})]
+    assert calls == [(1000, 0, {"include": {"jazz"}, "avoid": set()})]
     assert result.requested_genres == ["jazz"]
     assert result.protos[0]["recipe"]["genre_request"] == {"kind": "chosen_genres", "include": ["jazz"]}
-    assert result.protos[0]["recipe"]["ranker"] == "lane"
-    home_store.modes.log_impressions.assert_called_once_with(0, [('wheelhouse', 7, 'lane')], 1000)
+    assert result.protos[0]["recipe"]["ranker"] == "musical-group"
+    assert result.protos[0]["recipe"]["group_version"] == "version"
+    home_store.modes.log_impressions.assert_not_called()
 
 
 def test_pool_failure_and_polling_do_not_admit_jobs_or_record_offers(home_store):

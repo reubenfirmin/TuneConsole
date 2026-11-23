@@ -50,8 +50,8 @@ def _publish(store, payload, *, subjects_ready=False):
 
 def _publication(store):
     return {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')]
-            for table in ('recommendation_heads', 'recommendation_surface_pools', 'recommendation_pools',
-                          'recommendation_candidates', 'recommendation_bundle_framing', 'prepared_outputs')}
+            for table in ('recommendation_generation_surfaces', 'recommendation_surface_pools', 'recommendation_pools',
+                          'recommendation_candidates', 'recommendation_generations', 'recommendation_chunks')}
 
 
 def _subject_keys(payload):
@@ -116,10 +116,8 @@ def ranked_cards():
             return [{'mode_key': mid, 'id': self.ids[mid, lane]}
                     for mid, purpose in self.rows if purpose == lane]
 
-        def candidate_page(self, surface, mode, lane, *, generation, after, limit):
-            rows = self.rows[mode, lane][after + 1:after + 1 + limit]
-            return {'tracks': rows, 'after': rows[-1]['pool_rank'] if rows else after,
-                    'exhausted': after + 1 + len(rows) == len(self.rows[mode, lane])}
+        def complete_candidates(self, sources):
+            return {source: self.rows[source[2], source[3]] for source in sources}, {}
 
         def selected_candidates(self, surface, selections, *, generation):
             return [[row for row in self.rows[mode, lane] if row['key'] in keys]
@@ -137,7 +135,7 @@ def ranked_cards():
                 disliked_key_page=lambda **kwargs: [], suppressed_keys=lambda *args, **kwargs: set()),
             rec_eligibility=SimpleNamespace(suppressed_candidate_keys=lambda keys, now: set()),
             rec_query=SimpleNamespace(track_genres=lambda keys: {}),
-            artists=SimpleNamespace(credited_pages=lambda rows: (dict(row) for row in rows)),
+            artists=SimpleNamespace(credited_rows=lambda rows: [dict(row) for row in rows]),
             genres=SimpleNamespace(feature_axes=lambda genres: dict.fromkeys(genres, ('house', None))))
         return stored_home._assemble(reader, 1, 10., epoch, (), (), order, {'leans': {}})
 
@@ -338,21 +336,21 @@ def dislike_board_store(dislike_board_schema, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("ppr_share", [0, 1])
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
-def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(
+def test_cached_card_order_ignores_dislikes_of_similar_recordings(
         dislike_board_store, monkeypatch, ppr_share):
     from yt_playlist.controllers.genres import Genres
     from yt_playlist.rec import rec_params
 
     store = dislike_board_store
     # Retain the original four modes and all four 20-track lanes in each mode,
-    # with both published rankers and actual durable dislike scoring.
+    # with both published rankers and actual recording ratings.
     rec_params.set_param(store, "ppr_ab_share", ppr_share)
     monkeypatch.setattr(mode_selection, "select_modes", lambda *args, **kwargs: [1, 2, 3, 4])
     # The selected themes are controlled inputs; their bandit/history producers
-    # have separate owners. Keep current vectors and durable dislike scoring real.
+    # have separate owners. Keep current vectors and recording ratings real.
     monkeypatch.setattr(stored_home.mode_eval, "mode_bandit_stats", lambda *args, **kwargs: {})
-    monkeypatch.setattr(stored_home.layers, "now_mode_posterior", lambda *args, **kwargs: {})
-    monkeypatch.setattr(stored_home.transient, "facet_leans", lambda *args, **kwargs: {})
+    monkeypatch.setattr(stored_home.scoring, "mode_prior", lambda *args, **kwargs: (None, 0.))
+    monkeypatch.setattr(stored_home.scoring.transient, "facet_leans", lambda *args, **kwargs: {})
     # Taxonomy is fixed while the recording ratings change. Current-genre and
     # family-filter cases below retain the actual taxonomy reads.
     axes = store.genres.feature_axes({'house', 'House'})
@@ -365,11 +363,11 @@ def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(
     before = ms.assemble_cards(store, now=100, epoch=0)
     assert len(before) == 4
     apply_model_ratings(store, {"disliked-seed": "DISLIKE"}, now=1)
-    # Outlive the 365-day ban and every transient layer. The prepared payload stays unchanged.
-    after = ms.assemble_cards(store, now=1000 * 86400, epoch=0)
+    after = ms.assemble_cards(store, now=100, epoch=0)
     assert len(after) == 4
     assert all(card["tracks"][0]["key"].endswith("-0") for card in before)
-    assert all(not card["tracks"][0]["key"].endswith("-0") for card in after)
+    assert [[t["key"] for t in c["tracks"]] for c in after] == [
+        [t["key"] for t in c["tracks"]] for c in before]
     apply_model_ratings(store, {"disliked-seed": "INDIFFERENT"}, now=1000 * 86400)
     cleared = ms.assemble_cards(store, now=1000 * 86400, epoch=0)
     assert [[t["key"] for t in c["tracks"]] for c in cleared] == [
@@ -492,7 +490,7 @@ def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypat
     publication = _publication(store)
     seed_dislike(store, "deep0", until=None, now=1.0)
     entry = store.conn.execute("SELECT id FROM catalog_tracks WHERE identity_key='deep1'").fetchone()[0]
-    identity = store.accounts.upsert_account("test", "cred", None, True)
+    identity = store.accounts.upsert_account("test", None, True)
     playlist = store.playlists.upsert_playlist(identity, "GENERATED", "Generated", 1, "hash", 1)
     store.playlists.set_playlist_tracks(playlist, [entry])
     store.playlists.mark_generated_playlist("GENERATED")

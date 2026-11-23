@@ -7,7 +7,7 @@ from yt_playlist.util.matching import identity_key
 def _store_with_play_history(s, genre="Techno", n=10, now=1000.0):
     """A fresh store whose recent history is n distinct tracks of one genre (a dominant family).
     History dedupes by key, so distinctness (not repeats) is what builds a facet's play lean."""
-    iid = s.accounts.upsert_account("me", "cred", None, True)
+    iid = s.accounts.upsert_account("me", None, True)
     keys = []
     for i in range(n):
         tid = s.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)

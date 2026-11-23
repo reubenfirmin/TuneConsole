@@ -30,6 +30,26 @@ function createMusicTabs({origin, inject, pingContent}) {
     } catch (e) {}
   }
 
+  async function navigateLoaded(tab, url) {
+    if (tab.status !== 'complete' || tab.pendingUrl || tab.discarded) return false;
+    try {
+      const [result] = await chrome.scripting.executeScript({target: {tabId: tab.id}, world: 'MAIN',
+        args: [url], func: target => {
+          const watch = new URL(target);
+          if (location.origin !== watch.origin || document.readyState !== 'complete' || watch.pathname !== '/watch') return false;
+          const app = document.querySelector('ytmusic-app');
+          const videoId = watch.searchParams.get('v'), playlistId = watch.searchParams.get('list');
+          if (!app?.polymerController || !videoId || !playlistId) return false;
+          app.dispatchEvent(new CustomEvent('yt-navigate', {bubbles: true, composed: true, detail: {endpoint: {
+            watchEndpoint: {videoId, playlistId},
+            commandMetadata: {webCommandMetadata: {url: watch.pathname + watch.search}},
+          }}}));
+          return true;
+        }});
+      return result?.result === true;
+    } catch (_) { return false; }
+  }
+
   // Bounded document wait; remove every temporary listener on completion or removal.
   function waitForComplete(tabId, budgetMs = 30000) {
     return new Promise(resolve => {
@@ -88,5 +108,5 @@ function createMusicTabs({origin, inject, pingContent}) {
     return ensurePromise;
   }
 
-  return {list, coordinate, ensure, suppressBeforeUnload};
+  return {list, coordinate, ensure, suppressBeforeUnload, navigateLoaded};
 }

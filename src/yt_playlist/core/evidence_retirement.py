@@ -26,12 +26,16 @@ class Retirements:
                        or any(not isinstance(identity, str) for identity in value[key])
                        for key in ('offers', 'checkpoints'))):
             raise ValueError('Invalid evidence retirement intent')
+        files = value.get('files', [])
+        if not isinstance(files, list) or any(type(identity) is not int or identity <= 0 for identity in files):
+            raise ValueError('Invalid evidence file retirement intent')
         self.offers = set(value['offers'])
         self.checkpoints = set(value['checkpoints'])
+        self.files = set(files)
 
     def save(self):
         fao.write(self.path, canonical({'schema': 1, 'offers': sorted(self.offers),
-                                             'checkpoints': sorted(self.checkpoints)}))
+                                        'checkpoints': sorted(self.checkpoints), 'files': sorted(self.files)}))
 
     def reconcile(self, offers, checkpoints, callback):
         # Commit small prefixes. A cutoff during/after a SQL callback repeats at

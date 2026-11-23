@@ -11,8 +11,8 @@ class ModelFollowup:
         if latest and latest.get('diagnostic_challenger'):
             return latest
         active = self.settings.get_setting('rec_selection_active_run')
-        if active:
-            return self.repository.selection_run(active)
+        if active and (run := self.repository.selection_run(active)) is not None:
+            return run
         restored = self.settings.get_setting('rec_selection_display_run')
         restored = self.repository.selection_run(restored) if restored else None
         if restored and (not latest or latest['ran_at'] <= restored.get('restored_at', 0)):
@@ -23,7 +23,7 @@ class ModelFollowup:
         runs = self.repository.selection_runs(limit=1)
         run = self.tracked(runs[0] if runs else None)
         if (not run or run['status'] not in ('applied', 'retained', 'restored')
-                or run.get('kind') in ('product', 'daily')
+                or run.get('kind') == 'daily'
                 or (run.get('followup') or {}).get('frozen_at') is not None):
             return
         forecasts = self.repository.model_forecasts(run['id'])

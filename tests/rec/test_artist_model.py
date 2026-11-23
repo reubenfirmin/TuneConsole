@@ -11,7 +11,7 @@ def _playlist(s, iid, title, track_ids):
 
 def test_artist_baskets_reduce_to_distinct_artists(store):
     s = store
-    iid = s.accounts.upsert_account("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", None, True)
     a = s.tracks.upsert_track("v1", "S1", "Alpha", None, None)
     b = s.tracks.upsert_track("v2", "S2", "Beta", None, None)
     _playlist(s, iid, "P", [a, b])
@@ -25,7 +25,7 @@ def test_co_curated_ranking_and_seed_exclusion_work_without_content_vectors(stor
     """One collaborative fit owns neighbor ranking, missing-content fallback and set scoring."""
     from yt_playlist.util.matching import normalize
     s = store
-    iid = s.accounts.upsert_account("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -54,13 +54,46 @@ def test_neighbors_empty_when_unbuilt(store):
     assert artist_model.artist_neighbors(s, "Anyone") == []
 
 
+def test_ensemble_preserves_local_coverage_and_deduplicates_provider_evidence(store):
+    import numpy as np
+    import pytest
+
+    def artist(name, channel):
+        return store.artists.key(store.artists.ensure_artist(name, provider='youtube', provider_id=channel))
+
+    seed = artist('Seed', 'UCseed0000')
+    shared = artist('Shared', 'UCshared00')
+    twins = [artist('Twins', channel) for channel in ('UCtwins000', 'UCtwins111')]
+    local = artist('Local', 'UClocal000')
+    store.artist_similarity.cache_similar(seed, [('Shared', .8), ('SHARED', .4), ('Twins', 1)], 1)
+    assert store.artist_similarity.artist_similar_edges(seed) == [(shared, .8)]
+    keys = [seed, shared, local]
+    matrix = np.array([[1., 0.], [.9, .44], [.8, .6]], np.float32)
+    store.rec_model.replace_rec_artist_vectors(list(zip(keys, [row.tobytes() for row in matrix])))
+    base = artist_model.ranked_artist_neighbors(store, [seed])
+    assert [hit.key for hit in base] == [shared, local]
+    page = {'related': {'results': [{'title': name, 'browseId': browse} for name, browse in (
+        ('Shared', 'UCshared00'), ('Shared alias', 'UCshared00'), ('Twins', 'UCtwins000'), ('Twins', 'UCtwins111'))]}}
+    related = artist_model.youtube_neighbors(page)
+    hits = artist_model.ranked_artist_neighbors(store, [seed], youtube=related)
+    assert {hit.key for hit in hits} == {shared, local, *twins}
+    assert hits[0].key == shared and hits[0].score == pytest.approx(base[0].score + artist_model.YOUTUBE_WEIGHT)
+    assert hits[0].sources == {'co-occurrence': 2/3, 'lastfm': .8, 'youtube': 1.}
+    assert [hit.key for hit in hits if hit.key in twins] == twins
+    assert next(hit.score for hit in hits if hit.key == local) == base[1].score
+
+    provider_only = artist_model.ranked_artist_neighbors(store, ['youtube:UCother000'], youtube=related)
+    assert [hit.key for hit in provider_only] == [shared, *twins]
+    assert [hit.sources['youtube'] for hit in provider_only] == pytest.approx([1., 3 ** -.5, .5])
+
+
 def test_content_places_out_of_corpus_artist(store):
     """#28 §B: an out-of-corpus artist with only a genre still encodes into the shared artist-content
     space and has positive cosine to a same-genre library artist (graceful placement)."""
     import numpy as np
     from yt_playlist.util import genre_map
     s = store
-    s.accounts.upsert_account("m", "c", None, True)
+    s.accounts.upsert_account("m", None, True)
     t = s.tracks.upsert_track("v1", "S1", "Owned", None, None)
     s.tracks.set_track_genre(t, "Techno")
     profiles = artist_model.artist_content_profiles(s)
@@ -74,7 +107,7 @@ def test_content_places_out_of_corpus_artist(store):
 def test_build_persists_and_loads(store):
     """#28 Both collaborative and content artist fixtures use the persisted format."""
     s = store
-    iid = s.accounts.upsert_account("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", None, True)
     cl = []
     for i in range(12):
         t = s.tracks.upsert_track(f"v{i}", f"S{i}", f"A{i}", None, None)
@@ -90,15 +123,14 @@ def test_build_persists_and_loads(store):
 
 
 def test_content_projection_grounds_on_artist_when_no_content():
-    """#28 §2c: a track with no genre/audio still grounds via its (known) artist's vector; an unknown
-    artist degrades to a zero block. Tests the ContentProjection feature seam directly."""
+    """Known canonical credits contribute neighborhood scores even without track content."""
     import numpy as np
     from yt_playlist.rec.discover import ContentProjection
     empty_model = {"cat": {}, "ncat": 0, "cont": []}        # content block is zero-length
-    AV = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
-    proj = ContentProjection(empty_model, None, {"alpha": 0}, AV)
-    f_known = proj._features(None, None, None, "Alpha")     # known artist -> artist block set
-    f_unknown = proj._features(None, None, None, "Nobody")  # unknown artist -> zeros
+    features = {'@artist:1': np.array([1., 0., .8], dtype=np.float32)}
+    proj = ContentProjection(empty_model, None, features)
+    f_known = proj._features(None, None, None, ['@artist:1'])
+    f_unknown = proj._features(None, None, None, ['@artist:2'])
     assert f_known.shape == (3,) and np.any(f_known)
     assert not np.any(f_unknown)
 
@@ -109,7 +141,7 @@ def test_complete_playlist_pulls_out_of_corpus(store):
     from yt_playlist.rec import surfaces
     from yt_playlist.util.matching import normalize
     s = store
-    iid = s.accounts.upsert_account("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", None, True)
 
     def mk(name):
         return s.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)

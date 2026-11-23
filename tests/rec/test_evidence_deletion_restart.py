@@ -1,14 +1,16 @@
 """Real unlink and reconciliation cutoffs must finish on a fresh ledger."""
-from tests.file_content_support import age_file
 from contextlib import closing, contextmanager
 import shutil
 import sqlite3
 
 import pytest
 
+from tests.file_content_support import age_file
+from tests.store_fixture_support import _file_consumer_store
 from yt_playlist.core import fao
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.evidence_ledger import EvidenceLedger
+from yt_playlist.core.evidence_paths import KINDS
 from yt_playlist.rec.choice_capture import CaptureQueue
 
 
@@ -28,7 +30,7 @@ def menu(ledger, identity, *, response=None):
 
 
 def exact_bytes(ledger, result):
-    used = sum(fao.read(path).info.logical_bytes for path in ledger.directory.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for kind in KINDS for path in ledger.paths(kind))
     assert result['used_bytes'] == int((ledger.directory / '.budget').read_text()) == used
     assert not result['deferred']
 
@@ -216,11 +218,12 @@ def test_damaged_retirement_intent_is_not_silently_discarded(tmp_path, ledger_pr
     assert ledger.get('opportunity', 'expired')
 
 
-def test_backup_after_partial_unlink_preserves_pending_retirement(tmp_path, monkeypatch, ledger_prefix):
+def test_backup_after_partial_unlink_preserves_pending_retirement(
+        tmp_path, monkeypatch, ledger_prefix, _pristine_current_schema):
     from yt_playlist.core import choice_evidence_files
+    from yt_playlist.library import group_lifetimes
 
-    with closing(sqlite3.connect(tmp_path / 'source.db')) as source, \
-            closing(sqlite3.connect(tmp_path / 'restored.db')) as restored:
+    with closing(sqlite3.connect(tmp_path / 'source.db')) as source:
         ledger, contexts = ledger_prefix('expired', choice_evidence_files.directory(source))
         context = contexts['expired']
         remove = fao.delete
@@ -236,14 +239,74 @@ def test_backup_after_partial_unlink_preserves_pending_retirement(tmp_path, monk
             ledger.maintain(10)
         monkeypatch.setattr(fao, 'delete', remove)
         manifest = choice_evidence_files.export(source, tmp_path / 'backup')
-        choice_evidence_files.restore(restored, manifest)
-        copied = EvidenceLedger(choice_evidence_files.directory(restored), 1_000_000)
+    # The restored evidence has a current SQL menu owner even though its
+    # original offer was already unlinked before the backup.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as restored:
+        restored.rec_ledger.publish_mix_menu({
+            'id': 'expired', 'format': 'mixes', 'at': 1, 'context': context,
+            'options': [{'id': 'fresh', 'position': 1, 'label': 'Fresh', 'genres': ['jazz']}],
+        }, context)
+        choice_evidence_files.restore(restored.conn, manifest)
+        copied = restored.rec_ledger.evidence()
         assert copied.get('opportunity', 'expired') is None
         assert copied.records('response')
+        assert restored.conn.execute('SELECT opportunity_id FROM mix_choice_menus').fetchone()[0] == 'expired'
         callbacks = []
-        result = copied.maintain(10,
-            retire_references=lambda offers, checkpoints: callbacks.append((offers, checkpoints)))
+
+        def retire(offers, checkpoints):
+            callbacks.append((offers, checkpoints))
+            group_lifetimes.retired(restored, offers, checkpoints)
+
+        result = copied.maintain(10, retire_references=retire)
         assert callbacks == [(['expired'], [context])]
+        assert not restored.conn.execute('SELECT 1 FROM mix_choice_menus').fetchone()
+        assert not copied.records('response')
+        exact_bytes(copied, result)
+
+
+def test_backup_after_partial_unlink_keeps_current_receipt_and_menu_recoverable(
+        tmp_path, monkeypatch, _pristine_current_schema):
+    from yt_playlist.core import choice_evidence_files
+    from yt_playlist.library import group_lifetimes
+
+    destination = tmp_path / 'restored'
+    destination.mkdir()
+    with (_file_consumer_store(tmp_path, _pristine_current_schema) as source,
+          _file_consumer_store(destination, _pristine_current_schema) as restored):
+        ledger = source.rec_ledger.evidence()
+        context = menu(ledger, 'expired')
+        source.rec_ledger.publish_mix_menu({
+            'id': 'expired', 'format': 'mixes', 'at': 1, 'context': context,
+            'options': [{'id': 'fresh', 'position': 1, 'label': 'Fresh', 'genres': ['jazz']}],
+        }, context)
+        offer = ledger._path('opportunity', 'expired')
+        remove = fao.delete
+
+        def cutoff(path, **kwargs):
+            result = remove(path, **kwargs)
+            if path == offer:
+                raise WorkBudgetExceeded('Offer unlinked before reconciling its receipt and menu')
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fao, 'delete', cutoff)
+            with pytest.raises(WorkBudgetExceeded):
+                ledger.maintain(10)
+        assert not offer.exists()
+        assert source.conn.execute("SELECT 1 FROM collection_file_writes WHERE kind='listening-evidence' "
+                                   "AND owner_id->>0='opportunity' AND selected=1").fetchone()
+        assert source.conn.execute('SELECT 1 FROM mix_choice_menus').fetchone()
+
+        manifest = choice_evidence_files.export(source.conn, tmp_path / 'backup')
+        source.conn.backup(restored.conn)
+        choice_evidence_files.restore(restored.conn, manifest)
+        copied = restored.rec_ledger.evidence()
+        assert copied.records('response')
+        result = copied.maintain(10, retire_references=lambda offers, checkpoints:
+                                 group_lifetimes.retired(restored, offers, checkpoints))
+        assert not restored.conn.execute('SELECT 1 FROM mix_choice_menus').fetchone()
+        assert not restored.conn.execute("SELECT 1 FROM collection_file_writes WHERE kind='listening-evidence' "
+                                         'AND selected=1').fetchone()
         assert not copied.records('response')
         exact_bytes(copied, result)
 

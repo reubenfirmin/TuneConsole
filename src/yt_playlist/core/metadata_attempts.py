@@ -19,13 +19,6 @@ FORMAT = 'enrichment-result-1'
 MAX_STATE_BYTES = 8 * 1024 * 1024
 
 
-def available(conn):
-    from . import metadata_runtime
-    if metadata_runtime.active(conn):
-        return False
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='provider_state_fields'").fetchone() is not None
-
-
 def canonical(field):
     return 'mb_year' if field == 'year' else field
 
@@ -44,7 +37,7 @@ def capture_result(conn, entry_id, provider, fields, *, run_id=None, now=None, p
                 raise ValueError('Provider result has contradictory field aliases')
             captured[name] = value
     with evidence._atomic(conn):
-        row = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+        row = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
         if row is None:
             raise ValueError('Unknown provider result input')
         recording, video = row
@@ -74,7 +67,7 @@ def _fields(conn, delivery_id):
 
 def result_evidence(conn, entry_id, provider, delivery_id, fields, *, complete=False, run_id=None):
     """Verify the supplying result, including its captured input, before reusing it."""
-    subject = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+    subject = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
     delivery = conn.execute('SELECT provider,input_entry_id,input_recording_id,input_video_id,key_contract,delivery_key '
                             'FROM metadata_deliveries WHERE id=?', (delivery_id,)).fetchone()
     if (subject is None or delivery is None or delivery['key_contract'] == 'legacy_record'
@@ -105,15 +98,15 @@ def _read_fields(conn, rows, max_bytes):
 
 
 def state_fields(conn, recording_id, provider, *, max_bytes=MAX_STATE_BYTES):
-    rows = conn.execute('SELECT f.field,f.delivery_id,d.raw_byte_size FROM ' + credit_fields.state_source(conn) + ' f '
+    rows = conn.execute('SELECT f.field,f.delivery_id,d.raw_byte_size FROM ' + credit_fields.STATE_SOURCE + ' f '
         'JOIN metadata_deliveries d ON d.id=f.delivery_id WHERE f.recording_id=? AND f.provider=? ORDER BY f.field',
         (recording_id, provider)).fetchall()
     return _read_fields(conn, rows, max_bytes)
 
 
 def attempt_fields(conn, attempt_id, *, max_bytes=MAX_STATE_BYTES):
-    rows = conn.execute('SELECT f.field,a.delivery_id,d.raw_byte_size FROM ' + credit_fields.attempt_source(conn) + ' f '
-        'JOIN provider_attempts a ON a.id=f.attempt_id JOIN metadata_deliveries d ON d.id=a.delivery_id '
+    rows = conn.execute('SELECT f.field,f.delivery_id,d.raw_byte_size FROM ' + credit_fields.ATTEMPT_SOURCE + ' f '
+        'JOIN metadata_deliveries d ON d.id=f.delivery_id '
         'WHERE f.attempt_id=? ORDER BY f.field', (attempt_id,)).fetchall()
     return _read_fields(conn, rows, max_bytes)
 
@@ -121,16 +114,14 @@ def attempt_fields(conn, attempt_id, *, max_bytes=MAX_STATE_BYTES):
 def completed_genres(conn, recording_id):
     """Genre refresh queries finite evidence, without decoding provider documents."""
     rows = conn.execute('SELECT s.provider,o.text_value FROM enrichment_provider_state s '
-        "LEFT JOIN provider_state_fields f ON f.recording_id=s.recording_id AND f.provider=s.provider AND f.field='genre' "
-        'LEFT JOIN metadata_observations o ON o.id=f.observation_id '
-        "WHERE s.recording_id=? AND s.status<>'retry' AND NOT EXISTS(SELECT 1 FROM enrichment_provider_jobs j "
-        'WHERE j.recording_id=s.recording_id AND j.provider=s.provider)', (recording_id,))
+        "LEFT JOIN metadata_observations o ON o.id=json_extract(s.field_links,'$.genre[1]') "
+        "WHERE s.recording_id=? AND s.status<>'retry' AND s.queued=0", (recording_id,))
     return {row['provider']: row['text_value'] for row in rows}
 
 
 def reusable_evidence(conn, entry_id, provider, fields, *, now=None):
     """Follow the current state's exact field references, never equal-value matches."""
-    subject = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+    subject = conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
     if subject is None:
         raise ValueError('Unknown provider reuse input')
     result = {}
@@ -138,8 +129,8 @@ def reusable_evidence(conn, entry_id, provider, fields, *, now=None):
         name = canonical(field)
         if name not in (*values.RECORDING_FIELDS, *values.ITEM_FIELDS):
             continue
-        row = conn.execute('SELECT o.* FROM provider_state_fields s JOIN metadata_observations o '
-            'ON o.id=s.observation_id WHERE s.recording_id=? AND s.provider=? AND s.field=?',
+        row = conn.execute('SELECT o.* FROM enrichment_provider_state s,json_each(s.field_links) f '
+            'JOIN metadata_observations o ON o.id=f.value->>1 WHERE s.recording_id=? AND s.provider=? AND f.key=?',
             (subject[0], provider, field)).fetchone()
         if row is None or row['value_kind'] in ('unresolved', 'withdrawn'):
             continue
@@ -155,6 +146,27 @@ def reusable_evidence(conn, entry_id, provider, fields, *, now=None):
     return result
 
 
+def save_attempt(conn, recording, video, provider, at, status, delivery, fields, observations):
+    links = {field: observations.get(canonical(field)) for field in fields if field != 'artist_credits'}
+    attempt = conn.execute('INSERT INTO provider_attempts(recording_id,input_video_id,provider,at,status,delivery_id,'
+        'field_links,artist_credits) VALUES (?,?,?,?,?,?,?,?)',
+        (recording, video or '', provider, at, status, delivery, encode(links), 'artist_credits' in fields)).lastrowid
+    return attempt, links
+
+
+def save_state(conn, recording, provider, cycle, result, *, delivery=None, links=None, artist_credits=False):
+    references = {field: [delivery, observation] for field, observation in (links or {}).items()}
+    conn.execute('INSERT INTO enrichment_provider_state(recording_id,provider,cycle,at,status,failures,retry_at,error,'
+        'field_links,credit_delivery_id) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(recording_id,provider) DO UPDATE SET '
+        'cycle=excluded.cycle,at=excluded.at,status=excluded.status,failures=excluded.failures,'
+        'retry_at=excluded.retry_at,error=excluded.error,'
+        'field_links=CASE WHEN ? THEN excluded.field_links ELSE json_patch(field_links,excluded.field_links) END,'
+        'credit_delivery_id=CASE WHEN ? THEN excluded.credit_delivery_id '
+        'ELSE coalesce(excluded.credit_delivery_id,credit_delivery_id) END',
+        (recording, provider, cycle, result['at'], result['status'], result['failures'], result['retry_at'], result['error'],
+         encode(references), delivery if artist_credits else None, result['reset_fields'], result['reset_fields']))
+
+
 def record(conn, entry_id, provider, fields, *, cycle, retry=False, now=None, retry_after=0, error='',
            run_id=None, delivery_id=None, observations=None):
     """Return (attempt ID, inserted); an old replay cannot replace newer state."""
@@ -162,7 +174,7 @@ def record(conn, entry_id, provider, fields, *, cycle, retry=False, now=None, re
     if type(retry) is not bool:
         raise ValueError('Provider retry flag must be a boolean')
     with evidence._atomic(conn):
-        subject = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+        subject = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
         if subject is None:
             raise ValueError('Unknown provider attempt input')
         if delivery_id is None:
@@ -176,38 +188,13 @@ def record(conn, entry_id, provider, fields, *, cycle, retry=False, now=None, re
                 raise sqlite3.IntegrityError('A provider attempt replay cannot change its outcome')
             return previous_attempt['id'], False
         recording, video = subject
-        # The placeholder exists only while the unregistered migration is
-        # staged. The final cutover removes the old fields_json column.
-        has_json = any(row[1] == 'fields_json' for row in conn.execute('PRAGMA table_info(provider_attempts)'))
-        columns, placeholder = (',fields_json', ",'{}'") if has_json else ('', '')
-        attempt = conn.execute('INSERT INTO provider_attempts(recording_id,input_video_id,provider,at,status,delivery_id'
-            + columns + ') VALUES (?,?,?,?,?,?' + placeholder + ')',
-            (recording, video or '', provider, now, status, delivery_id)).lastrowid
-        for field in fields:
-            if field == 'artist_credits':
-                continue
-            conn.execute('INSERT INTO provider_attempt_fields(attempt_id,field,observation_id) VALUES (?,?,?)',
-                         (attempt, field, observations.get(canonical(field))))
-        previous = conn.execute('SELECT * FROM enrichment_provider_state WHERE recording_id=? AND provider=?',
+        attempt, links = save_attempt(conn, recording, video, provider, now, status, delivery_id, fields, observations)
+        previous = conn.execute("SELECT * FROM enrichment_provider_state WHERE recording_id=? AND provider=? AND status<>'queued'",
                                 (recording, provider)).fetchone()
         same_cycle = previous is not None and previous['cycle'] == cycle
         failures = (previous['failures'] if same_cycle else 0) + 1 if retry else 0
         deadline = max(now + min(3600, 30 * 2 ** min(failures - 1, 7)), retry_after) if retry else 0
-        if previous is not None and not same_cycle:
-            conn.execute('DELETE FROM provider_state_fields WHERE recording_id=? AND provider=?', (recording, provider))
-            credit_fields.reset(conn, recording, provider)
-        has_json = any(row[1] == 'fields_json' for row in conn.execute('PRAGMA table_info(enrichment_provider_state)'))
-        columns, placeholder = (',fields_json', ",'{}'") if has_json else ('', '')
-        conn.execute('INSERT INTO enrichment_provider_state(recording_id,provider,cycle,at,status,failures,retry_at,error'
-            + columns + ') VALUES (?,?,?,?,?,?,?,?' + placeholder + ') ON CONFLICT(recording_id,provider) DO UPDATE SET '
-            'cycle=excluded.cycle,at=excluded.at,status=excluded.status,failures=excluded.failures,'
-            'retry_at=excluded.retry_at,error=excluded.error', (recording, provider, cycle, now, status, failures, deadline, error))
-        for field in fields:
-            if field == 'artist_credits':
-                credit_fields.record(conn, attempt, recording, provider, delivery_id)
-                continue
-            conn.execute('INSERT INTO provider_state_fields(recording_id,provider,field,delivery_id,observation_id) '
-                'VALUES (?,?,?,?,?) ON CONFLICT(recording_id,provider,field) DO UPDATE SET '
-                'delivery_id=excluded.delivery_id,observation_id=excluded.observation_id',
-                (recording, provider, field, delivery_id, observations.get(canonical(field))))
+        save_state(conn, recording, provider, cycle, {'at': now, 'status': status, 'failures': failures,
+            'retry_at': deadline, 'error': error, 'reset_fields': previous is not None and not same_cycle},
+            delivery=delivery_id, links=links, artist_credits='artist_credits' in fields)
     return attempt, True

@@ -20,7 +20,7 @@ class SnapshotClient(FakeClient):
 @pytest.fixture
 def cached(store, monkeypatch):
     monkeypatch.setattr(acquisition, "with_retry", lambda fn, **kwargs: fn())
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     tracks = [{**_track(video, video.upper(), "Artist", set_video_id="set-" + video),
                "likeStatus": "INDIFFERENT"} for video in ("b", "a", "c")]
     client = SnapshotClient(playlists=[{"playlistId": "PL", "title": "Mix"}], tracks={"PL": tracks})
@@ -98,7 +98,7 @@ def test_complete_read_after_partial_replaces_order_and_allows_real_removals(sto
 @pytest.mark.parametrize("generated", [False, True])
 @pytest.mark.parametrize("empty", [False, True])
 def test_new_partial_playlist_retains_observations_without_inventing_membership(store, generated, empty):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     track = {**_track("new", "New song", "Artist"), "likeStatus": "LIKE"}
     client = SnapshotClient(playlists=[{"playlistId": "NEW", "title": "New mix"}], tracks={"NEW": [track]})
     client.response = {"tracks": [] if empty else [track], "continuation": "next",
@@ -110,7 +110,7 @@ def test_new_partial_playlist_retains_observations_without_inventing_membership(
     if not empty:
         assert store.tracks.identity_key_for_video("new") == "new song|artist"
         assert store.tracks.item_rating(iid, "new")["status"] == "LIKE"
-    assert store.conn.execute("SELECT COUNT(*) FROM library_memberships").fetchone()[0] == 0
+    assert store.conn.execute("SELECT COUNT(*) FROM track_sources WHERE library_origin IS NOT NULL").fetchone()[0] == 0
     if generated:
         assert store.playlists.is_quarantined_playlist("NEW")
     client.response = {"tracks": [track], "trackCount": 1,
@@ -143,7 +143,7 @@ def test_partial_playlist_and_unavailable_neighbor_report_partial_progress(store
 
 def test_partial_neutrals_cannot_erase_ratings_or_independent_history(store, cached):
     iid, client, before, ordered = cached
-    other = store.accounts.upsert_account("Other", "bridge", "other", False)
+    other = store.accounts.upsert_account("Other", "other", False)
     ratings.record_confirmed(store, iid, "a", "LIKE", 110)
     ratings.record_confirmed(store, other, "a", "DISLIKE", 111)
     store.history.record_history_plays(other, 100, ["a|artist"], source_timezone="UTC")
@@ -231,8 +231,8 @@ def test_complete_read_cannot_replace_a_newer_confirmed_edit(store, cached, monk
     assert store.playlists.get_playlists() == changed['playlists']
     assert {p.id: store.playlists.get_playlist_track_ids(p.id) for p in changed['playlists']} == changed['tracks']
     assert store.tracks.identity_key_for_video('observed') == 'observed only|artist'
-    assert not store.conn.execute('SELECT 1 FROM library_memberships l JOIN catalog_entries e ON e.id=l.entry_id '
-                                  "WHERE e.video_id='observed'").fetchone()
+    assert not store.conn.execute("SELECT 1 FROM track_sources WHERE library_origin IS NOT NULL AND video_id='observed'"
+                                  ).fetchone()
     if pending is not None:
         assert store.actions.get_action(pending).status == 'cancelled'
         assert client.edited == []

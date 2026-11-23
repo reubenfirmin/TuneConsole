@@ -74,7 +74,7 @@ def build(ctx) -> APIRouter:
         return {
             "cov": cov,
             "pct": {k: pct(k) for k in
-                    ("processed", "genre", "year", "bpm", "energy", "danceability")},
+                    ("processed", "genre", "year", "bpm", "danceability")},
             "remaining": remaining, "queue": queue,
             "conflicts": facts['conflicts'],
             "enabled": enabled, "state": state,

@@ -24,7 +24,7 @@ class Provider:
     def probe(self, track, store):
         self.calls.append(track["id"])
         return EnrichmentResult(self.name, {"genre":"techno", "year":"2024", "bpm":120,
-            "energy":.8, "danceability":.7, "mb_release_ids":["release"]})
+            "danceability":.7, "mb_release_ids":["release"]})
 
 
 def worker(store, clock, provider):
@@ -77,7 +77,7 @@ def test_transient_art_failure_recovers_after_restart_without_repeating_complete
     assert store.tracks.catalog_subject(tid)["thumbnail"] == "https://cover.example/real.jpg"
     assert provider.calls == [tid]
     assert store.enrichment_state.artwork_retry_status()["count"] == 0
-    assert store.conn.execute("SELECT status FROM enrichment_artwork").fetchone()[0] == "found"
+    assert store.conn.execute("SELECT artwork_status FROM track_sources WHERE artwork_status IS NOT NULL").fetchone()[0] == "found"
     store.conn.close()
 
 
@@ -108,7 +108,7 @@ def test_confirmed_absence_has_no_retry_job(store, monkeypatch):
     install_archive(monkeypatch, [1000], missing)
     tid = store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     assert worker(store, [1000], Provider()).drain_once() == 1
-    assert store.conn.execute("SELECT status FROM enrichment_artwork WHERE entry_id=?", (tid,)).fetchone()[0] == "absent"
+    assert store.conn.execute("SELECT artwork_status FROM track_sources WHERE id=?", (tid,)).fetchone()[0] == "absent"
     assert store.enrichment_state.artwork_retry_status()["count"] == 0
 
 
@@ -119,7 +119,7 @@ def test_bad_request_is_not_recorded_as_confirmed_absence(store, monkeypatch):
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', None, 200)
     assert worker(store, [1000], Provider()).drain_once() == 1
     assert store.enrichment_state.artwork_retry_status() == {'count': 1, 'retry_at': 1060}
-    assert store.conn.execute('SELECT status FROM enrichment_artwork WHERE entry_id=?',
+    assert store.conn.execute('SELECT artwork_status FROM track_sources WHERE id=?',
                               (tid,)).fetchone()[0] == 'retry'
 
 

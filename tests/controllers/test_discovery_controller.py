@@ -19,7 +19,6 @@ from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.collection_recovery import RecoveryFiles
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
-from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -32,9 +31,8 @@ def discovery():
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
     proposals = create_autospec(RecommendationProposals, instance=True, spec_set=True)
-    settings = create_autospec(Settings, instance=True, spec_set=True)
     repository.origin_inputs.return_value = dict(video=None, album=None, artists=set(), account=False)
-    return Discovery(repository, artists, eligibility, files, proposals=proposals, settings=settings,
+    return Discovery(repository, artists, eligibility, files, proposals=proposals,
         tracks=create_autospec(Tracks, instance=True, spec_set=True), albums=create_autospec(Albums, instance=True, spec_set=True),
         genres=create_autospec(Genres, instance=True, spec_set=True), metadata=create_autospec(MetadataChoices, instance=True, spec_set=True),
         keys=create_autospec(RecordingKeys, instance=True, spec_set=True))
@@ -53,22 +51,14 @@ def test_artist_reconciliation_clears_derived_explanation_without_reading_its_ol
     assert candidate['recovery_filename'] == 'file'
 
 
-def test_album_merge_prepares_combined_membership_and_retains_distinct_impressions(discovery):
-    rows = [dict(album_id=2, found_at=5, first_shown=7, last_shown=10, legacy_first_shown=None,
-                 legacy_last_shown=None, offered_count=2, legacy_offered_count=0),
-            dict(album_id=1, found_at=3, first_shown=None, last_shown=8, legacy_first_shown=4,
-                 legacy_last_shown=6, offered_count=1, legacy_offered_count=3)]
-    inputs = dict(typed=True, memberships=rows, impressions=[dict(id=9, album_id=2, shown_at=7)],
-                  legacy=[dict(album_id=1, offered_count=3)])
-    discovery.repository.album_merge_inputs.return_value = inputs
+def test_album_merge_preserves_earliest_discovery_date(discovery):
+    rows = [dict(album_id=2, found_at=5), dict(album_id=1, found_at=3)]
+    discovery.repository.album_merge_inputs.return_value = rows
     discovery.repository.origin_merge_inputs.return_value = []
-    before = json.dumps(inputs, sort_keys=True)
+    before = json.dumps(rows, sort_keys=True)
     discovery.merge_albums(2, 1)
-    member = discovery.repository.apply_album_merge.call_args.args[-1]
-    assert member == dict(album_id=1, found_at=3, first_shown=7, last_shown=10,
-                         legacy_first_shown=4, legacy_last_shown=6, offered_count=3, legacy_offered_count=3)
-    assert discovery.repository.apply_album_merge.call_args.args[2] == inputs
-    assert json.dumps(inputs, sort_keys=True) == before
+    assert discovery.repository.apply_album_merge.call_args.args[-1] == 3
+    assert json.dumps(rows, sort_keys=True) == before
 
 
 def test_artist_origin_collision_uses_rebound_sources_without_resurrecting_retired_artist(discovery):
@@ -85,11 +75,11 @@ def test_starter_identity_is_resolved_before_choice_and_limit_is_rechecked(disco
     discovery.artists.ensure_artist.return_value = 7
     discovery.repository.starter_count.return_value = 11
     discovery.repository.starter_artists.return_value = [{'artist_id': 7}]
-    discovery.repository.explanation_files.return_value = False
+    discovery.repository.origin_inputs.return_value['artists'] = {7}
     assert discovery.select_starter_artist('Name', 'browse', 'image', True, 9) == [{'artist_id': 7}]
     discovery.artists.ensure_artist.assert_called_once_with('Name', provider='youtube', provider_id='browse')
     discovery.repository.set_starter_artist.assert_called_once_with(
-        7, 'browse', 'image', True, 9, score=3., maximum=12, source='artist_start:browse', origin=None)
+        7, 'image', True, 9, score=3., maximum=12, origin=discovery._origin('artist_start:browse'))
 
 
 def test_full_starter_cohort_rejects_new_selection_but_allows_removal(discovery):
@@ -98,7 +88,7 @@ def test_full_starter_cohort_rejects_new_selection_but_allows_removal(discovery)
         discovery.select_starter_artist('Name', 'browse', None, True, 0)
     discovery.repository.set_starter_artist.assert_not_called()
     discovery.select_starter_artist('Name', 'browse', None, False, 0)
-    assert discovery.repository.set_starter_artist.call_args.args[3] is False
+    assert discovery.repository.set_starter_artist.call_args.args[2] is False
 
 
 def test_starter_tracks_round_robin_deduplicates_and_caps_each_artist(discovery):
@@ -136,15 +126,15 @@ def test_artwork_work_is_deduplicated_and_bounded_and_failures_delay_retry(disco
 
 def test_spotify_threshold_is_applied_before_resolving_identities(discovery):
     discovery.artists.state_id.side_effect = [10, 20]
-    discovery.repository.explanation_files.return_value = False
+    discovery.repository.origin_inputs.return_value['account'] = True
     discovery.seed_spotify_artists(3, {'below': 2, 'included': 3, 'higher': 10}, 123, import_key='import')
     assert [call.args for call in discovery.artists.state_id.call_args_list] == [('included',), ('higher',)]
     discovery.repository.seed_spotify_artists.assert_called_once_with(
-        3, [(10, 3.), (20, 10.)], 123, source='spotify_export:3', origin=None, excluded_kinds=('spotify_export',))
+        [(10, 3.), (20, 10.)], 123, origin=discovery._origin('spotify_export:3', account_id=3, import_key='import'),
+        excluded_kinds=('spotify_export',))
 
 
-@pytest.mark.parametrize('native', [False, True])
-def test_artist_explanation_is_prepared_before_sql_and_pinned_during_publication(discovery, native):
+def test_artist_explanation_is_prepared_before_sql_and_pinned_during_publication(discovery):
     steps = []
 
     @contextmanager
@@ -155,19 +145,16 @@ def test_artist_explanation_is_prepared_before_sql_and_pinned_during_publication
 
     discovery.files.retained.side_effect = retained
     discovery.artists.state_id.return_value = 7
-    discovery.repository.explanation_files.return_value = native
     discovery.genres.resolve.return_value = ('rock', None)
     discovery.repository.reserve_explanation_file.side_effect = lambda *args: steps.append('reserve') or 41
     discovery.files.describe.return_value = ('digest', 10)
     discovery.files.publish_reserved.side_effect = lambda *args, **kwargs: steps.append('file') or ('filename', 'digest', 10)
     discovery.repository.store_discovered_artist.side_effect = lambda *args, **kwargs: steps.append('sql')
     discovery.upsert_discovered_artist('Artist', 9, ['because'], ['fits'], 'image', 12, 'Rock', source='spotify_model')
-    assert steps == (['pin', 'reserve', 'file', 'sql', 'release'] if native else ['pin', 'sql', 'release'])
+    assert steps == ['pin', 'reserve', 'file', 'sql', 'release']
     discovery.repository.store_discovered_artist.assert_called_once_with(
-        7, 9, 'image', 12, 'Rock', source='spotify_model',
-        reference=('filename', 'digest', 10) if native else None, file_id=41 if native else None,
-        encoded=('["because"]', '["fits"]'),
-        origin=discovery._origin('spotify_model') if native else None, genre_key='rock')
+        7, 9, 'image', 12, 'Rock', reference=('filename', 'digest', 10), file_id=41,
+        origin=discovery._origin('spotify_model'), genre_key='rock')
 
 
 def test_invalid_explanation_cannot_create_identity_or_publish(discovery):
@@ -179,7 +166,6 @@ def test_invalid_explanation_cannot_create_identity_or_publish(discovery):
 
 
 def test_explanation_file_failure_cannot_replace_stored_candidate(discovery):
-    discovery.repository.explanation_files.return_value = True
     discovery.files.publish_reserved.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         discovery.upsert_discovered_artist('Artist', 1, [], [], None, 1)
@@ -214,9 +200,9 @@ def test_pruning_keeps_held_tracks_and_explicit_starter_artists(discovery):
 def cleanup_snapshot(discovery):
     repository = create_autospec(DiscoveryRepo, instance=True, spec_set=True)
     repository.cleanup_head_rows.return_value = []
-    repository.expired_pool_rows.return_value = {'albums': ['album'], 'artists': [7], 'artist_targets': [7],
+    repository.expired_pool_rows.return_value = {'albums': ['album'], 'artists': [7],
                                                'tracks': ['gone', 'held', 'generated']}
-    repository.cleanup_track_details.return_value = {'sources': {'source'}, 'unowned': {'gone'}}
+    repository.cleanup_source_tokens.return_value = {'source'}
     eligibility = create_autospec(RecommendationEligibility, instance=True, spec_set=True)
     eligibility.generated_track_keys.return_value = {'generated'}
     proposals = create_autospec(RecommendationProposals, instance=True, spec_set=True)
@@ -225,11 +211,10 @@ def cleanup_snapshot(discovery):
         rec_eligibility=eligibility, rec_proposals=proposals), release_reader=Mock(),
         publish_ordered=Mock(side_effect=lambda publish: publish() or True))
     discovery.repository.cleanup_snapshot.side_effect = lambda: nullcontext(snapshot)
-    discovery.proposals.stage_pruned_cache.return_value = []
     return snapshot, repository
 
 
-@pytest.mark.parametrize('failure', ['cache', 'checkpoints', 'settings', 'delete', None])
+@pytest.mark.parametrize('failure', ['cache', 'checkpoints', 'delete', None])
 def test_cleanup_commits_in_safe_order_and_stops_at_failed_step(discovery, failure):
     snapshot, repository = cleanup_snapshot(discovery)
     steps = []
@@ -244,17 +229,16 @@ def test_cleanup_commits_in_safe_order_and_stops_at_failed_step(discovery, failu
 
     discovery.proposals.publish_pruned_cache.side_effect = step('cache')
     discovery.repository.remember_source_tokens.side_effect = step('checkpoints')
-    discovery.settings.replace_keys.side_effect = step('settings')
     discovery.repository.delete_pool_entries.side_effect = step('delete')
     if failure:
         with pytest.raises(RuntimeError, match=failure):
             discovery.gc_discovery_pool(100 * 86400, 30, {'held'})
     else:
         assert discovery.gc_discovery_pool(100 * 86400, 30, {'held'}) == {'albums': 1, 'artists': 1, 'tracks': 1}
-    expected = ['cache', 'checkpoints', 'settings', 'delete']
+    expected = ['cache', 'checkpoints', 'delete']
     assert steps == (expected[:expected.index(failure) + 1] if failure else expected)
     repository.expired_pool_rows.assert_called_once_with(70 * 86400)
-    repository.cleanup_track_details.assert_called_once_with({'gone'})
+    repository.cleanup_source_tokens.assert_called_once_with({'gone'})
     if steps[-1] == 'delete':
         discovery.repository.delete_pool_entries.assert_called_once_with(['album'], [7], {'gone'})
 
@@ -267,14 +251,12 @@ def test_stale_cleanup_cannot_publish_any_owner(discovery):
         discovery.gc_discovery_pool(100 * 86400, 30, ())
     discovery.proposals.publish_pruned_cache.assert_not_called()
     discovery.repository.remember_source_tokens.assert_not_called()
-    discovery.settings.replace_keys.assert_not_called()
     discovery.repository.delete_pool_entries.assert_not_called()
 
 
 def test_discovered_track_uses_catalog_workflow_and_separate_membership_link_and_hints(discovery):
     discovery.tracks.upsert_track.return_value = 7
     discovery.tracks.catalog_subject.side_effect = [{'recording_id': 12}, {'identity_key': '@recording:12|artist'}]
-    discovery.repository.explanation_files.return_value = True
     discovery.repository.pooled_album.return_value = True
     discovery.repository.origin_inputs.return_value['album'] = 9
     key = discovery.upsert_discovered_track('imported|artist', 'video', 'Song', 'Artist', 'Album', 'cover',

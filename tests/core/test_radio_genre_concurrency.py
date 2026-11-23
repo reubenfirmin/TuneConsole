@@ -1,5 +1,6 @@
 """Radio selection must not borrow SQLite's serving connection from a writer."""
 from concurrent.futures import ThreadPoolExecutor
+import re
 import threading
 from types import SimpleNamespace
 
@@ -71,6 +72,7 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
                 candidates.membership, candidates.vectors, candidates.centroids = {}, {}, {}
                 candidates.pools = {'one': [], 'two': []}
                 candidates.modes = {'one': {'families': [('jazz', 2)]}, 'two': {'families': [('rock', 2)]}}
+                candidates.group_head, candidates.group_allocation = None, {}
                 candidates.affinities = {}
                 candidates.axes = inputs_for(store).taxonomy([track['genre'], other['genre']])
                 candidates._read_vectors = lambda keys: None
@@ -88,29 +90,23 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
 
 
 @pytest.mark.parametrize('installed', [107], indirect=True)
-def test_radio_checkpoint_schema_probes_own_the_connection(installed, monkeypatch):
-    from yt_playlist.core import radio_storage
-
+def test_radio_checkpoint_uses_admitted_schema(installed):
     store, _ = installed
-    account = store.accounts.upsert_account('Radio', 'radio.json', None, True)
-    original = radio_storage.available
-    probes = []
-
-    def available(conn):
-        assert conn is not store.conn or store._lock.held_by_current_thread, 'Unowned checkpoint schema probe'
-        probes.append(conn)
-        return original(conn)
-
-    monkeypatch.setattr(radio_storage, 'available', available)
-    with pytest.raises(AssertionError, match='Unowned checkpoint schema probe'):
-        radio_storage.available(store.conn)
-    assert not probes
+    account = store.accounts.upsert_account('Radio', None, True)
     persistence = RadioPersistence(store.radio_checkpoints)
     session = Session(None, SimpleNamespace(fingerprint='probe', tuning={}), account, 'Radio',
                       phase=Phase.STOPPED, playlist='PROBE', local_id=1)
-    persistence.save(session)
-    assert persistence.load()['episode_id'] == session.episode_id
-    assert len(probes) >= 3
+    queries = []
+    store.conn.set_trace_callback(queries.append)
+    try:
+        persistence.save(session)
+        assert persistence.load()['episode_id'] == session.episode_id
+    finally:
+        store.conn.set_trace_callback(None)
+    assert any('radio_sessions' in query for query in queries)
+    probes = [query for query in queries if re.search(
+        r'\bsqlite_(schema|master)\b|\bpragma\s+(?:main\.)?(table_|index_|foreign_key_list)', query, re.I)]
+    assert not probes, '\n'.join(probes)
 
 
 @pytest.mark.parametrize('installed', [107], indirect=True)

@@ -1,6 +1,6 @@
 """TV policy checks over detached facts and mocked SQL persistence."""
 from contextlib import nullcontext
-from unittest.mock import Mock, create_autospec
+from unittest.mock import create_autospec
 
 import pytest
 
@@ -16,8 +16,8 @@ def tv():
     repo = create_autospec(TVStateRepo, instance=True, spec_set=True)
     repo.transaction.side_effect = nullcontext
     repo.receipt_header.return_value = repo.launch.return_value = None
-    repo.pending_receipts.return_value = repo.pending_launches.return_value = 0
-    return TVState(repo, Mock(), installed=True)
+    repo.pending_launches.return_value = 0
+    return TVState(repo)
 
 
 def test_invalid_visual_does_not_enter_sql(tv):
@@ -27,29 +27,24 @@ def test_invalid_visual_does_not_enter_sql(tv):
     tv.repository.replace_visual.assert_not_called()
 
 
-@pytest.mark.parametrize('complete,expected', [(True, 7), (False, None)])
-def test_artwork_completion_is_fenced_by_the_observed_demand(tv, complete, expected):
-    tv.publish_artwork('artist', {'images': []}, 100, (7, 4), complete=complete)
-    tv.repository.replace_artwork.assert_called_once_with('artist', {'images': []}, 100, (7, 4),
-        request_to_complete=expected, limit=60)
+@pytest.mark.parametrize('complete', [True, False])
+def test_artwork_completion_is_fenced_by_the_observed_revision(tv, complete):
+    tv.publish_artwork('artist', {'images': []}, 100, 'observed', complete=complete)
+    tv.repository.replace_artwork.assert_called_once_with('artist', {'images': []}, 100, 'observed',
+        name=None, complete=complete, limit=60)
 
 
 @pytest.mark.parametrize('count,admitted', [(59, True), (60, False), (61, False)])
-def test_pending_rollover_limit_does_not_erase_unconfirmed_intents(tv, count, admitted):
-    tv.repository.pending_receipts.return_value = count
+def test_pending_creation_limit_does_not_erase_unconfirmed_intents(tv, count, admitted):
+    tv.repository.pending_launches.return_value = count
+    selection = [{'video_id': 'first'}]
     if admitted:
-        assert tv.begin_rollover('10:stream:request', 'next', 100)
-        tv.repository.insert_receipt.assert_called_once_with('10:stream:request', (10, 'stream', 'request'), 'next', 100)
+        assert tv.begin_launch('refill:request', 1, 'next', 15, selection, 100, current=False)
+        tv.repository.insert_launch.assert_called_once_with('refill:request', 1, 'next', 15, selection, 100, current=False)
     else:
-        with pytest.raises(ValueError, match='unconfirmed TV'):
-            tv.begin_rollover('10:stream:request', 'next', 100)
-        tv.repository.insert_receipt.assert_not_called()
-
-
-def test_existing_rollover_is_not_created_again(tv):
-    tv.repository.receipt_header.return_value = {'id': 8, 'status': 'pending', 'target_stream': 'next'}
-    assert not tv.begin_rollover('10:stream:request', 'next', 100)
-    tv.repository.insert_receipt.assert_not_called()
+        with pytest.raises(ValueError, match='unresolved TV'):
+            tv.begin_launch('refill:request', 1, 'next', 15, selection, 100, current=False)
+        tv.repository.insert_launch.assert_not_called()
 
 
 @pytest.mark.parametrize('previous,message', [
@@ -92,11 +87,8 @@ def test_failed_outcome_write_does_not_mark_launch_complete(tv):
     tv.repository.complete_launch.assert_not_called()
 
 
-def test_legacy_visual_cache_retains_latest_240_without_sql(tv):
-    tv.installed = False
-    tv.proposals.get_proposals.return_value = {str(index): {'verdict': 'static'} for index in range(240)}
-    tv.publish_visual('0', {'verdict': 'moving'}, 100)
-    saved = tv.proposals.put_proposals.call_args.args[1]
-    assert len(saved) == 240 and list(saved)[-1] == '0'
-    assert saved['0'] == {'verdict': 'moving'}
-    tv.repository.transaction.assert_not_called()
+def test_visual_publication_uses_the_bounded_sql_owner(tv):
+    value = {'verdict': 'moving'}
+    tv.publish_visual('visual00001', value, 100)
+    tv.repository.replace_visual.assert_called_once_with('visual00001', value, 100, 240)
+    tv.repository.transaction.assert_called_once()

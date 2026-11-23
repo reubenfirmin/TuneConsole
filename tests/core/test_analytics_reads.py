@@ -7,6 +7,8 @@ import pytest
 
 from yt_playlist.core import activity, db_reads
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
+from yt_playlist.core.file_collection import collector
+from yt_playlist.core.metadata_runtime_files import directory as metadata_runtime_directory
 from yt_playlist.core.store import Store
 from yt_playlist.repos.base import Repo, snapshot_read
 
@@ -82,7 +84,7 @@ def test_file_reader_pins_committed_state_without_copying_database(file_backed_s
         assert added <= {tmp_path / ('store.db.' + domain) for domain in (
             'policies', 'groups', 'recommendations', 'evidence', 'served', 'collections',
             'metadata', 'metadata-runtime', 'archives', 'vibe-provenance', 'vibe-models', 'profiles',
-            'embeddings', 'legacy-journals', 'policy-history')}
+            'embeddings', 'policy-history')}
         # Empty owner stores still establish their reader-lifetime lock before
         # pinning SQL. They must not create a database or output snapshot.
         for directory in added:
@@ -179,6 +181,25 @@ def test_waiting_for_capacity_is_also_bounded(database, monkeypatch):
     monkeypatch.setattr(db_reads, 'READ_SECONDS', 10)
     with database.read_view() as reader:
         assert reader.settings.get_setting('input') == 'old'
+
+
+def test_waiting_for_metadata_file_lease_is_bounded_and_recovers(file_backed_store):
+    store = file_backed_store
+    store.settings.set_setting('input', 'old')
+    root = metadata_runtime_directory(store.conn)
+
+    def read_value():
+        with store.read_view(seconds=.05) as reader:
+            return reader.settings.get_setting('input')
+
+    with ThreadPoolExecutor(1) as workers:
+        with collector(root) as acquired:
+            assert acquired
+            pending = workers.submit(read_value)
+            with pytest.raises(activity.WorkBudgetExceeded):
+                pending.result(timeout=2)
+        with store.read_view() as reader:
+            assert reader.settings.get_setting('input') == 'old'
 
 
 def test_worker_snapshot_outlives_request_deadline_but_cancellation_releases_it(database, monkeypatch):

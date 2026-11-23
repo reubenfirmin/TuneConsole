@@ -6,16 +6,20 @@ from threading import Lock
 from yt_playlist.core.db_revisions import DERIVED_TABLES
 
 
-def preparation_memo(store, owner):
+def preparation_memo(store, owner, *, wait_for_writer=True):
     """Keep an owner's completed inputs outside the shared, evictable read cache.
 
     Owners use fixed names and include time-dependent inputs in their keys.
     Ordinary input/schema/database guards still invalidate these calculations.
     """
-    with store._lock:
+    if not store._lock.acquire(blocking=wait_for_writer):
+        return None
+    try:
         if not hasattr(store, '_preparation_memos'):
             store._preparation_memos = {}
         return store._preparation_memos.setdefault(owner, ReadMemo())
+    finally:
+        store._lock.release()
 
 
 class ReadMemo:
@@ -24,7 +28,8 @@ class ReadMemo:
         self._lock = Lock()
         self._limit = limit
 
-    def calculate(self, name, prepare, *, epoch, serial, unchanged, reads, tables, views):
+    def calculate(self, name, prepare, *, epoch, serial, unchanged, reads, tables, views,
+                  cache_current=None):
         if epoch is None:
             return prepare()
         with self._lock:
@@ -34,8 +39,8 @@ class ReadMemo:
             # Never reuse a newer reader's result in an older pinned view. Seek
             # consumed inputs outside the memo lock to avoid lock-order cycles.
             if (previous_epoch == epoch and previous_serial <= serial
-                    # Equal serials describe the same pinned inputs. Later
-                    # writer changes cannot change either reader's snapshot.
+                    # Equal serials describe the same admitted inputs. A
+                    # committed reader first checks for writes after admission.
                     and (previous_serial == serial or unchanged(dependencies, previous_serial))):
                 reads.include(dependencies)
                 with self._lock:
@@ -45,6 +50,8 @@ class ReadMemo:
         # Calculation and database reads must not hold a shared cache/serving lock.
         with reads.capture() as dependencies:
             value = prepare()
+        if cache_current is not None and not cache_current():
+            return value
         # Unknown tables cannot be tracked safely. View definitions are protected
         # by the schema epoch; their underlying table reads are also captured.
         if any(table not in tables and table not in views and table not in DERIVED_TABLES

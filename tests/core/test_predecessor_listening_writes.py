@@ -6,7 +6,7 @@ from tests.core.test_predecessor_writes import installed
 
 def test_sync_disambiguation_keeps_captured_evidence_on_its_recording(installed):
     store, _ = installed
-    account = store.accounts.upsert_account('Main', 'main.json', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     entry = store.tracks.upsert_track('first-upload', 'Song', 'Artist', None, 123)
     original_key = store.tracks.identity_key_for_video('first-upload')
     stamp = 1704844800
@@ -38,7 +38,7 @@ def test_sync_disambiguation_keeps_captured_evidence_on_its_recording(installed)
 
 def test_live_coarse_and_late_upload_resolution_preserve_original_evidence(installed):
     store, _ = installed
-    account = store.accounts.upsert_account('Main', 'main.json', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     store.playlists.upsert_playlist(account, 'LM', 'Liked Music', 0, '', 1)
     store.tracks.upsert_track('known', 'Song', 'Artist', None, 123)
     key = store.tracks.identity_key_for_video('known')
@@ -68,8 +68,8 @@ def test_live_coarse_and_late_upload_resolution_preserve_original_evidence(insta
 
 def test_imports_keep_receipts_deduplicate_and_scope_resets_to_one_account(installed):
     store, _ = installed
-    first = store.accounts.upsert_account('Main', 'main.json', None, True)
-    second = store.accounts.upsert_account('Other', 'other.json', None, False)
+    first = store.accounts.upsert_account('Main', None, True)
+    second = store.accounts.upsert_account('Other', None, False)
     store.tracks.upsert_track('known', 'Song', 'Artist', None, 123)
     key = store.tracks.identity_key_for_video('known')
     stamp = 1704844800

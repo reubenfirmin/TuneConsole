@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import json
 
-from yt_playlist.controllers.group_preparation import BOOKKEEPING, CHECKPOINT, PROGRESS, report as report_progress
+from yt_playlist.controllers.group_preparation import CHECKPOINT, PROGRESS, report as report_progress
 from yt_playlist.rec import group_discovery
 
 

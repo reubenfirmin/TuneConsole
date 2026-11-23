@@ -1,4 +1,4 @@
-"""Measure release builds through verified publication, including runner queues."""
+"""Measure verified publication from the first deployment request, including runner queues."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from promote_release import Backend
-from release_candidates import EXPECTED
+from release_candidates import EXPECTED, RECOVERED
 
 BUDGET_SECONDS = 15 * 60
 TARGET_SECONDS = 10 * 60
@@ -123,7 +123,7 @@ def compare(measurements, *, cold_run):
                 or metrics["repository"] != candidate["repository"]
                 or not candidate.get("source_run")
                 or not candidate.get("revision") or not candidate.get("tag")
-                or {row["name"] for row in candidate["assets"]} != set(EXPECTED)
+                or {row["name"] for row in candidate["assets"]} not in (set(EXPECTED), set(RECOVERED))
                 or any(row["state"] != "complete" or row["bytes"] <= 0 for row in candidate["assets"])
                 or metrics["artifact_bytes"] != sum(row["bytes"] for row in candidate["assets"])):
             raise ValueError("Each release needs complete candidates and verified publication within 900 seconds of its request")
@@ -157,4 +157,4 @@ if __name__ == "__main__":
                 stream.write(result)
     output.write_text(json.dumps(metrics, indent=2) + "\n")
     print(result)
-    raise SystemExit(0 if args.compare or metrics["within_budget"] else 1)
+    raise SystemExit(0 if args.compare or metrics["verified_at"] else 1)

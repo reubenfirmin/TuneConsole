@@ -55,7 +55,7 @@ def test_scheduler_uses_exact_public_transport_and_detached_shared_metadata(boun
     first = b.iao.latest_release()
     first['tag_name'] = 'mutated'
     assert updatecheck._fetch_latest_release() == '0.2.0'
-    assert store.settings.get_setting('latest_version_seen') == '0.2.0'
+    assert store.enrichment_state.release_check()[2] == '0.2.0'
     assert len(b.calls) == 1 and b.events == ['pace', 'request']
     request, timeout = b.calls[0]
     assert request.full_url == github.RELEASES_URL
@@ -71,8 +71,7 @@ def test_overlapping_scheduler_checks_share_one_vendor_request(boundary, store):
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda index: updatecheck.check_latest(store, 1000, interval_s=0), range(8)))
     assert len(b.calls) == 1
-    assert store.settings.get_setting('latest_version_seen') == '0.2.0'
-    assert store.settings.get_setting('latest_version_checked_at') == '1000'
+    assert store.enrichment_state.release_check() == (1000, None, '0.2.0')
 
 
 @pytest.mark.parametrize('code,headers,deadline', [
@@ -91,14 +90,13 @@ def test_http_failure_deadlines_are_shared_and_persisted(boundary, store, code, 
         raise urllib.error.HTTPError(request.full_url, code, 'SECRET vendor message', headers, body)
 
     b = boundary(fetch, store=store)
-    store.settings.set_setting('latest_version_seen', '0.1.0')
+    store.enrichment_state.record_release_check(1, '0.1.0')
     with net.probe_errors() as errors:
         for _ in range(2):
             updatecheck.check_latest(store, 1000, interval_s=0)
     assert len(b.calls) == 1 and len(errors) == 2
     assert all(error.provider == 'github' and error.retry_at == deadline for error in errors)
-    assert store.settings.get_setting('latest_version_seen') == '0.1.0'
-    assert store.settings.get_setting('latest_version_checked_at') == '1000'
+    assert store.enrichment_state.release_check() == (1000, None, '0.1.0')
     saved = store.enrichment_state.integration_cooldown('github')
     assert saved['retry_at'] == deadline and saved['failures'] == 1
     assert 'SECRET' not in saved['error'] and 'SECRET' not in caplog.text and body.closed
@@ -129,13 +127,13 @@ def test_expired_last_good_survives_temporary_failure_and_recovers(boundary, sto
         updatecheck.check_latest(store, b.clock[0], interval_s=0)
         assert updatecheck._fetch_latest_release() == '0.2.0'
     assert len(b.calls) == 2 and len(errors) == 2
-    assert store.settings.get_setting('latest_version_seen') == '0.2.0'
+    assert store.enrichment_state.release_check()[2] == '0.2.0'
     b.clock[0] = errors[0].retry_at
     failed[0] = False
     with net.probe_errors() as recovered:
         updatecheck.check_latest(store, b.clock[0], interval_s=0)
     assert not recovered and len(b.calls) == 3
-    assert store.settings.get_setting('latest_version_seen') == '0.3.0'
+    assert store.enrichment_state.release_check()[2] == '0.3.0'
     assert store.enrichment_state.integration_cooldown('github') is None
 
 
@@ -164,12 +162,12 @@ def test_no_release_is_a_short_confirmed_miss_and_preserves_seen_version(boundar
         raise urllib.error.HTTPError(request.full_url, 404, 'not found', {}, body)
 
     b = boundary(fetch, store=store)
-    store.settings.set_setting('latest_version_seen', '0.1.0')
+    store.enrichment_state.record_release_check(-86400, '0.1.0')
     with net.probe_errors() as errors:
         updatecheck.check_latest(store, 1000)
         assert b.iao.latest_release() is None
     assert not errors and len(b.calls) == 1 and body.closed
-    assert store.settings.get_setting('latest_version_seen') == '0.1.0'
+    assert store.enrichment_state.release_check()[2] == '0.1.0'
     assert store.enrichment_state.integration_cooldown('github') is None
 
 
@@ -182,7 +180,7 @@ def test_primary_limit_headers_on_success_defer_uncached_work(boundary, store):
     with net.probe_errors() as errors:
         updatecheck.check_latest(store, b.clock[0], interval_s=0)
     assert len(b.calls) == 1 and errors[0].retry_at == 1300
-    assert store.settings.get_setting('latest_version_seen') == '0.2.0'
+    assert store.enrichment_state.release_check()[2] == '0.2.0'
 
 
 def test_foreground_database_work_proceeds_while_update_check_waits_for_http(boundary, store):
@@ -225,7 +223,7 @@ def test_reopened_database_keeps_cooldown_and_scoped_success_preserves_newer_wai
         assert not b.calls
         b.clock[0] = 1100
         updatecheck.check_latest(db, 1100, interval_s=0)
-        assert db.settings.get_setting('latest_version_seen') == '0.3.0'
+        assert db.enrichment_state.release_check()[2] == '0.3.0'
         assert db.enrichment_state.integration_cooldown('github')['retry_at'] == 1300
         assert b.iao.latest_release() == {'tag_name': 'v0.3.0'}
         assert db.enrichment_state.integration_cooldown('github')['retry_at'] == 1300
@@ -242,7 +240,7 @@ def test_cancellation_does_not_stamp_a_completed_check(boundary, store, error_ty
     with net.probe_errors() as errors, pytest.raises(error_type):
         updatecheck.check_latest(store, 1000)
     assert not errors and b.iao._cached is None
-    assert store.settings.get_setting('latest_version_checked_at') is None
+    assert store.enrichment_state.release_check()[0] is None
     assert store.enrichment_state.integration_cooldown('github') is None
 
 

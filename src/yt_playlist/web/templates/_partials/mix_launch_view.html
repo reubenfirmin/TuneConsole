@@ -82,10 +82,11 @@ function renderMixLaunch(doc, mix, phase = 'loading') {
     find.target = '_blank'; find.rel = 'noopener';
     const back = element('button', '', 'Back to this mix'); back.type = 'button';
     back.onclick = () => {
+      const pendingReturn = JSON.stringify({...mix, explicitReturn: true});
       try {
         const opener = doc.defaultView.opener;
         if (opener && !opener.closed) {
-          try { opener.sessionStorage.setItem('tc-mix-return', JSON.stringify(mix)); } catch (_) {}
+          try { opener.sessionStorage.setItem('tc-mix-return', pendingReturn); } catch (_) {}
           try {
             if (!opener.genReturnToMix?.(mix.id, mix)) opener.location.assign(mix.returnUrl || '/');
           } catch (_) { opener.location.assign(mix.returnUrl || '/'); }
@@ -93,7 +94,7 @@ function renderMixLaunch(doc, mix, phase = 'loading') {
           doc.defaultView.close(); return;
         }
       } catch (_) {}
-      try { doc.defaultView.sessionStorage.setItem('tc-mix-return', JSON.stringify(mix)); } catch (_) {}
+      try { doc.defaultView.sessionStorage.setItem('tc-mix-return', pendingReturn); } catch (_) {}
       doc.defaultView.location.assign(mix.returnUrl || '/');
     };
     actions.append(find, back); copy.append(actions);

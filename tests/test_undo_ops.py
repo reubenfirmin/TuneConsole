@@ -18,7 +18,7 @@ def test_successful_facade_undo_updates_local_membership_without_errors_or_keepe
     elif operation == "delete":
         iid, aid = _deleted(store, client)
     else:
-        iid = store.accounts.upsert_account("Main", "bridge", None, True)
+        iid = store.accounts.upsert_account("Main", None, True)
         source = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 2, "", 1)
         keeper = store.playlists.upsert_playlist(iid, "KEEP", "Keeper", 2, "", 1)
         PlaylistOps(store, lambda: {iid: client}, lambda: 2).delete_dupe(source, keeper)

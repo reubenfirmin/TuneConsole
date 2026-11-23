@@ -6,7 +6,7 @@ from yt_playlist.core import metadata_deliveries as deliveries, metadata_evidenc
 def capture(store, video='video', key='capture:1', *, fields=None):
     fields = {'bpm': 120} if fields is None else fields
     entry = store.tracks.upsert_track(video, 'Song', 'Artist', None, 200)
-    recording, = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()
+    recording, = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry,)).fetchone()
     delivery = deliveries.Delivery('provider', key, 'item', video, 20, entry, recording, video, response=fields)
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')

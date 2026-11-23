@@ -1,5 +1,7 @@
 """Chronology, shared comparisons, daily admission and atomic serving changes."""
 from contextlib import closing, contextmanager, nullcontext
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import sqlite3
 
@@ -95,12 +97,12 @@ def daily_catalog_template(_pristine_current_schema):
 def _seed_catalog(store):
     now = 200 * daily.DAY
     with atomic_write(store):
-        account = store.accounts.upsert_account('main', 'cred', None, True)
+        account = store.accounts.upsert_account('main', None, True)
         keys = [identity_key(f'Song{i:03d}', 'Artist') for i in range(160)]
         seed_publication_subjects(store, [dict(key=key, video_id=str(i),
             title=f'Song{i:03d}', artist='Artist', created_at=-200 * daily.DAY)
             for i, key in enumerate(keys)])
-        entries = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+        entries = [row[0] for row in store.conn.execute('SELECT id FROM track_sources ORDER BY id')]
         videos = {key: str(i) for i, key in enumerate(keys)}
         for offset in (0, 80):
             playlist = store.playlists.upsert_playlist(account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
@@ -183,7 +185,7 @@ def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
             # Compare all the same SQL/vector inputs through one real reader
             # per copy. No writes occur between these complete-copy assertions.
             with current.read_view() as reader:
-                assert reader.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
+                assert reader.conn.execute('SELECT count(*) FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)').fetchone()[0] == 160
                 for offset in (0, 80):
                     playlist = reader.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
                     assert len(reader.playlists.get_playlist_track_ids(playlist.id)) == 80
@@ -195,7 +197,7 @@ def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
                         for i in range(20, 80)]
                 assert reader.rec_model.get_rec_vectors() == library['original']
                 assert reader.settings.get_setting('rec_dim') == '2'
-                assert not reader.settings.get_setting('rec_fit_inputs')
+                assert not reader.rec_model.recording_state().fit_fingerprint
                 assert reader.model_selection.latest_daily_selection() is None
         copied_roots = [roots(target.conn) for target in (store, file_backed_store)]
         for name, source in roots(daily_library_template.source.conn).items():
@@ -241,7 +243,7 @@ def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
     assert [dim for dim, _, _ in library['calls']] == [2, 3, 3]
     assert library['calls'][0][1:] == library['calls'][1][1:]
     assert store.settings.get_setting('rec_dim') == '3'
-    assert store.settings.get_setting('rec_fit_inputs')
+    assert store.rec_model.recording_state().fit_fingerprint
     assert not daily.due(store, now + daily.DAY - 1)
     assert store.model_selection.restore_model_selection(result['id'], now + 100)
     assert dict(store.rec_model.get_rec_vectors()) == dict(library['original'])
@@ -266,6 +268,46 @@ def test_training_excludes_holdout_sessions_weights_and_future_catalog(library):
     assert all(set(basket) <= set(keys) for basket in captured['baskets'])
     assert captured['coverage']['undated_relationship_baskets_excluded'] == ['album', 'artist']
     assert captured['unavailable_targets'] >= 1
+
+
+@pytest.mark.parametrize('timezone', ['UTC', 'America/New_York', 'Pacific/Kiritimati'])
+def test_comparison_admits_only_whole_calendar_days_and_exact_in_window_plays(store, timezone):
+    local = ZoneInfo(timezone)
+    cutoff = datetime(2025, 11, 1, 18, tzinfo=local).timestamp()
+    end = cutoff + daily.HOLDOUT_DAYS * daily.DAY
+    account = store.accounts.upsert_account('Daily comparison', None, True)
+    names = ('before', 'basket partner', 'at cutoff', 'at end', 'previous day', 'cutoff day',
+             'next day', 'end day', 'end day late', 'previous day late')
+    tracks = {name: store.tracks.upsert_track(name, name, 'Artist', None, 180,
+                                             created_at=cutoff - 50 * daily.DAY) for name in names}
+    keys = {name: store.tracks.identity_key_for_video(name) for name in names}
+    playlist = store.playlists.upsert_playlist(account, 'stable', 'Stable library', len(tracks),
+                                               'unchanged', cutoff - 40 * daily.DAY)
+    store.playlists.set_playlist_tracks(playlist, list(tracks.values()))
+    store.settings.set_setting('rec_cooc_weighting', '1')
+
+    for name, at in (('before', cutoff - 1), ('basket partner', cutoff - 2),
+                     ('at cutoff', cutoff), ('at end', end)):
+        store.history.record_play_event(account, keys[name], name, at, source_timezone=timezone)
+    noon = datetime(2025, 11, 1, 12, tzinfo=local)
+    for name, at, label in (
+            ('previous day', (noon - timedelta(days=1)).timestamp(), 'Today'),
+            ('cutoff day', cutoff + 3600, 'Today'),
+            ('next day', (noon + timedelta(days=1)).timestamp(), 'Today'),
+            ('end day', end - 3600, 'Today'),
+            ('end day late', end + 3600, 'Today'),
+            ('previous day late', cutoff + 2 * 3600, 'Yesterday')):
+        store.history.record_history_plays(account, at, [(keys[name], label)], source_timezone=timezone)
+
+    with store.read_view() as reader:
+        captured, _ = daily._capture(reader, end)
+    next_day = noon.date() + timedelta(days=1)
+    assert set(captured['context']) == {keys[name] for name in ('before', 'basket partner', 'previous day')}
+    assert captured['held'] == {keys['at cutoff']: int(cutoff // daily.DAY),
+                                keys['next day']: (next_day - date(1970, 1, 1)).days}
+    assert set(captured['weights']) == set(captured['context'])
+    assert {frozenset(basket) for basket in captured['baskets']} == {
+        frozenset(keys.values()), frozenset({keys['before'], keys['basket partner']})}
 
 
 def test_insufficient_activity_skips_all_fits(library):
@@ -305,8 +347,8 @@ def test_initial_insufficient_attempt_does_not_require_another_30_plays(
             assert fresh.result == value == sibling
             for current in (daily_catalog_template.source, store, file_backed_store, producer):
                 assert list(map(tuple, current.conn.execute(
-                    'SELECT video_id,title,artist,created_at FROM tracks ORDER BY video_id'))) == list(map(tuple,
-                    producer.conn.execute('SELECT video_id,title,artist,created_at FROM tracks ORDER BY video_id')))
+                    'SELECT video_id,title,artist,created_at FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL) ORDER BY video_id'))) == list(map(tuple,
+                    producer.conn.execute('SELECT video_id,title,artist,created_at FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL) ORDER BY video_id')))
                 for offset in (0, 80):
                     playlist = current.playlists.get_playlist_for_account(account, f'PL{offset}')
                     assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
@@ -564,7 +606,7 @@ def test_day_votes_prevent_one_binge_from_creating_many_independent_wins():
 @pytest.mark.parametrize('previous_run_id', [113, 10000])
 def test_large_historical_run_counters_do_not_disable_future_model_switches(library, previous_run_id):
     store = library['store']
-    old = {'kind': 'product', 'status': 'retained', 'previous': {'method': 'svd', 'dim': 2}}
+    old = {'status': 'retained', 'previous': {'method': 'svd', 'dim': 2}}
     old_id = store.model_selection.start_selection(library['now'] - daily.DAY, old)
     # Model a retained high run ID after many legacy/failed runs, without
     # manufacturing thousands of unrelated historical records.
@@ -644,8 +686,7 @@ def test_failure_after_selection_publication_keeps_selected_vectors_and_restore_
     assert selected != library['original']
     assert store.settings.get_setting('rec_dim') == '3'
     active = int(store.settings.get_setting('rec_selection_active_run'))
-    assert dict(store.conn.execute('SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?',
-                                   (active,))) == dict(library['original'])
+    assert dict(store.model_selection.repository.restore_facts(active)['vectors']) == dict(library['original'])
 
 
 def test_tied_best_alternatives_keep_the_incumbent(library, monkeypatch):
@@ -666,52 +707,13 @@ def test_tied_best_alternatives_keep_the_incumbent(library, monkeypatch):
     assert result['status'] == 'retained' and result['selected']['dim'] == 2
 
 
-@pytest.mark.parametrize('phase', ['preparing', 'observing'])
-def test_legacy_gate_ends_but_held_projections_survive(library, phase):
-    from yt_playlist.rec import product_comparison
-    from yt_playlist.rec import choice_evidence
+def test_new_product_trials_are_rejected_and_daily_comparison_runs(library):
     store, now = library['store'], library['now']
     setup = {'method': 'svd', 'dim': 2}
     old = dict(kind='product', status='running', phase='observing', ran_at=now - daily.DAY,
                previous=setup, selected=setup, grid=[])
-    run_id = store.model_selection.start_selection(old['ran_at'], old)
-    current = dict(run_id=run_id, phase=phase, seed='retained-compatibility',
-        started_at=now - daily.DAY, exposure_until=now + daily.DAY,
-        constraints=product_comparison.constraints(store), generation='retained-generation',
-        policy=product_comparison.POLICY)
-    store.rec_proposals.put_proposals(product_comparison.SURFACE, current, now)
-    ledger = store.rec_ledger.evidence()
-    artifact = ledger.artifact({'retained': 'original comparison inputs'})
-    saved, assignments = {}, {}
-    for format in product_comparison.FORMATS:
-        for arm in ('incumbent', 'challenger'):
-            surface = product_comparison.pair_surface(run_id, arm, format)
-            saved[surface] = {'run_id': run_id, 'data': {
-                'retained': [arm, format], 'context': {'artifact': artifact}}}
-            store.rec_proposals.put_proposals(surface, saved[surface], now)
-        # Held assignments came from an observing trial before its retirement.
-        observing = {**current, 'phase': 'observing'}
-        store.rec_proposals.put_proposals(product_comparison.SURFACE, observing, now)
-        assignments[format] = product_comparison.assignment(store, format, 'held', now)
-    store.rec_proposals.put_proposals(product_comparison.SURFACE, current, now)
-    monitor = {'run_id': run_id, 'complete': False}
-    store.rec_proposals.put_proposals(product_comparison.MONITOR, monitor, now)
-    opportunity = choice_evidence.issue(store, 'mixes', [{'id': 'retained-option'}], now,
-        context={'comparison': assignments['mixes'], 'retained': {'artifact': artifact}})
-    assert choice_evidence.respond(store, opportunity, 'visible', now + 1, visible=['retained-option'])
-    original_offer = ledger.get('opportunity', opportunity)
-    original_artifact = ledger.get('artifact', artifact)
-    store.settings.set_setting('rec_selection_live_run', str(run_id))
-    daily.maintain(store, now)
-    assert store.model_selection.selection_run(run_id)['status'] == 'retained'
-    assert product_comparison.state(store)['phase'] == 'retained'
-    assert product_comparison.assignment(store, 'mixes', 'new', now) is None
-    assert all(store.rec_proposals.get_proposals(surface) == value for surface, value in saved.items())
-    for format, assignment in assignments.items():
-        surface = product_comparison.pair_surface(run_id, assignment['arm'], format)
-        assert product_comparison.prepared(store, format, 'held', now + 2,
-            existing=assignment) == (saved[surface]['data'], assignment)
-    assert ledger.get('opportunity', opportunity) == original_offer
-    assert ledger.get('artifact', artifact) == original_artifact
-    assert store.rec_proposals.get_proposals(product_comparison.MONITOR) == {**monitor, 'complete': True}
-    assert not store.settings.get_setting('rec_selection_live_run')
+    with pytest.raises(ValueError, match='Live recommendation trials are retired'):
+        store.model_selection.start_selection(old['ran_at'], old)
+    result = complete(library)
+    assert result['kind'] == 'daily' and result['holdout_days'] == 30
+    assert store.model_selection.selection_run(result['id'])['kind'] == 'daily'

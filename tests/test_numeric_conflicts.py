@@ -7,8 +7,8 @@ from yt_playlist.providers.base import EnrichmentResult, detect_conflicts
 
 
 @pytest.mark.parametrize("field,values", [
-    ("bpm", [120.9, 121.1]), ("energy", [.04, .06]), ("danceability", [.04, .06]),
-    ("bpm", [120, 122]), ("energy", [.7, .8]), ("danceability", [.2, .3]),
+    ("bpm", [120.9, 121.1]), ("danceability", [.04, .06]),
+    ("bpm", [120, 122]), ("danceability", [.2, .3]),
     ("bpm", ["120.9", 121.1]), ("bpm", [120, 121, 122]),
 ])
 def test_values_within_tolerance_never_conflict(field, values):
@@ -18,8 +18,8 @@ def test_values_within_tolerance_never_conflict(field, values):
 
 
 @pytest.mark.parametrize("field,values", [
-    ("bpm", [120, 122.01]), ("energy", [.7, .8001]), ("danceability", [.2, .3001]),
-    ("bpm", [120, 121.5, 123]), ("energy", [.1, .19, .28]),
+    ("bpm", [120, 122.01]), ("danceability", [.2, .3001]),
+    ("bpm", [120, 121.5, 123]), ("danceability", [.1, .19, .28]),
 ])
 def test_outside_tolerance_or_a_chain_retains_every_candidate(field, values):
     for ordered in permutations(values):

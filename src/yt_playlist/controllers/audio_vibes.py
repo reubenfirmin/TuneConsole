@@ -8,9 +8,8 @@ from yt_playlist.core import audio_vibe_metadata
 
 
 class AudioVibes:
-    def __init__(self, repository, samples, annotation_files, prepared_content, metadata_files):
+    def __init__(self, repository, samples, prepared_content, metadata_files):
         self.repository, self.sample_files = repository, samples
-        self.annotation_files = annotation_files
         self.prepared_content = prepared_content
         self.metadata_files = metadata_files
         self._lock = RLock()
@@ -74,16 +73,16 @@ class AudioVibes:
             self.repository.complete_sample(sample['id'], reference)
 
     def feedback(self, run_id):
-        with self.annotation_files.retained():
-            row = self.repository.annotation(run_id, kind='session', taxonomy_version=TAXONOMY_VERSION)
-            return self._feedback(row) if row else None
+        row = self.repository.annotation(run_id, kind='session', taxonomy_version=TAXONOMY_VERSION)
+        return self._feedback(row) if row else None
 
-    def _feedback(self, row):
-        document = self.annotation_files.read(row)
+    @staticmethod
+    def _feedback(row):
+        document = row['archive']
         legacy = (document.get('legacy') or {}).get('sample_ids')
         samples = json.loads(legacy) if legacy is not None else row['sample_ids']
         return dict(taxonomy_version=row['taxonomy_version'], vibes=row['vibes'],
-                    prediction=document['prediction'], updated_at=row['created_at'], sample_ids=samples)
+                    prediction=document.get('prediction'), updated_at=row['created_at'], sample_ids=samples)
 
     def latest_feedback(self, video_id, *, exclude_run_id):
         run = self.repository.latest_feedback_run(video_id, exclude_run_id=exclude_run_id,
@@ -109,37 +108,4 @@ class AudioVibes:
         return result
 
     def save_feedback(self, run_id, sample_ids, vibes, taxonomy_version, prediction, now):
-        sample_ids, vibes, _state = annotations.validate(run_id, sample_ids, vibes, now)
-        with self._lock, self.annotation_files.retained():
-            if self.repository.playback(run_id) is None:
-                raise ValueError('A new annotation requires an existing playback run')
-            known, vocabulary = self.repository.taxonomy(taxonomy_version)
-            if not known or not set(vibes) <= vocabulary:
-                raise ValueError('Labels do not belong to the annotation taxonomy')
-            owners = self.repository.sample_owners(sample_ids)
-            if any(owners.get(sample) != run_id for sample in sample_ids):
-                raise ValueError('Annotation sample is missing or belongs to another run')
-            previous = self.repository.annotation(run_id, kind='session', taxonomy_version=taxonomy_version)
-            state = ('labeled' if vibes else 'withdrawn'
-                     if previous and previous['state'] in ('labeled', 'withdrawn') else 'empty')
-            if previous and previous['state'] == state:
-                document = self.annotation_files.read(previous)
-                if (previous['sample_ids'] == sample_ids and previous['vibes'] == vibes
-                        and document['prediction'] == prediction):
-                    return
-            revision = previous['revision'] + 1 if previous else 1
-            prediction_version = prediction.get('taxonomy_version') if isinstance(prediction, dict) else None
-            _known, predicted_vocabulary = self.repository.taxonomy(prediction_version)
-            evaluation = annotations.evaluation_values(prediction, predicted_vocabulary)
-            document = dict(format=annotations.FILE_FORMAT, run_key=run_id, kind='session',
-                            taxonomy_version=taxonomy_version, revision=revision,
-                            prediction=prediction, unresolved_samples=[])
-            integrity = self.annotation_files.describe(document)
-            file_id = self.repository.reserve_annotation_file(run_id, taxonomy_version, revision, integrity)
-            with self.annotation_files.write_reserved(file_id, document, expected=integrity) as reference:
-                self.repository.publish_annotation(run_id, sample_ids, vibes, taxonomy_version,
-                    now, state=state, revision=revision, file_id=file_id, reference=reference, evaluation=evaluation,
-                    expected=previous['id'] if previous else None)
-
-    def resolve_annotations(self, run_id):
-        return self.repository.resolve_annotations(run_id)
+        self.repository.save_annotation(run_id, sample_ids, vibes, taxonomy_version, prediction, now)

@@ -426,20 +426,24 @@ def test_artwork_resumes_its_saved_shape_after_visiting_another_page(page, radio
     assert saved['phase'] == page.evaluate('window.leavingPhase')
     assert saved['phase'] >= 15
 
-    page.evaluate('''() => {
-      window.addEventListener('app-page-changed', () => {
-        const model = Alpine.$data(document.querySelector('.radio-home'));
-        // Capture the first restored drawing before a motion frame can advance it.
-        Alpine.effect(() => {
-          if (model.artworkPlaylistId && !window.resumedArtwork) {
-            window.resumedArtwork = {playlistId: model.artworkPlaylistId,
-              phase: model.artworkPhase, seed: model.artworkSeed};
-          }
-        });
-      }, {once: true});
+    # Home can finish mounting before the deferred Radio panel exists. Hold
+    # the returning panel's status until its artwork can be observed.
+    status = []
+    page.route('**/radio/status', lambda route: status.append(route), times=1)
+    with page.expect_request('**/radio/status'):
+        page.get_by_role('link', name='Home', exact=True).click()
+        page.get_by_role('tab', name='On air', exact=True).click()
+    page.locator('.radio-home').evaluate('''root => {
+      const model = Alpine.$data(root);
+      // Capture the first restored drawing before a motion frame can advance it.
+      const effect = Alpine.effect(() => {
+        if (!model.artworkPlaylistId) return;
+        window.resumedArtwork = {playlistId: model.artworkPlaylistId,
+          phase: model.artworkPhase, seed: model.artworkSeed};
+        queueMicrotask(() => Alpine.release(effect));
+      });
     }''')
-    page.get_by_role('link', name='Home', exact=True).click()
-    page.get_by_role('tab', name='On air', exact=True).click()
+    status[0].fulfill(json=api.state)
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
     assert page.evaluate('window.resumedArtwork') == saved
     expect(page.locator('#radio-landscape-0')).to_have_css('transition-duration', '0s')
@@ -484,6 +488,9 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
         page, radio_ui, width, height, motion, motion_costs):
     api = radio_ui
     page.set_viewport_size({'width': width, 'height': height})
+    # Keep the page entrance from moving the viewport coordinates while the
+    # test drives the Radio animation with the Playwright clock.
+    page.add_style_tag(content='main { animation-name: none; }')
     page.add_script_tag(content=Path(__file__).with_name('radio_junction_baseline.js').read_text())
     api.ready = {**api.ready, 'directions': [
         {**branch, 'tracks': api.tracks[branch['slot'] + 1:branch['slot'] + 7]}

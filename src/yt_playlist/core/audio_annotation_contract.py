@@ -1,7 +1,6 @@
 """Versioned human judgments, separate from product vibe calculations."""
 import math
 
-FILE_FORMAT = 'audio-annotation-1'
 LEGACY_FEEDBACK_TAXONOMY = 'audio-feedback-presets-1'
 TAXONOMIES = {
     LEGACY_FEEDBACK_TAXONOMY: ('gentle', 'boost', 'focus', 'bright', 'unwind', 'move'),
@@ -19,7 +18,7 @@ def validate(run_id, samples, labels, now, *, kind='session', state=None):
     if (state not in STATES or (state == 'labeled') != bool(labels)
             or any(not isinstance(value, str) or not value for value in [*samples, *labels])
             or len(set(samples)) != len(samples) or len(set(labels)) != len(labels)
-            or (kind == 'feedback' and len(labels) > 1)):
+            or len(samples) > 3 or (kind == 'feedback' and len(labels) > 1)):
         raise ValueError('Invalid annotation samples, labels or state')
     if not isinstance(now, (int, float)) or not math.isfinite(now):
         raise ValueError('Invalid annotation time')

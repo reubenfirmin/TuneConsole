@@ -17,9 +17,8 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def home():
     repository = create_autospec(HomeCacheRepo, instance=True, spec_set=True)
-    repository.native.return_value = True
     repository.unchanged.return_value = False
-    repository.document.return_value = None, None
+    repository.document.return_value = None
     repository.reserve_file.return_value = 41
     references = create_autospec(GroupEvidence, instance=True, spec_set=True)
     references.prepare_references.return_value = ('prepared', 'home_prepared', (), ())
@@ -48,7 +47,8 @@ def test_publication_resolves_references_and_writes_files_before_sql(home):
     home.files.publish_reserved.assert_called_once_with(41, prepared.parts[0], expected=('digest', 123))
     order.clear()
     home.repository.unchanged.return_value = True
-    home.repository.document.return_value = '{"context":{"artifact":"retained"}}', None
+    home.repository.document.return_value = home_outputs.Manifest(1, 'digest', 10, [('0', 'file', 'digest', 123)])
+    home.read_manifest.return_value = '{"context":{"artifact":"retained"}}'
     home.put('home_prepared', '{"context":{"artifact":"retained"}}', 11, input_revision=43)
     assert order == []
     home.repository.publish.assert_called_once()
@@ -83,7 +83,8 @@ def test_disposable_cache_reserves_a_file_without_replacing_the_sql_head(home):
 def test_healthy_identical_guarded_preparation_reuses_files_without_new_reservations(home):
     raw = '{"title":"Ready"}'
     home.repository.unchanged.return_value = True
-    home.repository.document.return_value = raw, None
+    home.repository.document.return_value = home_outputs.Manifest(1, 'digest', 10, [('0', 'file', 'digest', 123)])
+    home.read_manifest.return_value = raw
     prepared = home.prepare('home_prepared', raw, 10)
     assert prepared.file_ids == () and prepared.filenames == ()
     home.repository.reserve_file.assert_not_called()
@@ -100,34 +101,13 @@ def test_prepared_surface_and_time_must_match_before_any_work(home, surface, now
     home.files.publish_reserved.assert_not_called()
 
 
-def test_legacy_writer_keeps_exact_installed_bytes_and_prepared_references(home):
-    home.repository.native.return_value = False
-    raw = '{ "context": {"artifact":"retained"} }'
-    home.put('home_prepared', raw, 10, validate=False)
-    home.references.prepare_references.assert_called_once_with('home_prepared', {'context': {'artifact': 'retained'}}, 10)
-    home.repository.publish_legacy.assert_called_once_with('home_prepared', raw, 10, ('prepared', 'home_prepared', (), ()))
-    home.files.publish_reserved.assert_not_called()
-    home.repository.publish.assert_not_called()
-    home.repository.document.return_value = raw, None
-    home.put('home_prepared', raw, 11, validate=False)
-    home.repository.publish_legacy.assert_called_once()
-
-
-def test_validated_legacy_preparation_creates_no_files(home):
-    home.repository.native.return_value = False
-    publication = home.prepare('home_prepared', '{"title":"Ready"}', 10)
-    assert publication.filenames == ()
-    home.files.publish_reserved.assert_not_called()
-    home.repository.reserve_file.assert_not_called()
-
-
-def test_read_uses_detached_manifest_and_legacy_fallback(home):
-    home.repository.document.return_value = None, ('digest', 10, [('0', 'file', 'digest', 123)])
+def test_read_uses_detached_manifest_when_present(home):
+    home.repository.document.return_value = home_outputs.Manifest(1, 'digest', 10, [('0', 'file', 'digest', 123)])
     home.read_manifest.return_value = '{ "title":"Ready" }'
     assert home.encoded('home_prepared') == '{ "title":"Ready" }'
     home.read_manifest.assert_called_once_with('home_prepared', 'digest', 10, [('0', 'file', 'digest', 123)])
-    home.repository.document.return_value = '{ "installed":true }', None
-    assert home.encoded('home_prepared') == '{ "installed":true }'
+    home.repository.document.return_value = None
+    assert home.encoded('home_prepared') is None
     assert home.read_manifest.call_count == 1
 
 

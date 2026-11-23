@@ -17,7 +17,7 @@ def disable_periodic_library_sync():
 
 
 def _model(store, album=None, thumbnail=None):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # Scoring consumes completed catalog facts; provider ingestion is below its
     # boundary. Keep all sixteen songs and the actual playlist/history fit.
     seed_publication_subjects(store, [
@@ -26,8 +26,8 @@ def _model(store, album=None, thumbnail=None):
         for prefix, artist, genre in (('a', 'Alpha', 'Techno'), ('b', 'Beta', 'Folk'))
         for i in range(8)])
     with store.conn:
-        store.conn.execute('UPDATE youtube_items SET thumbnail=?', (thumbnail,))
-    entries = dict(store.conn.execute('SELECT video_id,id FROM catalog_entries'))
+        store.conn.execute('UPDATE track_sources SET thumbnail=?', (thumbnail,))
+    entries = dict(store.conn.execute('SELECT video_id,id FROM track_sources'))
     a = [entries[f'a{i}'] for i in range(8)]
     b = [entries[f'b{i}'] for i in range(8)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "Night drive", 8, "a", 1.0), a)
@@ -48,14 +48,14 @@ def test_trace_final_scores_equal_production_scores(store):
         store, taste, keys, V, idx, now=100.0, include_traces=True)
 
     assert traced == pytest.approx(served)
-    assert traces[keys[0]]["negative_delta"] < 0
+    assert all('negative_delta' not in trace for trace in traces.values())
     assert set(traces) == set(keys)
     for key, trace in traces.items():
         assert trace["final"] == pytest.approx(served[key])
         assert trace["final"] == pytest.approx(trace["rank_base"] * trace["axis_applied"])
         assert trace["combined"] == pytest.approx(
             trace["durable"] + trace["transient_delta"]
-            + trace["session_delta"] + trace["audio_delta"] + trace["negative_delta"])
+            + trace["session_delta"] + trace['now_delta'] + trace["audio_delta"])
 
 
 def test_taste_sample_items_carry_trace_but_normal_serving_does_not(store):

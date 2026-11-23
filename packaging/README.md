@@ -76,10 +76,15 @@ architectures must have compatible locked wheels.
 
 ## Release publishing
 
-Tests run only on pull requests. After the source checks pass, PR workflows
-build both architectures and run packaged checks. Main and release workflows
-build and publish without unit/browser suites, package smoke tests, synthetic
-publisher rehearsals or a test-history gate.
+Tests run only on pull requests. A maintainer-owned PR targeting `main` builds
+the next patch version, runs the packaged checks on those builds, and retains
+the final wheel, DMGs, staged container digests and signed Flatpak repository.
+The PR's merge tree must match the tagged commit exactly. Updates merged after
+the candidate ran can change that tree.
+
+For another version or a main commit without matching PR assets, dispatch
+`prepare-release.yml` on `main` with `tag=vX.Y.Z` and wait for the candidate.
+This workflow builds from its main commit and runs independently of PR checks.
 
 Tag the selected main commit:
 
@@ -89,10 +94,9 @@ git tag vX.Y.Z origin/main
 git push origin vX.Y.Z
 ```
 
-`release.yml` builds the wheel, container images, macOS DMGs/feeds and signed
-Flatpak bundles/repository from that commit. It retains hashes and exact build
-artifacts before publication. Manual dispatch on main with `tag=vX.Y.Z` uses
-the same flow. Tag normalization and prerelease policy live in
+`release.yml` locates and validates the retained artifacts, then deploys them.
+It runs no builds or tests. Manual dispatch on main with `tag=vX.Y.Z` can retry
+publication and optionally select a specific candidate run. Tag normalization and prerelease policy live in
 [release_policy.py](release_policy.py). Prereleases do not move stable channels.
 
 The serialized `release-production` publisher uploads a draft and SHA256
@@ -115,11 +119,15 @@ python3 packaging/release_candidates.py RUN_ID vX.Y.Z EXACT_TAG_COMMIT --reposit
 gh workflow run release.yml --ref main -f tag=vX.Y.Z -f source_run=RUN_ID
 ```
 
-The inspection needs an authenticated `GITHUB_TOKEN`. Choose the original build
-run, including a failed publisher run with all candidates uploaded. Wrong
-revisions, missing/expired artifacts or ambiguous duplicates block reuse. Rerun
-failed build jobs for missing candidates; expired candidates need rebuilding.
-Retries retain the original release clock and exact signed repository bytes.
+The inspection needs an authenticated `GITHUB_TOKEN`. Choose a run with the
+complete candidate set. Rerun failed preparation jobs as needed. For a legacy tag
+run with all platform artifacts and a failed receipt or provenance step, dispatch
+`prepare-release.yml` on main with the existing `tag` and `source_run` set to the
+original tag run ID. It verifies the container images, repairs the receipts and
+assembles the signed Flatpak repository from the retained platform artifacts.
+Then dispatch `release.yml` using the recovery run ID to publish those assets.
+Retries retain the original release clock and exact signed repository bytes once
+the candidate is prepared.
 
 Public verification checks asset hashes, both container digests, update feeds
 and both signed Flatpak catalogs. A verification failure leaves public assets
@@ -237,26 +245,87 @@ export SPARKLE_PUBLIC_ED_KEY="<your Sparkle public key>"
 ./smoke.sh
 ```
 
-The build embeds Python and dependencies. Releases provide separate arm64 and
-x86-64 DMGs; `TuneConsole-macos.dmg` aliases arm64. Install in Applications.
-The ad-hoc signed app may require **Open Anyway** in System Settings,
-**Privacy & Security** on first launch. Do not disable Gatekeeper globally.
+The local build embeds Python and dependencies and defaults to ad-hoc signing.
+Release downloads use Developer ID signing and Apple notarization.
+`TuneConsole-macos.dmg` is the Apple Silicon download. Intel Macs use
+`TuneConsole-macos-x86_64.dmg`. Open the download, drag TuneConsole to
+**Applications**, eject the disk image, and open TuneConsole from Applications.
+macOS may show its usual confirmation for an app downloaded from the internet.
 
 The app menu provides **Check for Updates…** and **Quit TuneConsole**. Sparkle
-verifies Ed25519 updates and relaunches after active jobs drain, preserving data
-and the existing browser tab. Each architecture has its own signed appcast.
-Sparkle's pinned framework and helpers are copied intact; the app is not
-Developer ID signed or notarized.
+verifies Ed25519 updates and relaunches after active jobs drain. Each architecture
+has its own appcast. For a manual upgrade from an older ad-hoc build, quit
+TuneConsole and replace `TuneConsole.app` in Applications with the signed copy.
+Keep `~/Library/Application Support/TuneConsole` to retain your library,
+settings and browser pairing.
 
-Generate signing keys once using the downloaded Sparkle tools:
+### Set up Apple signing
+
+1. On a Mac, sign in with the maintainer’s own Apple Account and enable
+   two-factor authentication. [Enroll in the Apple Developer Program](https://developer.apple.com/programs/enroll/).
+   Apple lists US$99 per membership year, with regional pricing. Individual
+   enrollment uses your legal name. An organization enrolls under its legal
+   entity name and generally needs a D‑U‑N‑S Number and someone authorized to
+   bind the organization.
+2. In Keychain Access, choose **Certificate Assistant > Request a Certificate
+   From a Certificate Authority** and save the request to disk. In the Apple
+   developer account, create a [Developer ID Application certificate](https://developer.apple.com/help/account/certificates/create-developer-id-certificates)
+   using that request. Developer ID Installer applies to `.pkg` installers.
+3. Install the certificate on the Mac that created the request. In Keychain
+   Access, export the certificate and corresponding private key together as a
+   password-protected `.p12`. Get its full identity with
+   `security find-identity -v -p codesigning` and its Team ID from Apple Developer
+   membership details. Create an [app-specific password](https://support.apple.com/en-us/102654)
+   for notarization in the Apple Account used with that team.
+4. Add these repository Actions values. Add secrets through GitHub and store
+   the private key and its password separately in your credential manager.
+
+   | Actions setting | Type | Value |
+   | --- | --- | --- |
+   | `MACOS_TEAM_ID` | Variable | Apple Developer Team ID |
+   | `MACOS_SIGNING_IDENTITY` | Variable | Full identity, `Developer ID Application: Name (TEAMID)` |
+   | `MACOS_CERTIFICATE_P12` | Secret | Base64 of the protected export, from `base64 -i /path/to/certificate.p12` on macOS |
+   | `MACOS_CERTIFICATE_PASSWORD` | Secret | Password used when exporting the `.p12` |
+   | `MACOS_NOTARY_APPLE_ID` | Secret | Apple Account email for notarization |
+   | `MACOS_NOTARY_APP_PASSWORD` | Secret | App-specific password for that account |
+   | `SPARKLE_PUBLIC_ED_KEY` | Variable | Existing Sparkle Ed25519 public key |
+   | `SPARKLE_PRIVATE_ED_KEY` | Secret | Existing Sparkle Ed25519 private key |
+
+For a new setup, generate Sparkle keys once using the pinned Sparkle tools:
 
 ```sh
 packaging/macos/.sparkle/bin/generate_keys
 packaging/macos/.sparkle/bin/generate_keys -p
 ```
 
-Set Actions variable `SPARKLE_PUBLIC_ED_KEY` and export it for local builds.
-Export the Keychain private key with `generate_keys -x <secure-file>` and save
-it as Actions secret `SPARKLE_PRIVATE_ED_KEY`. Keep the key stable across
-releases. Verify two successive builds on a Mac, including cancelled downloads,
-invalid signatures, active-work drain and relaunch without a second tab.
+Export the Keychain private key with `generate_keys -x <secure-file>`. Keep
+the Sparkle key stable across releases, including the first Developer ID release.
+
+### Prepare and verify a release
+
+The trusted release-candidate workflow builds on Apple Silicon and Intel runners.
+Each runner uses a temporary keychain, signs the app and its dependencies
+and signs the DMG. It submits the DMG to Apple, requires an Accepted result,
+staples and validates the ticket on the DMG, then verifies Gatekeeper acceptance
+for the image and its embedded app. Sparkle signs the exact stapled DMG.
+Promotion checks the notarization receipts and reuses the prepared downloads.
+[Apple distribution packaging](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)
+and [GitHub runner certificate setup](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)
+describe these steps.
+
+The workflow logs the submission ID before waiting up to six minutes for Apple.
+Look in the `macos-notary-logs-*` artifacts for Apple’s inspection log. For a
+rejection, fix the reported files before rebuilding. For a timeout, use
+`xcrun notarytool info <submission-id> --keychain-profile <local-profile>` on a
+Mac with the same Apple team configured. Retry a failed candidate job once Apple
+is reachable and any signing issue is resolved. If candidates are complete
+and only publication failed, retry publication using the original Actions run.
+
+For initial verification, use the available Mac to download the DMG through
+a browser and follow the installation steps above with quarantine enabled.
+Record the macOS version and CPU architecture. Confirm that TuneConsole opens
+the browser and stops the local server when quit. Test Sparkle between two
+successive signed releases and confirm the library and browser pairing survive.
+Try the update from an ad-hoc installation as well and record whether manual
+replacement is needed. The runner’s signature checks and PR smoke tests are
+separate from these checks on an installed copy.

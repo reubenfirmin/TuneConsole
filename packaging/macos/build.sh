@@ -7,7 +7,7 @@
 #   dist/TuneConsole.app
 #   dist/TuneConsole-<version>.dmg   (version comes from the git tag)
 #
-# The bundle is ad-hoc signed. First launch needs right-click -> Open; see ../README.md.
+# Local builds use ad-hoc signing unless a Developer ID identity is supplied.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
@@ -45,6 +45,9 @@ fi
 if [[ "${1:-}" == --prepare-only ]]; then exit 0; fi
 : "${SPARKLE_PUBLIC_ED_KEY:?Set SPARKLE_PUBLIC_ED_KEY to the release signing public key}"
 export SPARKLE_PUBLIC_ED_KEY
+if [[ -n "${RELEASE_TAG:-}" ]]; then
+  : "${MACOS_SIGNING_IDENTITY:?A Developer ID Application identity is required for release builds}"
+fi
 # shellcheck disable=SC1091
 . "$UV_PROJECT_ENVIRONMENT/bin/activate"
 
@@ -59,21 +62,35 @@ VERSION=$(python -c "import importlib.metadata as m; print(m.version('yt-playlis
 rm -rf build dist
 pyinstaller --noconfirm --clean yt-playlist.spec
 
-# Embed Sparkle with its existing helper signatures, then refresh only the outer ad-hoc
-# signature. Developer ID signing/notarization can replace this outer signature later.
-ditto .sparkle/Sparkle.framework dist/TuneConsole.app/Contents/Frameworks/Sparkle.framework
-codesign --force --sign - dist/TuneConsole.app
-codesign --verify --deep --strict dist/TuneConsole.app
+APP="dist/TuneConsole.app"
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+ditto .sparkle/Sparkle.framework "$SPARKLE"
+if [[ -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+  # PyInstaller signs the collected runtime and libraries. Sparkle is added afterward.
+  sign=(codesign --force --sign "$MACOS_SIGNING_IDENTITY" --options runtime --timestamp)
+  helpers="$SPARKLE/Versions/Current"
+  "${sign[@]}" "$helpers/XPCServices/Installer.xpc"
+  "${sign[@]}" --preserve-metadata=entitlements "$helpers/XPCServices/Downloader.xpc"
+  "${sign[@]}" "$helpers/Autoupdate"
+  "${sign[@]}" "$helpers/Updater.app"
+  "${sign[@]}" "$SPARKLE"
+  "${sign[@]}" "$APP"
+else
+  codesign --force --sign - "$APP"
+fi
+codesign --verify --deep --strict "$APP"
 
 # 4. Wrap it in a compressed drag-to-install .dmg.
-APP="dist/TuneConsole.app"
 DMG="dist/TuneConsole-$VERSION.dmg"
 DMG_ROOT="dist/dmg-root"
 mkdir -p "$DMG_ROOT"
-cp -R "$APP" "$DMG_ROOT/TuneConsole.app"
+ditto "$APP" "$DMG_ROOT/TuneConsole.app"
 ln -s /Applications "$DMG_ROOT/Applications"
 bash ./create-dmg.sh "$DMG_ROOT" "$DMG"
 rm -rf "$DMG_ROOT"
+if [[ -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+  codesign --sign "$MACOS_SIGNING_IDENTITY" --timestamp --identifier com.tuneconsole.TuneConsole.dmg "$DMG"
+fi
 
 echo
 echo "Built:"

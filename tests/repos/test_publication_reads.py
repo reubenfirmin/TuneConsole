@@ -7,9 +7,10 @@ import threading
 import pytest
 
 from yt_playlist.core.store import Store
+from yt_playlist.core.model_state import ArtistModelUpdate, RecordingModelUpdate
 from yt_playlist.core import json_cache
 from yt_playlist.core.db_revisions import Revisions
-from yt_playlist.rec import content_model, radio_candidates
+from yt_playlist.rec import content_model, embedding_vectors, radio_candidate_inputs
 from yt_playlist.core.proposal_codec import encode_proposals
 from tests.recommendation_support import publish_bundles
 
@@ -43,13 +44,32 @@ def test_settings_lookup_reuses_available_connection_and_owned_transaction(
         store.conn.close()
 
 
+def test_model_updates_and_related_settings_share_a_commit(tmp_path, consumer_store):
+    store = consumer_store(tmp_path / 'models.db')
+    try:
+        model = store.rec_model
+        model.publish_model_state(recording=RecordingModelUpdate(generation='old-generation'),
+                                  artist=ArtistModelUpdate(fit_fingerprint='old-fit'),
+                                  related_settings={'config_input': 'old-version'})
+        with pytest.raises(sqlite3.IntegrityError, match='Collection state requires its domain owner'):
+            model.publish_model_state(recording=RecordingModelUpdate(generation='new-generation'),
+                                      artist=ArtistModelUpdate(fit_fingerprint='new-fit'),
+                                      related_settings={'config_input': 'new-version',
+                                                        'rec_content_generation': 'wrong owner'})
+        assert model.recording_state().generation == 'old-generation'
+        assert model.artist_state().fit_fingerprint == 'old-fit'
+        assert store.settings.get_setting('config_input') == 'old-version'
+    finally:
+        store.conn.close()
+
+
 def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, monkeypatch, consumer_store):
     from yt_playlist.core import recommendation_content
     store = consumer_store(tmp_path / 'radio.db')
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     old_model = json.dumps({'cat': {'old': 0}})
     new_model = json.dumps({'cat': {'new': 0}})
-    store.settings.set_values({'rec_content_generation': 'old', 'rec_content_model': old_model})
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(generation='old', encoder=old_model))
     publish_bundles(store, {'_meta': {'musical_generation': 'old'},
         'all': {'wheelhouse': [{'key': 'song|artist', 'video_id': 'video',
                                'title': 'Song', 'artist': 'Artist', 'reason': 'Retained explanation'}]}}, 1)
@@ -62,7 +82,7 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
         connections.append(view.conn)
         return view
 
-    space_id = radio_candidates.vectors.content_space_id
+    space_id = embedding_vectors.content_space_id
     # Stage outside the input reader: only the head/settings commit belongs
     # inside the deliberately pinned read.
     from yt_playlist.rec import bundle_storage
@@ -77,8 +97,7 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
         result = space_id(view, **kwargs)
         # A real commit while the input reader is pinned must not mix generations.
         with store._lock:
-            store.settings.publish_values({'rec_content_generation': 'new',
-                                           'rec_content_model': new_model})
+            store.rec_model.publish_model_state(recording=RecordingModelUpdate(generation='new', encoder=new_model))
             store.recommendations.publish(build, 2)
         return result
 
@@ -96,11 +115,12 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
         return original_decode(encoded, *args, **kwargs)
 
     monkeypatch.setattr(store, '_make_reader', reader)
-    monkeypatch.setattr(radio_candidates.vectors, 'content_space_id', publish_during_read)
+    monkeypatch.setattr(embedding_vectors, 'content_space_id', publish_during_read)
     monkeypatch.setattr(json_cache, 'decode', no_global_decode)
     monkeypatch.setattr(recommendation_content, 'decode', decode)
     try:
-        generation, encoding_model, space, modes, bundles = radio_candidates._prepared_inputs(store, prepared=prepared_radio)
+        generation, encoding_model, space, modes, bundles = radio_candidate_inputs.prepared_inputs(
+            store, prepared=prepared_radio)
         assert generation == 'old' and encoding_model == old_model
         assert space == content_model.content_model_fingerprint(json.loads(old_model))
         assert modes == {} and bundles['_meta']['musical_generation'] == 'old'
@@ -112,7 +132,7 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
         assert len(connections) == 1
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             connections[0].execute('SELECT 1')
-        assert store.settings.get_setting('rec_content_generation') == 'new'
+        assert store.rec_model.recording_state().generation == 'new'
     finally:
         prepared_radio.close()
         store.conn.close()

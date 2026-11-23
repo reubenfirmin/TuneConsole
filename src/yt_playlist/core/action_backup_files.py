@@ -1,8 +1,9 @@
 """Exact playlist backup bytes retained by action history, including offline export."""
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 
-from . import collection_recovery, fao
+from . import action_backup_inventory, collection_recovery, fao
 from .action_backup_paths import record_path, record_id
 from .evidence_ledger import canonical
 from .policy_documents import _publish_encoded
@@ -20,11 +21,6 @@ def verified(filename,digest=None,size=None,*,with_age=False):
         raise ValueError('Action backup bytes do not match their committed reference')
     result = encoded,actual,len(encoded)
     return (result,age) if with_age else result
-
-
-def retain(conn,filename):
-    (encoded,digest,size),age = verified(filename,with_age=True)
-    return _publish_encoded(collection_recovery.directory(conn),encoded,digest,age=age),digest,size
 
 
 class ActionBackupFiles:
@@ -49,19 +45,27 @@ class ActionBackupFiles:
             raise ValueError('Unsupported playlist recovery backup')
         return (filename, digest, size, 'verified'), value
 
-    def retain_reserved(self, identity, filename, *, expected):
-        path = record_path(self.root, identity)
+    def retain(self, filename, *, expected):
         (encoded, digest, size), age = verified(filename, with_age=True)
         if (digest, size) != expected:
-            raise ValueError('Action backup changed after reservation')
+            raise ValueError('Action backup changed before publication')
+        path = record_path(self.root, uuid4().hex)
         # The controller retains the domain root through the final SQL update.
-        with fao.prepare(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES)) as pending:
-            pending.publish()
-        return str(path), digest, size
+        fao.write(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
+        return str(path)
 
 
 def inventory(conn):
-    return [dict(row) for row in conn.execute('SELECT * FROM action_backups ORDER BY action_id,position')]
+    # Offline export can pin the installed database before its upgrade.
+    if _predecessor(conn):
+        return [dict(row) for row in conn.execute('SELECT * FROM action_backups ORDER BY action_id,position')]
+    return [item for action, encoded in conn.execute("SELECT id,backup_inventory FROM actions "
+                                                    "WHERE backup_inventory<>'[]' ORDER BY id")
+            for item in action_backup_inventory.decode(action, encoded)]
+
+
+def _predecessor(conn):
+    return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='action_backups'").fetchone() is not None
 
 
 def export(conn,root):
@@ -93,6 +97,7 @@ def restore(conn,manifest):
         raise ValueError('Action backup restore requires an idle connection')
     conn.execute('BEGIN IMMEDIATE')
     try:
+        predecessor = _predecessor(conn)
         retained = inventory(conn)
         actual = [{key:item for key,item in row.items() if key!='retained_filename'} for row in retained]
         if value['records']!=actual:
@@ -103,17 +108,16 @@ def restore(conn,manifest):
                 (raw,_,_),age = verified(source,row['digest'],row['bytes'],with_age=True)
                 identity = record_id(row['retained_filename'])
                 if identity is not None:
-                    owner = conn.execute('SELECT action_id,position,content_digest,byte_size,file_status '
-                        'FROM action_backup_writes WHERE id=?', (identity,)).fetchone()
-                    if owner is None or tuple(owner) != (row['action_id'], row['position'], row['digest'], row['bytes'], 'ready'):
-                        raise ValueError('Action backup has an inconsistent file identity')
                     target = record_path(collection_recovery.directory(conn), identity)
                     fao.write(target, fao.Content(raw, metadata=age, max_bytes=MAX_BYTES))
                     filename = str(target)
                 else:
                     filename = _publish_encoded(collection_recovery.directory(conn),raw,row['digest'],age=age)
-                conn.execute('UPDATE action_backups SET retained_filename=? WHERE action_id=? AND position=?',
-                             (filename,row['action_id'],row['position']))
+                if predecessor:
+                    conn.execute('UPDATE action_backups SET retained_filename=? WHERE action_id=? AND position=?',
+                                 (filename, row['action_id'], row['position']))
+                else:
+                    action_backup_inventory.relocate(conn, row['action_id'], row['position'], filename)
                 conn.execute('UPDATE action_steps SET backup_filename=? WHERE action_id=? AND backup_status=\'verified\' '
                              'AND backup_digest=? AND backup_bytes=?',
                              (filename,row['action_id'],row['digest'],row['bytes']))
@@ -121,26 +125,3 @@ def restore(conn,manifest):
     except BaseException:
         conn.rollback()
         raise
-
-
-def relocate(conn,action_id,filename):
-    row = conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=? AND '
-                       '(filename=? OR retained_filename=?)',(action_id,filename,filename)).fetchone()
-    if row and row[0] is not None:
-        return row[0]
-    identity = record_id(filename)
-    if identity is not None:
-        row = conn.execute('SELECT b.retained_filename FROM action_backups b JOIN action_backup_writes f '
-            'ON f.action_id=b.action_id AND f.position=b.position WHERE b.action_id=? AND f.id=? '
-            "AND f.file_status='ready' AND b.availability='verified'", (action_id, identity)).fetchone()
-        if row:
-            return row[0]
-    # Progress files can capture an older content-addressed retained location.
-    # A cloned database has the same immutable digest under a different root.
-    path = Path(filename)
-    if path.suffix=='.json' and len(path.stem)==64 and all(char in '0123456789abcdef' for char in path.stem):
-        row = conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=? AND digest=? '
-                           "AND availability='verified'",(action_id,path.stem)).fetchone()
-        if row:
-            return row[0]
-    return filename

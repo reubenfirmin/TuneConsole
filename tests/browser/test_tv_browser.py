@@ -6,7 +6,7 @@ from playwright.sync_api import expect
 from tests.conftest import FakeClient
 from tests.home_fixture_support import browser_store as store, returning_listener
 from tests.onboarding_support import publish_personal_mix
-from yt_playlist.rec import tv, tv_artwork
+from yt_playlist.rec import account_growth, tv, tv_artwork
 from yt_playlist.util.matching import search_squash
 from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
     DIAGNOSTIC, action_evidence, assert_quiet_action,
@@ -99,9 +99,63 @@ def tv_ui(store, live_app, page, monkeypatch):
 
 
 
+@pytest.mark.parametrize('failure', ['503', 'stalled'])
+def test_tv_recovers_readiness_while_the_tab_stays_open(page, live_app, tv_ui, failure):
+    _searches, api_loads = tv_ui
+    reads, failed, writes = [], [], []
+
+    def status(route):
+        reads.append(route.request)
+        if len(reads) > 1:
+            route.continue_()
+        elif failure == '503':
+            route.fulfill(status=503, body='Controlled readiness failure')
+
+    page.route('**/home/tv', status)
+    page.on('requestfailed', lambda request: failed.append(request.url))
+    page.on('request', lambda request: writes.append(request.url)
+            if request.method == 'POST' and '/home/tv' in request.url else None)
+    page.goto(live_app + '/#tv')
+    expect(page.get_by_role('heading', name='Music worth watching')).to_be_visible()
+    expect(page.get_by_role('button', name='Play TV')).to_be_visible(timeout=15000)
+    expect(page.get_by_role('button', name='Play TV')).to_be_enabled()
+    assert len(reads) == 2 and not writes and not api_loads
+    if failure == 'stalled':
+        assert live_app + '/home/tv' in failed
+
+
+def test_tv_cancels_readiness_when_leaving_the_tab(page, live_app, tv_ui):
+    reads = []
+
+    def status(route):
+        reads.append(route.request)
+        if len(reads) > 1:
+            route.continue_()
+
+    page.route('**/home/tv', status)
+    with page.expect_request(live_app + '/home/tv'):
+        page.goto(live_app + '/#tv')
+    with page.expect_event('requestfailed', lambda request: request.url == live_app + '/home/tv'):
+        page.get_by_role('tab', name='Mix tapes', exact=True).click()
+    expect(page.locator('.tv-home')).to_be_hidden()
+    page.wait_for_timeout(2200)
+    assert len(reads) == 1
+
+    page.get_by_role('tab', name='TV', exact=True).click()
+    expect(page.get_by_role('button', name='Play TV')).to_be_visible()
+    assert len(reads) == 2
+
+
 @pytest.mark.parametrize('width', [1440])
-def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(page, live_app, tv_ui, width):
+def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(page, live_app, tv_ui, width, store, monkeypatch):
     searches, api_loads = tv_ui
+    # Supply an earned notice on the growth clock to exercise the layout shift.
+    track = store.rec_query.library_songs()[0]
+    account = store.accounts.get_accounts()[0].id
+    store.history.record_play_event(account, track['key'], track['video_id'], 1)
+    growth_view = account_growth.view
+    monkeypatch.setattr(account_growth, 'view', lambda source, now, **kwargs:
+                        growth_view(source, now + 86400, **kwargs))
     # Hold continuation at the network boundary so this checks Reset against the
     # initial saved draw. This journey does not establish refill history.
     page.route('**/home/tv/playlist/*/refill',
@@ -173,6 +227,7 @@ def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(pag
     assert page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId') == original_playlist
     # Acknowledging the in-flow earned notice moves the TV slot. Keep the
     # playing iframe mounted and align it with the new slot without restarting.
+    page.evaluate("Alpine.$data(document.querySelector('.home-growth')).refresh()")
     notice = page.locator('.growth-unlock-notice')
     expect(notice).to_be_visible()
     page.evaluate('window.noticePlayerFrame = document.querySelector(".tv-player iframe")')

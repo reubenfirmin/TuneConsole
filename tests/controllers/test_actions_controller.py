@@ -37,7 +37,6 @@ def actions():
 
     repo.transaction.side_effect = transaction
     files.retained.side_effect = nullcontext
-    repo.has_durable_targets.return_value = True
     repo.next_action_id.return_value = 7
     repo.prior_intent.return_value = None
     repo.backups.return_value = []
@@ -80,9 +79,9 @@ def test_matching_idempotent_intent_reuses_the_committed_action(actions):
 
 
 def owned_action(status='executed'):
-    return dict(layout='owned', row=dict(id=7, kind='delete_playlist', status=status, created_at=1, executed_at=2,
+    return dict(row=dict(id=7, kind='delete_playlist', status=status, created_at=1, executed_at=2,
         revision='current', execution_token=None, recovery_filename='file', recovery_digest='digest', recovery_bytes=100),
-        targets=[], steps=[], backups=[], resolutions=[], items=[], handles=[], draft=None, placement=None)
+        targets=[], steps=[], backups=[])
 
 
 def test_stale_revision_cannot_publish_replacement_recovery(actions):
@@ -105,18 +104,17 @@ def test_record_commits_its_reservation_before_file_and_final_sql_publication(ac
 
 
 @pytest.mark.parametrize('interrupted', [False, True])
-def test_backup_reserves_its_own_id_before_copying_and_commits_with_the_action(actions, interrupted):
+def test_backup_is_copied_before_the_action_commits(actions, interrupted):
     events = []
     actions.backups.reference.return_value = (('original', 'digest', 100, 'verified'), {})
-    actions.repository.reserve_backup_file.side_effect = lambda *args: events.append('reserve') or 53
 
     def retain(*args, **kwargs):
         events.append('file')
         if interrupted:
             raise OSError('backup copy interrupted')
-        return 'retained', 'digest', 100
+        return 'retained'
 
-    actions.backups.retain_reserved.side_effect = retain
+    actions.backups.retain.side_effect = retain
     if interrupted:
         with pytest.raises(OSError, match='backup copy interrupted'):
             actions.record_action('remove_track', '{}', '{}', 'executed', '{"backups":["original"]}', 1)
@@ -124,11 +122,9 @@ def test_backup_reserves_its_own_id_before_copying_and_commits_with_the_action(a
     else:
         actions.record_action('remove_track', '{}', '{}', 'executed', '{"backups":["original"]}', 1)
         progress = actions.repository.publish_record.call_args.args[0]['progress']
-        assert progress['backups'] == [(0, ('original', 'digest', 100, 'verified'),
-                                       (53, ('retained', 'digest', 100)))]
-    assert events == ['reserve', 'file']
-    actions.repository.reserve_backup_file.assert_called_once_with(7, 0, ('digest', 100))
-    actions.backups.retain_reserved.assert_called_once_with(53, 'original', expected=('digest', 100))
+        assert progress['backups'] == [(0, ('original', 'digest', 100, 'verified'), 'retained')]
+    assert events == ['file']
+    actions.backups.retain.assert_called_once_with('original', expected=('digest', 100))
     actions.repository.transaction.assert_not_called()
 
 
@@ -189,8 +185,8 @@ def test_deletion_verifies_committed_backup_before_claiming_or_marking_uncertain
 
 
 @pytest.mark.parametrize('prior,uncertain,reconcile,allowed', [
-    (None, None, False, True), ({'lease_until': 101}, None, False, False),
-    ({'lease_until': 100}, None, False, True), (None, 7, False, False),
+    (None, None, False, True), ({'id': 11, 'claim_until': 101}, None, False, False),
+    ({'id': 12, 'claim_until': 100}, None, False, True), (None, 7, False, False),
     (None, 7, True, True), (None, 8, True, False),
 ])
 def test_target_claims_expire_without_authorizing_uncertain_remote_replay(actions, prior, uncertain, reconcile, allowed):
@@ -201,7 +197,7 @@ def test_target_claims_expire_without_authorizing_uncertain_remote_replay(action
     if allowed:
         target, token = actions.begin_deletion(7, 3, 'remote', 100, reconcile=reconcile)
         assert target == 11
-        actions.repository.claim_target.assert_called_once_with(11, 3, 4, token, 160)
+        actions.repository.claim_target.assert_called_once_with(11, token, 160, previous=prior['id'] if prior else None)
         assert actions.repository.mark_step.called is (not reconcile)
     else:
         with pytest.raises(ValueError):

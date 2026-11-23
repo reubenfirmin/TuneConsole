@@ -11,6 +11,7 @@ from . import fao, file_collection
 from .evidence_ledger import canonical
 
 MAX_BYTES = 16 * 1024 * 1024
+FILE_KIND = 'vibe-model'
 HEAD_PREFIX = 'rec_vibe_joint_head_'
 STATE_PREFIX = 'rec_vibe_joint_state_'
 REVISION = 'rec_vibe_joint_revision'

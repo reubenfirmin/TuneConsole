@@ -31,7 +31,7 @@ def test_scoped_completeness_preserves_full_occurrence_and_membership_rules(stor
             album_tracklists.occurrence(store.conn,tracklist,entry_id=entry,position=0)
             album_tracklists.finish(store.conn,tracklist,complete=False)
         elif damage == "membership":
-            store.conn.execute("DELETE FROM library_memberships WHERE entry_id=?", (entry,))
+            store.conn.execute("UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?", (entry,))
         elif damage == "unresolved":
             tracklist = album_tracklists.begin(store.conn,album_id,'target',expected_count=2)
             album_tracklists.occurrence(store.conn,tracklist,entry_id=entry,position=0)

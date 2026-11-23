@@ -18,7 +18,7 @@ def test_read_time_reversion_is_lazy_and_nonpersisting(store):
     s.rec_model.nudge_weight("lane:deep_cut", 2.0, now=1000.0)
     later = 1000.0 + 60 * DAY                         # one 60d half-life later
     assert s.rec_model.get_weights(now=later)["lane:deep_cut"] == pytest.approx(1.5)   # halfway back to 1.0
-    row = s.conn.execute("SELECT weight FROM rec_weights").fetchone()
+    row = s.conn.execute('SELECT weight FROM taste_axes WHERE weight IS NOT NULL').fetchone()
     assert row["weight"] == pytest.approx(2.0)        # stored value untouched by reads
 
 
@@ -34,7 +34,7 @@ def test_legacy_row_without_updated_at_reads_as_prior_age_zero(store):
     s = store
     s.rec_model.set_weight("old", 2.5, now=0.0)
     # Retained evidence can lack a timestamp; keep its typed axis identity.
-    s.conn.execute("UPDATE rec_weights SET updated_at=NULL")
+    s.conn.execute('UPDATE taste_axes SET weight_updated_at=NULL WHERE weight IS NOT NULL')
     s.conn.commit()
     assert s.rec_model.get_weights(now=1e9)["old"] == pytest.approx(2.5)   # NULL updated_at: no reversion applied
 
@@ -53,7 +53,7 @@ def test_automatic_nudges_preserve_explicit_genre_mutes(store, factor, updated_a
     # Legacy mutes and fresh mutes survive both elapsed-time reversion and a positive clamp floor.
     store.rec_model.set_weight("genre:jazz", 0.0, lo=0.0, now=0.0)
     if updated_at is None:
-        store.conn.execute("UPDATE rec_weights SET updated_at=NULL")
+        store.conn.execute('UPDATE taste_axes SET weight_updated_at=NULL WHERE weight IS NOT NULL')
         store.conn.commit()
     for day in (1, 60, 365):
         assert store.rec_model.nudge_weight("genre:jazz", factor, now=day * DAY) == 0.0
@@ -68,3 +68,35 @@ def test_manual_unmute_allows_automatic_learning_again(store):
     store.rec_model.set_weight("genre:jazz", 0.8, lo=0.0, hi=2.0, now=DAY)
     assert store.rec_model.nudge_weight("genre:jazz", 1.1, now=DAY) == pytest.approx(0.88)
     assert store.rec_model.get_weights(now=DAY)["genre:jazz"] == pytest.approx(0.88)
+
+
+def test_startup_removes_historical_dislikes_even_through_subsequent_likes(store):
+    axis = 'genre:jazz'
+    model = store.rec_model
+
+    def graduate(source, multiplier, day, halflife):
+        weight = model.nudge_weight(axis, multiplier, lo=0., hi=2., now=day * DAY,
+                                    revert_halflife_d=halflife)
+        store.rec_signals.log_graduation(axis, source, 1., multiplier, weight, day * DAY)
+
+    graduate('like', 1.05, 1, 60.)
+    graduate('dislike', .95, 2, 60.)
+    graduate('dislike', .95, 10, 30.)
+    graduate('like', 1.05, 20, 30.)
+    # The worker's dated audit records do not write the retained weight.
+    store.rec_signals.log_graduation(axis, 'dated-support', 1., 1.01, 1.01, 40 * DAY)
+    model.set_weight('genre:mute', 0., lo=0., now=20 * DAY)
+    model.set_weight('lane:deep_cut', 1.8, now=20 * DAY)
+    retained = model.weight_records()
+
+    weights = model.baseline_weights(20 * DAY)
+    clean_expected = (1. + .05 * .5 ** (1. / 60. + 18. / 30.)) * 1.05
+    assert weights[axis] == pytest.approx(clean_expected)
+    assert weights['genre:mute'] == 0.
+    assert weights['lane:deep_cut'] == 1.8
+    assert retained[axis]['weight'] < weights[axis]
+    assert model.weight_records() == retained
+    assert store.rec_signals.graduation_log_counts()['dislike'] == 2
+
+    model.set_weight(axis, .8, now=21 * DAY)
+    assert model.baseline_weights(21 * DAY)[axis] == .8

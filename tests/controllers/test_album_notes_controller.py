@@ -1,12 +1,12 @@
-"""Editorial policy and file ordering with mocked storage owners."""
-from contextlib import contextmanager, nullcontext
+"""Editorial policy and publication with mocked storage owners."""
+from contextlib import nullcontext
+import json
 from unittest.mock import Mock, create_autospec
 
 import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.album_notes import AlbumNotes
-from yt_playlist.core.recommendation_files import RecommendationFiles
 from yt_playlist.repos.album_notes import AlbumNotesRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -17,32 +17,11 @@ ALBUM = {'browse_id': 'release', 'artist': 'Artist', 'title': 'Release', 'year':
 def notes():
     repo = create_autospec(AlbumNotesRepo, instance=True, spec_set=True)
     repo.requests.return_value = {}
-    repo.matches.return_value = True
-    repo.reserve_file.return_value = 41
     repo.publish_output.return_value = True
-    writing = False
-
-    @contextmanager
-    def transaction():
-        nonlocal writing
-        writing = True
-        try:
-            yield
-        finally:
-            writing = False
-
-    def publish(identity, encoded, *, expected):
-        assert not writing, 'Editorial files must be published before opening the SQL unit'
-        return ('file', 'digest', 10)
-
-    repo.transaction.side_effect = transaction
-    files = create_autospec(RecommendationFiles, instance=True, spec_set=True)
-    files.retained.side_effect = nullcontext
-    files.describe.return_value = ('digest', 10)
-    files.publish_reserved.side_effect = publish
+    repo.transaction.side_effect = nullcontext
     proposals = Mock()
     proposals.get_proposals.return_value = None
-    return AlbumNotes(repo, proposals, files, installed=True, paused=lambda: False)
+    return AlbumNotes(repo, proposals, paused=lambda: False)
 
 
 @pytest.mark.parametrize('cached,admit', [
@@ -61,13 +40,12 @@ def test_visible_poll_extends_visibility_without_changing_worker_input(notes):
     notes.request([ALBUM], 200, visible=True)
     fields = notes.repository.store_request.call_args.args[0]
     assert fields[-1] == 1100
-    assert notes.repository.store_request.call_args.kwargs == {'changed_work': False}
 
 
-def test_metadata_change_requires_a_new_worker_revision(notes):
+def test_metadata_change_reaches_the_provider_owner(notes):
     notes.repository.requests.return_value = {'release': ALBUM}
     notes.request([{**ALBUM, 'year': '2021'}], 100)
-    assert notes.repository.store_request.call_args.kwargs == {'changed_work': True}
+    assert notes.repository.store_request.call_args.args[0][3] == '2021'
 
 
 def test_current_menu_keeps_visible_demand_and_removes_expired_demand(notes):
@@ -79,44 +57,46 @@ def test_current_menu_keeps_visible_demand_and_removes_expired_demand(notes):
 
 
 def test_visible_demand_is_coalesced_bounded_and_expires(notes):
-    notes.installed = False
-    values = {}
-    notes.proposals.get_proposals.side_effect = values.get
-    notes.proposals.put_proposals.side_effect = lambda surface, value, now: values.update({surface: value})
+    queued = {}
+    notes.repository.requests.side_effect = lambda: dict(queued)
+    notes.repository.remove_request.side_effect = queued.pop
+
+    def remember(fields):
+        browse, artist, title, year, _, thumbnail, until = fields
+        queued[browse] = {'browse_id': browse, 'artist': artist, 'title': title, 'year': year,
+                          'thumbnail': thumbnail, 'requested_until': until}
+
+    notes.repository.store_request.side_effect = remember
     albums = [{**ALBUM, 'browse_id': f'visible-{index}'} for index in range(30)]
     notes.request(albums, 1, visible=True)
     notes.request([albums[-1]], 10, visible=True)
-    queued = values['album_note_requests']
     assert len(queued) == 24 and queued['visible-29']['requested_until'] == 910
     notes.request([], 902, current_only=True)
-    assert set(values['album_note_requests']) == {'visible-29'}
+    assert set(queued) == {'visible-29'}
     notes.request([], 911, current_only=True)
-    assert not values['album_note_requests']
+    assert not queued
 
 
-def test_publication_saves_file_before_sql_reference_and_exact_request_completion(notes):
+def test_publication_passes_the_output_and_exact_worker_token(notes):
     assert notes.publish('release', {'label': 'Current'}, 100, expected_request=(7, 2))
-    notes.repository.publish_output.assert_called_once_with('release', 41, ('file', 'digest', 10), 100, 128,
-                                                          expected_request=(7, 2))
-    notes.repository.transaction.assert_not_called()
+    browse, raw = notes.repository.publish_output.call_args.args
+    assert browse == 'release' and json.loads(raw) == {'label': 'Current'}
+    assert notes.repository.publish_output.call_args.kwargs == {'expected_request': (7, 2)}
 
 
-@pytest.mark.parametrize('matches,file_written', [(False, False), (True, True)])
-def test_superseded_worker_cannot_publish_or_complete_newer_demand(notes, matches, file_written):
-    notes.repository.matches.return_value = matches
+def test_superseded_worker_cannot_publish_or_complete_newer_demand(notes):
     notes.repository.publish_output.return_value = False
     assert not notes.publish('release', {'label': 'Stale'}, 100, expected_request=(7, 2))
-    assert bool(notes.files.publish_reserved.call_count) == file_written
-    notes.repository.replace_output.assert_not_called()
+    notes.repository.replace_outputs.assert_not_called()
     notes.repository.remove_request.assert_not_called()
 
 
-def test_file_failure_preserves_last_good_and_demand(notes):
-    notes.files.publish_reserved.side_effect = OSError('disk unavailable')
-    with pytest.raises(OSError, match='disk unavailable'):
+def test_publication_failure_leaves_demand_to_the_atomic_writer(notes):
+    notes.repository.publish_output.side_effect = RuntimeError('write failed')
+    with pytest.raises(RuntimeError, match='write failed'):
         notes.publish('release', {'label': 'New'}, 100, expected_request=(7, 2))
     notes.repository.transaction.assert_not_called()
-    notes.repository.replace_output.assert_not_called()
+    notes.repository.replace_outputs.assert_not_called()
     notes.repository.remove_request.assert_not_called()
 
 
@@ -126,4 +106,4 @@ def test_paused_work_leaves_storage_untouched(notes):
     assert not notes.publish('release', {}, 100)
     notes.proposals.get_proposals.assert_not_called()
     notes.repository.transaction.assert_not_called()
-    notes.files.publish_reserved.assert_not_called()
+    notes.repository.publish_output.assert_not_called()

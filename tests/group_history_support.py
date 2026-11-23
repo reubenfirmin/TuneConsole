@@ -13,5 +13,5 @@ def predecessor(tmp_path, _pristine_current_schema):
     store = Store(tmp_path / 'groups.db')
     with closing(store.conn):
         initialize_consumer(store, _pristine_current_schema)
-        seed_compact_group_history(store)
-        yield store.conn
+        prepared = seed_compact_group_history(store)
+        yield store, prepared

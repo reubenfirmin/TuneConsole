@@ -14,25 +14,30 @@ function automaticMixRefresh(detail) {
     && path.pathname === '/home/cards' && path.searchParams.has('prepare_attempt');
 }
 
-function backgroundHomeRefresh(detail) {
-  return detail.target?.id === 'home'
-    && detail.requestConfig?.headers?.['X-Home-Refresh'] === 'sync';
-}
-
 const homeBoardUpdates = new Set();
 const homeRefreshRevisions = new WeakMap();
 let homeBoardRevision = 0;
 
+function homeBoardRefreshGuard(root) {
+  const revision = homeBoardRevision;
+  return () => revision === homeBoardRevision && !homeBoardUpdates.size && !genHomeBusy(root);
+}
+
 document.addEventListener('htmx:beforeRequest', event => {
   const detail = event.detail;
-  if (automaticMixRefresh(detail) || backgroundHomeRefresh(detail)) {
+  if (detail.elt?.id === 'home-vibe-form' && detail.target?.id === 'home-mode-cards') {
+    // The new selection delivers its own board. Release any read or retry for
+    // the previous board before HTMX registers the new request's generation.
+    window.cancelReadFragment(detail.target);
+  }
+  if (automaticMixRefresh(detail)) {
     if (homeBoardUpdates.size || genHomeBusy(detail.target)) event.preventDefault();
   }
 });
 
 document.addEventListener('htmx:beforeSend', event => {
   const detail = event.detail;
-  if (automaticMixRefresh(detail) || backgroundHomeRefresh(detail)) {
+  if (automaticMixRefresh(detail)) {
     homeRefreshRevisions.set(detail.xhr, homeBoardRevision);
   } else if (detail.requestConfig?.verb === 'post'
       && ['home-mode-cards', 'fingerprint'].includes(detail.target?.id)) {
@@ -47,8 +52,7 @@ document.addEventListener('htmx:afterRequest', event => {
 
 document.addEventListener('htmx:beforeSwap', event => {
   const target = event.detail.target;
-  if ((target?.id === 'home-mode-cards' && automaticMixRefresh(event.detail)
-        || backgroundHomeRefresh(event.detail))
+  if (target?.id === 'home-mode-cards' && automaticMixRefresh(event.detail)
       && (homeBoardUpdates.size || homeRefreshRevisions.get(event.detail.xhr) !== homeBoardRevision
           || genHomeBusy(target))) {
     // A request may already be in flight when a mix opens. Keep its shell and
@@ -81,7 +85,8 @@ function genReveal(id) {
 function genTracks(id) {
   return JSON.stringify(Array.from(document.getElementById(id).querySelectorAll('.gen-row')).map((row) => ({
     video_id: row.dataset.vid, title: row.dataset.title, artist: row.dataset.artist,
-    album: row.dataset.album, thumbnail: row.dataset.thumb
+    album: row.dataset.album, thumbnail: row.dataset.thumb,
+    recording_id: row.dataset.recordingId ? Number(row.dataset.recordingId) : undefined
   })));
 }
 
@@ -144,6 +149,7 @@ document.addEventListener('htmx:beforeSwap', (event) => {
   event.detail.shouldSwap = false;
   const response = new DOMParser().parseFromString(event.detail.serverResponse, 'text/html');
   const replacement = response.getElementById(target.id);
+  const replacementCard = replacement?.closest('.gen-card');
   if (event.detail.xhr.status < 200 || event.detail.xhr.status >= 300
       || !replacement?.matches('.gen-card-body') || !replacement.querySelector('.gen-head')) {
     finishMixRegeneration(card, true);
@@ -172,6 +178,11 @@ document.addEventListener('htmx:beforeSwap', (event) => {
     target.dataset.genres = replacement.dataset.genres || '[]';
     if (replacement.dataset.recipe) target.dataset.recipe = replacement.dataset.recipe;
     else delete target.dataset.recipe;
+    for (const attribute of ['data-choice-opportunity', 'data-choice-option']) {
+      const value = replacementCard?.getAttribute(attribute);
+      if (value) card.setAttribute(attribute, value);
+      else card.removeAttribute(attribute);
+    }
     htmx.process(target);
     const enterStep = 44;
     incoming.forEach((row, index) => {
@@ -184,7 +195,7 @@ document.addEventListener('htmx:beforeSwap', (event) => {
     });
     finishMixRegeneration(card);
     // This animated replacement bypasses HTMX's swap/settle events.
-    document.dispatchEvent(new CustomEvent('home:mix-settled'));
+    card.dispatchEvent(new CustomEvent('home:mix-settled', {bubbles: true}));
   }, sequenceLength + 20);
 });
 

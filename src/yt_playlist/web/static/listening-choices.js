@@ -11,23 +11,36 @@
   }
   const observer = new IntersectionObserver(entries => {
     for (const entry of entries) {
-      if (!entry.target.isConnected) { observer.unobserve(entry.target); continue; }
-      if (entry.isIntersecting && entry.intersectionRatio >= .25 && !document.hidden) {
-        send(entry.target, 'visible').then(response => {
-          if (response.ok) observer.unobserve(entry.target);
+      const card = entry.target;
+      const identity = observed.get(card);
+      if (!card.isConnected || !identity) { observer.unobserve(card); continue; }
+      const {width, height} = entry.intersectionRect;
+      if (entry.isIntersecting && width > 0 && height > 0 && entry.intersectionRatio >= .25 && !document.hidden) {
+        send(card, 'visible').then(response => {
+          if (response.ok && observed.get(card) === identity) observer.unobserve(card);
         }).catch(() => {});
       }
     }
   }, {threshold: .25});
+  function observe(card) {
+    const {choiceOpportunity, choiceOption} = card.dataset;
+    const identity = choiceOpportunity && choiceOption && choiceOpportunity + ':' + choiceOption;
+    if (observed.get(card) === identity) return;
+    observer.unobserve(card);
+    if (identity) {
+      observed.set(card, identity);
+      observer.observe(card);
+    } else {
+      observed.delete(card);
+    }
+  }
   function scan() {
-    document.querySelectorAll('[data-choice-opportunity]').forEach(card => {
-      const identity = card.dataset.choiceOpportunity + ':' + card.dataset.choiceOption;
-      if (observed.get(card) !== identity) { observed.set(card, identity); observer.observe(card); }
-    });
+    document.querySelectorAll('[data-choice-opportunity]').forEach(observe);
   }
   document.addEventListener('DOMContentLoaded', scan);
   document.addEventListener('htmx:afterSwap', scan);
   document.addEventListener('listening-options', scan);
+  document.addEventListener('home:mix-settled', event => observe(event.target));
   document.addEventListener('htmx:configRequest', event => {
     // One ID per deliberate request: a transport retry retains it, another click gets another ID.
     if (event.detail.path === '/album/play') event.detail.parameters.action_id = crypto.randomUUID();

@@ -17,8 +17,8 @@ def stamp(local,zone):
 
 @pytest.fixture
 def listening_store(store):
-    store.accounts.upsert_account('main','bridge',None,True)
-    store.accounts.upsert_account('other','bridge','other',False)
+    store.accounts.upsert_account('main',None,True)
+    store.accounts.upsert_account('other','other',False)
     return store
 
 
@@ -81,7 +81,7 @@ def test_local_calendar_overlap_in_both_arrival_orders(listening_store,zone,loca
     assert s.conn.execute('SELECT day FROM listening_days').fetchone()[0]==local[:10]
     assert {r[0] for r in s.conn.execute('SELECT source FROM play_event_sources')}=={'live','takeout'}
     assert s.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0]==1
-    assert s.conn.execute('SELECT COUNT(*) FROM listening_capture_receipts').fetchone()[0]==0
+    assert s.conn.execute('SELECT COUNT(*) FROM listening_observations WHERE capture_id IS NOT NULL').fetchone()[0]==0
 
 
 def test_repeated_events_and_coarse_days_are_distinct_units(listening_store):
@@ -186,7 +186,6 @@ def test_reassociation_preserves_completed_listening_changes_when_final_invalida
     old,key = s.tracks.identity_key_for_video('a'),s.tracks.identity_key_for_video('b')
     s.history.record_history_plays(1,10*86400,[(old,'Today'),(key,'Today')],source_timezone='UTC')
     s.history.import_listening_events(1,[(key,'b',20*86400)])
-    s.trends.refresh_first_play()
     original = s.recording_keys.invalidate_catalog
     def fail():
         assert not s.conn.in_transaction
@@ -195,20 +194,18 @@ def test_reassociation_preserves_completed_listening_changes_when_final_invalida
     monkeypatch.setattr(s.recording_keys,'invalidate_catalog',fail)
     with pytest.raises(RuntimeError,match='interrupt association'):
         s.tracks.associate_youtube_item('a',s.tracks.catalog_subject(target)['recording_id'],
-                                       source='review',evidence={'same':True},now=1)
+                                       source='review',evidence={'same':True},now=1,same_recording=True)
     assert not s.conn.in_transaction
     assert s.tracks.catalog_subject(first)['recording_id']==s.tracks.catalog_subject(target)['recording_id']
     assert s.history.listening_day_counts()=={key:2}
     assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
     monkeypatch.setattr(s.recording_keys,'invalidate_catalog',original)
     s.tracks.associate_youtube_item('a',s.tracks.catalog_subject(target)['recording_id'],
-                                   source='review',evidence={'same':True},now=1)
+                                   source='review',evidence={'same':True},now=1,same_recording=True)
     assert s.settings.get_setting('trend_first_play_watermark') is None
-    assert not s.trends.first_play_map('track')
     assert s.history.listening_day_counts()=={key:2}
     evidence = s.conn.execute('SELECT raw_identity_key,identity_key FROM listening_observation_subjects').fetchall()
     assert {r[0] for r in evidence}=={old,key} and {r[1] for r in evidence}=={key}
-    s.trends.refresh_first_play()
     assert s.trends.first_play_map('track')=={key:10}
     assert s.tracks.catalog_subject(first)['recording_id']==s.tracks.catalog_subject(target)['recording_id']
 
@@ -228,24 +225,26 @@ def test_import_failure_keeps_calendar_setup_and_rolls_back_event_projection(lis
     assert {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables} == before
     monkeypatch.setattr(s.history.repository, 'project_event', original)
     assert s.history.import_listening_events(1, [('song', None, 1000)], source_timezone='America/Costa_Rica') == (1, 1)
-    assert s.conn.execute('SELECT count(*) FROM listening_calendars').fetchone()[0] == 1
+    assert s.conn.execute('SELECT count(*) FROM accounts WHERE listening_timezone IS NOT NULL').fetchone()[0] == 1
 
 
-def test_partial_reassociation_keeps_unattributed_coarse_evidence_with_recording(listening_store):
+@pytest.mark.parametrize('keep_sibling', [True, False])
+def test_upload_correction_keeps_unattributed_coarse_evidence_with_recording(listening_store,keep_sibling):
     s = listening_store
     a = s.tracks.upsert_track('a','First','Artist',None,200)
-    sibling = s.tracks.upsert_track('sibling','Sibling','Artist',None,200)
     b = s.tracks.upsert_track('b','Second','Artist',None,200)
     first_id = s.tracks.catalog_subject(a)['recording_id']
     second_id = s.tracks.catalog_subject(b)['recording_id']
-    s.tracks.associate_youtube_item('sibling',first_id,source='review',evidence={'same':True},now=1)
+    if keep_sibling:
+        sibling = s.tracks.upsert_track('sibling','Sibling','Artist',None,200)
+        s.tracks.associate_youtube_item('sibling',first_id,source='review',evidence={'same':True},now=1,same_recording=True)
     old,key = s.tracks.identity_key_for_video('a'),s.tracks.identity_key_for_video('b')
     s.history.record_history_plays(1,10*86400,[(old,'Today')],source_timezone='UTC')
     s.history.import_listening_events(1,[(old,'a',20*86400)])
     s.tracks.associate_youtube_item('a',second_id,source='review',evidence={'correction':True},now=2)
-    assert s.tracks.catalog_subject(sibling)['recording_id']==first_id
+    assert s.tracks.resolve_identity_key(old)==old
+    assert s.tracks.catalog_subject(a)['recording_id']==second_id
     assert s.history.listening_day_counts()=={old:1,key:1}
     assert s.history.event_play_counts()=={key:1}
     assert s.conn.execute('SELECT raw_identity_key FROM play_events').fetchone()[0]==old
-    s.trends.refresh_first_play()
     assert s.trends.first_play_map('track')=={old:10,key:20}

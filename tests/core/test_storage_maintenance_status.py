@@ -8,7 +8,7 @@ import pytest
 from yt_playlist.core.storage_maintenance import OPTIMIZING_BANNER, StorageMaintenance
 
 
-def test_status_uses_repository_and_keeps_backlog_recording_and_copy_capture(monkeypatch):
+def test_status_uses_repository_and_keeps_capturing_during_retirement(monkeypatch):
     pending = Mock(side_effect=[3, 0, 2])
 
     class Store:
@@ -38,19 +38,18 @@ def test_status_uses_repository_and_keeps_backlog_recording_and_copy_capture(mon
     assert drained['recording'] and drained['capturing_feedback']
     assert not drained['message'] and not drained['banner_message']
 
-    maintenance.active = True
-    maintenance.phase = 'building'
-    maintenance.detail = {'copied': 12}
-    copying = maintenance.status()
-    assert copying['active'] and not copying['recording'] and copying['capturing_feedback']
-    assert copying['pending_feedback'] == 2 and copying['phase'] == 'building'
-    assert copying['progress'] == {'copied': 12}
-    assert copying['banner_message'] == OPTIMIZING_BANNER and not copying['warning']
+    maintenance.store._recommendation_retirement_pending = True
+    maintenance.store._recommendation_retirement_progress = {'pools': 12}
+    retiring = maintenance.status()
+    assert retiring['active'] and not retiring['recording'] and retiring['capturing_feedback']
+    assert retiring['pending_feedback'] == 2 and retiring['phase'] == 'recommendation_retirement'
+    assert retiring['progress'] == {'pools': 12}
+    assert retiring['banner_message'] == OPTIMIZING_BANNER and not retiring['warning']
     assert pending.call_count == 3
     assert all(not call.args and not call.kwargs for call in pending.call_args_list)
 
 
-def test_priority_recommendation_cleanup_pauses_writes_without_copy_or_evidence():
+def test_priority_recommendation_cleanup_pauses_writes_and_reports_progress():
     store = SimpleNamespace(playback_feedback=SimpleNamespace(pending=lambda: 2),
                             _recommendation_retirement_pending=True,
                             _recommendation_retirement_progress={'rows': 2048, 'pools': 3},

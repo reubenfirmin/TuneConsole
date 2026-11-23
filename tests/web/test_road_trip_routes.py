@@ -1,3 +1,4 @@
+from collections import Counter
 import json
 import re
 import threading
@@ -5,10 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
 
+import numpy as np
 import pytest
 
 from fastapi.testclient import TestClient
 
+from yt_playlist.controllers.road_trip_transitions import RoadTripFacts
 from yt_playlist.rec import road_trip as road_trip_rec
 from yt_playlist.rec import road_trip_candidates as candidates
 from yt_playlist.rec import scorecard
@@ -35,10 +38,10 @@ pytestmark = pytest.mark.usefixtures('without_query_timing')
 def road_trip_http(monkeypatch):
     from yt_playlist.providers import genres
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import audio_preview
+    from yt_playlist.web.routes import audio_vibes
 
     monkeypatch.setattr(webapp, 'build_all',
-                        lambda ctx: [road_trip_route.build(ctx), audio_preview.build(ctx)])
+                        lambda ctx: [road_trip_route.build(ctx), audio_vibes.build(ctx)])
     monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
 
 
@@ -66,7 +69,7 @@ def store(tmp_path, road_trip_schema, monkeypatch):
 
 
 def _app(store, client=None, monkeypatch=None):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     if monkeypatch is not None:
         # Run the "fill in their half" worker inline, so a build is complete when the POST returns.
         # Its own staging is covered by test_build_returns_your_half_immediately below.
@@ -113,14 +116,16 @@ def _remember_draft(client, draft):
 
 
 def _editor_recipe_id(html):
-    initial = re.search(r'roadTripForm\((\{[^\n]*?\}),', html)
+    initial = re.search(r'roadTripForm\((?=\{)', html)
     assert initial, 'The response contains the recipe editor'
-    return json.loads(initial.group(1))['id']
+    recipe, _ = json.JSONDecoder().raw_decode(html, initial.end())
+    return recipe['id']
 
 
 def _recipe_form(store, recipe_id, **changes):
     """Submit the same complete saved recipe fields as the shipped editor."""
-    recipe = {**store.road_trip.get_road_trip_recipe(recipe_id), **changes}
+    recipe = store.road_trip.get_road_trip_recipe(recipe_id)
+    recipe = {**recipe, 'artists': list(recipe.get('artist_refs') or recipe['artists']), **changes}
     return {key: json.dumps(recipe.get(key) or []) if key in ('artists', 'genres', 'blacklist_genres')
             else str(recipe[key]) for key in (
                 'id', 'name', 'own_pct', 'familiarity_pct', 'target_minutes',
@@ -568,6 +573,36 @@ def test_tilting_a_genre_to_zero_drops_it_from_the_playlist(native_sql_calls, st
     assert store.road_trip.get_road_trip_draft(rid)["stats"]["their_count"] > 0
 
 
+def test_library_genre_slider_counts_yours_and_blend_together(store, monkeypatch):
+    library = []
+    for group, genre, count in [('blend', 'Rock', 14), ('own', 'Rock', 20), ('own', 'Jazz', 20)]:
+        for index in range(count):
+            video = f'{group}-{genre}-{index}'
+            artist = 'Passenger Artist' if group == 'blend' else f'Artist {video}'
+            library.append(dict(key=video, video_id=video, title=video, artist=artist, genre=genre,
+                                year=1995, duration=240, album='', thumbnail=None, liked=False))
+    guests = [dict(video_id=f'guest-{i}', title=f'Guest Song {i}', artist=f'Guest Artist {i}',
+                   genre='Pop', album='', thumbnail=None, duration=240) for i in range(20)]
+    seed_publication_subjects(store, [{**row, 'duration_s': row['duration']} for row in library])
+    monkeypatch.setattr(type(store.rec_query), 'library_songs', lambda self: library)
+    monkeypatch.setattr(candidates, 'other_input_songs', lambda *_a, **_kw: (guests, []))
+    monkeypatch.setattr(candidates, '_facts', lambda *_a: {'genre': 'Pop', 'year': 1995, 'duration': 240})
+    monkeypatch.setattr('yt_playlist.controllers.road_trip_drafts.random.randrange', lambda *_a: 7)
+    client, _ = _app(store, monkeypatch=monkeypatch)
+    rid = _recipe(store, artists=['Passenger Artist'], target_minutes=48)
+    assert client.post(f'/road_trip/recipes/{rid}/build').status_code == 200
+
+    for share, expected_notice in [('50', False), ('25', True)]:
+        response = client.post(f'/road_trip/draft/{rid}/tilt/v2', data={
+            'party': 'mine', 'axis': 'genre:Rock', 'share': share})
+        assert response.status_code == 200
+        draft = store.road_trip.get_road_trip_draft(rid)
+        assert Counter(row['mix_source'] for row in draft['picked']) == {'yours': 4, 'blend': 4, 'theirs': 4}
+        assert Counter(row['genre'] for row in draft['picked'] if row['source'] == 'mine') == {'Rock': 4, 'Jazz': 4}
+        assert draft['stats']['minutes'] == 48 and draft['stats']['short'] == {}
+        assert ('The playlist fell short of this genre balance.' in response.text) == expected_notice
+
+
 def test_a_slider_past_the_pool_kicks_off_a_search(native_sql_calls, store, monkeypatch):
     """Dragging a genre past what was drawn queues YouTube searches and keeps the panel polling,
     rather than settling for the pool it happens to have."""
@@ -699,7 +734,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(native_
     completion = re.search(r'\bgenComplete\((.*?)\);', response.text, re.S)
     assert completion is not None
     assert json.loads('[' + completion.group(1) + ']') == [
-        'road-trip-failure', None, True, False, False, None]
+        'road-trip-failure', None, True, False, False, None, None]
     assert "private provider details" not in response.text
     assert "window.location.assign" not in response.text
     assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] is None
@@ -738,6 +773,98 @@ def test_autocomplete_artists(store):
     r = c.get("/road_trip/autocomplete/artists?q=Tame")
     assert r.status_code == 200
     assert r.json()["results"] == ["Tame Impala"]     # deduped
+
+
+def test_same_name_passenger_edit_preserves_exact_artist_through_build(store, monkeypatch):
+    channels = ['UCLeftArtist', 'UCRightArtist']
+    artist_keys = [f'@artist:{store.artists.ensure_artist("Twins", provider="youtube", provider_id=channel)}'
+                   for channel in channels]
+
+    class Provider(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.requested = []
+
+        def search(self, query, filter='songs'):
+            assert filter == 'artists'
+            return [{'artist': 'Twins', 'browseId': channel} for channel in channels]
+
+        def get_artist(self, channel):
+            self.requested.append(channel)
+            other = next(artist for artist in channels if artist != channel)
+            return {'songs': {'results': [
+                {'videoId': f'wrong-{other}', 'title': 'Same-name artist',
+                 'artists': [{'name': 'Twins', 'id': other}], 'duration_seconds': 300},
+                {'videoId': f'guest-{channel}', 'title': f'Song {channel}',
+                 'artists': [{'name': 'Collaborator', 'id': 'UCCollaborator'},
+                             {'name': 'Twins', 'id': channel}], 'duration_seconds': 300},
+            ]}}
+
+    monkeypatch.setattr(candidates, '_facts', lambda *args: {'duration': 300, 'year': 2000})
+    provider = Provider()
+    client, _ = _app(store, provider, monkeypatch)
+    suggestions = client.get('/road_trip/autocomplete/artists?q=Twins').json()['results']
+    assert suggestions == [{'key': key, 'name': 'Twins'} for key in artist_keys]
+    fields = {'name': 'Passenger Twins', 'own_pct': 0, 'target_minutes': 15}
+    saved = client.post('/road_trip/recipes', data={**fields, 'artists': json.dumps([artist_keys[1]])})
+    assert saved.status_code == 200
+    recipe_id = _editor_recipe_id(saved.text)
+    assert client.post(f'/road_trip/recipes/{recipe_id}/build').status_code == 200
+    assert provider.requested == [channels[1]]
+    state = store.road_trip.get_road_trip_draft(recipe_id)
+    assert state['picks'] == [f'guest-{channels[1]}']
+    assert state['inputs']['artists'] == [artist_keys[1]]
+
+    updated = client.post('/road_trip/recipes', data={**fields, 'id': recipe_id,
+                          'artists': json.dumps([artist_keys[0]])})
+    assert updated.status_code == 200
+    assert provider.requested == channels[::-1]
+    state = store.road_trip.get_road_trip_draft(recipe_id)
+    assert [row['video_id'] for row in state['pool']] == [f'guest-{channels[0]}']
+    assert state['picks'] == [f'guest-{channels[0]}']
+
+
+@pytest.mark.parametrize('action', ['slot/0', 'shuffle'])
+@pytest.mark.parametrize('resolved', [True, False], ids=['saved-artist-id', 'name-only'])
+def test_draft_without_artist_refs_uses_its_saved_recipe(store, monkeypatch, action, resolved):
+    client, _ = _app(store, monkeypatch=monkeypatch)
+    vectors = []
+    for video, artist, channel, vector in (
+        ('left-seed', 'Twins', 'UCLeftArtist', [0, 1]),
+        ('right-seed', 'Twins', 'UCRightArtist', [1, 0]),
+        ('left-fit', 'First Artist', 'UCFirst', [0, 1]),
+        ('right-fit', 'Second Artist', 'UCSecond', [1, 0]),
+    ):
+        store.tracks.upsert_track(video, video, artist, duration_s=300,
+                                  credits=[{'name': artist, 'id': channel}])
+        key = store.tracks.identity_key_for_video(video)
+        vectors.append((key, np.array(vector, dtype=np.float32).tobytes()))
+    store.rec_model.replace_rec_content_vectors(vectors)
+
+    artist_id = store.artists.ensure_artist('Twins', provider='youtube', provider_id='UCRightArtist')
+    selected = f'@artist:{artist_id}' if resolved else 'Twins'
+    recipe_id = store.road_trip.save_road_trip_recipe(None, 'Trip', 100, [selected], [], 15, 1000)
+    assert client.post(f'/road_trip/recipes/{recipe_id}/build').status_code == 200
+    draft = store.road_trip.get_road_trip_draft(recipe_id)
+    assert draft['picks'] and not draft['building']
+    draft['inputs'] = {'artists': ['Twins'], 'genres': []}
+    store.road_trip.save_road_trip_draft(recipe_id, draft, 1000)
+
+    fits = []
+    rank = RoadTripFacts.ranking
+
+    def observe_ranking(facts, state, own, now):
+        result = rank(facts, state, own, now)
+        fits.append((result.passenger_fit['right-fit'], result.passenger_fit['left-fit']))
+        return result
+
+    monkeypatch.setattr(RoadTripFacts, 'ranking', observe_ranking)
+    assert client.post(f'/road_trip/draft/{recipe_id}/{action}').status_code == 200
+    saved = store.road_trip.get_road_trip_draft(recipe_id)
+    assert saved['inputs']['artists'] == [selected]
+    if action == 'slot/0':
+        assert saved['banned'] == [draft['picks'][0]]
+    assert fits == [(1., 0. if resolved else 1.)]
 
 
 def test_artist_genre_lookup_feeds_the_form(store, monkeypatch):

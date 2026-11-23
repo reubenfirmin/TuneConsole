@@ -1,21 +1,11 @@
 """The current Home offer deduplication window, independent of display output."""
 import json
 
+from . import worker_settings
 from .recommendation_work import finite
 
+KEY = 'home_shown'
 MAX_SIGNATURES = 100
-
-
-def prepared_owner(conn):
-    if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='home_offer_dedup'").fetchone():
-        return False
-    return bool(conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='published_offers'").fetchone()
-                and conn.execute('SELECT 1 FROM published_offers WHERE id=1').fetchone())
-
-
-def available(conn):
-    return bool(conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='home_offer_dedup'").fetchone()
-                or prepared_owner(conn))
 
 
 def parse(value, built_at):
@@ -35,29 +25,20 @@ def parse(value, built_at):
 
 
 def read(conn):
-    prefix = 'prepared_' if prepared_owner(conn) else ''
-    row = conn.execute('SELECT epoch FROM ' + prefix + 'home_offer_dedup WHERE id=1').fetchone()
-    if row is None:
+    raw = worker_settings.read(conn, KEY)
+    if raw is None:
         return None
-    owner = '' if prefix else ' WHERE owner_id=1'
-    return {'epoch': row[0], 'signatures': [item[0] for item in conn.execute(
-        'SELECT signature FROM ' + prefix + 'home_offer_signatures' + owner + ' ORDER BY signature')]}
+    value = json.loads(raw)
+    return {'epoch': value['epoch'], 'signatures': value['signatures']}
 
 
 def replace(conn, value, built_at):
     if not conn.in_transaction:
         raise RuntimeError('Home offer replacement requires an outer transaction')
     parsed = parse(value, built_at)
-    if prepared_owner(conn):
-        conn.execute("INSERT INTO rec_proposals(surface,payload,built_at) VALUES ('home_shown',?,?) "
-                     'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
-                     (json.dumps(value), built_at))
-        return
-    conn.execute('DELETE FROM home_offer_signatures WHERE owner_id=1')
     if parsed is None:
-        conn.execute('DELETE FROM home_offer_dedup WHERE id=1')
+        worker_settings.save(conn, KEY, None)
         return
     epoch, signatures = parsed
-    conn.execute('INSERT INTO home_offer_dedup VALUES (1,?,?) ON CONFLICT(id) '
-                 'DO UPDATE SET epoch=excluded.epoch,built_at=excluded.built_at', (epoch, built_at))
-    conn.executemany('INSERT INTO home_offer_signatures VALUES (1,?)', [(item,) for item in signatures])
+    value = json.dumps({'epoch': epoch, 'built_at': built_at, 'signatures': signatures})
+    worker_settings.save(conn, KEY, value)

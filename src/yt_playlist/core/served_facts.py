@@ -1,14 +1,11 @@
 """Captured reporting facts; opaque diagnostics belong to keyed JSON files."""
 import hashlib
-from contextlib import contextmanager, ExitStack
 from . import fao
 import json
 import math
-import os
 from pathlib import Path
 import tempfile
 
-from . import policy_documents
 from .evidence_ledger import canonical
 
 RETAIN_SECONDS = 30 * 86400
@@ -19,6 +16,7 @@ FIELDS = ('policy_kind', 'ranker', 'video_id', 'artist', 'genre', 'ownership', '
 
 
 def definitions():
+    """The original change 10 schema, used during installed upgrades."""
     yield 'served_fact_state', '''CREATE TABLE served_fact_state (
         id INTEGER PRIMARY KEY CHECK(id=1), active INTEGER NOT NULL CHECK(active IN (0,1)),
         next_id INTEGER NOT NULL CHECK(next_id>0))'''
@@ -48,21 +46,15 @@ def definitions():
 
 
 def available(conn):
-    return bool(conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='served_fact_state'").fetchone())
-
-
-def active(conn):
-    return available(conn) and bool(conn.execute('SELECT active FROM served_fact_state WHERE id=1').fetchone()[0])
+    return any(row[1] == 'policy_kind' for row in conn.execute('PRAGMA main.table_info(rec_served_impressions)'))
 
 
 def install(conn, context=None):
-    if available(conn):
+    if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='served_fact_state'").fetchone():
         validate(conn)
         return
     for _, sql in definitions():
         conn.execute(sql)
-    # Even an empty installed database starts in compatibility mode. Activation
-    # is explicit, never an implicit conversion during ordinary application use.
     conn.execute('INSERT INTO served_fact_state VALUES (1,0,1)')
 
 
@@ -136,39 +128,6 @@ def _encoded(identity, at, trace):
     return encoded
 
 
-def _replaceable(conn, identity, encoded):
-    root = directory(conn)
-    path = root / relative(identity)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # The caller reserves SQLite's writer before allocating or preparing an ID.
-    # A failed transaction may leave this ID's orphan; no published owner changes.
-    if conn.execute('SELECT 1 FROM served_facts WHERE impression_id=?', (identity,)).fetchone():
-        raise ValueError('Served diagnostic is immutable')
-    # Failed publications can leave an ID's orphan. A reused legacy ID must
-    # also respect readers of its former owner before replacing that file.
-    if path.is_file() and fao.read(path).bytes != encoded:
-        with (root / '.readers.lock').open('a+b') as lock:
-            unlock = policy_documents._try_file_lock(lock, exclusive=True)
-            if unlock is None:
-                raise ValueError('Served diagnostic identity is still retained by a reader; retry preparation')
-            unlock()
-    return path
-
-
-def _capture(conn, identity, trace):
-    marks = ','.join('?' for _ in FIELDS)
-    conn.execute('INSERT INTO served_facts(impression_id,' + ','.join(FIELDS) + ') VALUES (?,' + marks + ')',
-                 (identity, *extract(trace)))
-    conn.execute('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', (identity,))
-
-
-def publish(conn, identity, at, trace):
-    encoded = _encoded(identity, at, trace)
-    path = _replaceable(conn, identity, encoded)
-    fao.write(path, encoded)
-    _capture(conn, identity, trace)
-
-
 def diagnostic(conn, row):
     if row['diagnostic_expired']:
         return None
@@ -194,75 +153,15 @@ def _verified_diagnostic(encoded, row):
     return body['provenance']
 
 
-def expression(conn, field, legacy, alias=''):
-    """Installed compatibility reads use old JSON only for not-yet-prepared rows."""
-    if not available(conn):
-        return legacy
+def expression(field, legacy, alias=''):
+    """Read the original inline trace when the impression has no diagnostic file."""
     prefix = alias + '.' if alias else ''
-    return (f'CASE WHEN EXISTS(SELECT 1 FROM served_facts f WHERE f.impression_id={prefix}id) '
-            f'THEN (SELECT {field} FROM served_facts f WHERE f.impression_id={prefix}id) ELSE {legacy} END')
+    return f'CASE WHEN {prefix}policy_kind IS NOT NULL THEN {prefix}{field} ELSE {legacy} END'
 
 
-def _missing(conn, limit):
-    return conn.execute('SELECT i.id,i.served_at,i.provenance FROM rec_served_impressions i '
-        'LEFT JOIN served_facts f ON f.impression_id=i.id WHERE f.impression_id IS NULL ORDER BY i.id LIMIT ?',
-        (limit,)).fetchall()
-
-
-def _activate(conn):
-    conn.execute('UPDATE served_fact_state SET active=1,next_id=max(next_id,'
-                 '(SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions)) WHERE id=1')
-
-
-@contextmanager
-def staged_batch(conn, limit=128):
-    """Prepare files off-writer; publish only if their captured owners survive.
-
-    A changed or concurrently prepared input returns None, asking the caller
-    to retry rather than publishing stale facts or declaring completion.
-    """
-    if conn.in_transaction:
-        raise RuntimeError('Diagnostic staging requires an idle connection')
-    if type(limit) is not int or not 1 <= limit <= 256:
-        raise ValueError('Invalid served preparation batch size')
-    rows = [tuple(row) for row in _missing(conn, limit)]
-    with ExitStack() as cleanup:
-        prepared = []
-        for identity, at, provenance in rows:
-            trace = json.loads(provenance)
-            encoded = _encoded(identity, at, trace)
-            path = directory(conn) / relative(identity)
-            file = fao.prepare(path, encoded)
-            cleanup.callback(file.close)
-            prepared.append((identity, encoded, trace, file))
-
-        def publish_prepared():
-            if not conn.in_transaction:
-                raise RuntimeError('Diagnostic publication requires a writer reservation')
-            if [tuple(row) for row in _missing(conn, limit)] != rows:
-                return None
-            for identity, encoded, trace, file in prepared:
-                _replaceable(conn, identity, encoded)
-                file.publish()
-                _capture(conn, identity, trace)
-            if not rows:
-                _activate(conn)
-            return len(rows)
-        yield publish_prepared
-
-
-def prepare_batch(conn, limit=128):
-    """Explicit bounded preparation. Caller commits each batch before continuing."""
-    if not 1 <= limit <= 256:
-        raise ValueError('Invalid served preparation batch size')
-    if not conn.in_transaction:
-        conn.execute('BEGIN IMMEDIATE')
-    rows = _missing(conn, limit)
-    for row in rows:
-        publish(conn, row['id'], row['served_at'], json.loads(row['provenance']))
-    if not rows:
-        _activate(conn)
-    return len(rows)
+def captured(row):
+    if row['policy_kind'] is not None:
+        return {key: row[key] for key in (*FIELDS, 'diagnostic_expired')}
 
 
 def compact_provenance(encoded):
@@ -272,107 +171,10 @@ def compact_provenance(encoded):
     return json.dumps(thin, separators=(',', ':'))
 
 
-def insert(conn, rows):
-    if not conn.in_transaction:
-        conn.execute('BEGIN IMMEDIATE')
-    for row in rows:
-        if conn.execute('SELECT 1 FROM rec_served_impressions WHERE request_id=? AND surface=? AND rank=?',
-                        (row[0], row[1], row[5])).fetchone():
-            continue
-        identity = conn.execute('SELECT next_id FROM served_fact_state WHERE id=1').fetchone()[0]
-        identity = max(identity, conn.execute('SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions').fetchone()[0])
-        trace = json.loads(row[8])
-        # Old policy-reference triggers still own these relationships until #626.
-        compact = (*row[:8], compact_provenance(row[8]), row[9])
-        conn.execute('INSERT INTO rec_served_impressions(id,request_id,surface,lane,mode_id,identity_key,rank,'
-                     'score,model_version,provenance,served_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)', (identity, *compact))
-        publish(conn, identity, row[9], trace)
-        conn.execute('UPDATE served_fact_state SET next_id=? WHERE id=1', (identity + 1,))
-
-
-def expire(conn, now, limit=256):
-    """The caller holds the exclusive file lifetime fence and writer reservation."""
-    if not available(conn):
-        return 0
-    identities = [row[0] for row in conn.execute('SELECT f.impression_id FROM rec_served_impressions i '
-        'JOIN served_facts f ON f.impression_id=i.id WHERE i.served_at<? AND f.diagnostic_expired=0 '
-        'ORDER BY i.served_at,i.id LIMIT ?', (now - RETAIN_SECONDS, limit))]
-    # Commit intentional expiry before unlinking. A crash can leave extra files,
-    # but never a published diagnostic whose file maintenance has removed.
-    conn.executemany('UPDATE served_facts SET diagnostic_expired=1 WHERE impression_id=?', [(i,) for i in identities])
-    conn.executemany('INSERT OR IGNORE INTO served_diagnostic_retirements VALUES (?)', [(i,) for i in identities])
-    conn.commit()
-    for identity in identities:
-        fao.delete(directory(conn) / relative(identity), missing_ok=True)
-    return len(identities)
-
-
-def collect_retired(conn, limit=256):
-    """Caller holds the exclusive lifetime fence; the durable queue survives crashes."""
-    rows = conn.execute('SELECT impression_id FROM served_diagnostic_retirements ORDER BY impression_id LIMIT ?',
-                        (limit,)).fetchall()
-    for identity, in rows:
-        current = conn.execute('SELECT diagnostic_expired FROM served_facts WHERE impression_id=?', (identity,)).fetchone()
-        if current is None or current[0]:
-            path = directory(conn) / relative(identity)
-            if path.exists() and not fao.delete(path, missing_ok=True):
-                continue
-        conn.execute('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', (identity,))
-    return len(rows)
-
-
-def collect_orphans(conn, now, limit=256):
-    """Bound directory visits as well as deletions; restart repeats one shard.
-
-    Caller owns the domain's exclusive reader fence and SQLite writer reservation,
-    so neither a pinned reader nor an uncommitted publisher can lose its file.
-    """
-    if not conn.in_transaction:
-        raise RuntimeError('Orphan collection requires the diagnostic writer reservation')
-    root = directory(conn)
-    progress = root / '.orphan-collection.json'
-    current = getattr(conn, '_served_orphan_gc', None)
-    shard = (json.loads(fao.read(progress).bytes)['shard'] if progress.exists() else 0) if current is None else current[0]
-    removed = 0
-    for _ in range(limit):
-        if current is None:
-            directory_path = root / str(shard).zfill(2)
-            try:
-                iterator = os.scandir(directory_path)
-            except FileNotFoundError:
-                iterator = iter(())
-            current = shard, iterator
-            conn._served_orphan_gc = current
-            if hasattr(iterator, 'close'):
-                conn._close_callbacks.append(iterator.close)
-        try:
-            entry = next(current[1])
-        except StopIteration:
-            if hasattr(current[1], 'close'):
-                current[1].close()
-                conn._close_callbacks.remove(current[1].close)
-            shard = (shard + 1) % 100
-            current = conn._served_orphan_gc = None
-            continue
-        if not entry.is_file(follow_symlinks=False) or not entry.name.endswith('.json') or not entry.name[:-5].isdecimal():
-            continue
-        identity = int(entry.name[:-5])
-        if identity < 1 or root / relative(identity) != Path(entry.path):
-            continue
-        if conn.execute('SELECT 1 FROM rec_served_impressions WHERE id=?', (identity,)).fetchone():
-            continue
-        info = fao.read(entry.path).info
-        if info.ctime_ns / 1e9 <= now - RETAIN_SECONDS:
-            removed += fao.delete(entry.path, expected=info.identity, missing_ok=True)
-    # Persist once per bounded pass. A crash may rescan a shard, never skip it.
-    fao.write(progress, canonical({'shard': shard}))
-    return removed
-
-
 def references(conn):
     if available(conn):
-        yield from conn.execute('SELECT i.id,i.served_at,f.* FROM rec_served_impressions i '
-                                'JOIN served_facts f ON f.impression_id=i.id WHERE f.diagnostic_expired=0')
+        yield from conn.execute('SELECT id,served_at,' + ','.join(FIELDS) + ',diagnostic_expired '
+                                'FROM rec_served_impressions WHERE policy_kind IS NOT NULL AND diagnostic_expired=0')
 
 
 def export(conn, target):

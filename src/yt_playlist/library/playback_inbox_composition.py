@@ -1,14 +1,13 @@
-"""Bind the independent inbox database and its database-free observation files."""
+"""Bind the FAO-managed inbox after any installed queue cutover."""
 from pathlib import Path
-import tempfile
 
 from yt_playlist.controllers.playback_inbox import PlaybackInbox
-from yt_playlist.core.playback_observation_files import ObservationFiles
-from yt_playlist.repos.playback_inbox import PlaybackInboxRepo
+from yt_playlist.core.playback_inbox_file import InboxFile, inbox_path
+from yt_playlist.core.playback_inbox_upgrade import legacy_path, upgrade
 
 
 def inbox_for_database(database, memory_key):
-    path = (Path(database).with_name(Path(database).name + '.playback-feedback.sqlite3') if database else
-            Path(tempfile.gettempdir()) / ('tuneconsole-playback-' + memory_key + '.sqlite3'))
-    return PlaybackInbox(PlaybackInboxRepo(path), ObservationFiles(
-        path.with_name(path.name + '.observations'), path.with_name(path.name + '.lock')))
+    file = InboxFile(inbox_path(database, memory_key))
+    if database is not None:
+        upgrade(file, legacy_path(Path(database).resolve()))
+    return PlaybackInbox(file)

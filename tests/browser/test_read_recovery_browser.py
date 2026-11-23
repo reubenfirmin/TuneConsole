@@ -1,4 +1,5 @@
 """Expired SQLite reads keep a usable document and retry without user action."""
+from contextvars import ContextVar
 import json
 from pathlib import Path
 import sqlite3
@@ -12,40 +13,63 @@ from playwright.sync_api import expect
 from tests.browser_fixtures import _free_port
 from tests.live_server import LiveServer
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
+from yt_playlist.core.lock_diagnostics import database_operation
 from yt_playlist.web.app import create_app
-from yt_playlist.web.routes import audio_preview
+from yt_playlist.core import updatecheck
 
 
 @pytest.fixture
 def recovery_app(file_backed_store, monkeypatch):
     store = file_backed_store
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     entry = store.tracks.upsert_track('v', 'Song', 'Artist', None, 100)
     playlist = store.playlists.upsert_playlist(account, 'PL', 'My music', 1, 'h', 1)
     store.playlists.set_playlist_tracks(playlist, [entry])
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
-    state = SimpleNamespace(remaining=2, attempts=[], connections=[], mutations=0, confirmed_mutations=0)
+    state = SimpleNamespace(remaining=2, attempts=[], expired_reads=[], mutations=0, confirmed_mutations=0)
     original = store.collection.collection_artists
+    timed_read = ContextVar('timed_read', default=None)
+    gate = store._analytics_readers
+    acquire, release = gate.acquire, gate.release
+
+    def acquire_reader(*args, **kwargs):
+        acquired = acquire(*args, **kwargs)
+        events = timed_read.get()
+        if acquired and events is not None:
+            events.append('acquired')
+        return acquired
+
+    def release_reader(*args, **kwargs):
+        release(*args, **kwargs)
+        events = timed_read.get()
+        if events is not None:
+            events.append('released')
+
+    monkeypatch.setattr(gate, 'acquire', acquire_reader)
+    monkeypatch.setattr(gate, 'release', release_reader)
 
     def artists():
         state.attempts.append(time.monotonic())
         if state.remaining:
             state.remaining -= 1
-            with store.read_view() as reader:
-                state.connections.append(reader.conn)
-                with work_budget(.005):
-                    reader.conn.execute('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL '
-                        'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
+            events = []
+            token = timed_read.set(events)
+            try:
+                with store.read_view() as reader:
+                    state.expired_reads.append((reader.conn, events))
+                    with work_budget(.005):
+                        reader.conn.execute('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL '
+                            'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
+            finally:
+                timed_read.reset(token)
         return original()
 
     monkeypatch.setattr(store.collection, 'collection_artists', artists)
     # Recovery pages must keep the same heartbeat that prevents a packaged
     # backend from deciding its UI has closed after a plain error document.
     monkeypatch.setenv('YT_PLAYLIST_EXIT_ON_IDLE', '1')
-    # This journey exercises preview navigation and retained feedback, not model
-    # inference. CI does not install the optional audio model bundle.
-    monkeypatch.setattr(audio_preview, 'available', lambda: True)
+    monkeypatch.setattr(updatecheck, 'is_dev_install', lambda: True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1, background_work=False)
 
     @app.get('/test-fragment')
@@ -109,10 +133,10 @@ def test_initial_document_recovers_from_repeated_sql_timeouts(page, recovery_app
     card.get_by_role('button', name=DESCRIPTIONS['concentrate'], exact=True).click()
     page.wait_for_function('JSON.parse(localStorage.getItem(' + json.dumps(CARDS) + '))[0].dirty')
     page.evaluate('window.retainedVibeCard=document.querySelector("[data-vibe-card]")')
-    # Enter and leave preview through the app's intercepted links after recovery.
+    # Enter and leave the model map through intercepted links after recovery.
     page.locator('.topbar').get_by_role('button', name='Tools', exact=True).click()
-    page.locator('.topbar').get_by_role('link', name='Audio analysis preview', exact=True).click()
-    expect(page.locator('[data-audio-preview]')).to_be_visible()
+    page.locator('.topbar').get_by_role('link', name='Model map', exact=True).click()
+    expect(page.locator('.page-model-admin')).to_be_visible()
     expect(page.locator('[data-audio-vibe-banner]')).to_be_hidden()
     page.locator('.topbar').get_by_role('link', name='Playlists', exact=True).click()
     expect(page.locator('main h1')).to_have_text('Playlists')
@@ -127,19 +151,16 @@ def test_initial_document_recovers_from_repeated_sql_timeouts(page, recovery_app
     assert len(state.attempts) == 3
     assert state.attempts[2] - state.attempts[1] >= 1.8
     assert heartbeats and not errors
-    for connection in state.connections:
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            connection.execute('SELECT 1')
-    # The timed-out requests released every admission slot and the writer.
-    permits = []
-    try:
-        for _ in range(4):
-            assert store._analytics_readers.acquire(blocking=False)
-            permits.append(True)
-    finally:
-        for _ in permits:
-            store._analytics_readers.release()
-    store.settings.set_setting('after_timeout', 'saved')
+    # A successful reader may be active while the two expired reads have each
+    # released their own permit and connection. Writes can still proceed.
+    with database_operation('subsequent successful read'), store.read_view() as reader:
+        assert reader.conn.execute('SELECT 1').fetchone()[0] == 1
+        assert len(state.expired_reads) == 2
+        for connection, events in state.expired_reads:
+            assert events == ['acquired', 'released']
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                connection.execute('SELECT 1')
+        store.settings.set_setting('after_timeout', 'saved')
     assert store.settings.get_setting('after_timeout') == 'saved'
     page.screenshot(path='/tmp/tuneconsole-882-read-recovered.png')
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from yt_playlist.rec import road_trip_state as road_trip
+from yt_playlist.rec.road_trip_artists import recipe_inputs
 from yt_playlist.rec.road_trip_axes import canonical_genre
 from yt_playlist.util.matching import identity_key
 
@@ -30,7 +31,16 @@ class RoadTripDrafts:
 
     def _read(self, recipe_id):
         state = self.repository.get_road_trip_draft(recipe_id)
-        return self.transitions.normalize(state, self.now()) if state is not None else None
+        return self._normalize(recipe_id, state) if state is not None else None
+
+    def _normalize(self, recipe_id, state):
+        inputs = state.get('inputs') or {}
+        if inputs.get('artists') and 'artist_refs' not in inputs:
+            recipe = self.repository.get_road_trip_recipe(recipe_id)
+            if recipe and recipe.get('artist_refs'):
+                saved = recipe_inputs(recipe)
+                state['inputs'] = {**inputs, 'artists': saved['artists'], 'artist_refs': saved['artist_refs']}
+        return self.transitions.normalize(state, self.now())
 
     def _replace(self, recipe_id, state, client):
         """A user change invalidates every acquisition based on the preceding state."""
@@ -50,7 +60,7 @@ class RoadTripDrafts:
         """Resolve a genre for any newly added artist, save the recipe, then refresh its draft."""
         artists, genres = list(artists), list(genres)
         previous = self.repository.get_road_trip_recipe(recipe_id) if recipe_id is not None else None
-        previous_artists = {a.casefold() for a in (previous or {}).get("artists", [])}
+        previous_artists = {a.casefold() for a in recipe_inputs(previous or {})['artists']}
         known_genres = {canonical_genre(g) for g in genres}
         for artist in artists:
             if artist.casefold() in previous_artists:
@@ -63,9 +73,11 @@ class RoadTripDrafts:
             recipe_id = self.repository.save_road_trip_recipe(
                 recipe_id, name, own_pct, artists, genres, target_minutes, self.now(),
                 familiarity_pct=familiarity_pct, blacklist_genres=blacklist_genres)
-            state = self._read(recipe_id)
+            state = self.repository.get_road_trip_draft(recipe_id)
             job = None
             if state is not None:
+                # The edit compares the inputs used by the draft with the recipe just saved.
+                state = self.transitions.normalize(state, self.now())
                 recipe = self.repository.get_road_trip_recipe(recipe_id)
                 state = self.transitions.apply_recipe(state, recipe, self.now())
                 job = self._replace(recipe_id, state, client)
@@ -125,7 +137,7 @@ class RoadTripDrafts:
             if not entry or entry['state'] is None:
                 return None
             rid = entry['recipe_id']
-            state = self.transitions.normalize(entry['state'], self.now())
+            state = self._normalize(rid, entry['state'])
             job = self._jobs.get(rid)
             if state.get('building') and (job is None or job.generation != state.get('generation')):
                 # A process restart can leave a persisted build without a job.
@@ -230,7 +242,7 @@ class RoadTripDrafts:
                     break
                 # Only the detached state is changed during slow acquisition.
                 # User edits can proceed and invalidate this exact revision.
-                self.acquisition.add(state, job.client, state['pending'].pop(0))
+                self.acquisition.add(state, job.client, state['pending'].pop(0), self.now())
                 if not self._publish(job, state):
                     return
                 revision = state['revision']

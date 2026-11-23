@@ -106,18 +106,13 @@ class FreshAcquisition:
 
 
 class LibraryPoolPreparation:
-    def __init__(self, proposals, ledger, recommendations, *, vibe, scheduled, clicked, snapshot, calculate, stamp):
-        self.proposals, self.ledger, self.recommendations = proposals, ledger, recommendations
-        self.vibe, self.scheduled, self.clicked = vibe, scheduled, clicked
-        self.snapshot, self.calculate, self.stamp = snapshot, calculate, stamp
+    def __init__(self, ledger, recommendations, *, vibe, scheduled, snapshot):
+        self.ledger, self.recommendations = ledger, recommendations
+        self.vibe, self.scheduled, self.snapshot = vibe, scheduled, snapshot
 
     def prepare(self, now, parameters):
         if self.vibe(now):
             return self.scheduled(now)
-        if not self.clicked:
-            tracks = self.stamp(self.calculate(now, parameters), now, parameters['lane'])
-            return self.proposals.put_proposals(f"home_pool:{parameters['lane']}",
-                {'parameters': parameters, 'tracks': tracks}, now)
         with self.snapshot() as capture:
             tracks = capture.calculate(now, parameters)
             policies = capture.policies(now)

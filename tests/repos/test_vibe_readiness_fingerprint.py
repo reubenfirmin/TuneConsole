@@ -1,4 +1,4 @@
-"""Keep persisted readiness hashes compatible while batching cursor reads."""
+"""Keep persisted readiness hashes compatible across query changes."""
 from contextlib import closing
 import hashlib
 import json
@@ -8,9 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from yt_playlist.core import vibe_versions
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 from yt_playlist.controllers.musical_profiles import MusicalProfiles
+from yt_playlist.rec.vibe_score_policy import score_patterns
 
 
 @pytest.mark.parametrize('normalized', [False, True])
@@ -18,28 +20,30 @@ from yt_playlist.controllers.musical_profiles import MusicalProfiles
 def test_readiness_hash_retains_exact_legacy_page_bytes(tmp_path, normalized, count):
     with closing(sqlite3.connect(tmp_path / 'fingerprint.db', factory=DiagnosticConnection)) as conn:
         conn.row_factory = sqlite3.Row
-        conn.execute('CREATE TABLE recordings(id INTEGER PRIMARY KEY,identity_key TEXT UNIQUE)')
-        conn.execute('CREATE TABLE rec_musical_profiles(identity_key TEXT PRIMARY KEY,version TEXT,digest TEXT)')
+        conn.execute('CREATE TABLE recordings(id INTEGER PRIMARY KEY,identity_key TEXT UNIQUE,'
+                     'musical_profile_version TEXT,musical_profile_digest TEXT)')
         conn.execute('CREATE TABLE measurements(' + ('model_version_id INTEGER' if normalized else 'model_version TEXT') + ')')
         conn.execute('CREATE TABLE vibe_versions(id INTEGER PRIMARY KEY,value TEXT)')
         version_column = 'inputs_version_id INTEGER' if normalized else 'inputs_version TEXT'
         conn.execute('CREATE TABLE recording_vibes(recording_id INTEGER,vibe TEXT,score REAL,'
-                     'support TEXT,source TEXT,' + version_column + ')')
-        versions = ['exact policy | café', 'another policy ' * 80]
+                     'support TEXT,source TEXT,' + version_column + ',measurement_id INTEGER,prediction_id INTEGER,'
+                     'artist_key TEXT,subgenre_key TEXT,recordings INTEGER,variance REAL)')
+        vibe_versions.install_application_relations(conn)
+        conn.execute('CREATE VIEW served_vibe_fits AS SELECT * FROM vibe_recording_fits')
+        prefix = score_patterns()[0].removesuffix('*')
+        versions = [prefix + 'exact policy | café', prefix + 'another policy ' * 80]
         conn.executemany('INSERT INTO vibe_versions VALUES (?,?)', enumerate(versions, 1))
         expected_rows = {}
         for index in range(count):
             key = f'{index:04}|café'
-            conn.execute('INSERT INTO recordings VALUES (?,?)', (index + 1, key))
             profile = (f'profile-{index % 2}', f'digest-{index}') if index % 3 else (None, None)
-            if profile[0] is not None:
-                conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?)', (key, *profile))
+            conn.execute('INSERT INTO recordings VALUES (?,?,?,?)', (index + 1, key, *profile))
             rows = []
             if index % 4:
                 # Deliberately insert opposite to the required vibe order.
                 for vibe, serial in [('relax', 1), ('concentrate', 0)]:
-                    fit = (vibe, .125 + serial / 2, '{"support":0.8}', 'exact source')
-                    conn.execute('INSERT INTO recording_vibes VALUES (?,?,?,?,?,?)',
+                    fit = (vibe, .125 + serial / 2, '{"support":0.8}', 'audio_measurement')
+                    conn.execute('INSERT INTO recording_vibes VALUES (?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,NULL)',
                                  (index + 1, *fit, serial + 1 if normalized else versions[serial]))
                     rows.append((key, *profile, *fit, versions[serial]))
             expected_rows[key] = sorted(rows, key=lambda row: row[3]) or [(key, *profile, *([None] * 5))]
@@ -54,5 +58,6 @@ def test_readiness_hash_retains_exact_legacy_page_bytes(tmp_path, normalized, co
         assert profiles.readiness_fingerprint(iter(keys)) == digest.hexdigest()
         if count:
             with conn:
-                conn.execute("INSERT INTO rec_musical_profiles VALUES ('0000|café','new','changed')")
+                conn.execute("UPDATE recordings SET musical_profile_version='new',musical_profile_digest='changed' "
+                             "WHERE identity_key='0000|café'")
             assert profiles.readiness_fingerprint(keys) != digest.hexdigest()

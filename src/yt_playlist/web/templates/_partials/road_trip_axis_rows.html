@@ -28,6 +28,9 @@
   {% endfor %}
   <p class="notice warning" x-show="error" x-text="error" x-cloak></p>
   {% if s.building %}<p class="section-note">Updating the mix…</p>{% endif %}
+  {% if not s.building and kind in s.stats.get('balance_short', {}).get(party, []) %}
+  <p class="section-note">The playlist fell short of this {{ 'genre' if kind == 'genre' else 'year' }} balance.</p>
+  {% endif %}
   {% if rows | selectattr('target', 'number') | list %}
   <button type="button" class="btn-ghost btn-sm" {{ 'disabled' if s.building else '' }}
     hx-post="/road_trip/draft/{{ rid }}/unpin"

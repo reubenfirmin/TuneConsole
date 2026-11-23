@@ -7,7 +7,8 @@
     <h2 id="radio-tuning-title">Tune streams</h2>
     <div class="radio-tuning-controls">
       <template x-for="axis in tuningAxes" :key="axis.key">
-        <div class="radio-tuning-axis" x-show="axis.key !== 'energy' || typeof growth !== 'undefined' && growth.vibes_ready" :style="'--dial-color:' + axis.color + ';--dial-value:' + tuningDraft[axis.key] + '%;--dial-turn:' + (tuningDraft[axis.key] * .2 - 10) + 'deg'">
+        <div class="radio-tuning-axis" x-show="axis.key !== 'energy' || (typeof growth !== 'undefined' && (growth.nodes.find(node => node.id === 'vibes')?.unlocked ?? growth.vibes_ready))"
+             :style="{'--dial-color': axis.color, '--dial-value': tuningDraft[axis.key] + '%', '--dial-turn': (tuningDraft[axis.key] * .2 - 10) + 'deg'}">
           <label :for="'radio-tune-' + axis.key"><span x-text="axis.low"></span><span x-text="axis.high"></span></label>
           <div class="radio-tuning-fader">
             <div class="radio-tuning-scale" aria-hidden="true">
@@ -30,6 +31,15 @@
           </div>
         </div>
       </template>
+    </div>
+    <div class="radio-tuning-journey">
+      <label for="radio-tune-journey">DJ sequencing</label>
+      <select id="radio-tune-journey" x-model="tuningJourney" :disabled="tuningBusy">
+        <option value="">Follow stream</option>
+        {% for key, label in journey_labels.items() %}
+        <option value="{{ key }}">{{ label }}</option>
+        {% endfor %}
+      </select>
     </div>
     <div class="radio-tuning-status text-muted" x-show="tuningMessage" x-text="tuningMessage" aria-live="polite"></div>
     <footer class="radio-tuning-actions">

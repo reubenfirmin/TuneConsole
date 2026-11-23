@@ -1,9 +1,6 @@
 """Exercise the extracted reconciliation against real storage boundaries."""
 import pytest
 
-from yt_playlist.core.store import Store
-
-
 def identities(store):
     old = store.artists.ensure_artist('Artist')
     target = store.artists.ensure_artist('Artist', provider='youtube', provider_id='channel')
@@ -13,14 +10,23 @@ def identities(store):
 
 def test_controller_reconciliation_merges_discovery_and_similarity_before_redirect(store):
     old, target = identities(store)
+    store.artists.ensure_artist('Neighbor')
+    account = store.accounts.upsert_account('Listener', None, True)
+    store.tracks.upsert_track('played', 'Song', 'Artist')
+    key = store.tracks.identity_key_for_video('played')
+    store.history.record_play_event(account, key, 'played', 86400, source_timezone='UTC')
+    before = {'@artist:' + str(old): 1}
+    assert store.trends.first_play_map('artist') == before
     for aid, when in ((old, 10), (target, 20)):
         store.discovery.mark_scanned(aid, when)
         store.discovery.upsert_discovered_artist('Artist', when, ['captured'], [], None, when, artist_id=aid)
         store.discovery.record_discovery_impressions('artist', [aid], 'same-view', when)
         store.artist_similarity.cache_similar(aid, [['Neighbor', when]], when)
+    assert store.trends.first_play_map('artist') == before
     assert store.artists.ensure_artist('Artist', provider='youtube', provider_id='channel', previous=old) == target
     assert store.artists.resolve(old) == target
-    assert store.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:] == (target, 20)
+    assert store.trends.first_play_map('artist') == {'@artist:' + str(target): 1}
+    assert store.discovery.repository.artist_scan_times([old, target]) == {target: 20}
     candidates = store.discovery.get_discovered_artists()
     assert len(candidates) == 1 and candidates[0]['artist_id'] == target
     assert candidates[0]['offered_count'] == 1 and candidates[0]['found_at'] == 10
@@ -48,32 +54,10 @@ def test_reconciliation_retry_keeps_completed_feature_merge_without_double_count
     assert store.discovery.get_discovered_artists()[0]['offered_count'] == 1
 
 
-@pytest.mark.parametrize('version', [107])
-def test_reconciliation_keeps_installed_formats_writable(tmp_path, _admitted_installed_schema, version):
-    template = _admitted_installed_schema(version)
-    store = Store(tmp_path / 'installed.db')
-    try:
-        template.restore(store)
-        store._bind_repositories()
-        old, target = identities(store)
-        for aid, when in ((old, 10), (target, 20)):
-            store.discovery.mark_scanned(aid, when)
-            store.discovery.upsert_discovered_artist('Artist', 1, [], [], None, when, artist_id=aid)
-            store.discovery.record_discovery_impressions('artist', [aid], 'shared-view', when)
-            store.artist_similarity.cache_similar(aid, [['Neighbor', when]], when)
-        assert store.artists.reconcile_provisional(old, target, source='youtube') == target
-        assert store.artists.resolve(old) == target
-        candidate, = store.discovery.get_discovered_artists()
-        assert candidate['offered_count'] == 1 and candidate['found_at'] == 10
-        assert store.artist_similarity.cached_similar(target, 30) == [['Neighbor', 20]]
-    finally:
-        store.conn.close()
-
-
 def test_artist_origin_collision_rebinds_sources_and_preserves_contributions(store):
     old, target = identities(store)
     entry = store.tracks.upsert_track('v', 'Song', 'Artist')
-    recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
+    recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry,)).fetchone()[0]
     with store.conn.atomic():
         old_origin = store.conn.execute("INSERT INTO discovery_origins(kind,artist_id,resolution_status) VALUES ('artist',?,'resolved')", (old,)).lastrowid
         new_origin = store.conn.execute("INSERT INTO discovery_origins(kind,artist_id,resolution_status) VALUES ('artist',?,'resolved')", (target,)).lastrowid
@@ -104,7 +88,7 @@ def test_release_credit_reconciliation_can_resume_after_an_independent_feature_w
         store.collection.cache_album_tracklist('B', 'Album', 'Artist', None, [], credits=[{'name': 'Artist', 'id': 'channel'}])
     assert store.artists.resolve(old) == old
     assert store.artists.album_credits('B')[0]['artist_id'] == old
-    assert store.collection.cached_album_tracklist_ids() == set()
+    assert not store.collection.has_published_album_tracklist('B')
     monkeypatch.setattr(owner, 'reconcile_artist', original)
     store.collection.cache_album_tracklist('B', 'Album', 'Artist', None, [], credits=[{'name': 'Artist', 'id': 'channel'}])
     assert store.artists.resolve(old) == target

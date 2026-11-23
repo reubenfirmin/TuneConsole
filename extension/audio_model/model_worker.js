@@ -29,47 +29,7 @@ async function initialize() {
     })}),
     fetch('vendor/musicnn/metadata.json').then(r => r.json()),
   ]);
-  const heads = [];
-  for (const config of loaded.bundle.mood_heads || []) {
-    const base = config.id + '/';
-    for (const name of ['model.json', 'group1-shard1of1.bin', 'metadata.json']) await loaded.verify(base + name);
-    const [head, info] = await Promise.all([
-      tf.loadGraphModel('vendor/' + base + 'model.json'),
-      fetch('vendor/' + base + 'metadata.json').then(r => r.json()),
-    ]);
-    heads.push({config, model: head, metadata: info});
-  }
-  return {...loaded, model, metadata, heads, startup_ms: performance.now() - started};
-}
-
-async function moods(embeddings, model, patches) {
-  const traits = {}, models = {};
-  for (const head of model.heads) {
-    let output;
-    try {
-      output = tf.tidy(() => {
-        const input = head.config.id === 'deam' ? embeddings.reshape([patches, 1, 200]) : embeddings;
-        return head.model.execute({[head.model.inputs[0].name]: input}, head.metadata.schema.outputs[0].name);
-      });
-      const matrix = await output.array();
-      if (matrix.length !== patches || matrix.some(row => row.length !== 2 || row.some(v => !Number.isFinite(v))))
-        throw Error('Unexpected mood prediction shape: ' + head.config.id);
-      const classes = head.metadata.classes;
-      const labels = head.config.class ? [head.config.class] : classes;
-      for (const label of labels) {
-        const index = classes.indexOf(label);
-        if (index < 0) throw Error('Missing mood output: ' + label);
-        const values = matrix.map(row => row[index]);
-        const range = head.config.range || [0, 1];
-        if (!head.config.range && values.some(v => v < 0 || v > 1)) throw Error('Invalid mood score');
-        traits[label] = {score: values.reduce((a, b) => a + b, 0) / patches,
-          range, per_patch: values, model: head.config.id, version: head.metadata.version};
-      }
-      models[head.config.id] = {path: head.config.path, version: head.metadata.version, classes};
-    } finally { output?.dispose(); }
-  }
-  return {status: 'uncalibrated_preview', traits, models, reliability: null,
-    aggregation: 'mean_of_full_patch_predictions', recommendation_adoption: false};
+  return {...loaded, model, metadata, startup_ms: performance.now() - started};
 }
 
 async function predict(samples, rate, model) {
@@ -108,9 +68,7 @@ async function predict(samples, rate, model) {
       graph_policy: 'restore-fused-preactivation-1', pooling: 'mean_full_patches', patches,
       values: Array.from({length: 200}, (_, i) =>
         embeddingMatrix.reduce((sum, row) => sum + row[i], 0) / patches)};
-    const mood = model.heads.length ? await moods(embeddings, model, patches) : null;
-    return {status: mood ? 'native_tags_and_moods' : 'native_tags_only', moods: mood,
-      embedding,
+    return {status: 'native_tags_only', embedding,
       scores: Object.fromEntries(model.metadata.classes.map((name, index) =>
       [name, matrix.reduce((sum, row) => sum + row[index], 0) / patches])), patches,
       analysed_seconds: ((patches * patchSize - 1) * hop + frameSize) / rate,

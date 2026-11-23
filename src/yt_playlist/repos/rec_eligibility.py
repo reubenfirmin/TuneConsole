@@ -35,14 +35,15 @@ class RecEligibilityRepo(Repo):
 
     @lookup_read
     def offer_metadata(self, videos) -> dict:
-        """Current genre and length for bounded offered uploads, without ranking."""
+        """Current genre and edit evidence for bounded offered uploads."""
         videos = list(dict.fromkeys(videos))
         result = {}
         for offset in range(0, len(videos), 500):
             batch = videos[offset:offset + 500]
             qs = ','.join('?' * len(batch))
             result.update({row['video_id']: dict(row) for row in self.conn.execute(
-                f'SELECT video_id,genre,duration_s AS duration FROM catalog_tracks WHERE video_id IN ({qs})', batch)})
+                'SELECT video_id,genre,duration_s AS duration,orig_title,artist_browse_id '
+                f'FROM catalog_tracks WHERE video_id IN ({qs})', batch)})
         return result
 
     @lookup_read
@@ -62,7 +63,7 @@ class RecEligibilityRepo(Repo):
         blocked.update(r[0] for r in self.conn.execute(
             "SELECT DISTINCT r.identity_key FROM rec_feedback f "
             f"JOIN {self.entry_artists_table} ta ON ta.artist_id=f.artist_id "
-            "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
+            "JOIN track_sources e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
             f'WHERE r.identity_key IN ({qs}) AND f.kind=? AND (f.until IS NULL OR f.until>?)',
             [*keys, artist_kind, now]))
         return blocked
@@ -80,7 +81,7 @@ class RecEligibilityRepo(Repo):
         """
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT t.identity_key FROM playlist_tracks pt "
-            "JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id "
+            "JOIN catalog_tracks t ON t.id=pt.track_id JOIN active_playlists p ON p.id=pt.playlist_id "
             "JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id WHERE g.name=?", (group,))}
 
     @synchronized
@@ -91,7 +92,7 @@ class RecEligibilityRepo(Repo):
             return set()
         qs = ",".join("?" * len(excl))
         rows = self.conn.execute(
-            "SELECT t.identity_key k FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+            "SELECT t.identity_key k FROM playlist_tracks pt JOIN catalog_tracks t ON t.id=pt.track_id "
             "GROUP BY t.identity_key "
             f"HAVING SUM(CASE WHEN pt.playlist_id IN ({qs}) THEN 0 ELSE 1 END)=0",
             list(excl)).fetchall()

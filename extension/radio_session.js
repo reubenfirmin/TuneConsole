@@ -1,12 +1,13 @@
 // MAIN-world companion for saved-playlist Radio Sessions.
 // Ask Music to fetch the saved playlist; never supply playback items ourselves.
 (() => {
-  const VERSION = 9;
+  const VERSION = 12;
   if (window.__tcRadioSession?.version === VERSION) {
     window.__tcPlaylistPoc = window.__tcRadioSession;
     return;
   }
   let expected = null;
+  let removedCurrent = null;
   let lastRefresh = "";
   let lastRefreshAt = 0;
   let lastAutoplayClick = 0;
@@ -39,6 +40,7 @@
     const selected = Number.isSafeInteger(selectedIndex) && selectedIndex >= 0 ? state.items[selectedIndex] : null;
     const primary = renderer(selected);
     const endpoint = primary?.navigationEndpoint?.watchEndpoint;
+    const counterparts = selected?.playlistPanelVideoWrapperRenderer?.counterpart;
     return {
       available: true,
       videoIds: items.map(item => item?.videoId || ""),
@@ -46,20 +48,50 @@
       selectedIndex: state.selectedItemIndex ?? null,
       selectedItem: primary ? {
         videoId: primary.videoId, playlist: endpoint?.playlistId, index: endpoint?.index,
-        counterparts: (selected?.playlistPanelVideoWrapperRenderer?.counterpart || [])
-          .map(item => item?.counterpartRenderer?.playlistPanelVideoRenderer?.videoId).filter(Boolean),
+        counterparts: Array.isArray(counterparts) ? counterparts
+          .map(item => item?.counterpartRenderer?.playlistPanelVideoRenderer?.videoId).filter(Boolean) : [],
       } : null,
       autoplay: typeof state.autoplay === "boolean" ? state.autoplay : null,
       autoPlaying: typeof queue.autoPlaying === "boolean" ? queue.autoPlaying : null,
-      automixVideoIds: (state.automixItems || []).map(item => renderer(item)?.videoId).filter(Boolean),
+      automixVideoIds: Array.isArray(state.automixItems) ? state.automixItems
+        .map(item => renderer(item)?.videoId).filter(Boolean) : [],
       stateKeys: Object.keys(state),
     };
+  }
+
+  function currentEndpoint(app = document.querySelector("ytmusic-app")?.polymerController) {
+    return app?.getState?.()?.playerPage?.playerPageWatchNextResponse?.currentVideoEndpoint;
   }
 
   function player() {
     let api = document.querySelector("#movie_player");
     if (typeof api?.getVideoData !== "function") api = document.querySelector("ytmusic-player")?.playerApi;
-    const video = document.querySelector("video");
+    const video = document.querySelector("#movie_player video") ||
+      document.querySelector("ytmusic-player video") || document.querySelector("video");
+    let videoId = api?.getVideoData?.()?.video_id || "";
+    let playlist = api?.getPlaylistId?.() || "";
+    let ended = !!video?.ended, error = video?.error ? `media error ${video.error.code}` : null;
+    try {
+      ended ||= api?.getPlayerState?.() === 0;
+      const response = api?.getPlayerResponse?.();
+      const status = response?.playabilityStatus?.status;
+      const responseId = response?.videoDetails?.videoId;
+      if (video?.paused !== false && (!responseId || !videoId || responseId === videoId) &&
+          ["ERROR", "UNPLAYABLE", "LOGIN_REQUIRED", "AGE_CHECK_REQUIRED"].includes(status)) error = status;
+      if ((error || ended) && (!videoId || !playlist)) {
+        // An unavailable video can have no loaded player identity. Bind the
+        // failure to the watch endpoint only while that watch page is open.
+        const watch = currentEndpoint()?.watchEndpoint;
+        const url = new URL(location.href);
+        if (url.pathname === "/watch" && watch?.videoId === url.searchParams.get("v") &&
+            watch.playlistId === url.searchParams.get("list") &&
+            (!videoId || videoId === watch.videoId) && (!playlist || playlist === watch.playlistId) &&
+            (!responseId || responseId === watch.videoId)) {
+          videoId = watch.videoId;
+          playlist = watch.playlistId;
+        }
+      }
+    } catch (_) {}
     let brandKnown = false, brandId = "";
     try {
       const config = window.ytcfg;
@@ -72,11 +104,12 @@
       }
     } catch (_) {}
     return {
-      video_id: api?.getVideoData?.()?.video_id || "",
-      playlist_ytm_id: api?.getPlaylistId?.() || "",
+      video_id: videoId,
+      playlist_ytm_id: playlist,
       brand_known: brandKnown,
       brand_id: brandId,
-      paused: !video || video.paused,
+      paused: !video || video.paused || ended || !!error,
+      ended, error,
       position: video?.currentTime || 0,
       duration: Number.isFinite(video?.duration) ? video.duration : null,
       loadedVideoIds: api?.getPlaylist?.() || [],
@@ -147,12 +180,20 @@
       refreshError = null;
       return "confirmed";
     }
-    if (!savedSlot(current, nativePlayback())) return "current song is not in saved playlist";
+    const native = nativePlayback();
+    const slot = playbackSlot(current, native);
+    const savedIndex = expected.videoIds.indexOf(current.video_id);
+    // The watch endpoint below can anchor a unique saved song if Music's
+    // selected row is absent. Confirmation still requires native readback.
+    const missingRow = !native.selectedItem && current.video_id && savedIndex >= 0 &&
+      expected.videoIds.lastIndexOf(current.video_id) === savedIndex &&
+      (!native.playlistIds || native.playlistIds.every(id => id === expected.playlist));
+    if (!slot && !missingRow) return "current song is not in saved playlist";
     const app = document.querySelector("ytmusic-app")?.polymerController;
     if (typeof app?.handleQueueUpdateCommand !== "function") return "native playlist refresh unavailable";
     let endpoint;
     try {
-      endpoint = app.getState().playerPage?.playerPageWatchNextResponse?.currentVideoEndpoint;
+      endpoint = currentEndpoint(app);
     } catch (_) { return "playback endpoint unavailable"; }
     if (endpoint?.watchEndpoint?.playlistId !== expected.playlist ||
         endpoint.watchEndpoint.videoId !== current.video_id) return "waiting for current playback endpoint";
@@ -173,6 +214,7 @@
     // In this handler index selects a steering chip, so omit the track index.
     // No seek, play, pause, track array, or direct store mutation is involved.
     const {index, startTimeSeconds, ...watch} = endpoint.watchEndpoint;
+    if (slot?.removed) delete watch.playlistSetVideoId;
     lastRefreshAt = Date.now();
     refreshAttempts++;
     try {
@@ -187,7 +229,7 @@
     }
   }
 
-  function savedSlot(current, native) {
+  function playbackSlot(current, native) {
     const item = native.selectedItem;
     if (!expected || current.playlist_ytm_id !== expected.playlist || !native.available ||
         item?.playlist !== expected.playlist || !current.video_id ||
@@ -196,13 +238,22 @@
     // Use its original saved index for repeats; a trimmed native queue has its
     // own selected index. Older endpoints without an index must be unambiguous.
     const ids = expected.videoIds;
-    const savedId = ids.includes(item.videoId) ? item.videoId : current.video_id;
+    const loadedIndex = native.selectedIndex;
+    if (removedCurrent?.videoId === current.video_id && item.videoId === current.video_id &&
+        native.videoIds[loadedIndex] === current.video_id && !ids.includes(current.video_id) &&
+        native.playlistIds.every(id => id === expected.playlist)) {
+      const savedIndex = removedCurrent.afterIndex;
+      if (Number.isSafeInteger(savedIndex) && savedIndex >= 0 && savedIndex < ids.length) {
+        return {savedIndex, loadedIndex, removed: true};
+      }
+    }
+    const savedIds = [item.videoId, current.video_id, ...item.counterparts].filter(id => ids.includes(id));
     let savedIndex = item.index;
     if (savedIndex === undefined) {
-      savedIndex = ids.indexOf(savedId);
-      if (savedIndex < 0 || ids.lastIndexOf(savedId) !== savedIndex) return null;
-    } else if (!Number.isSafeInteger(savedIndex) || savedIndex < 0 || ids[savedIndex] !== savedId) return null;
-    return {savedIndex, loadedIndex: native.selectedIndex};
+      savedIndex = ids.findIndex(id => savedIds.includes(id));
+      if (savedIndex < 0 || ids.findLastIndex(id => savedIds.includes(id)) !== savedIndex) return null;
+    } else if (!Number.isSafeInteger(savedIndex) || savedIndex < 0 || !savedIds.includes(ids[savedIndex])) return null;
+    return {savedIndex, loadedIndex};
   }
 
   function playbackMatches() {
@@ -212,7 +263,7 @@
     const native = nativePlayback();
     if (!native.available) return false;
     if (native.playlistIds.length && !native.playlistIds.includes(expected.playlist)) return false;
-    const slot = savedSlot(current, native);
+    const slot = playbackSlot(current, native);
     if (!slot) return false;
     const {savedIndex, loadedIndex} = slot;
     const saved = expected.videoIds.slice(savedIndex + 1);
@@ -270,9 +321,12 @@
   }
 
   function snapshot() {
+    const current = player(), native = nativePlayback();
+    const slot = playbackSlot(current, native);
     return {
       observerVersion: VERSION,
-      expected, player: player(), native: nativePlayback(), switches: switches().map(switchInfo),
+      expected, player: current, native, switches: switches().map(switchInfo),
+      savedIndex: slot && !slot.removed ? slot.savedIndex : null,
       playback_synced: playbackMatches(),
       page_synced: pageMatches(),
       refreshRequest: {attempts: refreshAttempts, error: refreshError},
@@ -346,9 +400,15 @@
       return report;
     },
     source: (owner, method) => String(owners()[owner]?.[method] || "method not found"),
+    recoveryCurrent(playlist, videoId) {
+      const current = player();
+      return current.playlist_ytm_id === playlist && current.video_id === videoId &&
+        (current.ended || !!current.error);
+    },
     refresh,
     update(frame) {
       expected = {playlist: frame.playlist, videoIds: frame.videoIds};
+      removedCurrent = frame.removedCurrent;
       const current = player();
       const matching = current.playlist_ytm_id === frame.playlist;
       const autoplay = matching ? autoplayOff() : "waiting for session playlist";

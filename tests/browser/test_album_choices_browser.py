@@ -1,5 +1,5 @@
 import pytest
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from tests.test_mode_cards_route import prepare_home as prepare_current_home
 from tests.home_fixture_support import browser_store, returning_listener
@@ -20,7 +20,7 @@ def album_home_template(_pristine_current_schema, genre_candidates_template):
         genre_candidates_template.restore(source)
         # Match live_app's pre-preparation account/playlist state. Each live
         # consumer later upserts these identities in its own private copy.
-        identity = source.accounts.upsert_account('main', 'cred', None, True)
+        identity = source.accounts.upsert_account('main', None, True)
         source.playlists.upsert_playlist(identity, 'PLZ', 'Old Mix', 3, 'h', 0.0)
         source.settings.set_setting('last_sync_at', '1')
         source.settings.set_setting('onboard_dismissed', '1')
@@ -37,6 +37,57 @@ def store(browser_store, album_home_template):
     # responses, choices, notes and all subsequent mutations belong to the case.
     album_home_template.restore(browser_store)
     return browser_store
+
+
+def album_fragment(url):
+    path = urlsplit(url)
+    query = parse_qs(path.query)
+    return path.path == '/' and query.get('panel') == ['album-choices'] and query.get('fragment') == ['1']
+
+
+@pytest.mark.parametrize(('unavailable', 'leave'), [
+    ('album-choices.css', False), ('album-choices.js', False), (None, False), (None, True),
+])
+def test_long_play_recovers_from_a_temporary_read_failure(live_app, store, page, unavailable, leave):
+    from playwright.sync_api import expect
+
+    store.rec_proposals.put_proposals('album_prepared', {
+        'built_at': 1, 'context': {},
+        'items': [{'browse_id': f'recovery-{index}', 'title': f'Record {index}',
+                   'artist': f'Artist {index}', 'year': '2020', 'genre': 'Jazz',
+                   'classification': 'discovery', 'score': 1 - index / 10} for index in range(4)],
+    }, 1)
+    matches = album_fragment if unavailable is None else (
+        lambda url: urlsplit(url).path == f'/static/{unavailable}')
+    requests = []
+
+    def fail_once(route):
+        requests.append(route.request.url)
+        if len(requests) == 1:
+            route.fulfill(status=503, body='Temporary service interruption')
+        else:
+            route.continue_()
+
+    page.route(matches, fail_once)
+    page.goto(live_app + '/', wait_until='domcontentloaded')
+    assert not requests
+    page.evaluate("window.originalPlayer = document.querySelector('.global-now-playing')")
+    long_play = page.get_by_role('tab', name='Long play', exact=True)
+    with page.expect_response(lambda response: matches(response.url)) as first:
+        long_play.click()
+    assert first.value.status == 503
+    expect(long_play).to_have_attribute('aria-selected', 'true')
+    if leave:
+        mix_tapes = page.get_by_role('tab', name='Mix tapes', exact=True)
+        mix_tapes.click()
+        expect(mix_tapes).to_have_attribute('aria-selected', 'true')
+        page.wait_for_timeout(2200)  # Beyond the fragment's first retry interval.
+        assert len(requests) == 1
+        long_play.click()
+    expect(page.locator('.album-choice:visible')).to_have_count(4, timeout=7000)
+    assert len(requests) == 2
+    assert page.evaluate("originalPlayer && originalPlayer === document.querySelector('.global-now-playing')")
+    expect(page.locator('#toasts [role="alert"]')).to_have_count(0)
 
 
 @pytest.mark.parametrize("width", [1440])
@@ -186,7 +237,7 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
 
 
 @pytest.mark.parametrize('delayed', [False, True])
-def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, page, delayed, action_evidence, monkeypatch):
+def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, page, delayed, action_evidence):
     from playwright.sync_api import expect
     from tests.rec.test_album_menu import records
     from yt_playlist.rec import album_tuning, choice_evidence
@@ -196,24 +247,21 @@ def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, p
     store.rec_proposals.put_proposals('album_prepared', {
         'built_at': 1, 'context': {}, 'items': records()}, 1)
     pending = []
-    from yt_playlist.library import home_query_composition
-    album_menu = home_query_composition.album_menu
-    if delayed:
-        # Exercise the genuine lazy-fragment path even when the normal Home
-        # response can already embed this fixture's prepared album board.
-        from types import SimpleNamespace
-        monkeypatch.setattr(home_query_composition, 'album_menu',
-                            lambda *args, **kwargs: SimpleNamespace(query=lambda now: None))
-        page.route('**/home/album-choices', lambda route: pending.append(route))
     page.set_viewport_size({'width': 1440, 'height': 1100})
-    page.goto(live_app + '/#album-choices', wait_until='domcontentloaded')
+    if delayed:
+        page.route(album_fragment, lambda route: pending.append(route))
+        with page.expect_request(lambda request: album_fragment(request.url)):
+            page.goto(live_app + '/#album-choices', wait_until='domcontentloaded')
+    else:
+        page.goto(live_app + '/#album-choices', wait_until='domcontentloaded')
     tune = page.get_by_role('button', name='Adjust album parameters')
     if delayed:
-        monkeypatch.setattr(home_query_composition, 'album_menu', album_menu)
         expect(tune).to_be_visible()
         expect(tune).to_be_disabled()
         assert len(pending) == 1
-        pending[0].continue_()
+        with page.expect_response(lambda response: album_fragment(response.url)) as loaded:
+            pending.pop().continue_()
+        assert loaded.value.ok
     tune.click()
     dialog = page.get_by_role('dialog', name='Long play')
     expect(dialog).to_be_visible()

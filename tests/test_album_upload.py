@@ -63,7 +63,7 @@ def test_album_playlist_creation_routes_and_preserves_complete_order(store, uplo
     browse = UPLOAD_ID if uploaded else "MPRE1"
     fc = _StrictClient(uploads={browse: album} if uploaded else {}, albums={browse: album} if not uploaded else {})
     fc._catalog.update({t["videoId"]: t for t in album["tracks"]})
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     result = create_playlist_from_album(store, browse, "", fc, 1, iid)
     assert result["added"] == 2
     assert fc.added == [(result["new_ytm"], ["u1", "u2"])]
@@ -76,7 +76,7 @@ def test_album_playlist_creation_routes_and_preserves_complete_order(store, uplo
 def test_album_playlist_creation_rejects_incomplete_response_before_writes(store, change):
     from yt_playlist.library.playlist_creation import create_playlist_from_album
     fc = _StrictClient(uploads={UPLOAD_ID: {**deepcopy(_UPLOAD_ALBUM), **change}})
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     with pytest.raises(ValueError):
         create_playlist_from_album(store, UPLOAD_ID, "", fc, 1, iid)
     assert not fc.created and not fc.added
@@ -108,7 +108,7 @@ class _StrictClient(FakeClient):
 
 
 def _upload_client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = _StrictClient(uploads={UPLOAD_ID: _UPLOAD_ALBUM})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc
@@ -161,7 +161,7 @@ def test_album_hides_the_artist_tag_when_there_is_no_album_artist(route_store, m
     tag anyway leaves an empty pill in the header."""
     store = route_store
     install_routes(monkeypatch, 'album')
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     no_artist = dict(_UPLOAD_ALBUM, artists=[])
     fc = _StrictClient(uploads={UPLOAD_ID: no_artist})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
@@ -179,7 +179,7 @@ def test_album_with_no_cover_shows_a_mosaic_of_its_track_art(store):
     for vid, title, art in (("u1", "Opener", "http://art/1.jpg"), ("u2", "Closer", "http://art/2.jpg")):
         store.tracks.upsert_track(vid, title, "Gatecrasher", "Disco-tech (disc 1)", 100,
                            album_browse_id=UPLOAD_ID, thumbnail=art)
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = _StrictClient(uploads={UPLOAD_ID: dict(_UPLOAD_ALBUM, thumbnails=[{"url": _PH}])})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     html = TestClient(app, base_url="http://127.0.0.1").get(f"/album?browse={UPLOAD_ID}").text
@@ -191,7 +191,7 @@ def test_album_with_no_cover_shows_a_mosaic_of_its_track_art(store):
 def test_album_with_real_cover_keeps_the_single_cover(store):
     """No regression: an ordinary album with its own art shows it, not a mosaic."""
     real = "https://lh3.googleusercontent.com/real=w544"
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient(albums={"MPREb_x": {"title": "A", "artists": [{"name": "B"}],
                                         "thumbnails": [{"url": real}], "tracks": []}})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
@@ -202,7 +202,7 @@ def test_album_with_real_cover_keeps_the_single_cover(store):
 
 def test_catalog_album_still_shows_save_button(store):
     # No regression: an ordinary unsaved album keeps its save button.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient(albums={"MPREb_x": {"title": "The Album", "artists": [{"name": "A"}],
                                         "thumbnails": [], "tracks": []}})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)

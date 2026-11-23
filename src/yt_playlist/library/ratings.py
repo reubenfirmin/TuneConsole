@@ -72,15 +72,15 @@ def reconcile_pending(store, account_id, client):
 
 
 def set_rating(store, account_id, video_id, status, client, now, *, after_confirmed=None, now_fn=None,
-               acquisition=None):
+               acquisition=None, playback=None):
     if not isinstance(video_id, str) or not video_id.strip():
         raise ActionInputError('song_required')
     if status not in STATUSES:
         raise ActionInputError('rating_invalid')
     with ordered(store, account_id, video_id):
         # Resolve the retained clock before sending a remote mutation. Once
-        # YouTube confirms, local capture must not depend on the main handle
-        # remaining open through a compaction cutover.
+        # YouTube confirms, the independent inbox accepts feedback during
+        # recommendation cleanup as well as ordinary playback.
         retained = main_item_rating(store, account_id, video_id)
         result = with_retry(lambda: client.rate_song(video_id, status))
         if isinstance(result, dict) and result.get("status", "STATUS_SUCCEEDED") != "STATUS_SUCCEEDED":
@@ -94,6 +94,8 @@ def set_rating(store, account_id, video_id, status, client, now, *, after_confir
             body = {'video_id': video_id, 'status': status}
             if acquisition is not None:
                 body['acquisition'] = acquisition
+            if playback is not None and playback['account_id'] == account_id:
+                body['playback'] = {'playlist': playback['playlist'], 'at': playback['at']}
             playback_feedback.capture(store, 'rating', account_id, body, confirmed_at)
             playback_feedback.try_drain(store)
         except Exception:

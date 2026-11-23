@@ -76,6 +76,8 @@ def player_projection(body):
         video, playlist, action = body.get('videoId') or None, body.get('playlist') or None, None
         position, duration = body.get('position'), body.get('duration')
         payload = {key: body[key] for key in _PAYLOAD_EXTRAS if body.get(key) not in (None, '')}
+        if kind == 'next' and body.get('ratingAdvance') is True:
+            payload['rating_advance'] = True
     else:
         video, playlist, action = _curation_fields(kind, body)
         position = duration = None
@@ -83,6 +85,9 @@ def player_projection(body):
         if action:
             payload['action'] = action
         payload.update({key: body[key] for key in ('phase', 'success', 'httpStatus', 'error') if key in body})
+        requested_at = body.get('requestedAt')
+        if kind == 'rate' and type(requested_at) is int and 0 < requested_at <= 2**53 - 1:
+            payload['requestedAt'] = requested_at
     return dict(kind=kind, video=video, playlist=playlist, position=position, duration=duration,
         payload=payload, exit=kind in {'track_exit', 'ended', 'bye'},
         rating=_RATE_STATUS[action] if kind == 'rate' and confirmed_rate(body) and video and action in _RATE_STATUS else None)
@@ -91,12 +96,15 @@ def player_projection(body):
 class PlaybackObservations:
     def __init__(self, accounts, tracks, history, settings, events, *, deferred, capture,
                  album_context, record_playback, capture_start, observe_exit,
-                 rating_observations, confirmed_rating, reconcile_ratings, refresh_ratings):
+                 rating_observations, confirmed_rating, observe_like, reconcile_ratings, refresh_ratings,
+                 attributed=None):
         self.accounts, self.tracks, self.history, self.settings, self.events = accounts, tracks, history, settings, events
         self.deferred, self.capture = deferred, capture
         self.album_context, self.record_playback, self.capture_start = album_context, record_playback, capture_start
         self.observe_exit, self.rating_observations = observe_exit, rating_observations
         self.confirmed_rating, self.reconcile_ratings, self.refresh_ratings = confirmed_rating, reconcile_ratings, refresh_ratings
+        self.observe_like = observe_like
+        self.attributed = attributed or (lambda body, now, account, album: bool(album))
 
     def observe(self, kind, body, now):
         observation = admit(kind, self.accounts.get_accounts(), body, now)
@@ -107,56 +115,72 @@ class PlaybackObservations:
             return True
         return self.project(observation)
 
-    def project(self, observation, *, inline_analytics=False, capture_id=None):
+    def project(self, observation, *, inline_analytics=False, capture_id=None, attribute=True):
         if observation.kind == 'live':
-            return self._live(observation, inline_analytics)
-        return self._player(observation, capture_id)
+            key = self.live_subject(observation.body, observation.at)
+            return self.project_live(observation, key, inline_analytics=inline_analytics, attribute=attribute)
+        return self._player(observation, capture_id, attribute=attribute)
 
-    def _live(self, observation, inline):
-        body, account, now = observation.body, observation.account_id, observation.at
+    def live_subject(self, body, now):
+        """Resolve catalog metadata before a replay opens its projection transaction."""
         title, artist = (body.get('title') or '').strip(), (body.get('artist') or '').strip()
-        verified = body.get('metadataVerified') is not False
         video = body.get('videoId')
-        if not verified:
-            key = self.tracks.identity_key_for_video(video) if body.get('videoVerified') is True and video else None
-            if not key:
-                return False
-        else:
-            if not title:
-                return False
-            key = self.tracks.observe_track(video, title, artist, now=now) if video else identity_key(title, artist)
+        if body.get('metadataVerified') is False:
+            return self.tracks.identity_key_for_video(video) if body.get('videoVerified') is True and video else None
+        if title:
+            return self.tracks.observe_track(video, title, artist, now=now) if video else identity_key(title, artist)
+
+    def project_live(self, observation, key, *, inline_analytics=False, attribute=True):
+        if not key:
+            return False
+        body, account, now = observation.body, observation.account_id, observation.at
+        verified, video = body.get('metadataVerified') is not False, body.get('videoId')
         status = (body.get('likeStatus') or '').strip() if verified else ''
         rating = self.tracks.item_rating(account, video)
         confirmed = rating is not None and rating['source'] == 'api'
         if confirmed:
             status = rating['status']
         context = self.album_context(body, now, account_id=account)
-        new = self.history.record_play_event(account, key, video or None, now,
-            playlist_ytm_id=body.get('playlist') or None, like_status=status or None,
-            source_timezone=body.get('timeZone'), context_choice=bool(context))
+        playlist = body.get('playlist') or None
+        verified_album = context if (context and body.get('videoVerified') is True
+                                     and not body.get('bindingConflict')
+                                     and (not playlist or playlist == context['playlist'])) else None
+        new, first_live = self.history.record_play_event(account, key, video or None, now,
+            playlist_ytm_id=playlist, like_status=status or None, verified_album=verified_album,
+            source_timezone=body.get('timeZone'), context_choice=self.attributed(body, now, account, context),
+            report_observation=True)
+        if first_live and attribute:
+            self.record_playback(body, now, account_id=account)
         if new:
             self.settings.set_setting('last_plays_sync_at', str(now))
-            self.record_playback(body, now, account_id=account)
             initial = rating['status'] if rating else status if status in {'LIKE', 'DISLIKE'} else None
-            self.capture_start(account, video, body.get('playlist') or None, initial, now,
-                               album=bool(context), inline=inline)
+            self.capture_start(account, video, playlist, initial, now,
+                               album=bool(context), inline=inline_analytics)
         if status in {'LIKE', 'DISLIKE'} and video:
             if confirmed:
                 self.reconcile_ratings({key})
             else:
                 self.rating_observations(account, {video: status}, source='action', now=now)
-        return new
+        return new if attribute else first_live
 
-    def _player(self, observation, capture_id):
+    def _player(self, observation, capture_id, *, attribute):
         body, account, now = observation.body, observation.account_id, observation.at
         projected = player_projection(body)
         kind, video, playlist = projected['kind'], projected['video'], projected['playlist']
         position, duration, payload = projected['position'], projected['duration'], projected['payload']
+        if capture_id is not None:
+            payload['capture_id'] = capture_id
         event_id = self.events.record_player_event(account, kind, video, position, duration, playlist,
             json.dumps(payload) if payload else None, now, capture_id=capture_id)
-        if projected['exit']:
+        if attribute and projected['exit']:
             self.observe_exit(account, playlist, video, kind, position, duration, event_id, now)
         if projected['rating'] is not None:
-            self.confirmed_rating(account, video, projected['rating'], now)
+            changed = self.confirmed_rating(account, video, projected['rating'], now,
+                                            playlist=playlist, capture_id=f'player:{event_id}')
             self.refresh_ratings()
+            if projected['rating'] == 'LIKE':
+                if not attribute:
+                    return changed
+                if changed:
+                    self.observe_like(account, playlist, video, event_id, payload.get('requestedAt'), now)
         return True

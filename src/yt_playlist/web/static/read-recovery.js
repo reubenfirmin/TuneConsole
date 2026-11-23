@@ -78,6 +78,10 @@
     pending.delete(target);
     generations.set(target, (generations.get(target) || 0) + 1);
   }
+  window.cancelReadFragment = target => {
+    clear(target);
+    htmx.trigger(target, 'htmx:abort');
+  };
   function retryFragment(request, requestConfig, xhr, target = request.target, swap, select) {
     const {generation, target: originalTarget, state} = request;
     const source = requestConfig.elt;

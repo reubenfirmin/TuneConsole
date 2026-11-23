@@ -127,3 +127,66 @@ gating and fallback were removed; unavailable specialists leave measurements
 absent. Historical shared coefficients and replay code remain under
 `audio_lab_tools/legacy/`, outside the shipped application. Frozen source archives
 remain the authority for reproducing earlier comparisons.
+
+**AcousticBrainz and Focus.** A held-out adjustment using instrumental and
+relaxed probabilities gained .068 NDCG on 65 matched CAL500 recordings and .046
+across all 494, with intervals spanning losses. Instrumental alone had the
+largest mixed-cohort point gain (.050). Cached probabilities for the same
+recording covered 111 of 302 library Focus scores and 1 of 37 dated 2023 or
+later. The newer library replay measured rank changes without human judgments.
+Retain the Focus specialist. See `local/focus-acousticbrainz-1275/round-2/`.
+
+**Fitting AcousticBrainz to specialist scores.** On 136 matched library recordings
+from 96 credited artists, one ridge regression per vibe using eight classifier
+probabilities reduced mean absolute error from .224 to .058 and improved mean
+NDCG from .814 to .885 across five artist-disjoint folds. The comparison replayed
+the existing fill-in with audio hidden and reproduced all six stored scores for
+each of 200 independently checked recordings. The target scores came from
+rerunning the shipped specialists on saved samples. Tempo, loudness and dynamic
+complexity did not improve the average result. Against the newer fill-in in the
+working tree, the fitted model also reduced error for every vibe, with mixed
+ranking results. Keep the classifier-only model as the first candidate for testing
+local adjustment. The [study](../audio_lab_tools/studies/acousticbrainz_vibe_mapping.py)
+and `../../build/test-reports/acousticbrainz-vibe-mapping-20261119-r2/` contain the
+replay command, frozen settings, match exclusions and held-out predictions.
+
+**Nonlinear AcousticBrainz models.** Gaussian kernel ridge regression and nearest
+neighbours used the same eight classifier fields and the same five artist splits.
+Three inner folds selected settings per vibe. Mean absolute error was .0592 for
+kernel ridge and .0608 for neighbours, compared with .0583 for linear ridge.
+Mean NDCG was .880, .871 and .885 respectively. Keep linear ridge for the first
+local adjustment experiment. The [study](../audio_lab_tools/studies/acousticbrainz_vibe_learners.py)
+and `local/acousticbrainz-vibe-learners-20261119/` contain the settings, source
+snapshot and held-out predictions for this comparison on the same library cohort.
+
+**Weighting strong specialist scores.** Giving the highest fifth of training
+scores double or quadruple weight raised estimates for strong Uplift recordings.
+On the same 136 recordings, the original fit still had lower mean absolute error
+(.058 versus .062 and .067) and higher mean specialist scores for its top picks
+(.446 versus .443 and .439). Tuning the unweighted fit for top picks also lost
+ground. Four newly sampled recordings with verified AcousticBrainz matches and
+no artists in the training set gave .063 mean absolute error for the original
+fit and .187 for the existing fill-in. Double weighting picked the strongest
+fresh Uplift recording and raised overall error to .069. Keep the original fit.
+The [study](../audio_lab_tools/studies/acousticbrainz_vibe_weighting.py),
+`local/acousticbrainz-vibe-weighting-20261119/` and
+`../../build/test-reports/acousticbrainz-vibe-weighting-inputs-20261119/` preserve
+the settings, input collection recipes and predictions.
+
+**Bundled AcousticBrainz fit and listener adjustment.** Export the original
+unweighted classifier-only fit trained on the 136 verified pairs. In chronological
+replay, use the oldest 68 recordings for the starting fit, the next 34 to choose
+the penalty for local adjustment, and the last 34 to verify that choice.
+With a penalty of 30, the adjustment reduced mean absolute error on the last
+34 from .0564 to .0559. The exported starting fit scored .063 on the four fresh
+pairs versus .187 for the former fallback. The
+[export study](../audio_lab_tools/studies/acousticbrainz_vibe_export.py) binds
+the coefficients and measurement versions to the frozen input digests.
+
+**On Air listening references.** Scored eleven of twelve catalog uploads with
+frozen MusiCNN features and the bundled Energize and Release specialists at the
+three standard positions. The other upload was private. Both heads rated
+Electric Six's “Dance Commander” higher than the listener's positive White Lies
+example. A ranking that favors higher scores on both heads preserves that
+ordering. The source IDs, decoder, artifact hashes and
+per-excerpt outputs are in `../../build/test-reports/1346-evidence/direct-scores.json`.

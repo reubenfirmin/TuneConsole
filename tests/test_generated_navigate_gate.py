@@ -126,7 +126,7 @@ def test_home_captures_intent_before_creation_finishes(store, monkeypatch):
     from tests.conftest import FakeClient
     from yt_playlist.web.app import create_app
 
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = FakeClient()
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 1)
     bridge = app.state.ctx.bridge

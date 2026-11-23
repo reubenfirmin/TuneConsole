@@ -17,13 +17,15 @@ import numpy as np
 import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (account_growth, artist_model, embedding_training as embed,
                              model_refresh, model_calculations, mode_inputs, mode_surfaces, rec_params, taste_modes)
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
-from tests.home_fixture_support import (home_routes_only, publish_menu, returning_listener,
+from tests.home_fixture_support import (home_routes_only, seed_menu_cards, returning_listener,
                                         without_metadata_providers)
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.prepared_fixture_support import prepared_template
 from tests.model_refresh_support import seed
 from tests.store_fixture_support import (
@@ -159,13 +161,13 @@ def test_production_refresh_invalidates_content_without_a_coverage_gate(store, m
         store.tracks.upsert_track('two', 'Two', 'Artist', None, None)
     elif change == 'empty-library':
         with store.conn:
-            store.conn.execute('DELETE FROM library_memberships')
+            store.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE library_origin IS NOT NULL')
     elif change == 'missing-model':
-        store.settings.delete_setting('rec_content_model')
+        store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder=None))
     elif change == 'genre-revision':
         monkeypatch.setattr(genre_catalog, 'REVISION', 'next-catalog')
     elif change == 'missing-revision':
-        store.settings.delete_setting('rec_content_genre_revision')
+        store.rec_model.publish_model_state(recording=RecordingModelUpdate(genre_revision=None))
     prepared = model_refresh.rebuild(store, 1002)
     assert 'rec_content_vectors' in prepared['vectors']
     after = store.rec_model.content_generation()
@@ -229,11 +231,9 @@ def test_enrichment_stamps_allow_full_model_and_pool_publication(store, monkeypa
         # subject in a completed bucket while the real snapshot is open.
         keys = sorted(reader.rec_query.library_keys())
         tracks = reader.rec_query.tracks_by_keys(keys)
-        mode = str(reader.modes.list_modes(active_only=True)[0]['mode_id'])
         items = policies.stamp([dict(tracks[key], key=key) for key in keys], 'wheelhouse')
         stamp()
-        return {mode: {'wheelhouse': items}, 'all': {'wheelhouse': items},
-                '_meta': {'full_pools': True}}, []
+        return {'all': {'wheelhouse': items}, '_meta': {'full_pools': True}}, []
 
     calculate = Mock(wraps=fitting)
     monkeypatch.setattr(model_calculations, 'calculate', calculate)
@@ -248,7 +248,7 @@ def test_enrichment_stamps_allow_full_model_and_pool_publication(store, monkeypa
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_failed_publication_rolls_back_models_settings_clusters_and_notification(
         rollback_store, model_catalog_template, monkeypatch):
-    from yt_playlist.core import embedding_files, embeddings, fao, model_contract
+    from yt_playlist.core import embedding_files, embeddings, fao
 
     # Files and failed SQL publication stay real; snapshot coordination is
     # uncontended below this rollback-and-retry workflow.
@@ -262,11 +262,12 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     before = store.rec_model.content_generation()
     assert before['coherent'] and before['generation'] and before['library']
     modes = [(m['mode_id'], m['centroid'].tobytes()) for m in store.modes.list_modes()]
-    assert modes
+    assert modes == []
     vectors = {name: embeddings.rows(store.conn, name) for name in embeddings.SPACES}
     assert all(rows for name, rows in vectors.items() if name != 'rec_discovered_content_vectors')
     settings = {key: store.settings.get_setting(key) for key in (
-        *model_contract.FIELDS, 'rec_refresh_version', 'rec_mode_fit_inputs', 'rec_embed_method', 'rec_dim')}
+        'rec_mode_fit_inputs', 'rec_embed_method', 'rec_dim')}
+    fit_version = store.rec_refresh.version()
     store.tracks.set_track_genre(tids[0], 'Classical')
     revision = store.rec_refresh.revision()
     assert revision is not None
@@ -289,9 +290,11 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     monkeypatch.setattr(fao, 'prepare', write_without_serving_lock)
 
     def selected():
-        return {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')]
-                for table in ('recording_embedding_files', 'artist_embedding_files',
-                              'taste_model_state', 'taste_modes', 'rec_change_queue')}
+        tables = {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')]
+                  for table in ('recording_embedding_files', 'artist_embedding_files', 'legacy_mode_payloads')}
+        tables['model_settings'] = dict(store.conn.execute(
+            "SELECT key,value FROM settings WHERE key IN ('recording_model_state','artist_model_state')"))
+        return tables
 
     def recording_references():
         return [tuple(row) for row in store.conn.execute('SELECT * FROM recording_embedding_files ORDER BY 1,2')]
@@ -299,8 +302,8 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     recording_before = recording_references()
     embedding_paths = set(embedding_files.references(store.conn))
     selected_before = selected()
-    model_files = [row[0] for row in store.conn.execute(
-        'SELECT recovery_filename FROM taste_model_state WHERE recovery_filename IS NOT NULL')]
+    model_files = [state.reference[0] for state in (store.rec_model.recording_state(), store.rec_model.artist_state())
+                   if state.reference is not None]
     file_bytes = {path: fao.read(path).bytes for path in (*embedding_paths, *model_files)}
     reached = []
 
@@ -328,6 +331,7 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
         assert set(embedding_files.references(store.conn)) == set(file_bytes) - set(model_files)
         assert {name: embeddings.rows(store.conn, name) for name in embeddings.SPACES} == vectors
         assert {key: store.settings.get_setting(key) for key in settings} == settings
+        assert store.rec_refresh.version() == fit_version
         assert store.rec_model.content_generation() == before
         assert [(m['mode_id'], m['centroid'].tobytes()) for m in store.modes.list_modes()] == modes
         assert store.rec_refresh.revision() == revision and store.rec_refresh.has_pending_changes()
@@ -346,7 +350,8 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     assert after['coherent'] and after['generation'] != before['generation']
     for name, rows in retry['vectors'].items():
         assert dict(embeddings.rows(store.conn, name)) == dict(rows)
-    assert {key: store.settings.get_setting(key) for key in retry['settings']} == retry['settings']
+    assert store.rec_refresh.version() == fit_version
+    assert not store.conn.execute("SELECT 1 FROM settings WHERE key='rec_refresh_version'").fetchone()
     assert store.settings.get_setting('unrelated') == 'commit after failure'
     assert not store.rec_refresh.has_pending_changes()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -361,8 +366,8 @@ def test_coalesced_notifications_survive_restart_and_do_not_acknowledge_later_ch
                                       ('rock', 'Rock'), ('house', 'House')))
     path = store._db_path
     model_catalog_template.restore(store)
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_change_queue').fetchone()[0] == 1
     revision = store.rec_refresh.revision()
+    assert revision is not None
     store.rec_refresh.enqueue()
     store.rec_refresh.acknowledge(revision)
     assert store.rec_refresh.has_pending_changes()
@@ -374,6 +379,11 @@ def test_coalesced_notifications_survive_restart_and_do_not_acknowledge_later_ch
         assert store.rec_refresh.has_pending_changes()
         assert model_refresh.rebuild(store, 2000)
         assert not store.rec_refresh.has_pending_changes()
+        store.rec_refresh.enqueue()
+        latest = store.rec_refresh.revision()
+        assert latest > revision
+        store.rec_refresh.acknowledge(revision)
+        assert store.rec_refresh.revision() == latest
     finally:
         store.conn.close()
 
@@ -381,12 +391,16 @@ def test_coalesced_notifications_survive_restart_and_do_not_acknowledge_later_ch
 def test_background_fit_leaves_event_loop_and_last_good_home_available(
         file_backed_store, monkeypatch, home_routes_only, without_metadata_providers):
     store = file_backed_store
-    # This case owns worker/request concurrency and last-good serving. Ranked
-    # menu/model equivalence is checked above. Four playable cards need one
-    # subject each here; ranking additional subjects adds no concurrency state.
-    prepared = publish_menu(store, 2000, tracks_per_card=1)
-    tids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
-    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
+    # Live Home needs four ranked candidates per playable card.
+    library_cards = seed_menu_cards(store, 2000, count=3, tracks_per_card=4)
+    library_pools = {card['lane']: card['tracks'] for card in library_cards}
+    tids = [row[0] for row in store.conn.execute('SELECT id FROM track_sources ORDER BY id')]
+    fresh = [{'key': f'fresh song {i}|fresh artist {i}', 'title': f'Fresh song {i}',
+              'artist': f'Fresh artist {i}', 'video_id': f'fresh-{i}', 'genre': 'House'}
+             for i in range(4)]
+    seed_publication_subjects(store, fresh, discoveries=[track['key'] for track in fresh])
+    publish_bundles(store, {'all': library_pools}, 2000, fresh=fresh)
+    iid = store.accounts.upsert_account('Listener', None, True)
     pid = store.playlists.upsert_playlist(iid, 'first', 'First', len(tids), '', 1)
     store.playlists.set_playlist_tracks(pid, tids)
     store.settings.set_setting('rec_dim', '4')
@@ -412,11 +426,9 @@ def test_background_fit_leaves_event_loop_and_last_good_home_available(
     # actual persisted report and access check without rerunning that producer.
     returning_listener(store, 'mixes', now=1993)
     assert store.rec_proposals.choice_usage()['episodes']['mixes'] == 1
-    assert any(len(menu['protos']) == 4 for menu in prepared['menus']), [
-        [proto['lane'] for proto in menu['protos']] for menu in prepared['menus']]
     expected_cards = {
-        f"gen-{proto['lane']}": [(track['key'], track['video_id']) for track in proto['tracks']]
-        for proto in prepared['menus'][0]['protos']}
+        f'gen-{lane}': {(track['key'], track['video_id']) for track in tracks}
+        for lane, tracks in {**library_pools, 'fresh': fresh}.items()}
     assert account_growth.has_access(account_growth.view(store, 2000), 'directions')
     app = create_app(store, lambda: {}, now_fn=lambda: 2000, background_work=False)
     ctx = SimpleNamespace(store=store, work=Activity(), now_fn=lambda: 2000,
@@ -465,13 +477,15 @@ def test_background_fit_leaves_event_loop_and_last_good_home_available(
                     assert rows and all(key and video for key, video in rows)
                 return document.cards
 
+            before = playable_cards(await client.get('/home/cards'))
+            assert {card: set(rows) for card, rows in before.items()} == expected_cards
             generation = store.rec_model.content_generation()
             worker.trigger()
             assert await asyncio.to_thread(started.wait, 5)
             # One request made after the fitter is blocked proves this overlap.
             # Repeating the identical render adds no distinct state transition.
             response = await asyncio.wait_for(client.get('/home/cards'), 1)
-            assert playable_cards(response) == expected_cards
+            assert playable_cards(response) == before
             assert store.rec_model.content_generation() == generation
             assert await asyncio.wait_for(asyncio.to_thread(store.rec_model.rec_vectors_count), 1) > 0
         assert not release.is_set()

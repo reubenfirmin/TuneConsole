@@ -10,7 +10,7 @@ import pytest
 
 @pytest.fixture
 def skip_store(store):
-    assert store.accounts.upsert_account("main", "bridge", None, True) == 1
+    assert store.accounts.upsert_account("main", None, True) == 1
     return store
 
 

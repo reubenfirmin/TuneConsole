@@ -2,17 +2,19 @@
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from copy import deepcopy
+from copy import copy, deepcopy
 from itertools import zip_longest
 import hashlib
-import math
 import weakref
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.rec import group_roots, musical_character, radio_intensity, radio_rotation
+from yt_playlist.rec import group_roots, musical_character, radio_intensity, radio_rotation, vibe_intensity
+from yt_playlist.rec.vibe_score_policy import score_patterns
 
 PAGE_SIZE = 128
 LOOKAHEAD = 96
+HOME_LANES = ('wheelhouse', 'explore', 'comfort', 'temporal', 'fresh')
+PUBLICATION_SURFACES = ('radio', 'home', 'fresh')
 _planning_read = ContextVar('radio_planning_read', default=None)
 
 
@@ -27,7 +29,7 @@ def _cached(cache, key, load, limit):
 
 def initial_pool(bucket, mid, blocked, muted, comfort):
     """Interleave prepared lanes into the bounded live discovery reserve."""
-    names = ('wheelhouse', 'explore', 'comfort', 'temporal', 'fresh')
+    names = HOME_LANES
     pool, seen = [], set()
     for group in zip_longest(*(bucket.get(name, []) for name in names)):
         for name, item in zip(names, group):
@@ -53,16 +55,16 @@ class PreparedRadio:
         self.rotation_seed = str(at)
         self.comfort = .5
         self.rotation_cursors = {}
+        self._intensity_headings = None
+        surfaces = tuple(self.surface(name) for name in PUBLICATION_SURFACES)
         if not getattr(store, '_read_only', False) and store.activity_paused:
-            # Maintenance keeps the current publication immutable. Select it
-            # without writing a lease; the live session retains it through the
-            # existing resume callback before recommendation workers restart.
+            # Select the published generation during cleanup. The live session
+            # saves its lease when library writes resume.
             with store.read_view() as reader:
-                selected, _ = group_roots.pending_head(reader,
-                    tuple(self.surface(name) for name in ('radio', 'home', 'fresh')), at)
+                selected, _ = group_roots.pending_head(reader, surfaces, at)
             self.generation, close = generation if generation is not None else selected, None
         elif generation is None:
-            self.generation, close = group_roots.pending_head(store, tuple(self.surface(name) for name in ('radio', 'home', 'fresh')), at)
+            self.generation, close = group_roots.pending_head(store, surfaces, at)
         else:
             self.generation = generation
             close = None if getattr(store, '_read_only', False) else group_roots.pending(
@@ -74,16 +76,26 @@ class PreparedRadio:
         return self.surface_prefix + name
 
     def close(self):
-        if self._lifetime is not None:
-            self._lifetime()
+        owner = getattr(self, '_lease_owner', self)
+        if owner._lifetime is not None:
+            owner._lifetime()
+
+    def for_tuning(self, comfort):
+        reader = copy(self)
+        reader.comfort = comfort
+        reader.rotation_cursors = dict(self.rotation_cursors)
+        # Keep the original retain marker alive for all plans on this publication.
+        reader._lease_owner = getattr(self, '_lease_owner', self)
+        return reader
 
     def retain(self, at):
-        """Retain a maintenance-started session before background work resumes."""
-        if (self._lifetime is None and self.generation is not None
+        """Retain the selected generation once library writes resume."""
+        owner = getattr(self, '_lease_owner', self)
+        if (owner._lifetime is None and self.generation is not None
                 and not getattr(self.store, '_read_only', False) and not self.store.activity_paused):
             close = group_roots.pending(self.store, {'recommendation_generations': [self.generation]}, at)
             if close is not None:
-                self._lifetime = weakref.finalize(self, close)
+                owner._lifetime = weakref.finalize(owner, close)
 
     def _reader(self):
         if self.current_reader is not None:
@@ -150,14 +162,34 @@ class PreparedRadio:
             return self._cached_read('axes', label,
                 lambda: reader.genres.feature_axes([label]).get(label, (None, None)), 512)
 
+    def tuning_ranks(self, purpose, *, energy, include_fresh=False, pinned_genre=None, maximum_duration=None):
+        if self.generation is None:
+            return None
+        surface = self.fresh_surface if purpose == 'fresh' else 'radio'
+        with self._reader() as reader:
+            intensity = None
+            if energy:
+                measurement, joint, _estimate = score_patterns()
+                intensity = (musical_character.VERSION, measurement, joint, vibe_intensity.SOURCES)
+            fresh_surface = self.surface(self.fresh_surface) if include_fresh else None
+            return self.planning_fact(('tuning-ranks', purpose, energy, include_fresh, pinned_genre, maximum_duration),
+                lambda: reader.radio_catalog.tuning_ranks(
+                    self.generation, self.surface(surface), purpose, intensity=intensity,
+                    fresh_surface=fresh_surface, pinned_genre=pinned_genre, maximum_duration=maximum_duration))
+
+    def hydrate_tuning_ranks(self, rows):
+        with self._reader() as reader:
+            return reader.recommendations.hydrate_radio_ranks(rows, self.generation)
+
     def tracks(self, surface, mode, purpose, *, allowed, excluded=(), used=(), limit=LOOKAHEAD,
-               band=None, genres=None, reader=None, include_display=True):
+               band=None, genres=None, reader=None, include_display=True, unheard_discoveries=False,
+               sample_membership=True, prepare_page=None):
         """Advance past unavailable and rejected rows without a global cutoff."""
         if type(limit) is not int or not 1 <= limit <= LOOKAHEAD:
             raise ValueError('Invalid Radio lookahead limit')
         if self.generation is None:
             return []
-        rotate = surface == 'radio' and purpose == 'membership' and limit > 1
+        rotate = sample_membership and surface == 'radio' and purpose == 'membership' and limit > 1
         # Inspect at most 384 eligible rows for rotation, then adopt only the
         # requested lookahead. Quotas never trigger a full-membership search.
         budget = 3 * PAGE_SIZE if rotate else limit
@@ -172,7 +204,7 @@ class PreparedRadio:
                     track.update(radio_rotation.metadata(facts.get(track['key'])))
                 return radio_rotation.reserve(result, limit, self.comfort)
 
-            if surface == 'radio' and purpose == 'membership':
+            if sample_membership and surface == 'radio' and purpose == 'membership':
                 pool = self._cached_read('headings', ('rotation', mode), lambda: current.recommendations.pool(
                     self.surface(surface), mode, purpose, generation=self.generation), 128)
                 count = pool['eligible_count'] if pool else 0
@@ -193,10 +225,18 @@ class PreparedRadio:
                 if rotate:
                     self.rotation_cursors[mode, band, tuple(genres or ())] = -1 if page['exhausted'] else after
                 inspected += len(page['tracks'])
-                for track in page['tracks']:
-                    if wrapped and track['pool_rank'] > start:
-                        return finish()
-                    if track['key'] in seen or track['video_id'] in excluded or not allowed(track):
+                rows = page['tracks']
+                if prepare_page is not None:
+                    prepare_page(current, rows)
+                stop = wrapped and any(track['pool_rank'] > start for track in rows)
+                if unheard_discoveries:
+                    facts = self.track_facts('rotation', [track['key'] for track in rows],
+                                             current.radio_catalog.rotation_facts)
+                    rows = [track for track in rows if radio_rotation.classify(facts.get(track['key'])) == 'new']
+                eligible = (track for track in rows if (not wrapped or track['pool_rank'] <= start)
+                            and track['key'] not in seen and track['video_id'] not in excluded and allowed(track))
+                for track in eligible:
+                    if track['key'] in seen:
                         continue
                     # Issued choices gain mode/profile metadata. Never let that
                     # mutate a cached catalog page used by another branch.
@@ -207,6 +247,8 @@ class PreparedRadio:
                     seen.add(track['key'])
                     if len(result) == budget:
                         break
+                if stop:
+                    break
                 if rotate and inspected >= 3 * PAGE_SIZE and len(result) >= limit:
                     break
                 if page['exhausted']:
@@ -215,46 +257,47 @@ class PreparedRadio:
                     after, wrapped = -1, True
             return finish()
 
-    def capture_inputs(self, reader, modes, space, model_generation, blocked, muted, comfort):
+    def capture_inputs(self, reader, modes, space, model_generation, blocked, muted, comfort, *, adaptive=False):
         """Capture the live lookahead and file owners from one pinned SQL view."""
         self.comfort = comfort
         if self.generation is None:
             return {}, [], []
         repo = reader.recommendations
         framing = repo.framing(self.surface('home'), generation=self.generation) or repo.framing(self.surface('radio'), generation=self.generation) or {}
-        valid = framing.get('radio_space') == space and (bool(self.surface_prefix) or framing.get('radio_generation') == model_generation)
-        members = {row['mode_key']: row['eligible_count'] for row in
-                   repo.selections(self.surface('radio'), 'membership', generation=self.generation)} if valid else {}
+        same_space = framing.get('radio_space') == space
+        compatible_legacy = same_space and (self.surface_prefix or framing.get('radio_generation') == model_generation)
+        # Adaptive membership is the published group partition. A newer encoder
+        # does not change the recordings identified by an immutable group key.
+        members = {}
+        if same_space or adaptive:
+            members = {key: row['eligible_count'] for row in
+                       repo.selections(self.surface('radio'), 'membership', generation=self.generation)
+                       if (key := row['mode_key']) in modes
+                       and (compatible_legacy or modes[key].get('version') == key)}
         self.has_intensity = bool(members and framing.get('intensity_version') == radio_intensity.VERSION
                                   and framing.get('radio_profile_version') == musical_character.VERSION)
         result = {'_meta': {'musical_generation': framing.get('musical_generation')},
                   '_radio': {'generation': framing.get('radio_generation'), 'space': framing.get('radio_space'),
                              'members': members}}
         allowed = lambda track: track['key'] not in blocked and (track.get('artist') or '').casefold() not in muted
+        self.fresh_surface = ('fresh' if repo.pool(self.surface('fresh'), 'all', 'fresh',
+                                                  generation=self.generation) else 'home')
+        if adaptive:
+            # Home pools have their own group versions. A stale Radio catalog
+            # does not force us to open their ranked pages before the first pick.
+            home_modes = {row['mode_key'] for lane in HOME_LANES for row in
+                          repo.selections(self.surface('home'), lane, generation=self.generation)
+                          if row['eligible_count'] and row['mode_key'] in modes}
+            if home_modes or any(members.values()):
+                result['_lazy_modes'] = home_modes | {key for key, count in members.items() if count}
+                return result, [], []
+            modes = ()
+
         displays, pools = [], []
 
         # Lanes share many recordings. Hydrate their bounded pages together,
         # rather than repeating current catalog/genre reads for every lane.
-        lanes = ('wheelhouse', 'explore', 'comfort', 'temporal', 'fresh')
-        selected = {(mode, lane): [] for mode in modes for lane in lanes}
-        pending = [(mode, lane, -1) for mode, lane in selected]
-        while pending:
-            remaining = []
-            for offset in range(0, len(pending), 16):
-                check_cancellable_work()
-                batch = pending[offset:offset + 16]
-                pages = repo.candidate_pages(self.surface('home'), batch, generation=self.generation,
-                                             limit=PAGE_SIZE, include_display=False)
-                for (mode, lane, _), page in zip(batch, pages):
-                    tracks = selected[mode, lane]
-                    for track in page['tracks']:
-                        if allowed(track):
-                            tracks.append(deepcopy(track))
-                            if len(tracks) == LOOKAHEAD:
-                                break
-                    if len(tracks) < LOOKAHEAD and not page['exhausted']:
-                        remaining.append((mode, lane, page['after']))
-            pending = remaining
+        selected = self._home_lanes(reader, modes, allowed)
 
         def tracks(surface, mode, lane):
             rows = (selected[mode, lane] if surface == 'home' and (mode, lane) in selected else
@@ -265,15 +308,56 @@ class PreparedRadio:
             return rows
 
         for mode in modes:
-            buckets = {lane: tracks('home', mode, lane) for lane in lanes}
+            buckets = {lane: tracks('home', mode, lane) for lane in HOME_LANES}
             result[mode] = {'_radio_pool': initial_pool(buckets, mode, blocked, muted, comfort)}
             pools.append((mode, buckets, blocked, muted, comfort))
-        if not any(value['_radio_pool'] for mode, value in result.items() if mode in modes) and not any(members.values()):
-            result['all'] = {lane: tracks('home', 'all', lane)
-                             for lane in ('wheelhouse', 'fresh')}
-            if not result['all']['fresh']:
-                result['all']['fresh'] = tracks('fresh', 'all', 'fresh')
+        has_groups = any(result[mode]['_radio_pool'] for mode in modes) or any(members.values())
+        result['all'] = {'fresh': tracks(self.fresh_surface, 'all', 'fresh')}
+        if not has_groups:
+            result['all']['wheelhouse'] = tracks('home', 'all', 'wheelhouse')
         return result, displays, pools
+
+    def _home_lanes(self, reader, modes, allowed):
+        selected = {(mode, lane): [] for mode in modes for lane in HOME_LANES}
+        pending = [(mode, lane, -1) for mode, lane in selected]
+        while pending:
+            remaining = []
+            for offset in range(0, len(pending), 16):
+                check_cancellable_work()
+                batch = pending[offset:offset + 16]
+                pages = reader.recommendations.candidate_pages(self.surface('home'), batch,
+                    generation=self.generation, limit=PAGE_SIZE, include_display=False)
+                for (mode, lane, _), page in zip(batch, pages):
+                    tracks = selected[mode, lane]
+                    for track in page['tracks']:
+                        if allowed(track):
+                            tracks.append(deepcopy(track))
+                            if len(tracks) == LOOKAHEAD:
+                                break
+                    if len(tracks) < LOOKAHEAD and not page['exhausted']:
+                        remaining.append((mode, lane, page['after']))
+            pending = remaining
+        return selected
+
+    def initial_track_group_pool(self, mode, blocked, muted, comfort):
+        allowed = lambda track: track['key'] not in blocked and (track.get('artist') or '').casefold() not in muted
+        with self.planning_read():
+            selected = self._home_lanes(self.current_reader, (mode,), allowed)
+            buckets = {lane: selected[mode, lane] for lane in HOME_LANES}
+            pool = initial_pool(buckets, mode, blocked, muted, comfort)
+            # Only the tracks selected for the combined reserve need display
+            # data. Lane flags are determined by the original ranked pools.
+            for lane in HOME_LANES:
+                tracks = [track for track in pool if track['lane'] == lane]
+                if not tracks:
+                    continue
+                display = self.current_reader.recommendations.display(self.surface('home'), mode, lane,
+                    [track['pool_rank'] for track in tracks], generation=self.generation)
+                for track in tracks:
+                    explanation = display.get(track['pool_rank'], {})
+                    track['reason'] = explanation.get('reason', '')
+                    track['lane'] = explanation.get('lane', lane)
+            return pool
 
     @staticmethod
     def decode_inputs(captured):
@@ -290,48 +374,65 @@ class PreparedRadio:
         return result
 
     def positions(self, mode, keys):
-        if self.generation is None:
+        if self.generation is None or not keys:
             return {}
-        return {key: row['rank'] for key, row in self.store.recommendations.ranks(
+        reader = self.current_reader if self.current_reader is not None else self.store
+        return {key: row['rank'] for key, row in reader.recommendations.ranks(
             self.surface('radio'), mode, 'ppr', keys, generation=self.generation).items()}
 
-    def regions(self, mode, energy, genre_allowed):
-        """Order the small intensity headings; page genres inside each band."""
-        if self.generation is None:
-            return
-        with self._reader() as reader:
-            repo = reader.recommendations
-            bands = self._cached_read('headings', ('bands', mode), lambda: repo.intensity_bands(
-                self.surface('radio'), mode, 'membership', generation=self.generation), 128)
-            bands = sorted(bands, key=lambda band: (radio_intensity.loss(band / radio_intensity.RESOLUTION, energy),
-                                                   abs(band / radio_intensity.RESOLUTION - energy)))
-            for band in bands:
-                after = None
-                while True:
-                    check_cancellable_work()
-                    headings = self._cached_read('headings', ('genres', mode, band, after),
-                        lambda: repo.band_page(self.surface('radio'), mode, 'membership',
-                            generation=self.generation, band=band, after=after, limit=PAGE_SIZE), 128)
-                    for row in headings:
-                        if genre_allowed(row['genre_key']):
-                            yield radio_intensity.loss(band / radio_intensity.RESOLUTION, energy), band, row['genre_key']
-                    if len(headings) < PAGE_SIZE:
-                        break
-                    after = (band, headings[-1]['genre_key'])
+    def intensity_headings(self):
+        if not self.has_intensity:
+            return {}
+        if self._intensity_headings is None:
+            with self._reader() as reader:
+                self._intensity_headings = reader.recommendations.intensity_headings(
+                    self.surface('radio'), generation=self.generation)
+        return self._intensity_headings
 
-    def intensity_pool(self, mode, energy, *, allowed, genre_allowed, excluded, used, limit=LOOKAHEAD):
-        if (type(limit) is not int or not 1 <= limit <= LOOKAHEAD or type(energy) not in (int, float)
-                or not math.isfinite(energy) or not 0 <= energy <= 1):
+    def regions(self, mode, preference, genre_allowed, *, max_priority=None):
+        """Order the immutable band headings before reading any member tracks."""
+        bands = self.intensity_headings().get(mode, {})
+        bounds = sorted((radio_intensity.band_priority(band, preference), band) for band in bands)
+        for priority, band in bounds:
+            if max_priority is not None and priority > max_priority:
+                break
+            check_cancellable_work()
+            for label in bands[band]:
+                if genre_allowed(label):
+                    yield priority, band, label
+
+    def intensity_pool(self, mode, preference, *, allowed, genre_allowed, excluded, used,
+                       limit=LOOKAHEAD, max_priority=None):
+        if type(limit) is not int or not 1 <= limit <= LOOKAHEAD:
             raise ValueError('Invalid Radio intensity lookahead')
         result, priority = [], None
-        for loss, band, genre in self.regions(mode, energy, genre_allowed):
-            if priority is not None and loss > priority:
+        for tier, band, genre in self.regions(mode, preference, genre_allowed, max_priority=max_priority):
+            if priority is not None and tier > priority:
                 break
             found = self.tracks('radio', mode, 'membership', band=band, genres=[genre], allowed=allowed,
                                 excluded=excluded, used=used, limit=limit - len(result), include_display=False)
             if found:
-                priority = loss
+                priority = tier
                 result.extend(found)
             if len(result) == limit:
                 break
         return priority, result
+
+    def contrast_witness(self, mode, preference, priority, witness, *,
+                         contrast, allowed, genre_allowed, excluded, used):
+        """Find a better live genre in the best fit tier using prepared region headings."""
+        best = contrast(witness)
+        regions = self.regions(mode, preference, genre_allowed, max_priority=priority)
+        choices = sorted(((contrast({'genre': label}), band, label)
+                          for tier, band, label in regions if priority == tier),
+                         key=lambda choice: choice[0], reverse=True)
+        for rank, band, label in choices:
+            if rank <= best:
+                break
+            found = self.tracks('radio', mode, 'membership', band=band, genres=[label],
+                                allowed=lambda track: allowed(track) and contrast(track) > best,
+                                excluded=excluded, used=used, limit=1, include_display=False)
+            if found:
+                witness = found[0]
+                best = contrast(witness)
+        return witness

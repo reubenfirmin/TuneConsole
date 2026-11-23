@@ -25,8 +25,18 @@ def _pristine_current_schema():
         yield schema
 
 
+def _seed_library(store, keys):
+    songs = [(i, key, f'Song {i:04}', 'Artist') for i, key in enumerate(keys)]
+    store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist,unresolved_genre) '
+        "VALUES (?,?,?,?,'House')", songs)
+    store.conn.executemany(
+        'INSERT INTO track_sources(id,recording_id,video_id,title,artist,album,duration_s,thumbnail,mb_year,library_origin) '
+        "VALUES (?,?,?,?,?,'Album',180,'cover','1991','fixture')",
+        [(i, i, f'v{i}', title, artist) for i, _, title, artist in songs])
+
+
 def test_library_reads_do_not_rescan_history_or_containers_per_song(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     playlists = [store.playlists.upsert_playlist(account, f'PL{i}', f'Playlist {i}', 0, 'h', 0)
                  for i in range(300)]
     entries = list(range(1, 601))
@@ -35,11 +45,9 @@ def test_library_reads_do_not_rescan_history_or_containers_per_song(store):
         artist = ensure(store.conn, 'Artist')
         store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
             [(entry, key, f'Song {entry}', 'Artist') for entry, key in zip(entries, keys)])
-        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
-            [(f'v{entry}', entry, f'Song {entry}', 'Artist') for entry in entries])
-        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-            [(entry, entry, f'v{entry}') for entry in entries])
-        store.conn.executemany("INSERT INTO library_memberships(entry_id,origin) VALUES (?,'fixture')",
+        store.conn.executemany('INSERT INTO track_sources(id,recording_id,video_id,title,artist) VALUES (?,?,?,?,?)',
+            [(entry, entry, f'v{entry}', f'Song {entry}', 'Artist') for entry in entries])
+        store.conn.executemany("UPDATE track_sources SET library_origin='fixture' WHERE id=?",
             [(entry,) for entry in entries])
         store.conn.executemany("INSERT INTO entry_artists VALUES (?,0,?,'Artist','fixture')",
             [(entry, artist) for entry in entries])
@@ -88,7 +96,7 @@ def test_library_reads_do_not_rescan_history_or_containers_per_song(store):
 
 
 def test_provenance_reads_do_not_rescan_independent_history_per_generated_song(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     store.history.record_history_plays(account, 86400,
         [f'independent {i}' for i in range(600)], source_timezone='UTC')
     with store.conn:
@@ -113,19 +121,15 @@ def test_provenance_reads_do_not_rescan_independent_history_per_generated_song(s
 
 
 def test_weighting_indexes_computed_history_keys(store):
-    # Model the computed keys in installed history projections. These TEMP
-    # relations isolate join work from metadata decoding and history ingestion;
-    # actual-library result parity is checked separately on an online backup.
+    # Model the computed keys in installed history projections.
     with store.conn:
-        store.conn.execute('CREATE TEMP TABLE subjects(identity_key TEXT,genre TEXT,mb_year TEXT)')
+        _seed_library(store, (f'key-{i}' for i in range(1200)))
         store.conn.execute('CREATE TEMP TABLE observations(identity_key TEXT,at INTEGER)')
-        store.conn.executemany('INSERT INTO subjects VALUES (?,?,?)',
-            [(f'key-{i}', 'House', '1991') for i in range(1200)])
         # A second upload cannot multiply the genre/year weight of its song.
-        store.conn.execute("INSERT INTO subjects VALUES ('key-0','House','1991')")
+        store.conn.execute('INSERT INTO track_sources(recording_id,video_id,title,artist,mb_year) '
+            "VALUES (0,'duplicate','Song 0000','Artist','1991')")
         store.conn.executemany('INSERT INTO observations VALUES (?,?)',
             [(f'key-{i}', day) for i in range(1000) for day in (86400, 172800)])
-        store.conn.execute('CREATE TEMP VIEW tracks AS SELECT * FROM subjects')
         store.conn.execute("CREATE TEMP VIEW listening_days AS SELECT identity_key||'' identity_key FROM observations")
         store.conn.execute('CREATE TEMP VIEW listening_day_counts AS '
             'SELECT identity_key,COUNT(*) plays FROM listening_days GROUP BY identity_key')
@@ -151,20 +155,15 @@ def test_weighting_indexes_computed_history_keys(store):
 def test_charts_and_candidates_index_computed_history_keys(store):
     # Keep the history key untyped, as in installed compatibility projections.
     # A modest cohort must stay cheap even when many songs share one playlist.
+    days = [('1970-01-02', 86400 + 43200), ('1970-01-03', 2 * 86400 + 43200)]
+    revisit_last_played = dt.datetime(1970, 1, 4, 12, tzinfo=dt.timezone.utc).timestamp()
     with store.conn:
-        store.conn.execute('CREATE TEMP TABLE subjects(id INTEGER PRIMARY KEY,recording_id INTEGER, '
-            'identity_key TEXT,title TEXT,artist TEXT,album TEXT,video_id TEXT,thumbnail TEXT, '
-            'genre TEXT,duration_s INTEGER)')
-        store.conn.executemany('INSERT INTO subjects VALUES (?,?,?,?,?,?,?,?,?,?)',
-            [(i, i, f'key-{i:04}', f'Song {i:04}', 'Artist', 'Album', f'v{i}', 'cover', 'House', 180)
-             for i in range(1200)])
-        store.conn.execute('CREATE TEMP TABLE observations(identity_key TEXT,at INTEGER)')
-        store.conn.executemany('INSERT INTO observations VALUES (?,?)',
-            [(f'key-{i:04}', day) for i in range(1000) for day in (86400, 172800)])
-        store.conn.execute('CREATE TEMP VIEW tracks AS SELECT * FROM subjects')
-        store.conn.execute('CREATE TEMP VIEW playable_library_tracks AS SELECT * FROM subjects')
+        _seed_library(store, (f'key-{i:04}' for i in range(1200)))
+        store.conn.execute('CREATE TEMP TABLE observations(identity_key TEXT,day TEXT,at INTEGER)')
+        store.conn.executemany('INSERT INTO observations VALUES (?,?,?)',
+            [(f'key-{i:04}', day, at) for i in range(1000) for day, at in days])
         store.conn.execute("CREATE TEMP VIEW listening_days AS SELECT identity_key||'' identity_key, "
-            'at day_ts,at/86400 day,1 account_id FROM observations')
+            'at day_ts,day,1 account_id FROM observations')
         store.conn.execute("CREATE TEMP VIEW listening_activity AS SELECT identity_key||'' identity_key,at FROM observations")
         store.conn.execute('CREATE TEMP TABLE playlist_tracks(playlist_id INTEGER,track_id INTEGER, '
             'PRIMARY KEY(playlist_id,track_id))')
@@ -172,7 +171,7 @@ def test_charts_and_candidates_index_computed_history_keys(store):
         store.conn.executemany('INSERT INTO playlist_tracks VALUES (999,?)', [(i,) for i in range(1200)])
     operations = [
         ('playlist recency', store.charts.get_playlist_track_recency,
-         lambda rows: rows == {999: [172800] * 1000 + [None] * 200}),
+         lambda rows: rows == {999: [days[-1][1]] * 1000 + [None] * 200}),
         ('genre representative', lambda: store.charts.genre_representative(['House']),
          lambda row: row == {'artist': 'Artist', 'thumbnail': 'cover'}),
         ('chart tracks', store.charts.top_tracks,
@@ -180,7 +179,7 @@ def test_charts_and_candidates_index_computed_history_keys(store):
              and all(row['plays'] == 2 for row in rows)),
         ('revisit', lambda: store.rec_candidates.revisit_candidates(100 * 86400),
          lambda rows: [row['key'] for row in rows] == [f'key-{i:04}' for i in range(90)]
-             and all(row['plays'] == 2 and row['last_played'] == 259200 for row in rows)),
+             and all(row['plays'] == 2 and row['last_played'] == revisit_last_played for row in rows)),
         ('rotation', store.rec_candidates.more_like_rotation,
          lambda rows: [row['key'] for row in rows] == [f'key-{i:04}' for i in range(1000, 1040)]
              and all(row['plays'] == 0 and row['shared_playlists'] == 1 for row in rows)),
@@ -205,7 +204,7 @@ def test_charts_and_candidates_index_computed_history_keys(store):
 
 
 def test_album_familiarity_does_not_scan_all_events_per_imported_day(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     entry = store.tracks.upsert_track('v', 'Song', 'Artist', 'Release', 180, album_browse_id='B')
     subject = store.tracks.catalog_subject(entry)
     key = subject['identity_key']
@@ -240,27 +239,24 @@ def test_prepared_revisit_checks_bound_computed_exact_day_history(store):
     # Compatibility projections compute identity keys. A small prepared pool
     # must not repeatedly scan every exact event to reconcile its imported days.
     with store.conn:
-        store.conn.execute('CREATE TEMP TABLE revisit_songs(id INTEGER PRIMARY KEY,recording_id INTEGER, '
-            'identity_key TEXT,title TEXT,artist TEXT,album TEXT,video_id TEXT,thumbnail TEXT, '
-            'genre TEXT,duration_s INTEGER)')
-        store.conn.executemany('INSERT INTO revisit_songs VALUES (?,?,?,?,?,?,?,?,?,?)',
-            [(i, i, f'revisit-{i:04}', f'Song {i:04}', 'Artist', 'Album', f'v{i}', 'cover', 'House', 180)
-             for i in range(120)])
-        store.conn.execute('CREATE TEMP VIEW playable_library_tracks AS SELECT * FROM revisit_songs')
+        _seed_library(store, (f'revisit-{i:04}' for i in range(120)))
         store.conn.execute('CREATE TEMP TABLE exact_history(id INTEGER PRIMARY KEY,identity_key TEXT, '
-            'account_id INTEGER,played_at INTEGER,day INTEGER)')
+            'account_id INTEGER,played_at INTEGER,day TEXT)')
         selected = [f'revisit-{i:04}' for i in range(12)]
-        events = [(key, 1, 86400 + offset, 1) for key in selected for offset in (1, 2)]
-        events += [(f'revisit-{12 + i % 108:04}', 1, 86400 + i, 1) for i in range(10000)]
+        first_day, second_day = '1970-01-02', '1970-01-03'
+        events = [(key, 1, 86400 + offset, first_day) for key in selected for offset in (1, 2)]
+        events += [(f'revisit-{12 + i % 108:04}', 1, 86400 + i, first_day) for i in range(10000)]
         store.conn.executemany('INSERT INTO exact_history(identity_key,account_id,played_at,day) '
             'VALUES (?,?,?,?)', events)
         store.conn.execute("CREATE TEMP VIEW play_event_subjects AS SELECT id,identity_key||'' identity_key, "
             'account_id,played_at FROM exact_history')
         store.conn.execute('CREATE TEMP VIEW play_event_calendar AS SELECT id event_id,day FROM exact_history')
-        store.conn.execute('CREATE TEMP TABLE imported_history(identity_key TEXT,account_id INTEGER,day INTEGER, '
+        store.conn.execute('CREATE TEMP TABLE imported_history(identity_key TEXT,account_id INTEGER,day TEXT, '
             'day_ts INTEGER)')
-        store.conn.executemany('INSERT INTO imported_history VALUES (?,?,?,?)',
-            [(key, account, day, day * 86400) for key in selected for account, day in ((1, 1), (1, 2), (2, 1))])
+        imports = [(key, 1, first_day, 86400 + 43200) for key in selected]
+        imports += [(key, 2, first_day, 86400 + 43200) for key in selected[1:]]
+        imports += [(key, 1, second_day, 2 * 86400 + 43200) for key in selected[2:]]
+        store.conn.executemany('INSERT INTO imported_history VALUES (?,?,?,?)', imports)
         store.conn.execute("CREATE TEMP VIEW listening_days AS SELECT identity_key||'' identity_key, "
             'account_id,day,day_ts FROM imported_history')
     steps = 0
@@ -270,11 +266,20 @@ def test_prepared_revisit_checks_bound_computed_exact_day_history(store):
         steps += 1000
         return int(steps > 250_000)
 
+    first_cutoff = dt.datetime(1970, 1, 3, 12, tzinfo=dt.timezone.utc).timestamp()
+    second_cutoff = dt.datetime(1970, 1, 4, 12, tzinfo=dt.timezone.utc).timestamp()
+    now_at_cutoff = second_cutoff + 30 * 86400
     with store._lock:
         store.conn.set_progress_handler(bounded, 1000)
         try:
             rows = store.rec_candidates.revisit_candidates(100 * 86400, keys=selected)
         finally:
             store.conn.set_progress_handler(interrupt_query, 1000)
+        before_cutoff = store.rec_candidates.revisit_candidates(now_at_cutoff - 1, keys=selected)
+        at_cutoff = store.rec_candidates.revisit_candidates(now_at_cutoff, keys=selected)
     assert [row['key'] for row in rows] == selected
-    assert all(row['plays'] == 4 and row['last_played'] == 3 * 86400 for row in rows)
+    assert [(row['plays'], row['last_played']) for row in rows] == [
+        (2, 86402), (3, first_cutoff), *[(4, second_cutoff)] * (len(selected) - 2),
+    ]
+    assert [row['key'] for row in before_cutoff] == selected[:2]
+    assert [row['key'] for row in at_cutoff] == selected

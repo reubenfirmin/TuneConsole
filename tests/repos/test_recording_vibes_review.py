@@ -10,7 +10,7 @@ from tests.prepared_fixture_support import roots
 from tests.rec.test_vibe_prediction import capture, controlled_measurements, drain, fits, track
 from tests.store_fixture_support import native_sql_calls, without_query_timing
 from tests.test_audio_vibes import sample
-from yt_playlist.core import sample_files
+from yt_playlist.core import content_work, sample_files
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
@@ -34,11 +34,15 @@ def test_identical_retry_restores_measurement_after_missing_file_was_processed(s
     # Another ordinary catalog change causes the worker to observe the missing
     # file. The absent file itself need not be watched by the application.
     with store.conn:
-        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (original,))
+        content_work.enqueue(store.conn, (original,))
     drain(store)
-    assert fits(store, target)['relax']['source'] == 'heuristic'
+    partial = fits(store, original)['relax']
+    assert partial['source'] == 'audio_measurement'
+    assert partial['support'] == pytest.approx(2 / 3)
+    assert fits(store, target)['relax']['support'] < before['relax']['support']
     store.audio_vibes.save_sample(values[0], 500)
     drain(store)
+    assert fits(store, original)['relax']['support'] == 1
     assert fits(store, target) == before
 
 

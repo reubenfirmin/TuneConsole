@@ -22,7 +22,8 @@ function fixture() {
     ended:false,readyState:4,isConnected:true,playbackRate:1,
     captureStream(){captures++;throw Error('Reached native capture')}};
   const elements=[media];
-  const window={__tcAudioPreviewCapture:{revision:3,stop(){oldStopped++}},
+  const window={__tcBridgeLoaded:{checkingPlaybackAudio:false},
+    __tcAudioPreviewCapture:{revision:4,stop(){oldStopped++}},
     addEventListener(type,fn){listeners.set(type,fn)},removeEventListener(type){listeners.delete(type)}};
   const chrome={runtime:{id:'extension',onConnect:event()}};
   const context=vm.createContext({window,chrome,location:{origin:'https://music.youtube.com'},
@@ -31,7 +32,7 @@ function fixture() {
     setInterval(fn){const id=next++;timers.set(id,fn);return id},clearInterval(id){timers.delete(id)}});
   vm.runInContext(source,context);
   assert.equal(oldStopped,1,'on-demand injection upgrades the old capture controller');
-  assert.equal(window.__tcAudioCapture.revision,4);
+  assert.equal(window.__tcAudioCapture.revision,5);
   assert.equal(window.__tcAudioPreviewCapture,window.__tcAudioCapture,
     'the old revision marker prevents an already-open tab from duplicating capture');
   vm.runInContext(source,context);
@@ -45,6 +46,7 @@ function fixture() {
     start(){port.onMessage.listeners[0]({type:'capture',id:'check',video_id:'song',not_before:30},port)},
     tick(ms,delta=ms/1000){now+=ms;media.currentTime+=delta;
       for(const fn of [...timers.values()])fn()},
+    checkingPlaybackAudio(value){window.__tcBridgeLoaded.checkingPlaybackAudio=value},
     running(){return window.__tcAudioCapture.inspect().running},
     close(){window.__tcAudioCapture.stop();
       assert.equal(window.__tcAudioCapture,undefined);
@@ -83,6 +85,11 @@ assert.equal(buffering.running(),true);assert.equal(buffering.captures,0);
 buffering.tick(500);buffering.media.readyState=4;buffering.status(31);buffering.tick(0);
 assert.equal(buffering.captures,1,'capture resumes as soon as the same song has ready media');
 buffering.close();
+const confirming=fixture();confirming.checkingPlaybackAudio(true);confirming.status(31);confirming.start();
+assert.equal(confirming.port.sent.at(-1).type,'waiting');confirming.tick(500);
+assert.equal(confirming.captures,0,'an excerpt waits for card confirmation to release the capture route');
+confirming.checkingPlaybackAudio(false);confirming.status(31);confirming.tick(250);
+assert.equal(confirming.captures,1);confirming.close();
 for(const change of [f=>f.elements.splice(0),f=>{f.media.paused=true},
     f=>{f.media.ended=true},f=>{f.media.readyState=1}]) {
   const f=fixture();change(f);f.status(31);f.start();f.tick(3000);

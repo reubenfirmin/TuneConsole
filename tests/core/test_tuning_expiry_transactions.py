@@ -38,7 +38,7 @@ def test_expired_tuning_keeps_caller_draft_and_expiry_in_its_transaction(install
             assert store.conn.execute("SELECT name FROM genre_catalog WHERE key='expiry-genre'").fetchone()[0] == 'Caller draft'
             with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as observer:
                 assert observer.execute("SELECT name FROM genre_catalog WHERE key='expiry-genre'").fetchone()[0] == 'Original genre'
-                assert observer.execute('SELECT count(*) FROM rec_lean').fetchone()[0] == len(before)
+                assert observer.execute('SELECT count(*) FROM taste_axes WHERE lean IS NOT NULL').fetchone()[0] == len(before)
         finally:
             store.conn.rollback()
     assert store.rec_model.get_leans() == before
@@ -73,10 +73,10 @@ def test_failed_expiry_preserves_draft_and_retries_until_caller_commit(installed
             assert store.conn.in_transaction and not store.rec_model.get_leans()
             with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as observer:
                 assert observer.execute("SELECT name FROM genre_family WHERE key='expiry-family'").fetchone()[0] == 'Original family'
-                assert observer.execute('SELECT count(*) FROM rec_lean').fetchone()[0] == len(before)
+                assert observer.execute('SELECT count(*) FROM taste_axes WHERE lean IS NOT NULL').fetchone()[0] == len(before)
             store.conn.commit()
             with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as observer:
                 assert observer.execute("SELECT name FROM genre_family WHERE key='expiry-family'").fetchone()[0] == 'Caller draft'
-                assert observer.execute('SELECT count(*) FROM rec_lean').fetchone()[0] == 0
+                assert observer.execute('SELECT count(*) FROM taste_axes WHERE lean IS NOT NULL').fetchone()[0] == 0
         finally:
             store.conn.rollback()

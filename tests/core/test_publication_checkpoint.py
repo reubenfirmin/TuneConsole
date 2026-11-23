@@ -129,7 +129,6 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
         database.rec_ledger.record_prepared_policies(policies)
     with database.read_snapshot() as snapshot:
         if projection == 'trends':
-            rows = snapshot.store.trends.prepare_first_play()
             build = None
         else:
             prepared = bundle_storage.prepare(snapshot.store.conn, {'all': {}}, [],
@@ -144,8 +143,7 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
         def publish():
             assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
             if projection == 'trends':
-                database.trends.publish_rollup(
-                    rows, '{"generation":"2"}', 2., None)
+                database.trends.publish_rollup('{"generation":"2"}', 2.)
             else:
                 database.recommendations.publish(build, 2.)
             database.settings.set_setting('projection-version', '2')

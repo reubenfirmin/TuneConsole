@@ -16,7 +16,7 @@ pytestmark = pytest.mark.browser
 @pytest.fixture
 def live_pl_app(tmp_path, monkeypatch, store):
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client_tracks = {}
     for suffix, title, song, artist in [("A", "Alpha", "SongA", "X"),
                                        ("B", "Beta", "SongB", "Y"),

@@ -1,18 +1,12 @@
 """Relational taste axes; encoded tokens exist only at the legacy API boundary."""
-from yt_playlist.core import genre_identity, taste_reads
+from yt_playlist.core import genre_identity, worker_settings
 from yt_playlist.util import genre_catalog
 
-TABLES = ('rec_weights', 'rec_lean', 'home_hidden_facet', 'rec_theme',
-          'play_gradient_checkpoints', 'recommendation_gradient_events')
-
-
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='taste_axes'").fetchone() is not None
-
+GRADUATIONS = 'taste_axis_graduations'
+GRADUATION_HISTORY = 'graduation_history'
+GRADUATION_SERIAL = 'taste_axis_graduation_high_water'
 
 def identity(conn, token, *, create=False):
-    if not available(conn):
-        return token
     if not isinstance(token, str) or not token:
         raise ValueError('A taste axis requires a nonempty token')
     kind, genre, family, value, reason = 'other', None, None, token, None
@@ -52,87 +46,32 @@ def identity(conn, token, *, create=False):
                         'VALUES (?,?,?,?,?)', (*fields, reason)).lastrowid
 
 
-def projection(conn, table, columns='*', *, token_name='axis'):
-    if not available(conn):
-        prepared = taste_reads.projection(conn,table,columns,token_name=token_name)
-        if prepared is not None:
-            return prepared
-        if compatible(conn):
-            return taste_reads.live_projection(table,columns,token_name=token_name)
-        return f'SELECT {columns} FROM {table} t'
+def token_expression():
     # IDs stay stable when display names or aliases change. Existing callers
     # consume stable genre keys and family keys through their token boundary.
-    token = ("CASE a.kind WHEN 'genre' THEN 'genre:'||a.genre_key "
-             "WHEN 'family' THEN 'genre:'||a.family_key "
-             "WHEN 'unresolved_genre' THEN 'genre:'||a.value ELSE a.value END")
-    names = [c.strip() for c in columns.split(',')]
-    selected = ','.join(f'{token} AS {token_name}' if c == token_name else 't.' + c for c in names)
-    return f'SELECT {selected} FROM {table} t JOIN taste_axes a ON a.id=t.axis_id'
+    return ("CASE a.kind WHEN 'genre' THEN 'genre:'||a.genre_key "
+            "WHEN 'family' THEN 'genre:'||a.family_key "
+            "WHEN 'unresolved_genre' THEN 'genre:'||a.value ELSE a.value END")
 
 
-def column(conn, legacy='axis'):
-    return 'axis_id' if available(conn) else legacy
+def graduation_event_sql(identity, source, score, factor, weight, at):
+    numbers = ','.join(f"json(printf('%!0.26g',{column}))" for column in (score, factor, weight, at))
+    return f'json_array({identity},{source},{numbers})'
 
 
-def table(conn, legacy):
-    return ({'rec_play_grad': 'play_gradient_checkpoints',
-             'rec_grad_log': 'recommendation_gradient_events'}.get(legacy, legacy)
-            if available(conn) else legacy)
+def graduation_view():
+    return f'''CREATE VIEW {GRADUATIONS} AS
+        SELECT event.value->>0 AS id, a.id AS axis_id, {token_expression()} AS axis,
+            event.value->>1 AS source, event.value->>2 AS score, event.value->>3 AS factor,
+            event.value->>4 AS new_weight, event.value->>5 AS created_at
+        FROM taste_axes a CROSS JOIN json_each(a.{GRADUATION_HISTORY}) event
+        WHERE a.{GRADUATION_HISTORY}<>'[]' '''
 
 
-def compatible(conn):
-    """Keep canonical API writes compatible after a published selection is withdrawn."""
-    return (not available(conn) and conn.execute(
-        "SELECT 1 FROM main.sqlite_schema WHERE name='published_taste_head'").fetchone() is not None
-        and conn.execute('SELECT 1 FROM main.published_taste_head WHERE id=1').fetchone() is not None)
-
-
-def matches(conn, owner, token, *, create=False):
-    """Match current physical aliases using the same identity rules as preparation.
-
-    The SQL predicate also covers newly added source aliases and catalog edits;
-    an old publication map cannot establish their current identity. Only matched
-    keys cross the Python boundary. Graduation events are appended separately.
-    """
-    legacy = 'facet' if owner=='rec_theme' else 'axis'
-    if available(conn):
-        return 'axis_id=?', (identity(conn,token,create=create),)
-    if not compatible(conn):
-        return legacy+'=?', (token,)
-    _, (kind,genre,family,value,_) = taste_reads.axis(conn,token)
-    if kind=='other':
-        return legacy+'=?', (value,)
-    prefixed,label,candidates = taste_reads.legacy_parts(legacy)
-    if kind=='family':
-        return prefixed+' AND ('+label+')=?', (family,)
-    if kind=='unresolved_genre':
-        return prefixed+' AND ('+label+')=?', (value,)
-    return (prefixed+f' AND NOT EXISTS(SELECT 1 FROM genre_family WHERE key=({label})) '
-        'AND (SELECT count(*)=1 AND min(identity_key)=? FROM ('+candidates+'))', (genre,))
-
-
-def reference(conn, owner, token, *, create=False):
-    """Resolve one mutable physical key without introducing a competing alias."""
-    if available(conn):
-        return identity(conn,token,create=create)
-    if not compatible(conn):
-        return token
-    column = 'facet' if owner=='rec_theme' else 'axis'
-    predicate,parameters = matches(conn,owner,token)
-    rows = conn.execute('SELECT '+column+' FROM main.'+owner+' WHERE '+predicate+' ORDER BY '+column+' LIMIT 2',parameters).fetchall()
-    if len(rows)>1 and owner in ('rec_weights','rec_lean'):
-        raise ValueError('Multiple configured taste values resolve to one identity; reconcile the source explicitly')
-    return rows[0][0] if rows else token
-
-
-def lookup(conn, owner, token, columns):
-    """Read a selected fold, or the current compatible physical contribution(s)."""
-    projected = taste_reads.projection(conn,owner,'*',token_name='facet' if owner=='rec_theme' else 'axis')
-    if projected is not None:
-        _, (kind,genre,family,value,_) = taste_reads.axis(conn,token)
-        canonical = ('genre:'+genre if kind=='genre' else 'genre:'+family if kind=='family'
-                     else 'genre:'+value if kind=='unresolved_genre' else value)
-        return conn.execute('SELECT '+columns+' FROM ('+projected+') WHERE '+
-            ('facet' if owner=='rec_theme' else 'axis')+'=?',(canonical,)).fetchone()
-    predicate,parameters = matches(conn,owner,token)
-    return conn.execute('SELECT '+columns+' FROM main.'+table(conn,owner)+' WHERE '+predicate,parameters).fetchone()
+def record_graduation(conn, axis, source, score, factor, weight, at):
+    reference = identity(conn, axis, create=True)
+    serial = int(worker_settings.read(conn, GRADUATION_SERIAL, '0')) + 1
+    event = graduation_event_sql('?', '?', '?', '?', '?', '?')
+    conn.execute(f"UPDATE taste_axes SET {GRADUATION_HISTORY}=json_insert({GRADUATION_HISTORY},'$[#]',{event}) "
+                 'WHERE id=?', (serial, source, score, factor, weight, at, reference))
+    worker_settings.save(conn, GRADUATION_SERIAL, str(serial))

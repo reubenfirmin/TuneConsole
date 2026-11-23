@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class ChoiceResponses:
-    def __init__(self, ledger, *, capture, paused, admission, pending, roots_enabled, persist):
+    def __init__(self, ledger, *, capture, paused, admission, pending, persist):
         self.ledger, self.capture, self.paused = ledger, capture, paused
-        self.admission, self.pending, self.roots_enabled = admission, pending, roots_enabled
+        self.admission, self.pending = admission, pending
         self.persist = persist
 
     def opportunity(self, identity):
@@ -32,16 +32,15 @@ class ChoiceResponses:
         capture = None if synchronous else self.capture
         if capture is not None:
             close = None
-            if self.roots_enabled():
-                captured = capture.context(opportunity_id)
-                if captured is None:
-                    offer = self.ledger.get('opportunity', opportunity_id)
-                    captured = {'artifact': offer['context']} if offer else None
-                if captured is not None:
-                    try:
-                        close = self.pending({}, now)
-                    except WorkBudgetExceeded:
-                        return None
+            captured = capture.context(opportunity_id)
+            if captured is None:
+                offer = self.ledger.get('opportunity', opportunity_id)
+                captured = {'artifact': offer['context']} if offer else None
+            if captured is not None:
+                try:
+                    close = self.pending({}, now)
+                except WorkBudgetExceeded:
+                    return None
             try:
                 return capture.enqueue('listening:response', self._persist, opportunity_id, kind, now,
                     references=(opportunity_id,), on_close=close,

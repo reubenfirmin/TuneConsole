@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.rec import actions
 from yt_playlist.web import app as webapp
-from yt_playlist.web.routes import app_update, audio_preview, cleanup
+from yt_playlist.web.routes import app_update, audio_vibes, cleanup
 from tests.conftest import FakeClient
 
 
@@ -17,8 +17,8 @@ def cleanup_client(store, monkeypatch):
     # Keep cleanup's real app, including the shared template and shutdown owners.
     # Other feature routers do not participate in these dismissal workflows.
     monkeypatch.setattr(webapp, "build_all", lambda ctx: [module.build(ctx) for module in
-                                                        (cleanup, app_update, audio_preview)])
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+                                                        (cleanup, app_update, audio_vibes)])
+    iid = store.accounts.upsert_account("main", None, True)
     app = webapp.create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0,
                            background_work=False)
     with TestClient(app, base_url="http://127.0.0.1") as client:

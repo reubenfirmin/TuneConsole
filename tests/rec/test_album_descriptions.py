@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +49,29 @@ def own_album(store, album=ALBUM):
 
 def other_album(store, title):
     return own_album(store, {**ALBUM, 'browse_id': 'other-id', 'title': title})
+
+
+def test_failed_outcome_write_rolls_back_metered_usage_and_can_retry(store):
+    album_id = store.album_descriptions.album_id(own_album(store))
+    claim = store.album_descriptions.claim(album_id, {'model': 'test'}, 'credential', 5, 10)
+    identity, token = claim['request_id'], claim['token']
+    assert store.album_descriptions.authorize(identity, token, 'credential', 5, 11)
+    ready = {'status': 'ready', 'description': 'Finished', 'model': 'test', 'usage': {'total_tokens': 7}}
+    store.conn.execute("CREATE TEMP TRIGGER fail_outcome BEFORE UPDATE OF outcome_json ON album_description_requests "
+                       "BEGIN SELECT RAISE(ABORT,'Interrupted outcome'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='Interrupted outcome'):
+        store.album_descriptions.finish(identity, token, ready, 12)
+    assert store.album_descriptions.repository.request(identity)['status'] == 'sent'
+    usage_sql = ('SELECT usage_kind,units FROM album_description_requests '
+                 'WHERE usage_id IS NOT NULL ORDER BY usage_id')
+    assert list(map(tuple, store.conn.execute(usage_sql))) == [('requests', 1)]
+
+    store.conn.execute('DROP TRIGGER fail_outcome')
+    assert store.album_descriptions.finish(identity, token, ready, 13)
+    assert not store.album_descriptions.finish(identity, token, ready, 14)
+    assert store.album_descriptions.result(identity) == ready
+    assert list(map(tuple, store.conn.execute(usage_sql))) == [
+        ('requests', 1), ('total_tokens', 7)]
 
 
 @pytest.fixture(autouse=True)
@@ -246,12 +270,10 @@ def test_disabled_missing_key_or_zero_limit_never_requests_provider(store, gener
 
 def test_usage_and_generated_records_do_not_contain_credentials(store, generated):
     copy.get(store, ALBUM, 100)
-    from yt_playlist.core import album_description_files, fao
     rows = [tuple(row) for row in store.conn.execute('SELECT * FROM album_description_requests')]
-    files = [fao.read(path).bytes.decode('utf-8')
-             for path in album_description_files.directory(store.conn).rglob('*.json')]
-    assert rows and files
-    assert 'secret-key' not in json.dumps(rows + files)
+    assert store.conn.execute('SELECT 1 FROM album_description_requests WHERE usage_id IS NOT NULL').fetchone()
+    assert store.conn.execute("SELECT 1 FROM album_description_requests WHERE outcome_json IS NOT NULL").fetchone()
+    assert 'secret-key' not in json.dumps(rows)
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface LIKE 'album_description%'").fetchone()
 
 
@@ -260,7 +282,7 @@ def test_worker_prepares_refreshed_menu_instead_of_buying_copy_for_previous_menu
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home
+    from yt_playlist.web.routes import app_update, audio_vibes, home
     from yt_playlist.rec import album_choices, album_notes, home_prepared
     from yt_playlist.rec.worker_tasks import ServingTasks
     store = album_worker_store
@@ -269,7 +291,7 @@ def test_worker_prepares_refreshed_menu_instead_of_buying_copy_for_previous_menu
     returning_listener(store, 'albums', now=1000)
     # Keep the real Home routes, template globals and shutdown ownership.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
-                                                        (home, app_update, audio_preview)])
+                                                        (home, app_update, audio_vibes)])
     app = webapp.create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     albums = [{'browse_id': f'record-{i}', 'artist': f'Artist {i}', 'title': f'Album {i}',
                'score': 1 - i / 20, 'classification': 'discovery'} for i in range(12)]

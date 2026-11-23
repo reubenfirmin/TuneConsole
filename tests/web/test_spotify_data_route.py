@@ -16,7 +16,7 @@ from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
     native_sql_calls, reuse_reporting_reader, without_query_timing,
 )
-from yt_playlist.rec import mode_surfaces, rec_params, transient
+from yt_playlist.rec import rec_params, transient
 from yt_playlist.web.app import create_app
 
 
@@ -44,10 +44,10 @@ def store(tmp_path, _pristine_current_schema, monkeypatch):
 def spotify_routes(monkeypatch, home_page_bytecode, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, setup
+    from yt_playlist.web.routes import app_update, audio_vibes, home, setup
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, home, setup)])
+        for module in (app_update, audio_vibes, home, setup)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     templates = webapp.Jinja2Templates
@@ -105,7 +105,7 @@ def spotify_clients(store):
 
 
 def _client(store, spotify_clients):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("yt", "Song", "Artist", None, 180)
     return spotify_clients(create_app(store, lambda: {}, now_fn=lambda: 1000.0),
                            base_url="http://127.0.0.1:8123")
@@ -178,22 +178,20 @@ def test_upload_imports_history_and_replaces_form_with_report(store, spotify_cli
 
 @pytest.mark.parametrize('_pristine_current_schema', [False], indirect=True, ids=['uncontended'])
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
-def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, monkeypatch, spotify_clients):
+def test_history_upload_updates_recent_taste_and_preserves_saved_preferences(store, monkeypatch, spotify_clients):
     now = 1704103200.0  # The export's timestamp, so its play participates in recent taste.
-    store.accounts.upsert_account('main', 'bridge', None, True)
+    store.accounts.upsert_account('main', None, True)
     tid = store.tracks.upsert_track('yt', 'Song', 'Artist', None, 180)
     store.tracks.set_track_genre(tid, 'Techno')
     rec_params.set_param(store, 'source_w_play', 1.0)
-    rec_params.set_param(store, 'theme_threshold', 0.2)
     app = create_app(store, lambda: {}, now_fn=lambda: now, background_work=False)
     from fastapi.responses import HTMLResponse
 
     render = app.state.ctx.templates.TemplateResponse
 
     def template_response(request, name, context, **kwargs):
-        # This workflow checks Home reads and subsequent background learning.
-        # Keep both route/context builds; page markup has its own tests. Import
-        # reports retain their actual rendering and response-text assertions.
+        # Keep the Home route and context builds. Import reports retain their
+        # actual rendering and response-text assertions.
         if name == 'home.html':
             return HTMLResponse('Home')
         return render(request, name, context, **kwargs)
@@ -208,26 +206,19 @@ def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, 
         'file': ('history.zip', _payload(), 'application/zip')})
     assert response.status_code == 200 and 'Spotify import complete' in response.text
     assert refreshes == [True]
-    assert transient.play_facet_leans(store, now)
+    recent_leans = transient.play_facet_leans(store, now)
+    assert recent_leans
     assert client.get('/').status_code == 200
     assert store.rec_model.get_weights(now=now) == {}
 
-    # Candidate pools precede Home in the worker; HTTP reads must not prepare either.
-    assert mode_surfaces.prepare_bundles(store, now) is not None
-    # Daily exposure belongs to background Home preparation, including after an import.
-    worker = app.state.ctx.rec_worker
-    worker.enabled = True
-    worker.debounce_s = 0
-    worker.trigger_home_refresh(force=True)
-    worker.join(5)
+    store.rec_model.set_weight('genre:techno', 1.5, now=now)
     weights = store.rec_model.get_weights(now=now)
-    assert weights and all(weight > 1.0 for weight in weights.values())
+    assert weights['genre:techno'] == 1.5
 
     client.post('/import/spotify/v2', files={'file': ('history.zip', _payload(), 'application/zip')})
     assert client.get('/').status_code == 200
-    worker.trigger_home_refresh(force=True)
-    worker.join(5)
     assert store.history.spotify_history_stats()['events'] == 1
+    assert transient.play_facet_leans(store, now) == recent_leans
     assert store.rec_model.get_weights(now=now) == weights
     assert refreshes == [True]
 
@@ -304,7 +295,7 @@ def test_daily_only_spotify_history_can_be_removed(store, source_timezone, spoti
 @pytest.mark.parametrize('_pristine_current_schema', [False], indirect=True, ids=['uncontended'])
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 def test_account_data_requires_selection_preview_and_confirmation_before_writes(store, spotify_clients):
-    identity = store.accounts.upsert_account("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     client = FakeClient(search_results=[_track("yt-song", "Song", "Artist")],
                         catalog={"yt-song": _track("yt-song", "Song", "Artist")})
     web = spotify_clients(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000.0,
@@ -369,7 +360,8 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     returning_listener(store, 'mixes', now=1000)
     dashboard = web.get("/")
     assert "Spotify import complete" in dashboard.text
-    assert "panel: homePanel(location.hash.slice(1)) || 'notices'" in dashboard.text
+    assert 'class="dash-nav"' in dashboard.text
+    assert "panel: 'notices'" in dashboard.text
 
     report = web.get("/import/spotify-library/report")
     assert report.status_code == 200
@@ -397,7 +389,7 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
 
 
 def test_account_data_upload_returns_before_youtube_matching_finishes(store, spotify_clients):
-    identity = store.accounts.upsert_account("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     entered, release = threading.Event(), threading.Event()
 
     class SlowClient(FakeClient):
@@ -425,7 +417,7 @@ def test_account_data_upload_returns_before_youtube_matching_finishes(store, spo
 
 
 def test_technical_log_is_explained_as_the_wrong_spotify_package(store, spotify_clients):
-    identity = store.accounts.upsert_account("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     web = spotify_clients(create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: 1.0),
                      base_url="http://127.0.0.1:8123")
     wrong = io.BytesIO()
@@ -440,8 +432,8 @@ def test_technical_log_is_explained_as_the_wrong_spotify_package(store, spotify_
 
 
 def test_playlist_selection_and_preview_bind_the_destination_and_recording(store, spotify_clients):
-    first = store.accounts.upsert_account("first", "first-bridge", None, True)
-    second = store.accounts.upsert_account("second", "second-bridge", None, False)
+    first = store.accounts.upsert_account("first", None, True)
+    second = store.accounts.upsert_account("second", None, False)
     first_client = FakeClient(search_results=[_track("wrong-account", "Song", "Artist")])
     second_client = FakeClient(search_results=[_track("chosen-recording", "Song", "Artist")])
     web = spotify_clients(create_app(store, lambda: {first: first_client, second: second_client}, now_fn=lambda: 1000),
@@ -470,7 +462,7 @@ def test_playlist_selection_and_preview_bind_the_destination_and_recording(store
 
 
 def test_expired_and_cancelled_previews_cannot_write(store, spotify_clients):
-    identity = store.accounts.upsert_account("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     client = FakeClient(search_results=[_track("yt", "Song", "Artist")])
     clock = [1000]
     web = spotify_clients(create_app(store, lambda: {identity: client}, now_fn=lambda: clock[0]),
@@ -487,7 +479,7 @@ def test_expired_and_cancelled_previews_cannot_write(store, spotify_clients):
 
 
 def test_invalid_selection_and_disconnected_destination_do_not_consume_upload(store, spotify_clients):
-    identity = store.accounts.upsert_account("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     client = FakeClient(search_results=[_track("yt", "Song", "Artist")])
     web = spotify_clients(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000),
                      base_url="http://127.0.0.1:8123")
@@ -510,7 +502,7 @@ def test_failed_playlist_result_remains_reviewable_with_successes(store, spotify
                 raise RuntimeError("create rejected")
             return super().create_playlist(title, description)
 
-    identity = store.accounts.upsert_account("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     client = BrokenFirst(search_results=[_track("yt", "Song", "Artist")],
                          catalog={"yt": _track("yt", "Song", "Artist")})
     web = spotify_clients(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000),
@@ -533,7 +525,7 @@ def test_failed_playlist_result_remains_reviewable_with_successes(store, spotify
 
 
 def test_legacy_report_gets_spotify_search_links_and_can_resolve_a_candidate(store, spotify_clients):
-    identity = store.accounts.upsert_account("main", "bridge", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
 
     class AlbumClient(FakeClient):
         def __init__(self):
@@ -579,13 +571,9 @@ def test_legacy_report_gets_spotify_search_links_and_can_resolve_a_candidate(sto
         },
     }
     from yt_playlist.core import spotify_job_state
-    if spotify_job_state.available(store.conn):
-        # This fixture represents a report written before destination accounts
-        # were retained. Ordinary new jobs must name their account.
-        with store.conn:
-            spotify_job_state.save(store.conn,legacy_job,legacy=True)
-    else:
-        store.settings.set_setting(spotify_job_state.KEY,json.dumps(legacy_job))
+    # This fixture represents a report written before destination accounts were retained.
+    with store.conn:
+        spotify_job_state.save(store.conn, legacy_job, legacy=True)
 
     legacy = web.get("/import/spotify-library/report")
     assert "open.spotify.com/search/The%20Fat%20of%20the%20Land%20The%20Prodigy" in legacy.text

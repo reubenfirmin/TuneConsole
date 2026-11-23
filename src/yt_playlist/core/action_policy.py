@@ -66,7 +66,6 @@ def progress(kind, params, plan, undo, status):
         if type(params.get(field)) is int:
             targets.append((role, 0, dict(membership=params[field],
                 remote=params.get('source_ytm') if role == 'source' else None)))
-    placement = None
     if type(plan.get('playlist_id')) is int:
         targets.append(('placement', 0, dict(membership=plan['playlist_id'])))
         videos, handles = plan.get('video_ids', []), plan.get('set_video_ids', {})
@@ -74,16 +73,14 @@ def progress(kind, params, plan, undo, status):
                 or not isinstance(handles, dict) or any(not isinstance(v, str) or not v or not isinstance(h, str) or not h
                                                        for v, h in handles.items())):
             raise ValueError('Unsupported ordered action placement')
-        placement = (videos, handles, plan.get('after_video_id'), 'set_video_ids' in plan)
         phase = 'complete' if status == 'executed' else 'cancelled' if status == 'cancelled' else 'pending'
         steps.append((750000, 'place_tracks', {'phase': phase}, ('placement', 0), None))
-    resolutions = []
     if kind == 'plan':
         for list_kind in ('additions', 'unresolved'):
-            for position, item in enumerate(plan.get(list_kind, [])):
-                if not isinstance(item, dict) or set(item) != {'identity_key', 'source_video_id', 'target_video_id', 'method'}:
+            for item in plan.get(list_kind, []):
+                if (not isinstance(item, dict) or set(item) != {'identity_key', 'source_video_id', 'target_video_id', 'method'}
+                        or item['method'] not in ('reuse', 'search', 'unresolved')):
                     raise ValueError('Unsupported merge plan resolution')
-                resolutions.append((list_kind, position, item))
     for position, entry in enumerate(undo.get('restored', [])):
         targets.append(('keeper', position, dict(account=entry.get('identity'), remote=entry.get('ytm'))))
         if entry.get('backup'):
@@ -113,8 +110,7 @@ def progress(kind, params, plan, undo, status):
                 targets.append(('recovery', position, target))
             steps.append((1000000 + position, operation, entry,
                           ('recovery', position) if target is not None else None, backup))
-    return dict(backups=list(dict.fromkeys(backups)), targets=targets, steps=steps,
-                placement=placement, resolutions=resolutions)
+    return dict(backups=list(dict.fromkeys(backups)), targets=targets, steps=steps)
 
 
 def recovery_entry(undo, step):

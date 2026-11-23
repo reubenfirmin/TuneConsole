@@ -18,18 +18,17 @@ _FAMILY_ENERGY = {
     "dnb": 0.86, "metal": 0.86,
 }
 _DEFAULT_ENERGY = 0.5
-_MIN_ACOUSTIC = 12   # need at least this many acoustic-tagged plays before we claim "you PLAYED ..."
 
 # Archetype names by the sign of each axis around 0.5: (energy_charged, exploring, night_owl).
 _ARCHETYPES = {
-    (True,  True,  True):  ("Midnight Voyager", "charged, wide-ranging, and wide awake after dark"),
-    (True,  True,  False): ("Daylight Trailblazer", "high-energy and always chasing something new, in the light"),
-    (True,  False, True):  ("Nocturnal Loyalist", "you went hard on your favorites, deep into the night"),
-    (True,  False, False): ("Power-Hour Regular", "high-energy comfort listening on your own clock"),
-    (False, True,  True):  ("Midnight Explorer", "mellow, curious, and most alive after dark"),
-    (False, True,  False): ("Daydream Wanderer", "easygoing and exploratory through the daylight hours"),
-    (False, False, True):  ("Late-Night Comfort", "calm, familiar, and yours after hours"),
-    (False, False, False): ("Steady Companion", "calm and loyal -- the same trusted rotation, on repeat"),
+    (True,  True,  True):  "Midnight Voyager",
+    (True,  True,  False): "Daylight Trailblazer",
+    (True,  False, True):  "Nocturnal Loyalist",
+    (True,  False, False): "Power-Hour Regular",
+    (False, True,  True):  "Midnight Explorer",
+    (False, True,  False): "Daydream Wanderer",
+    (False, False, True):  "Late-Night Comfort",
+    (False, False, False): "Steady Companion",
 }
 
 
@@ -47,30 +46,38 @@ def _clamp01(x):
 
 
 def energy_axis(track_plays, audio, meta, *, genre_axes):
-    """Calm(0)..Charged(1) for the month. Weighted by plays over tracks that HAVE acoustic energy; where
-    coverage is thin, blends in genre-family priors so the axis is always defined. Returns
-    (value, source) where source is 'acoustic' (mostly measured) or 'genre' (mostly inferred)."""
-    e_num = e_den = 0.0
-    covered = 0
-    g_num = g_den = 0.0
+    """Return the blended energy score, measured play count, and total play count."""
+    e_num = g_num = 0.0
+    covered = total = 0
     for key, plays in track_plays.items():
         a = audio.get(key)
         if a and a.get("energy") is not None:
             e_num += a["energy"] * plays
-            e_den += plays
             covered += plays
         genre = (meta.get(key) or ("", None))[1]
         fam = genre_axes[genre][0] if genre else None
         g_num += _FAMILY_ENERGY.get(fam, _DEFAULT_ENERGY) * plays
-        g_den += plays
-    acoustic = (e_num / e_den) if e_den else None
-    genre = (g_num / g_den) if g_den else _DEFAULT_ENERGY
-    if acoustic is None:
-        return _clamp01(genre), "genre"
+        total += plays
+    genre = (g_num / total) if total else _DEFAULT_ENERGY
+    if not covered:
+        return _clamp01(genre), covered, total
     # blend acoustic with genre by how much of the month acoustic actually covered
-    total = sum(track_plays.values()) or 1
-    w = min(1.0, covered / total)
-    return _clamp01(acoustic * w + genre * (1 - w)), ("acoustic" if covered >= _MIN_ACOUSTIC else "genre")
+    weight = min(1.0, covered / (total or 1))
+    return _clamp01((e_num / covered) * weight + genre * (1 - weight)), covered, total
+
+
+def _describe_energy(energy, covered, total, has_genre_estimate):
+    tone = "high-energy" if energy >= 0.5 else "mellow"
+    if covered and covered == total:
+        return f"The tracks you played leaned {tone}, based on audio measurements."
+    if covered and has_genre_estimate:
+        return (f"Your listening leaned {tone}, based on genre estimates "
+                f"and audio measurements for {covered:,} of {total:,} plays.")
+    if covered:
+        return f"Audio measurements covered {covered:,} of {total:,} plays."
+    if has_genre_estimate:
+        return f"Your genres skew {tone}."
+    return ""
 
 
 def rhythm_axis(hours):
@@ -94,10 +101,10 @@ def exploration_axis(month_row):
 def personality(month_row, meta, *, track_plays, audio, hours, genre_axes):
     """The signature beat: 3 axes -> a named archetype + a deterministic aura. Always defined (energy
     falls back to genre priors, exploration to the month rollup, rhythm to play timestamps)."""
-    energy, e_src = energy_axis(track_plays, audio, meta,genre_axes=genre_axes)
+    energy, audio_plays, total = energy_axis(track_plays, audio, meta, genre_axes=genre_axes)
     rhythm = rhythm_axis(hours)
     explore = exploration_axis(month_row or {})
-    name, blurb = _ARCHETYPES[(energy >= 0.5, explore >= 0.5, rhythm >= 0.5)]
+    name = _ARCHETYPES[(energy >= 0.5, explore >= 0.5, rhythm >= 0.5)]
     # dominant genre family this month (for the aura hue), from the month's per-key plays
     fam_plays = {}
     for key, plays in track_plays.items():
@@ -106,10 +113,14 @@ def personality(month_row, meta, *, track_plays, audio, hours, genre_axes):
         if fam:
             fam_plays[fam] = fam_plays.get(fam, 0) + plays
     top_fam = max(fam_plays, key=fam_plays.get) if fam_plays else None
+    has_genre_estimate = any(fam_plays.get(family, 0) > 0 for family in _FAMILY_ENERGY)
+    energy_description = _describe_energy(energy, audio_plays, total, has_genre_estimate)
+    exploration = "You explored widely" if explore >= 0.5 else "You stuck close to your favorites"
+    time = "after dark" if rhythm >= 0.5 else "during the day"
     return {
-        "kind": "personality", "name": name, "blurb": blurb,
+        "kind": "personality", "name": name, "blurb": f"{energy_description} {exploration}, mostly {time}.".strip(),
         "axes": {"energy": round(energy, 3), "exploration": round(explore, 3), "rhythm": round(rhythm, 3)},
-        "energy_source": e_src, "top_family": top_fam,
+        "audio_plays": audio_plays, "top_family": top_fam,
         # "hue" is a presentation token: the route fills it in from top_family (web/theme owns the
         # actual genre-family-to-CSS-colour mapping; this module stays detached from web).
         "aura": {"turbulence": round(energy, 3), "reach": round(explore, 3), "warmth": round(rhythm, 3)},

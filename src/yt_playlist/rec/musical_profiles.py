@@ -11,9 +11,13 @@ import math
 
 from yt_playlist.util import genre_catalog
 
-VERSION = 'musical-profile-2/genre-priors-1/' + genre_catalog.REVISION
+# The qualified Bayesian covariates already excluded selected catalog scalars.
+MASKED_VERSION = 'musical-profile-2/genre-priors-1/' + genre_catalog.REVISION
+VERSION = 'musical-profile-3/genre-priors-1/' + genre_catalog.REVISION
 DIMENSIONS = ('intensity', 'tempo', 'groove', 'instrumental', 'acoustic', 'relaxed',
               'happiness', 'sadness', 'aggression', 'density')
+CHANNELS = (('intensity', 'aggression', 'relaxed', 'density'), ('happiness', 'sadness'),
+            ('groove',), ('instrumental',), ('acoustic',), ('tempo',))
 
 # Initial engineering priors, deliberately sparse and weak. No genre implies
 # exact tempo, instrumentation, vocal presence, or emotional valence.
@@ -59,6 +63,16 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def dimension(profile, name):
+    """Read a bounded dimension and its support from a prepared profile."""
+    value = profile.get('dimensions', {}).get(name) or {}
+    number, support = value.get('value'), value.get('support', 0)
+    if (type(number) not in (int, float) or not math.isfinite(number) or not 0 <= number <= 1
+            or type(support) not in (int, float) or not math.isfinite(support) or not 0 < support <= 1):
+        return None, 0
+    return number, support
+
+
 def number(value, *, low=0, high=1):
     if isinstance(value, bool):
         return None
@@ -67,6 +81,13 @@ def number(value, *, low=0, high=1):
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) and low <= value <= high else None
+
+
+def independent(value):
+    """Whether all constituent evidence describes the recording itself."""
+    if value.get('kind') in ('curated', 'inherited') or value.get('scope') in ('artist', 'release'):
+        return False
+    return all(independent(item) for item in value.get('evidence', ()))
 
 
 @functools.lru_cache(maxsize=2048)
@@ -109,7 +130,7 @@ def source_profile(source):
     """One provider/entity's native observations; never aggregate prior resolutions."""
     canonical(source)  # The retention boundary also rejects nonfinite or non-JSON evidence.
     provider, scope, entity_id = source['provider'], source['scope'], source['entity_id']
-    observations = source['observations']
+    observations = {field: value for field, value in source['observations'].items() if field != 'energy'}
     candidates = {name: [] for name in DIMENSIONS}
     def add(name, value, support, field, kind, extra=None):
         candidates[name].append({'value': value, 'support': support, 'kind': kind,
@@ -144,8 +165,6 @@ def source_profile(source):
             add('tempo', (value - 30) / 270, .65 * _match(bpm['provenance']), 'bpm',
                 bpm['provenance'].get('kind', 'prediction'),
                 {'native': True, 'bpm': value, 'alternatives_bpm': [value / 2, value, value * 2]})
-        # Legacy derived energy and native loudness/dynamics remain retained in
-        # observations. They are not independent votes or normalized gain here.
     dimensions = {}
     for name, values in candidates.items():
         if not values:
@@ -169,20 +188,10 @@ def combine(values):
             'conflict': spread > .35, 'evidence': values}
 
 
-def _only_priors(dimension):
-    """Genre inheritance cannot hide an existing recording-level selected field."""
-    evidence = dimension.get('evidence') or []
-    return bool(evidence) and all(
-        value.get('kind') in ('curated', 'inherited') or _only_priors(value)
-        for value in evidence)
-
-
-def resolve(sources, *, selected=None, overrides=None, genre=None):
+def resolve(sources, *, overrides=None, genre=None):
     """Resolve one recording without pool statistics or recursive inherited evidence."""
-    selected, overrides = selected or {}, overrides or {}
+    overrides = overrides or {}
     source_versions = [digest(source) for source in sources]
-    observed = {field for source in sources if source['scope'] == 'recording'
-                for field in source['observations']}
     if 'genre' in overrides:
         genre = overrides['genre']
         labels = genre_catalog.catalog()[1]
@@ -233,23 +242,13 @@ def resolve(sources, *, selected=None, overrides=None, genre=None):
     if support:
         dimensions['intensity'] = {'value': .5 + evidence, 'support': support,
                                     'evidence': components, 'kind': 'derived'}
-    for field, name in {'energy': 'intensity', 'bpm': 'tempo', 'danceability': 'groove',
-                        **_RAW}.items():
+    for field, name in {'intensity': 'intensity', 'bpm': 'tempo', **_RAW}.items():
         if field in overrides:
             value = number(overrides[field], low=30 if field == 'bpm' else 0,
                            high=300 if field == 'bpm' else 1)
             dimensions[name] = {'value': (value - 30) / 270 if field == 'bpm' and value is not None else value,
                                 'support': 1 if value is not None else 0,
                                 'evidence': [{'kind': 'explicit', 'field': field}], 'override': True}
-        elif ((dimensions[name]['value'] is None or _only_priors(dimensions[name]))
-              and field in selected and field not in observed
-              and not (field == 'energy' and any(component in observed or component in overrides for component in
-                  ('mood_aggressive', 'mood_party', 'mood_relaxed')))):
-            value = number(selected[field], low=30 if field == 'bpm' else 0,
-                           high=300 if field == 'bpm' else 1)
-            if value is not None:
-                dimensions[name] = {'value': (value - 30) / 270 if field == 'bpm' else value,
-                                    'support': .35, 'evidence': [{'kind': 'legacy_selected', 'field': field}]}
     intensity = dimensions['intensity']
     if intensity['value'] is not None and not intensity.get('override'):
         intensity['value'] = .5 + (intensity['value'] - .5) * min(1, intensity['support'] / .6)

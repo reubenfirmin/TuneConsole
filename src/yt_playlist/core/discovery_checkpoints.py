@@ -1,40 +1,40 @@
 """Discovery fetch history is retained independently of disposable candidates."""
 from . import albums, discovery_sources, discovery_provenance
 
-PREFIX = 'discovery_tracks_fetched:'
+
+def fetched(conn, tokens):
+    wanted = {discovery_sources.source_identity(token): token for token in tokens}
+    if not wanted:
+        return set()
+    markers = conn.execute('''SELECT f.value->>0,f.value->>1 FROM discovery_origins o,json_each(o.fetch_sources) f
+        WHERE o.fetch_sources<>'[]' ''')
+    return {wanted[kind, key] for kind, key in markers if (kind, key) in wanted}
 
 
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='discovery_fetch_history'").fetchone() is not None
-
-
-def fetched(conn,token):
-    if not available(conn):
-        from .discovery_checkpoint_reads import OWNERS
-        owner = OWNERS['fetch-history']
-        if (revision := owner.selected(conn)) is not None:
-            return owner.read(conn, revision, PREFIX+token) is not None
-        row = conn.execute('SELECT value FROM settings WHERE key=?',(PREFIX+token,)).fetchone()
-        return bool(row and row[0])
-    kind,identifier = discovery_sources.source_identity(token)
-    return conn.execute('SELECT 1 FROM discovery_fetch_history WHERE source_type=? AND source_id=?',
-                        (kind,identifier)).fetchone() is not None
-
-
-def remember(conn,token):
-    if not isinstance(token,str) or not token:
-        raise ValueError('Discovery fetch history requires its exact source token')
-    if not available(conn):
-        conn.execute("INSERT OR IGNORE INTO settings VALUES (?,'1')",(PREFIX+token,))
+def mark(conn, kind, identifier, *, album=None):
+    token = identifier if kind == 'album' else f'{kind}:{identifier}'
+    fields = discovery_provenance.origin_fields(conn, token)
+    if album is not None:
+        fields.update(kind='album', album_id=album, seed_video_id=None, genre_key=None, artist_id=None,
+                      legacy_source_key=None, resolution_status='resolved', resolution_reason=None)
+    origin = discovery_provenance.store_origin(conn, fields)
+    if kind == 'album' and album is None:
         return
-    kind,identifier = discovery_sources.source_identity(token)
-    album = albums.lookup(conn,identifier) if kind=='album' else None
-    if kind=='album' and album is None:
-        if discovery_provenance.available(conn):
-            # Unknown discovery input is retained by its provenance owner; a
-            # fetch checkpoint cannot manufacture an album to satisfy its FK.
-            discovery_provenance.origin(conn,token)
-            return
-        album = albums.observe(conn,identifier)
-    conn.execute('INSERT INTO discovery_fetch_history(source_type,source_id,album_id) VALUES (?,?,?) '
-                 'ON CONFLICT(source_type,source_id) DO NOTHING',(kind,identifier,album))
+    conn.execute('''UPDATE discovery_origins SET fetch_sources=json_insert(fetch_sources,'$[#]',json_array(?,?))
+        WHERE id=? AND NOT EXISTS(SELECT 1 FROM json_each(fetch_sources) f WHERE f.value->>0=? AND f.value->>1=?)''',
+        (kind, identifier, origin, kind, identifier))
+
+
+def remember(conn, tokens):
+    tokens = tuple(dict.fromkeys(tokens))
+    if any(not isinstance(token, str) or not token for token in tokens):
+        raise ValueError('Discovery fetch history requires its exact source token')
+    retained = fetched(conn, tokens)
+    for token in tokens:
+        if token in retained:
+            continue
+        kind, identifier = discovery_sources.source_identity(token)
+        if not identifier:
+            raise ValueError('Discovery fetch history requires its exact source identifier')
+        album = albums.lookup(conn, identifier) if kind == 'album' else None
+        mark(conn, kind, identifier, album=album)

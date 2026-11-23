@@ -59,8 +59,8 @@ def test_raw_component_override_and_retraction_also_change_derived_intensity():
         ('mood_aggressive', 'mood_party', 'mood_relaxed')})
     assert corrected < previous
     assert withdrawn['value'] is None
-    assert dimension([raw], overrides={'energy': None}, genre='Metal')['value'] is None
-    assert dimension([raw], overrides={'energy': .1})['value'] == .1
+    assert dimension([raw], overrides={'intensity': None}, genre='Metal')['value'] is None
+    assert dimension([raw], overrides={'intensity': .1})['value'] == .1
 
 
 def test_scoped_multi_tags_are_conservative_and_personal_context_is_ignored():
@@ -106,19 +106,12 @@ def test_explicit_genre_replaces_inherited_tags_without_overriding_recording_cla
     assert dimension([source(mood_aggressive=.95), artist], overrides={'genre': 'Ambient'})['value'] > .5
 
 
-def test_retracted_native_values_cannot_be_resurrected_from_legacy_selected_columns():
-    selected = {'energy': .9, 'mood_aggressive': .9, 'bpm': 160}
+def test_retracted_native_values_leave_the_dimensions_unknown():
     raw = source(mood_aggressive=None, bpm=None)
-    resolved = profiles.resolve([raw], selected=selected)['dimensions']
+    resolved = profiles.resolve([raw])['dimensions']
     assert all(resolved[name]['value'] is None for name in ('intensity', 'aggression', 'tempo'))
 
 
-def test_selected_recording_fields_precede_genre_priors_but_keep_weak_support():
-    for sources in ([], [source(scope='artist', tags=[{'name': 'Metal'}])]):
-        resolved = profiles.resolve(sources, genre='Metal', selected={'energy': .05, 'danceability': .1})['dimensions']
-        assert resolved['intensity']['value'] < .5
-        assert resolved['intensity']['support'] == .35
-        assert resolved['groove']['value'] == .1
-    # Native recording evidence and an explicit retraction still own the field.
+def test_native_recording_evidence_takes_precedence_over_genre_priors():
     raw = source(mood_aggressive=.95, mood_party=.9, mood_relaxed=.05)
-    assert dimension([raw], selected={'energy': .05}, genre='Ambient')['value'] > .5
+    assert dimension([raw], genre='Ambient')['value'] > .5

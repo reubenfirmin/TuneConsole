@@ -51,7 +51,7 @@ def metadata():
                            create_autospec(MetadataDeliveries, instance=True, spec_set=True))
 
 
-@pytest.mark.parametrize('layout', ['legacy', 'evidence', 'runtime'])
+@pytest.mark.parametrize('layout', ['evidence', 'runtime'])
 def test_import_fills_missing_fields_and_retains_hints_without_overwriting_selections(metadata, layout):
     metadata.repository.import_inputs.return_value = dict(layout=layout,
         track={'genre': '', 'mb_year': None, 'bpm': 120}, hints={'bpm'})
@@ -65,9 +65,9 @@ def test_import_fills_missing_fields_and_retains_hints_without_overwriting_selec
         metadata.deliveries.capture_state.assert_not_called()
     else:
         assert [call.args for call in metadata.repository.store_hint.call_args_list] == [
-            (layout, 7, 'genre', 'release', 'Jazz', 21 if layout == 'evidence' else None),
-            (layout, 7, 'mb_year', 'release', '2000', 21 if layout == 'evidence' else None)]
-        assert metadata.deliveries.capture_state.call_count == (2 if layout == 'evidence' else 0)
+            (7, 'genre', 'release', 21),
+            (7, 'mb_year', 'release', 21)]
+        assert metadata.deliveries.capture_state.call_count == 2
 
 
 def test_import_hint_file_failure_does_not_publish_its_reference(metadata):
@@ -79,7 +79,7 @@ def test_import_hint_file_failure_does_not_publish_its_reference(metadata):
     metadata.repository.store_observations.assert_not_called()
 
 
-@pytest.mark.parametrize('layout', ['runtime', 'evidence', 'legacy'])
+@pytest.mark.parametrize('layout', ['runtime', 'evidence'])
 def test_equivalent_recording_reuses_only_genuinely_missing_base_fields(metadata, layout):
     metadata.repository.recording_reuse_inputs.return_value = dict(layout=layout, target_entry=9,
         before={'genre': 'Jazz', 'mb_year': '2000', 'bpm': 120, 'energy': .8},
@@ -91,7 +91,7 @@ def test_equivalent_recording_reuses_only_genuinely_missing_base_fields(metadata
         metadata.select.assert_called_once_with(9, 'genre', 'Jazz', 'provider')
         metadata.repository.copy_recording_selection.assert_not_called()
     else:
-        metadata.repository.copy_recording_selection.assert_called_once_with(layout, 7, 12, 'genre')
+        metadata.repository.copy_recording_selection.assert_called_once_with(7, 12, 'genre')
         metadata.select.assert_not_called()
 
 
@@ -144,9 +144,8 @@ def test_invalid_choice_is_rejected_before_a_writer_or_file(metadata, field, val
     metadata.files.publish.assert_not_called()
 
 
-@pytest.mark.parametrize('layout', ['legacy', 'evidence'])
-def test_predecessor_choices_remain_database_only(metadata, layout):
-    metadata.repository.input.return_value['layout'] = layout
+def test_choices_remain_database_only_before_metadata_preparation(metadata):
+    metadata.repository.input.return_value['layout'] = 'evidence'
     metadata.choose(7, 'bpm', '', now=10)
     assert metadata.repository.store.call_args.args[3].kind == 'blank'
     metadata.files.publish.assert_not_called()

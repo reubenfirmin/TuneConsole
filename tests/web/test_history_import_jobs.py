@@ -75,8 +75,8 @@ def uploaded_files(monkeypatch):
 
 @pytest.mark.parametrize('brand', [None, 'brand-account'])
 def test_spotify_captured_identity_reaches_discovery_after_main_changes(store, monkeypatch, brand):
-    first = store.accounts.upsert_account('First', 'one', None, True)
-    second = store.accounts.upsert_account('Second', 'two', brand, False)
+    first = store.accounts.upsert_account('First', None, True)
+    second = store.accounts.upsert_account('Second', brand, False)
     store.tracks.upsert_track('known-video', 'Known', 'Known Artist', None, 180)
     raw = json.dumps([{
         'ts': f'2024-01-{day:02}T10:00:00Z', 'ms_played': 180000,
@@ -99,8 +99,8 @@ def test_spotify_captured_identity_reaches_discovery_after_main_changes(store, m
             running = pool.submit(lambda: asyncio.run(imports.run('spotify', raw)))
             try:
                 assert entered.wait(2)
-                store.accounts.upsert_account('First', 'one', None, False)
-                store.accounts.upsert_account('Second', 'two', brand, True)
+                store.accounts.upsert_account('First', None, False)
+                store.accounts.upsert_account('Second', brand, True)
             finally:
                 release.set()
             result = running.result(timeout=5)
@@ -130,7 +130,7 @@ def test_spotify_captured_identity_reaches_discovery_after_main_changes(store, m
 
 def test_slow_import_keeps_requests_and_bridge_replies_responsive_and_serializes_history(
         store, monkeypatch, uploaded_files):
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     ctx = context(store)
     app = FastAPI()
     app.include_router(setup.build(ctx))
@@ -315,7 +315,7 @@ async def finish_held_import(imports, held):
 
 
 def test_cancelled_import_request_remains_owned_until_worker_finishes(store, monkeypatch):
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     imports = HistoryImports(context(store))
 
     async def run():
@@ -330,7 +330,7 @@ def test_cancelled_import_request_remains_owned_until_worker_finishes(store, mon
 
 
 def test_cancelled_import_failure_cleanup_drains_before_store_closes(store, monkeypatch):
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     imports = HistoryImports(context(store))
 
     async def run():
@@ -350,7 +350,7 @@ def test_cancelled_import_failure_cleanup_drains_before_store_closes(store, monk
 
 
 def test_cancelled_import_stays_owned_during_real_post_import_lock_wait(store, monkeypatch):
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     imports = HistoryImports(context(store))
     report = {**REPORT, 'unmatched': 3, 'unmatched_artists': {'New Artist': 3}}
     clock = [1000.0]
@@ -391,7 +391,7 @@ def test_library_decode_keeps_requests_and_bridge_responsive_and_is_drained(
         store, monkeypatch, uploaded_files):
     ctx = context(store)
     ctx.spotify_import_lock = threading.Lock()
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     app = FastAPI()
     app.include_router(setup.build(ctx))
     app.include_router(bridge.build(ctx))
@@ -440,7 +440,7 @@ def test_library_decode_keeps_requests_and_bridge_responsive_and_is_drained(
 def test_cancelled_library_upload_keeps_decoder_owned(store, monkeypatch, uploaded_files):
     ctx = context(store)
     ctx.spotify_import_lock = threading.Lock()
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     app = FastAPI()
     app.include_router(setup.build(ctx))
     entered, release = threading.Event(), threading.Event()
@@ -479,7 +479,7 @@ def test_cancelled_library_upload_keeps_decoder_owned(store, monkeypatch, upload
 def test_library_upload_format_error_keeps_guidance_and_releases_work(store, uploaded_files):
     ctx = context(store)
     ctx.spotify_import_lock = threading.Lock()
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     app = FastAPI()
     app.include_router(setup.build(ctx))
     with TestClient(app) as client:

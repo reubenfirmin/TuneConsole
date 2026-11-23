@@ -64,7 +64,7 @@
       {% for r in tracks %}
       <tr id="dt-{{ loop.index }}">
         <td>{{ r.title }} <span class="muted">· {{ r.artist }}</span>
-          <div class="muted">{{ r.genre or 'No genre' }}{% if r.year %} · {{ r.year }}{% endif %}{% if r.audio.bpm is defined %} · {{ r.audio.bpm|round(1) }} BPM{% endif %}{% if r.audio.energy is defined %} · Energy {{ r.audio.energy|round(2) }}{% endif %}{% if r.audio.danceability is defined %} · Danceability {{ r.audio.danceability|round(2) }}{% endif %}</div>
+          <div class="muted">{{ r.genre or 'No genre' }}{% if r.year %} · {{ r.year }}{% endif %}{% if r.audio.bpm is defined %} · {{ r.audio.bpm|round(1) }} BPM{% endif %}{% if r.audio.danceability is defined %} · Danceability {{ r.audio.danceability|round(2) }}{% endif %}</div>
         </td>
         <td>{{ ingested(r) }}</td><td>{{ r.plays }}</td><td>{{ r.offered_count }}</td>
         <td>{{ r.playlists }}</td><td>{{ gc_cell(r) }}</td>

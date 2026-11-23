@@ -18,11 +18,11 @@ def test_provider_metadata_reaches_discovery_audio_projection(store):
     s.discovery.upsert_discovered_track("a|x", "v1", "A", "X", None, None, None, None, "radio:s", 100.0)
     entry = s.discovery.discovered_tracks_by_keys(['a|x'])['a|x']['id']
     s.enrichment.apply_provider_fields(entry, 'deezer', {
-        'genre': 'techno', 'year': '2019', 'bpm': 128.0, 'energy': .9,
+        'genre': 'techno', 'year': '2019', 'bpm': 128.0, 'danceability': .9,
         'popularity': 999, 'label': 'Because Music'})
     row = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
     assert row["genre"] == "Techno" and row["year"] == "2019"
-    assert row["audio"]["bpm"] == 128.0 and row["audio"]["energy"] == 0.9
+    assert row["audio"]["bpm"] == 128.0 and row["audio"]["danceability"] == 0.9
     assert "popularity" not in row["audio"] and "label" not in row["audio"]
 
 
@@ -39,10 +39,10 @@ def test_rediscovery_preserves_enrichment_when_catalog_metadata_is_missing(store
     s = store
     s.discovery.upsert_discovered_track("a|x", "v1", "A", "X", None, None, None, None, "radio:s", 100.0)
     entry = s.discovery.discovered_tracks_by_keys(['a|x'])['a|x']['id']
-    s.enrichment.apply_provider_fields(entry, 'deezer', {'genre': 'techno', 'year': '2020', 'bpm': 128.0, 'energy': .8})
+    s.enrichment.apply_provider_fields(entry, 'deezer', {'genre': 'techno', 'year': '2020', 'bpm': 128.0, 'danceability': .8})
     complete_discovered(s, ['a|x'], 200.0)
     s.discovery.upsert_discovered_track("a|x", "v1", "A", "X", "Album", None, None, None, "album", 300.0)
     row = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
     assert row["genre"] == "Techno" and row["year"] == "2020"
-    assert row["audio"] == {"bpm": 128.0, "energy": .8}
+    assert row["audio"] == {"bpm": 128.0, "danceability": .8}
     assert s.enrichment_reports.coverage_stats(include_discovery=True)["processed"] == 1

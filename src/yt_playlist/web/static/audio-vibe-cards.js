@@ -3,13 +3,15 @@ const KEY = 'tuneconsole.audio-vibes.cards.1';
 const FEEDBACK_LOCK = 'tuneconsole-audio-vibe-feedback';
 const CARDS_LOCK = 'tuneconsole-audio-vibe-cards';
 const RUN = 'tuneconsole.audio-vibes.run.1';
-// More than the extension's 24 recent occurrences. Keep the current occurrence
+const RECENT = 'tuneconsole.audio-vibes.recent.1';
+const CHECKS = [['thirty', '30 seconds'], ['middle', 'Halfway'], ['two_thirds', 'Two-thirds']];
+// More than the extension's recent occurrences and pending checks. Keep the current occurrence
 // even when it predates this window, so heartbeats cannot reopen its card.
 const DISMISSED_LIMIT = 64;
 
 export class AudioVibeCards {
-  constructor({root, request, read, write, compatible, taxonomy, renderInspector, diagnose = () => {}}) {
-    Object.assign(this, {root, request, read, write, compatible, taxonomy, renderInspector, diagnose});
+  constructor({root, request, read, write, compatible, taxonomy, renderInspector, renderSpecialists, diagnose = () => {}}) {
+    Object.assign(this, {root, request, read, write, compatible, taxonomy, renderInspector, renderSpecialists, diagnose});
     this.cards = new Map();
     this.restored = new Set();
     this.loads = new Map();
@@ -155,13 +157,7 @@ export class AudioVibeCards {
     if (state.samples.length >= card.state.samples.length) card.state = state;
     else if ('collection_status' in state) card.state.collection_status = state.collection_status;
     const current = card.state;
-    // Compatible installed extensions and retained views can contain older
-    // diagnostic messages. Never use their free-form text in the human card.
-    card.find('prediction').textContent = current.prediction
-      ? 'Independent listening-purpose scores'
-      : current.collection_status?.update ? 'Update to TuneConsole extension 0.1.24 or later to resume audio checks.'
-      : current.collection_status?.phase === 'unavailable' ? 'Audio checks are paused. You can still label this song.'
-      : `${current.samples.length} of 3 audio checks complete`;
+    const hasScores = Object.keys(current.prediction?.suitability || {}).length > 0;
     card.find('extension-update').hidden = !current.collection_status?.update;
     for (const row of card.node.querySelectorAll('[data-vibe-specialist]')) {
       const key = row.dataset.vibeSpecialist;
@@ -171,17 +167,49 @@ export class AudioVibeCards {
       output.setAttribute('aria-label', Number.isFinite(score) ? score.toFixed(2) : 'Not available');
       output.title = Number.isFinite(score) ? 'Uncalibrated suitability for this purpose' : 'Not available';
     }
-    card.find('specialists').hidden = !current.prediction;
-    const checks = card.find('checks');
-    checks.replaceChildren();
-    for (const [point, label] of [['thirty', '30 seconds'], ['middle', 'Halfway'], ['two_thirds', 'Two-thirds']]) {
-      const complete = current.samples.some(sample => sample.point === point);
-      const light = document.createElement('span');
-      light.className = 'audio-vibe-check'; light.dataset.complete = String(complete);
-      light.setAttribute('role', 'img'); light.setAttribute('aria-label', `${label}: ${complete ? 'complete' : 'pending'}`);
-      checks.append(light);
-    }
+    card.find('specialists').hidden = !hasScores;
+    if (this.inspecting === id && this.find('diagnostics').open) this.inspect(current);
     this.render();
+  }
+
+  renderPrediction(card, run) {
+    const {samples, prediction, collection_status: status} = card.state;
+    const points = run?.points || {};
+    const saved = new Set(samples.map(sample => sample.point));
+    const skipped = point => ['missed', 'too_short'].includes(points[point]);
+    const settled = CHECKS.every(([point]) => saved.has(point) || skipped(point));
+    const delivered = Object.entries(points).every(([point, phase]) =>
+      !['analysing', 'saving', 'saved'].includes(phase) || saved.has(point));
+    const finished = !run || settled || (run.sampling_complete && delivered);
+    const hasScores = Object.keys(prediction?.suitability || {}).length > 0;
+    // Older extensions can supply diagnostic strings. Use the app's own status copy.
+    card.find('prediction').textContent = hasScores
+      ? `${finished ? 'Prediction' : 'Prediction so far'}: ${prediction.label || 'No clear fit'}`
+      : status?.update ? 'Update to TuneConsole extension 0.1.24 or later to resume audio checks.'
+      : status?.phase === 'unavailable' ? 'Audio checks are paused. You can still label this song.'
+      : finished && samples.length ? 'No Vibe prediction available'
+      : `${samples.length} of ${CHECKS.length} audio checks complete`;
+    const checks = card.find('checks');
+    if (!checks.childElementCount) {
+      for (const _ of CHECKS) {
+        const light = document.createElement('span');
+        light.className = 'audio-vibe-check';
+        light.setAttribute('role', 'img');
+        checks.append(light);
+      }
+    }
+    CHECKS.forEach(([point, label], index) => {
+      const light = checks.children[index];
+      const complete = saved.has(point);
+      light.dataset.complete = String(complete);
+      light.setAttribute('aria-label', `${label}: ${complete ? 'complete' : finished || skipped(point) ? 'skipped' : 'pending'}`);
+    });
+  }
+
+  inspect(state) {
+    this.find('inspect-title').textContent = (state.playback || state.samples[0]).title;
+    this.renderSpecialists(this.find('specialist-details'), state.samples, state.prediction?.individual_models, state.choices);
+    this.renderInspector(this.find('attributes'), state.samples);
   }
 
   render() {
@@ -195,7 +223,6 @@ export class AudioVibeCards {
           this.find('diagnostics').close();
           this.find('attributes').replaceChildren();
           delete this.find('attributes').dataset.samples;
-          for (const name of ['inspect-title', 'evidence', 'alternatives']) this.find(name).textContent = '';
           this.inspecting = null;
         }
         card.node.remove();
@@ -216,6 +243,8 @@ export class AudioVibeCards {
     }
     const available = records.filter(row => this.available(row));
     if (!available.some(row => row.id === this.active)) this.active = available[0]?.id ?? null;
+    const run = this.read(RUN);
+    const observed = run?.id === this.active ? run : this.read(RECENT, []).find(row => row.id === this.active);
     for (const [id, card] of this.cards) {
       const record = byId.get(id);
       const edits = this.edits.get(id) || [];
@@ -225,6 +254,7 @@ export class AudioVibeCards {
         else selected.add(edit.key);
       }
       card.node.hidden = id !== this.active;
+      if (!card.node.hidden) this.renderPrediction(card, observed);
       for (const button of card.node.querySelectorAll('[data-vibe-choice]')) {
         button.disabled = !this.restored.has(id);
         button.setAttribute('aria-pressed', String(selected.has(button.dataset.vibeChoice)));
@@ -303,14 +333,8 @@ export class AudioVibeCards {
       this.active = available[(available.findIndex(row => row.id === this.active) + 1) % available.length]?.id;
       this.render(); this.focusCard();
     } else if (event.target.closest('[data-vibe-inspect]') && card) {
-      const {state} = card;
       this.inspecting = id;
-      this.find('inspect-title').textContent = (state.playback || state.samples[0]).title;
-      this.find('evidence').textContent = state.prediction?.evidence.join('. ')
-        || `${state.samples.length} of 3 audio checks complete. Your labels can be saved now.`;
-      this.find('alternatives').textContent = state.prediction
-        ? 'Scores describe each listening purpose independently; compare songs within a purpose, not scores across purposes.' : '';
-      this.renderInspector(this.find('attributes'), state.samples);
+      this.inspect(card.state);
       this.find('diagnostics').showModal();
     } else if (event.target.closest('[data-vibe-inspect-close]')) this.find('diagnostics').close();
   }

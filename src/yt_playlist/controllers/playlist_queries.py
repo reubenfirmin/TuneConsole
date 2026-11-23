@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
-from yt_playlist.core.playlist_snapshot import playlist_read_report
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.util.navigation import artist_credit_links
 
@@ -157,4 +157,4 @@ class PlaylistQueries:
             account, client = self.access.resolve(account_id=account)
             remote = 'LM'
         return dict(account_id=account, **({'playlist_id': pid} if pid is not None else {}),
-                    reads=playlist_read_report(client, remote))
+                    reads=YouTubeMusicAccess.for_client(client).playlist_read_report(remote))

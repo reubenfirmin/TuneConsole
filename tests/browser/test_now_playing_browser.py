@@ -1,5 +1,115 @@
 """Space controls playback while respecting search and focused buttons."""
+import json
+
+import pytest
 from playwright.sync_api import expect
+from websockets.sync.client import connect
+
+from tests.home_fixture_support import returning_listener
+from tests.onboarding_support import publish_personal_mix
+from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
+
+
+def test_now_playing_retains_the_song_during_a_status_read_failure(live_app, page):
+    song = {'video_id': 'playing', 'title': 'Still playing', 'artist': 'Artist',
+            'paused': False, 'position': 40, 'duration': 180}
+    status = {'connected': True, 'now_playing': song}
+    page.route('**/bridge/status', lambda route: route.fulfill(
+        json=status) if status is not None else route.fulfill(status=503))
+    commands = []
+    page.on('request', lambda request: commands.append(request.url)
+            if request.method == 'POST' and '/now-playing/' in request.url else None)
+
+    page.goto(live_app + '/artists')
+    card = page.locator('.global-now-playing')
+    expect(card.locator('.hs-now-title')).to_have_text('Still playing')
+    expect(card.get_by_role('progressbar', name='Track progress')).to_be_visible()
+    expect(card.get_by_role('button', name='Pause', exact=True)).to_be_enabled()
+
+    status = None
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(card.locator('.hs-now-title')).to_have_text('Still playing')
+    expect(card.get_by_role('progressbar', name='Track progress')).to_be_hidden()
+    expect(card.get_by_role('button', name='Play or pause')).to_be_disabled()
+    expect(card.get_by_role('button', name='Next / skip')).to_be_disabled()
+    assert page.evaluate("window.playbackControls.command('toggle')") is False
+    assert not commands
+
+    status = {'connected': True, 'now_playing': {**song, 'video_id': 'next', 'title': 'Next song'}}
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(card.locator('.hs-now-title')).to_have_text('Next song')
+    expect(card.get_by_role('button', name='Pause', exact=True)).to_be_enabled()
+    status = {'connected': False}
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(card).to_be_hidden()
+
+
+@pytest.mark.parametrize('selected,other', [
+    (('On air', 'radio', 'ArrowLeft'), ('Mix tapes', 'directions', 'ArrowRight')),
+    (('Mix tapes', 'directions', 'ArrowRight'), ('On air', 'radio', 'ArrowLeft')),
+], ids=['on-air', 'mix-tapes'])
+def test_space_pauses_and_resumes_radio_while_home_tab_keeps_focus(live_app, page, store, selected, other):
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    tracks = publish_personal_mix(store, now=1)
+    returning_listener(store, 'radio', 'mixes')
+    store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': 'keyboard'}))
+
+    requests = []
+    page.on('request', lambda request: requests.append(request.url.removeprefix(live_app))
+            if request.method == 'POST' and request.url.endswith(('/home/format', '/now-playing/toggle'))
+            else None)
+
+    with connect(live_app.replace('http://', 'ws://') + '/bridge/ws',
+                 origin=EXTENSION_ORIGIN, open_timeout=5) as extension:
+        def heartbeat(paused):
+            extension.send(json.dumps({'type': 'now-heartbeat', 'videoId': 'radio-song',
+                'title': 'Playing on Radio', 'artist': 'Artist', 'playlist': 'PLRADIO', 'paused': paused}))
+
+        heartbeat(False)
+        tab_name, tab_area, next_key = selected
+        other_name, other_area, previous_key = other
+        page.goto(f'{live_app}/#{other_area}')
+        player = page.locator('.global-now-playing')
+        expect(player.get_by_role('button', name='Pause', exact=True)).to_be_visible()
+        tab = page.get_by_role('tab', name=tab_name, exact=True)
+        other_tab = page.get_by_role('tab', name=other_name, exact=True)
+        expect(other_tab).to_have_attribute('aria-selected', 'true')
+        with page.expect_response('**/home/format'):
+            tab.click()
+        expect(tab).to_be_focused()
+        expect(tab).to_have_attribute('aria-selected', 'true')
+
+        for paused in (True, False):
+            with page.expect_response('**/now-playing/toggle', timeout=3000):
+                if paused:
+                    page.keyboard.down('Space')
+                    page.keyboard.down('Space')  # A held key repeats before release.
+                    page.keyboard.up('Space')
+                else:
+                    page.keyboard.press('Space')
+            frame = json.loads(extension.recv(timeout=5))
+            assert frame['type'] == 'playpause' and frame.get('action', 'toggle') == 'toggle'
+            heartbeat(paused)
+            page.evaluate('window.playbackStatus.refresh()')
+            expect(player.get_by_role('button', name='Play' if paused else 'Pause', exact=True)).to_be_visible()
+            expect(tab).to_be_focused()
+            expect(tab).to_have_attribute('aria-selected', 'true')
+            expect(page).to_have_url(f'{live_app}/#{tab_area}')
+
+        assert requests == ['/home/format', '/now-playing/toggle', '/now-playing/toggle']
+        tab.press(next_key)
+        expect(other_tab).to_be_focused()
+        expect(tab).to_have_attribute('aria-selected', 'true')
+        with page.expect_response('**/home/format'):
+            page.keyboard.press('Space')
+        expect(other_tab).to_have_attribute('aria-selected', 'true')
+        other_tab.press(previous_key)
+        expect(tab).to_be_focused()
+        with page.expect_response('**/home/format'):
+            page.keyboard.press('Space')
+        expect(tab).to_have_attribute('aria-selected', 'true')
+        assert requests[3:] == ['/home/format', '/home/format']
 
 
 def test_space_controls_playback_without_intercepting_search_or_focused_buttons(live_app, page, store):

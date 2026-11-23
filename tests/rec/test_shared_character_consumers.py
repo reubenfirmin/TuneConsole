@@ -28,6 +28,18 @@ from yt_playlist.controllers.musical_profiles import MusicalProfiles
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
+def measured_profile(scores):
+    profile = musical_profiles.resolve([])
+    fits = {preset: {'score': score, 'support': .8, 'source': 'audio_measurement'}
+            for preset, score in scores.items()}
+    profile['vibes'] = {
+        'inputs_version': vibe_preparation.serving_prefix() + 'controlled-measurements',
+        'fits': fits,
+        'intensity_fits': {preset: fits[preset] for preset in ('energize', 'release') if preset in fits},
+    }
+    return profile
+
+
 @pytest.fixture
 def controlled_profiles(monkeypatch):
     # These consumers own pool selection, genre reserves and served stamps.
@@ -37,14 +49,9 @@ def controlled_profiles(monkeypatch):
     monkeypatch.setattr(MusicalProfiles, 'by_keys',
                         lambda _repo, keys: {key: deepcopy(profiles[key]) for key in keys if key in profiles})
 
-    def add(key, energy):
-        profile = musical_profiles.resolve([], selected={'energy': energy})
-        profile['vibes'] = {'inputs_version': vibe_preparation.serving_prefix() + 'controlled-provider-profiles', 'fits': {
-            preset: {'score': energy if preset in ('energize', 'release') else 1 - energy,
-                     'support': .8, 'source': 'provider_measurement'}
-            for preset in home_vibe.PRESETS}}
-        profile['vibes']['intensity_fits'] = {
-            preset: profile['vibes']['fits'][preset] for preset in ('energize', 'release')}
+    def add(key, intensity):
+        profile = measured_profile({preset: intensity if preset in ('energize', 'release') else 1 - intensity
+                                    for preset in home_vibe.PRESETS})
         profiles[key] = profile
         return musical_character.compact(profile)
 
@@ -56,9 +63,10 @@ def character_consumer(monkeypatch, controlled_profiles):
     # These consumers assemble completed lower-layer results. SQL/file reads,
     # numerical preparation and access admission have independent real owners.
     reader = SimpleNamespace(
-        _recommendation_files=True, _read_only=True,
+        _read_only=True,
         settings=SimpleNamespace(get_setting=lambda key: None),
         recommendations=SimpleNamespace(framing=lambda *args, **kwargs: {}),
+        rec_ledger=SimpleNamespace(card_views=lambda lane: 0),
         musical_profiles=MusicalProfiles.__new__(MusicalProfiles),
         artists=SimpleNamespace(track_keys=lambda *, keys: {}),
         rec_query=SimpleNamespace(track_genres=lambda keys: {}, track_decades=lambda keys: {},
@@ -69,7 +77,7 @@ def character_consumer(monkeypatch, controlled_profiles):
         memoized_read=lambda key, read: read())
     # The recipe producer is below card composition. Keep the actual journey,
     # ranker, profile stamp and card construction under test.
-    monkeypatch.setattr(home_cards, '_rolled_theme', lambda *args, **kwargs:
+    monkeypatch.setattr(home_cards.recipes, 'roll_recipe', lambda *args, **kwargs:
                         {'journey': 'warm_up', 'dj': {'seed': 1}, 'facets': {}})
     with home_vibe.authorized(reader, 'relax'):
         yield reader
@@ -88,11 +96,13 @@ def _prepare_opportunities(store, *, controlled=None):
             key = f'{lane}-{i}'
             good = i >= good_start
             genre = ('Metal' if i % 2 else 'Techno') if good else 'Jazz'
-            audio = {'energy': .05 if good else .95, 'mood_relaxed': .95 if good else .05}
+            if controlled and i == 0:
+                genre = 'Techno'
+            audio = {'mood_relaxed': .95 if good else .05}
             item = dict(key=key, video_id=key, title=key, artist=f'Artist {key}', album='',
                         genre=genre, score=.1 if good else 10, year='2000')
             if controlled:
-                item['musical'] = controlled(key, audio['energy'])
+                item['musical'] = controlled(key, .05 if good else .95)
             elif lane == 'library':
                 seed_catalog_track(store, key, key, item['artist'], video_id=key, genre=genre,
                                    **audio)
@@ -154,7 +164,7 @@ def profile_stamp_template(profile_stamp_schema):
 def profile_stamp_input(store):
     key = 'profile-stamp'
     seed_catalog_track(store, key, 'Profile stamp', 'Artist', video_id=key,
-                       genre='Techno', energy=.05, mood_relaxed=.95)
+                       genre='Techno', mood_relaxed=.95)
     publish_recording_profiles(store, 1000)
     return dict(key=key, video_id=key, title='Profile stamp', artist='Artist',
                 album='', genre='Techno', score=1)
@@ -215,6 +225,18 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
                               if lane in ('wheelhouse', 'explore') else []) for lane in lanes}
 
     monkeypatch.setattr(vibe_pools, '_stored_pools', stored)
+    store.recommendations.framing = lambda *args, **kwargs: {'vibe_version': home_vibe.VERSION, 'generation_id': 1}
+    store.recommendations.vibe_fresh_candidates = lambda *args, **kwargs: [
+        {**item, '_mix_selection': 'vibe:relax'} for item in pools['fresh']]
+    store.recommendations.explain_mix = lambda tracks: None
+    fit_reads = []
+
+    def fit_scores(keys, preset):
+        fit_reads.append((tuple(keys), preset))
+        profiles = store.musical_profiles.by_keys(keys)
+        return {key: profile['vibes']['fits'][preset]['score'] for key, profile in profiles.items()}
+
+    store.vibe_predictions = SimpleNamespace(fit_scores=fit_scores)
     _controlled_eligibility(monkeypatch, store, pools['library'], pools['fresh'])
     def unexpected(*args, **kwargs):
         pytest.fail('A control must only assemble prepared opportunities')
@@ -232,6 +254,7 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
                                    genre_options=[])
     groups += [service.built_library(parameters, 1000, [])['tracks'],
                service.built_fresh(parameters, 1000)['tracks']]
+    assert any(preset == 'relax' and 'fresh-0' in keys and 'fresh-40' in keys for keys, preset in fit_reads)
     for tracks in groups:
         assert len(tracks) == 12
         assert all(genre_map.family(track['genre']) == 'techno' for track in tracks)
@@ -288,7 +311,7 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
     track = before[0]
     tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
     with store.conn:
-        catalog.choose_field(store.conn, tid, 'energy', .99)
+        catalog.choose_field(store.conn, tid, 'mood_relaxed', .01)
     publish_recording_profiles(store, 1001)
     current = musical_character.load(store, [track['key']])[track['key']]
     assert current['digest'] != track['musical']['digest']
@@ -352,10 +375,12 @@ def test_selected_genre_has_reserved_candidates_beyond_the_global_vibe_head(stor
 
 def test_unknown_intensity_stays_neutral_and_weaker_than_a_known_endpoint_fit():
     from yt_playlist.rec import radio_intensity
-    unknown, gentle, intense = {'key': 'unknown'}, sound('gentle', energy=.1), sound('intense', energy=.9)
-    assert radio_intensity.narrow([unknown, gentle, intense], 0) == [gentle]
-    assert radio_intensity.narrow([unknown, gentle, intense], 1) == [intense]
-    assert radio_intensity.narrow([unknown, gentle, intense], .5) == [unknown, gentle, intense]
+    unknown = {'key': 'unknown'}
+    gentle = measured_track('gentle', energize=.1, release=.1)
+    intense = measured_track('intense', release=.9)
+    assert radio_intensity.narrow([unknown, gentle, intense], radio_intensity.CHILL) == [gentle]
+    assert radio_intensity.narrow([unknown, gentle, intense], radio_intensity.FULL_ON) == [intense]
+    assert radio_intensity.narrow([unknown, gentle, intense], None) == [unknown, gentle, intense]
     assert musical_character.provenance(unknown)['intensity'] is None
 
 
@@ -372,32 +397,34 @@ def test_worker_selection_preserves_current_explicit_exclusions(store, opportuni
     # A newly assembled cross-genre vibe can use a corrected genre. It becomes
     # ineligible when an explicit restriction excludes its *current* genre.
     remaining = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse', avoid_genres=['classical'])
+    assert len(remaining) == 12
     assert not {first['key'], second['key'], third['key']} & {track['key'] for track in remaining}
     assert all(track['genre'] != 'Metal' for track in remaining)
 
 
-def sound(key, score=0, **overrides):
-    return {'key': key, 'score': score, 'musical': musical_character.compact(
-        musical_profiles.resolve([], overrides=overrides))}
+def measured_track(key, *, taste=0, **scores):
+    return {'key': key, 'score': taste, 'musical': musical_character.compact(measured_profile(scores))}
 
 
-@pytest.mark.parametrize('preset,preferred,other', [
-    ('relax', {'instrumental': 1, 'mood_relaxed': 1, 'energy': .1},
-              {'instrumental': 1, 'mood_aggressive': 1, 'energy': 1}),
-    ('concentrate', {'instrumental': 1, 'energy': .3}, {'instrumental': 0, 'energy': .9}),
-    ('cruise', {'energy': .5}, {'energy': .05}),
-    ('energize', {'mood_happy': .1, 'energy': 1}, {'mood_happy': 1, 'energy': .1}),
-    ('uplift', {'mood_happy': 1, 'energy': .1}, {'mood_happy': .1, 'energy': 1}),
-    ('release', {'mood_aggressive': 1, 'energy': .1}, {'mood_aggressive': 0, 'energy': 1}),
+@pytest.mark.parametrize('preset,neighbor', [
+    ('relax', 'concentrate'),
+    ('concentrate', 'relax'),
+    ('cruise', 'relax'),
+    ('energize', 'uplift'),
+    ('uplift', 'energize'),
+    ('release', 'energize'),
 ])
-def test_neighboring_presets_use_distinct_character_dimensions(preset, preferred, other):
-    assert home_vibe.affinity(sound('preferred', **preferred), preset) > home_vibe.affinity(sound('other', **other), preset)
+def test_neighboring_presets_use_their_own_specialist_scores(preset, neighbor):
+    preferred = measured_track('preferred', **{preset: .8, neighbor: .2})
+    other = measured_track('other', **{preset: .2, neighbor: .8})
+    assert home_vibe.affinity(preferred, preset) > home_vibe.affinity(other, preset)
+    assert home_vibe.affinity(preferred, neighbor) < home_vibe.affinity(other, neighbor)
 
 
 def test_actual_taste_scores_break_close_fit_ties_independently_of_pool_order_and_size():
-    weak = sound('weak', score=100, energy=1)
-    low = sound('low', score=-2, energy=.1)
-    high = sound('high', score=2, energy=.11)
+    weak = measured_track('weak', taste=100, relax=.2)
+    low = measured_track('low', taste=-2, relax=.9)
+    high = measured_track('high', taste=2, relax=.89)
     assert sorted([weak, low, high], key=lambda item: home_vibe.order_key(item, 'relax')) == [high, low, weak]
     assert home_vibe.taste_score(high) == home_vibe.taste_score({**high, 'key': 'in-another-pool'})
     assert home_vibe.taste_score({'key': 'unknown'}) == .5
@@ -456,7 +483,7 @@ def test_radio_midpoint_is_neutral_and_saved_session_preserves_profile_stamps(ra
     c = RadioCandidates(store, 1000, radio_tuning.DEFAULTS)
     track = c._load('local')[0]
     genres = SimpleNamespace(breadth=.5, bonus=lambda _: 0)
-    low, high = sound('low', energy=0), sound('high', energy=1)
+    low, high = measured_track('low', energize=0), measured_track('high', energize=1)
     assert c._score({**track, 'musical': low['musical']}, [], None, {}, genres) == c._score(
         {**track, 'musical': high['musical']}, [], None, {}, genres)
     s = Session(object(), c, 1, 'On Air', phase=Phase.PLAYING, playlist='PL', tracks=[track],

@@ -26,11 +26,12 @@ def test_ranking_contribution_fades_by_source_half_life(transient_store, space, 
         store.rec_signals.recent_mood_events.return_value = [(now, 1, [key])]
     elif source == "play":
         store.history.recent_plays_with_ts.return_value = [(key, now)]
-        store.history.play_events_since.return_value = [{'identity_key': key, 'played_at': now}]
+        store.history.play_events_since.side_effect = lambda cutoff, *args, **kwargs: (
+            [{'identity_key': key, 'played_at': now}] if cutoff <= now else [])
     elif source == "like":
         store.rec_model.recent_liked_with_ts.return_value = [(key, now)]
     else:
-        store.player_events.recent_skips_with_ts.return_value = [(key, now)]
+        store.player_events.recent_skips_with_ts.side_effect = lambda cutoff: [(key, now)] if cutoff <= now else []
 
     # With acoustic scoring, zero collaborative rows isolate the real content-space producer.
     V = np.zeros_like(vectors) if space == "acoustic" else vectors
@@ -39,21 +40,25 @@ def test_ranking_contribution_fades_by_source_half_life(transient_store, space, 
     sign = -1 if source == "skip" else 1
     base = np.array([0.1, 0]) if source == "skip" else np.array([0, 0.1])
     half_life = rec_params.get_param(store, source + "_halflife_d")
+    horizon = rec_params.get_param(store, 'recent_horizon_days')
 
     def components(age):
         return scoring._mood_components(base, store, now + age * DAY, V, idx)
 
-    fresh, half, old = (components(age) for age in (0, half_life, 3 * half_life))
+    late_age = min(3 * half_life, horizon)
+    fresh, half, late = (components(age) for age in (0, half_life, late_age))
     assert sign * fresh[component][0] > 0
     np.testing.assert_allclose(half[component], fresh[component] / 2)
-    np.testing.assert_allclose(old[component], fresh[component] / 8)
+    np.testing.assert_allclose(late[component], fresh[component] * 2 ** (-late_age / half_life))
+    expired = components(horizon + 1 / DAY)
+    np.testing.assert_array_equal(expired[component], np.zeros(2))
     if source == 'mood' and space == 'collaborative':
         # Retained #85 QA oracle: the ordinary default fades by at least eight
         # times within twenty-one days, even if a future default changes.
         assert components(21)['transient'][0] <= fresh['transient'][0] / 8 + 1e-9
     # With no new evidence, durable taste regains the lead instead of staying overridden forever.
     assert fresh["combined"].argmax() == (0 if sign > 0 else 1)
-    assert old["combined"].argmax() == (1 if sign > 0 else 0)
+    assert expired["combined"].argmax() == (1 if sign > 0 else 0)
 
 
 def test_missing_and_zero_vectors_do_not_dilute_bounded_tilt(transient_store):
@@ -80,14 +85,16 @@ def test_disabled_play_source_cannot_dilute_mood_signal(transient_store):
         store, 1000, np.eye(2), {"a|x": 0, "b|y": 1}), [1, 0])
 
 
-def test_session_ranking_contribution_fades_without_new_plays(store):
-    now = 1000 * DAY
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+def test_today_ranking_contribution_fades_then_resets_at_local_midnight(store):
+    midnight = 1000 * DAY
+    now = midnight + 3600
+    iid = store.accounts.upsert_account("main", None, True)
     keys = ["a|x", "b|y", "other|z"]
     V = np.array([[1, 0], [1, 0], [0, 1]], dtype=np.float32)
     idx = {k: i for i, k in enumerate(keys)}
-    for key in keys[:2]:
-        store.history.record_play_event(iid, key, None, now)
+    for index, key in enumerate(keys[:2], 1):
+        assert store.history.record_play_event(iid, key, f'v{index}', midnight + index * 60,
+                                               source_timezone='UTC')
     rec_params.set_param(store, "now_min_events", 2)
     rec_params.set_param(store, "session_halflife_h", 4)
     rec_params.set_param(store, "audio_transient_w", 0)
@@ -97,4 +104,5 @@ def test_session_ranking_contribution_fades_without_new_plays(store):
     for hours, divisor in ((4, 2), (12, 8)):
         aged = scoring._mood_components(base, store, now + hours * 3600, V, idx)["session"]
         np.testing.assert_allclose(aged, fresh / divisor)
-    assert not scoring._mood_components(base, store, now + 25 * 3600, V, idx)["session"].any()
+    assert scoring._mood_components(base, store, midnight + DAY - 1, V, idx)["session"][0] > 0
+    assert not scoring._mood_components(base, store, midnight + DAY, V, idx)["session"].any()

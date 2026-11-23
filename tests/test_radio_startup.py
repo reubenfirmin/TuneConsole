@@ -105,8 +105,8 @@ def test_radio_route_reserves_playback_before_its_worker_starts(owned_playback, 
         assert response.status_code == 200, response.text
         assert response.json()['ok'], response.text
     assert len(dispatched) == len(starts) == 1
-    assert controller.ctx.store.playlists.get_playlist(controller.session.local_id)
-    assert remote.ids and frames == [direct]
+    assert controller.session.local_id is None
+    assert remote.ids == [chosen] and frames == [direct]
 
 
 @pytest.mark.parametrize("presence", ["missing", "stale", "disconnected", "paused", "other_playlist"])
@@ -137,8 +137,8 @@ def test_old_checkpoint_does_not_replace_song_choices_with_a_restore_loader(poc,
     assert len(frames) == before
 
 
-@pytest.mark.parametrize("accepted", [["v5", "v2"], ["v1", "v2"], ["v5", "v1"], ["v2"]])
-def test_launch_uses_a_settled_complete_subset_without_repeating_the_write(poc, monkeypatch, accepted):
+@pytest.mark.parametrize("accepted", [["v1", "v3"], ["v2", "v3"], ["v1", "v2"], ["v3"]])
+def test_unselected_launch_uses_a_settled_complete_subset_without_repeating_the_write(poc, monkeypatch, accepted):
     c, remote, frames, workers, _ = poc
     read = remote.get_playlist
 
@@ -148,7 +148,7 @@ def test_launch_uses_a_settled_complete_subset_without_repeating_the_write(poc, 
             "trackCount": len(accepted)}
 
     monkeypatch.setattr(remote, "get_playlist", saved)
-    assert c.start("v5")["starting"]
+    assert c.start()["starting"]
     s = c.session
     assert frames == []
     with pytest.raises(PlaylistPending):
@@ -164,7 +164,7 @@ def test_launch_uses_a_settled_complete_subset_without_repeating_the_write(poc, 
     assert not s.initial_tracks
     assert s.directions.seed["video_id"] == accepted[0]
     assert set(s.choices) == {accepted[0]}
-    assert s.rejected == {"v5", "v1", "v2"} - set(accepted)
+    assert s.rejected == {"v1", "v2", "v3"} - set(accepted)
     assert not s.rejected.intersection(t["video_id"] for b in c.status()["directions"] for t in b["tracks"])
     # The durable checkpoint contains only the rows YouTube actually saved.
     assert [t["video_id"] for t in c.persistence.load()["tracks"]] == accepted
@@ -265,16 +265,15 @@ def test_launch_adopts_proven_playback_upload_and_skips_an_omitted_song(poc, mon
     ids = [row['videoId'] for row in rows]
     assert [t['video_id'] for t in s.tracks] == ids
     actual = next(t for t in s.tracks if t['video_id'] == 'v31')
-    assert actual['_radio_rotation_slot'] == 'familiar'
     assert s.directions.seed['video_id'] == ids[0]
     assert set(s.choices) == {ids[0]}
     assert s.rejected == {requested['video_id'], 'v2'}
     assert len(frames) == 1 and f'watch?v={ids[0]}&list=' in frames[0]['url']
     assert not remote.adds and not remote.removes
     assert not s.initial_handles
-    alternate = c.ctx.store.tracks.playback_alternate(s.identity, requested['video_id'])
-    assert alternate['video_id'] == 'v31'
-    assert alternate['key'] != requested['key']
+    preferred = c.ctx.store.tracks.preferred_playback_uploads([requested['video_id']])[requested['video_id']]
+    assert preferred['video_id'] == 'v31'
+    assert preferred['key'] == actual['key'] == requested['key']
     assert [t['video_id'] for t in c.ctx.store.charts.playlist_tracks_detail(s.local_id)] == ids
     assert [t['video_id'] for t in c.persistence.load()['tracks']] == ids
     # A later launch reuses the proven upload instead of requesting the bad ID again.

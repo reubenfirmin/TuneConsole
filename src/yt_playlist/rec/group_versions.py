@@ -58,7 +58,7 @@ def prepare(result, recordings, previous, legacy_modes, *, now, serial, input_fi
     reconcile(nodes, old, threshold=policy.continuation, identity_seed=generation)
     names = group_names.name_groups(result, recordings, previous=old, metadata=metadata)
     generation = generation or uuid.uuid4().hex
-    groups, lineage = [], []
+    groups = []
     versions = {node['index']: fingerprint([generation, node['group_id']]) for node in nodes}
     structural = bool(not previous or
         {(n['group_id'], nodes[n['parent']]['group_id'] if n['parent'] is not None else None, n['leaf']) for n in nodes}
@@ -87,25 +87,6 @@ def prepare(result, recordings, previous, legacy_modes, *, now, serial, input_fi
         groups.append({'group_id': node['group_id'], 'version': versions[node['index']],
             'parent_version': versions.get(node['parent']), 'payload': musical_profiles.canonical(payload),
             'members': [(key, score, support) for score, support, key in fit]})
-    # Lineage is temporal; it is never inferred from the current parent/child edge.
-    prior_members = [(source, set(source['members'])) for source in old]
-    for node in nodes:
-        keys = set(node['members'])
-        candidates = []
-        for source, old_keys in prior_members:
-            overlap = len(keys & old_keys)
-            if not overlap:
-                continue
-            old_share, new_share = overlap / len(old_keys), overlap / len(keys)
-            same = source['group_id'] == node['group_id']
-            # A leaf can split into new children; child leaves can merge into an umbrella.
-            # Do not create temporal mappings between every old ancestor and every new descendant.
-            if same or source.get('leaf') and node['leaf'] and min(old_share, new_share) >= .2:
-                relation = 'continuation' if same else 'split' if new_share > old_share else 'merge'
-                candidates.append((source['version'], versions[node['index']], relation,
-                    musical_profiles.canonical({'old_share': old_share, 'new_share': new_share,
-                                               'overlap': overlap, 'compatible': min(old_share, new_share) >= policy.continuation})))
-        lineage.extend(candidates)
     # Immutable snapshots of legacy definitions coexist with adaptive definitions. They
     # carry no invented member rows and cannot train a specific adaptive child by default.
     already = set(legacy_versions)
@@ -121,7 +102,7 @@ def prepare(result, recordings, previous, legacy_modes, *, now, serial, input_fi
                    'unknown': len(result['unknown']), 'groups': len(nodes), 'edges': len(result['edges'])}}
     return {'generation': generation, 'policy': musical_profiles.canonical(result['policy']),
             'fingerprint': input_fingerprint, 'at': now, 'serial': serial,
-            'payload': musical_profiles.canonical(payload), 'groups': groups, 'lineage': lineage,
+            'payload': musical_profiles.canonical(payload), 'groups': groups,
             'unknown': [(key, 'insufficient-shared-evidence') for key in result['unknown']],
             'edges': [(recordings[a].key, recordings[b].key, weight, support)
                       for a, b, weight, support in result['edges']]}

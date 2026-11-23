@@ -1,18 +1,19 @@
 """Detached content vocabulary, audio projection and stable model identity.
 
-Model dictionaries retain their persisted JSON shape. Inputs and fitted outputs
-are named tuples, preserving the established ordering and unpacking contracts.
+Model dictionaries retain the catalog vocabulary and projection columns. Versions
+distinguish character-based columns from the legacy catalog audio encoder.
 """
 import hashlib
 import json
-from typing import NamedTuple, TypedDict
+from typing import NamedTuple, NotRequired, TypedDict
 
 import numpy as np
 
 from yt_playlist.core.activity import check_stopping
+from yt_playlist.rec import content_character
 from yt_playlist.util import genre_map
 
-CONTINUOUS_AUDIO = ("bpm", "energy", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
+CONTINUOUS_AUDIO = ("bpm", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
                     "mood_acoustic", "instrumental", "loudness", "dynamic_complexity")
 AUDIO_DIM_W = 0.5
 
@@ -21,12 +22,14 @@ class ContentInputs(NamedTuple):
     keys: list[str]
     content: dict
     audio: dict
+    policy: str | None = None
 
 
 class ContentModel(TypedDict):
     cat: dict[str, int]
     ncat: int
     cont: list
+    policy: NotRequired[str]
 
 
 class EncodedLibrary(NamedTuple):
@@ -63,8 +66,8 @@ def content_features(content, *, genre_axes=None):
     return feats, rows
 
 
-def build_content_model(content, audio, *, genre_axes=None) -> ContentModel:
-    """Fit ordered genre/era/key vocabulary and nonconstant audio z-score statistics."""
+def build_content_model(content, audio, *, genre_axes=None, policy=None) -> ContentModel:
+    """Fit the catalog vocabulary and select the versioned character columns."""
     cat, _ = content_features(content,genre_axes=genre_axes)
     cat = dict(cat)
 
@@ -76,6 +79,8 @@ def build_content_model(content, audio, *, genre_axes=None) -> ContentModel:
             cat_col(f"scale:{str(d['music_scale']).lower()}")
         if d.get("music_key"):
             cat_col(f"key:{d['music_key']}")
+    if policy:
+        return {"cat": cat, "ncat": len(cat), "cont": list(content_character.COLUMNS), "policy": policy}
     cont = []
     for f in CONTINUOUS_AUDIO:
         vals = [float(d[f]) for d in audio.values() if d.get(f) is not None]
@@ -88,7 +93,7 @@ def build_content_model(content, audio, *, genre_axes=None) -> ContentModel:
 
 
 def encode_content(model: ContentModel, genre, year, audio, *, genre_axes=None):
-    """Unit float32 projection, or None without any feature the model recognizes."""
+    """Bounded float32 projection, or None without any recognized feature."""
     cat, ncat, cont = model["cat"], model["ncat"], model["cont"]
     vec = np.zeros(ncat + len(cont), dtype=np.float32)
     toks = []
@@ -108,12 +113,15 @@ def encode_content(model: ContentModel, genre, year, audio, *, genre_axes=None):
         c = cat.get(t)
         if c is not None:
             vec[int(c)] = 1.0
-    for j, (f, mu, sd) in enumerate(cont):
-        val = a.get(f)
-        if val is not None and sd:
-            vec[ncat + j] = AUDIO_DIM_W * (float(val) - mu) / sd
-    n = float(np.linalg.norm(vec))
-    return (vec / n).astype(np.float32) if n > 0 else None
+    if model.get('policy'):
+        character = a.get('character', {})
+        content_character.encode(cont, character, vec[ncat:])
+    else:
+        for j, (f, mu, sd) in enumerate(cont):
+            val = a.get(f)
+            if val is not None and sd:
+                vec[ncat + j] = AUDIO_DIM_W * (float(val) - mu) / sd
+    return content_character.finish_vector(vec, model.get('policy'))
 
 
 def input_fingerprint(inputs: ContentInputs, *, genre_axes=None):
@@ -124,8 +132,8 @@ def input_fingerprint(inputs: ContentInputs, *, genre_axes=None):
 
 def build_library_content(inputs: ContentInputs, *, genre_axes=None) -> EncodedLibrary:
     """Fit and encode detached library inputs in one shared content space."""
-    _, content, audio = inputs
-    model = build_content_model(content, audio,genre_axes=genre_axes)
+    content, audio = inputs.content, inputs.audio
+    model = build_content_model(content, audio, genre_axes=genre_axes, policy=inputs.policy)
     candidates = sorted(set(content) | set(audio))
     matrix = np.empty((len(candidates), model['ncat'] + len(model['cont'])), dtype=np.float32)
     keys = []
@@ -143,11 +151,14 @@ def build_library_content(inputs: ContentInputs, *, genre_axes=None) -> EncodedL
 
 def content_model_fingerprint(model) -> str:
     """Identify ordered column meanings, excluding drifting audio means/stddevs."""
-    payload = json.dumps({
+    basis = {
         "catalog_identity_version": 2,
         "cat": sorted(model.get("cat", {}).items(), key=lambda kv: (kv[1], kv[0])),
         "cont": [c[0] for c in model.get("cont", [])],
-    }, sort_keys=True)
+    }
+    if 'policy' in model:
+        basis.update(policy=model['policy'], cont=model['cont'])
+    payload = json.dumps(basis, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -156,7 +167,10 @@ def encode_discovered(rows, model: ContentModel, *, genre_axes=None):
     for i, r in enumerate(rows):
         if i % 256 == 0:
             check_stopping()
-        v = encode_content(model, r.get("genre"), r.get("year"), r.get("audio"),genre_axes=genre_axes)
+        audio = r.get("audio")
+        if model.get('policy') and 'character' in r:
+            audio = content_character.audio(audio, r['character'])
+        v = encode_content(model, r.get("genre"), r.get("year"), audio, genre_axes=genre_axes)
         if v is not None:
             out.append((r["identity_key"], v.tobytes()))
     return out

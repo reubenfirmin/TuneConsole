@@ -6,25 +6,25 @@ from yt_playlist.core.config import AccountConfig
 
 
 def test_upsert_is_idempotent_on_label(store):
-    a = store.accounts.upsert_account("me", "cred-1", "BA1", True)
-    b = store.accounts.upsert_account("me", "cred-2", "BA1", True)
+    a = store.accounts.upsert_account("me", "BA1", True)
+    b = store.accounts.upsert_account("me", "BA1", True)
     assert a == b
     ids = store.accounts.get_accounts()
-    assert len(ids) == 1 and ids[0].credential_ref == "cred-2" and ids[0].brand_account_id == "BA1"
+    assert len(ids) == 1 and ids[0].brand_account_id == "BA1"
     assert store.accounts.get_master_account().label == "me"
     assert [i.label for i in ids] == ["me"]
     with pytest.raises(ValueError,match='cannot be retargeted'):
-        store.accounts.upsert_account('me','cred-2','BA2',True)
+        store.accounts.upsert_account('me','BA2',True)
 
 
 def test_get_master_identity(store):
-    store.accounts.upsert_account("alt", "c", None, False)
-    store.accounts.upsert_account("main", "c", None, True)
+    store.accounts.upsert_account("alt", None, False)
+    store.accounts.upsert_account("main", None, True)
     assert store.accounts.get_master_account().label == "main"
 
 
 def test_get_master_identity_missing_raises(store):
-    store.accounts.upsert_account("alt", "c", None, False)
+    store.accounts.upsert_account("alt", None, False)
     with pytest.raises(ValueError):
         store.accounts.get_master_account()
 
@@ -33,15 +33,15 @@ def test_get_master_identity_missing_raises(store):
 def test_upsert_rejects_non_boolean_account_flags_before_writing(store, flag):
     before = store.conn.total_changes
     with pytest.raises(ValueError, match='boolean or integer 0 or 1'):
-        store.accounts.upsert_account('invalid', 'c', None, flag)
+        store.accounts.upsert_account('invalid', None, flag)
     assert store.conn.total_changes == before
 
 
 @pytest.mark.parametrize('flags', [(False, False), (True, True), (True, 2)])
 def test_reconciliation_validates_master_configuration_before_writing(store, flags):
-    existing = store.accounts.upsert_account('existing', 'c', None, True)
+    existing = store.accounts.upsert_account('existing', None, True)
     before = store.conn.total_changes
-    configs = [AccountConfig(label, 'c', None, flag) for label, flag in zip(('a', 'b'), flags)]
+    configs = [AccountConfig(label, None, flag) for label, flag in zip(('a', 'b'), flags)]
     with pytest.raises(ValueError):
         store.accounts.replace_accounts(configs)
     assert store.conn.total_changes == before
@@ -49,10 +49,10 @@ def test_reconciliation_validates_master_configuration_before_writing(store, fla
 
 
 def test_master_and_label_exchange_preserves_account_ids_and_retired_history(store):
-    configs = [AccountConfig('main', 'c', None, True), AccountConfig('brand', 'c', 'BA1', False)]
+    configs = [AccountConfig('main', None, True), AccountConfig('brand', 'BA1', False)]
     ids = store.accounts.replace_accounts(configs)
-    exchanged = [AccountConfig('brand', 'c', None, False, ids['main']),
-                 AccountConfig('main', 'c', 'BA1', True, ids['brand'])]
+    exchanged = [AccountConfig('brand', None, False, ids['main']),
+                 AccountConfig('main', 'BA1', True, ids['brand'])]
     assert store.accounts.replace_accounts(exchanged) == {'brand': ids['main'], 'main': ids['brand']}
     assert store.accounts.get_master_account().id == ids['brand']
     store.accounts.replace_accounts(exchanged[1:])
@@ -61,10 +61,10 @@ def test_master_and_label_exchange_preserves_account_ids_and_retired_history(sto
 
 
 def test_interrupted_account_sql_rolls_back_the_complete_binding_change(store):
-    configs = [AccountConfig('main', 'c', None, True), AccountConfig('brand', 'c', 'BA1', False)]
+    configs = [AccountConfig('main', None, True), AccountConfig('brand', 'BA1', False)]
     ids = store.accounts.replace_accounts(configs)
-    switched = [AccountConfig('main', 'c', None, False, ids['main']),
-                AccountConfig('brand', 'c', 'BA1', True, ids['brand'])]
+    switched = [AccountConfig('main', None, False, ids['main']),
+                AccountConfig('brand', 'BA1', True, ids['brand'])]
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM accounts')]
     store.conn.execute("CREATE TEMP TRIGGER fail_account_update BEFORE UPDATE OF is_master ON accounts "
                        "WHEN NEW.is_master=1 BEGIN SELECT RAISE(ABORT,'controlled interrupted setup'); END")
@@ -79,20 +79,29 @@ def test_interrupted_account_sql_rolls_back_the_complete_binding_change(store):
 
 
 def test_binding_plan_cannot_overwrite_a_change_after_its_read(store):
-    identity = store.accounts.upsert_account('Main', 'old-credential', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     repository = store.accounts.repository
     observed = repository.account_rows()
-    store.accounts.upsert_account('Main', 'new-credential', None, True)
+    with store.conn:
+        store.conn.execute("UPDATE accounts SET label='Updated' WHERE id=?", (identity,))
     with pytest.raises(ValueError, match='bindings changed'):
-        repository.replace_accounts([('Renamed', 'old-credential', None, 1, identity)], expected=observed)
-    assert [(account.label, account.credential_ref) for account in store.accounts.get_accounts()] == [
-        ('Main', 'new-credential')]
+        repository.replace_accounts([(identity, 'Renamed', None, 1)], expected=observed)
+    assert [account.label for account in store.accounts.get_accounts()] == ['Updated']
     assert not store.conn.in_transaction
 
 
+def test_import_cannot_overwrite_saved_bindings(store):
+    original = AccountConfig('Main', None, True)
+    replacement = AccountConfig('Stale import', None, True)
+    store.accounts.replace_accounts([original])
+    with pytest.raises(ValueError, match='already been imported'):
+        store.accounts.replace_accounts([replacement], importing=True)
+    assert store.accounts.get_master_account().label == original.label
+
+
 def test_conditional_upsert_rejects_retargeting_even_after_an_outdated_controller_read(store):
-    identity = store.accounts.upsert_account('Main', 'old-credential', 'original-owner', True)
+    identity = store.accounts.upsert_account('Main', 'original-owner', True)
     with pytest.raises(ValueError, match='cannot be retargeted'):
-        store.accounts.repository.upsert_account('Main', 'new-credential', 'another-owner', 1)
+        store.accounts.repository.upsert_account('Main', 'another-owner', 1)
     assert store.accounts.get_master_account().id == identity
     assert store.accounts.get_master_account().brand_account_id == 'original-owner'

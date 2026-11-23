@@ -1,46 +1,59 @@
-"""Home retains the visible menu assignment without historical track recipes (#688)."""
-import html
-import json
+"""Live Home retains visible choice evidence without private ranker inputs."""
 import re
 
-from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
-from tests.rec.test_home_prepared import (
-    cached_menu_schema, one_menu_per_attempt, publication_inputs, publication_prepared, store,
-)
+from tests.group_support import publish_keyed
+from tests.onboarding_support import publish_live_mix_inputs
+from yt_playlist.core import mix_choices
+from yt_playlist.rec import choice_evidence, home_cards, rec_params
+from yt_playlist.web.app import create_app
 
 
 def test_home_keeps_assignment_and_visible_options_without_hidden_ranker_recipes(
-        store, publication_prepared, unlocked_home_controls, monkeypatch):
-    from yt_playlist.rec import choice_evidence
-    from yt_playlist.core import mix_choices
-    from yt_playlist.web.app import create_app
-    from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home
+        store, unlocked_home_controls, monkeypatch):
+    tracks = publish_live_mix_inputs(store, tracks_per_lane=20)
+    rec_params.set_param(store, 'comfort_min_pool', 0)
+    publish_keyed(store, [
+        (genre, [track['key'] for track in tracks if track['video_id'].startswith(f'live-{lane}-')], character)
+        for lane, genre, character in (
+            ('wheelhouse', 'House', .25), ('explore', 'Jazz', .75), ('comfort', 'Ambient', .05))
+    ], now=1000)
 
-    # The resource consumes a completed menu. Its ranking is controlled below
-    # preparation; real HTTP rendering, evidence capture and SQL expansion own
-    # the visible assignment and omission of private recipe fields here.
-    monkeypatch.setattr(webapp, 'build_all',
-                        lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
-    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
-    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    # Supply known assignment metadata on the actual live selection to check
+    # how the HTTP and evidence paths carry it.
+    assignment = {'policy': 'controlled-test', 'unit': 'whole_menu', 'menu': 1, 'probability': .3,
+                  'candidates': [{'menu': 0, 'probability': .7}, {'menu': 1, 'probability': .3}]}
+    live_cards = home_cards.HomeCards.cards
+
+    def assigned_cards(service, request):
+        result = live_cards(service, request)
+        for proto in result.protos:
+            proto.update(assignment=assignment, ranker='private-ranker')
+            proto['counterfactual'] = {'tracks': list(reversed(proto['tracks']))}
+        return result
+
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', assigned_cards)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         response = client.get('/home/cards')
     assert response.status_code == 200
-    match = re.search(r"hx-vals='([^']*opportunity_id[^']*)'", response.text)
-    assert match, 'The rendered menu must identify its actual choice opportunity'
-    identity = json.loads(html.unescape(match[1]))['opportunity_id']
+    displayed = re.findall(
+        r'id="gen-([^"]+)"\s+data-choice-opportunity="([^"]+)" data-choice-option="([^"]+)"',
+        response.text)
+    assert [lane for lane, _, _ in displayed] == ['wheelhouse', 'explore', 'fresh', 'comfort']
+    identity = displayed[0][1]
+    assert {opportunity for _, opportunity, _ in displayed} == {identity}
     offer = choice_evidence.opportunity(store, identity)
-    assert offer and offer['format'] == 'mixes' and len(offer['options']) > 1
-    assert [option['position'] for option in offer['options']] == list(range(1, len(offer['options']) + 1))
-    for option in offer['options']:
-        visible = mix_choices.expand(store.conn, option)
-        assert visible['label'] and visible['intent']
-        assert option['assignment']['unit'] == 'whole_menu'
-        assert 0 < option['assignment']['probability'] <= 1
-        assert not {'tracks', 'recipe', 'mode_id', 'ranker', 'centroid', 'vectors'} & option.keys()
+    assert offer and offer['format'] == 'mixes'
+    options = [mix_choices.expand(store.conn, option) for option in offer['options']]
+    assert [(option['intent'], option['id']) for option in options] == [
+        (lane, option) for lane, _, option in displayed]
+    assert [option['position'] for option in options] == [1, 2, 3, 4]
+    labels = {proto['lane']: proto['label'] for proto in response.context['protos']}
+    for option in options:
+        assert option['label'] == labels[option['intent']]
+        assert option['assignment'] == assignment
+        assert not {'tracks', 'recipe', 'mode_id', 'ranker', 'counterfactual', 'centroid', 'vectors'} & option.keys()
     # Theme visibility does not claim exposure to any of its possible songs.
     assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0

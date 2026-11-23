@@ -1,0 +1,58 @@
+name: Prepare release assets
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Intended release tag, including its version prefix
+        required: true
+        type: string
+      source_run:
+        description: Optional original tag run whose platform artifacts need recovery
+        type: string
+permissions:
+  contents: read
+jobs:
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.policy.outputs.version }}
+      tag: ${{ steps.policy.outputs.tag }}
+      revision: ${{ steps.source.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: policy
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python3 packaging/release_policy.py "$RELEASE_TAG"
+      - id: source
+        env:
+          RELEASE_TAG: ${{ steps.policy.outputs.tag }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+        run: |
+          target=HEAD
+          if [[ -n "$SOURCE_RUN" ]]; then target="refs/tags/$RELEASE_TAG"; fi
+          revision=$(git rev-parse --verify "$target^{commit}")
+          git merge-base --is-ancestor "$revision" HEAD
+          printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+  prepared:
+    needs: version
+    uses: ./.github/workflows/prepared-candidates.yml
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    with:
+      version: ${{ needs.version.outputs.version }}
+      tag: ${{ needs.version.outputs.tag }}
+      revision: ${{ needs.version.outputs.revision }}
+      source-run: ${{ inputs.source_run }}
+    secrets:
+      FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+      SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}

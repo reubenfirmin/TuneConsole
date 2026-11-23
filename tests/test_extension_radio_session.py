@@ -11,6 +11,8 @@ import pytest
     "other_playlist", "missing_sidebar", "refresh_errors", "reinjection",
     "counterpart_refresh", "counterpart_confirmed", "counterpart_trimmed", "counterpart_repeat",
     "unrelated_selected", "counterpart_other_playlist", "counterpart_wrong_index", "counterpart_stale_endpoint",
+    "removed_current", "missing_row", "missing_row_repeat", "missing_row_wrong_playlist",
+    "malformed_automix", "malformed_counterpart",
 ])
 def test_radio_native_refresh_and_playlist_view(scenario):
     node = shutil.which("node")
@@ -42,6 +44,17 @@ if (scenario.startsWith('counterpart_') || scenario === 'unrelated_selected') {
   }
   if (scenario === 'counterpart_other_playlist') nativePlaylist = 'OTHER';
 }
+if (scenario === 'removed_current') {
+  current = 'retired';
+  nativeIds = [current];
+}
+if (scenario.startsWith('missing_row')) {
+  nativeIds = scenario === 'missing_row_wrong_playlist' ? ['old-next'] : [];
+  if (scenario === 'missing_row_wrong_playlist') nativePlaylist = 'OTHER';
+  if (scenario === 'missing_row_repeat') expected = ['v1', 'v2', 'v3', 'v2', 'v4'];
+}
+if (scenario === 'malformed_counterpart') selected = 1;
+const initialVideo = current;
 const commands = [], listeners = [];
 const video = {paused: false, currentTime: 30, duration: 300};
 const endpoint = {clickTrackingParams: 'tracking', watchEndpoint: {
@@ -72,11 +85,12 @@ const queue = {queue: {store: {store: {getState: () => ({queue: available ? {
       navigationEndpoint: {watchEndpoint: {playlistId: nativePlaylist,
         ...(i === selected ? {index: savedIndex} : {})}}}};
     if (i === selected) return {playlistPanelVideoWrapperRenderer: {
-      primaryRenderer: item, counterpart: [{counterpartRenderer: {
+      primaryRenderer: item, counterpart: scenario === 'malformed_counterpart' ? {contents: []} : [{counterpartRenderer: {
         playlistPanelVideoRenderer: {videoId: counterpart}}}],
     }};
     return i % 2 ? {playlistPanelVideoWrapperRenderer: {primaryRenderer: item}} : item;
   }), autoplay: false, selectedItemIndex: selected ?? nativeIds.indexOf(current),
+  automixItems: scenario === 'malformed_automix' ? {contents: []} : undefined,
 } : null})}}}};
 const toggle = {
   id: 'automix', localName: 'tp-yt-paper-toggle-button', checked: true,
@@ -114,14 +128,53 @@ const context = vm.createContext({window, URL, AbortController, HTMLElement: cla
 });
 vm.runInContext(code, context);
 const observer = window.__tcRadioSession;
-const update = (refresh = true, ids = expected) => observer.update({playlist: 'PLSESSION', videoIds: ids, refresh});
+const update = (refresh = true, ids = expected, removedCurrent) => observer.update({
+  playlist: 'PLSESSION', videoIds: ids, refresh, removedCurrent,
+});
 const assertPlayback = () => {
-  assert.equal(current, counterpart ? 'native-v2' : 'v2');
+  assert.equal(current, initialVideo);
   assert.equal(video.currentTime, 30);
   assert.equal(video.paused, false);
 };
 
-if (scenario === 'counterpart_refresh') {
+if (scenario === 'removed_current') {
+  const hint = {videoId: current, afterIndex: 1};
+  assert.equal(update().refresh, 'current song is not in saved playlist');
+  assert.equal(update(true, expected, {...hint, afterIndex: -1}).playback_synced, false);
+  nativePlaylist = 'OTHER';
+  assert.equal(update(true, expected, hint).refresh, 'current song is not in saved playlist');
+  nativePlaylist = playlist;
+  endpoint.watchEndpoint.videoId = 'v2';
+  assert.equal(update(true, expected, hint).refresh, 'waiting for current playback endpoint');
+  assert.equal(commands.length, 0);
+  endpoint.watchEndpoint.videoId = current;
+  assert.equal(update(true, expected, hint).refresh, 'requested');
+  const request = commands[0].queueUpdateCommand.fetchContentsCommand.watchEndpoint;
+  assert.equal(request.videoId, 'retired');
+  assert.equal(request.playlistId, playlist);
+  assert(!('playlistSetVideoId' in request) && !('index' in request) && !('startTimeSeconds' in request));
+  assert.equal(endpoint.watchEndpoint.playlistSetVideoId, 'set-v2');
+  nativeIds = ['retired', 'v3', 'v4'];
+  assert.equal(update(true, expected, hint).playback_synced, true);
+  assert.equal(commands.length, 1);
+} else if (scenario.startsWith('missing_row')) {
+  const result = update();
+  assert.equal(result.native.selectedItem, null);
+  assert.equal(result.playback_synced, false);
+  assert.equal(commands.length, scenario === 'missing_row' ? 1 : 0);
+  if (scenario === 'missing_row') {
+    assert.equal(result.refresh, 'requested');
+    nativeIds = expected;
+    assert.equal(update().savedIndex, 1);
+    assert.equal(update().playback_synced, true);
+  }
+} else if (scenario === 'malformed_automix' || scenario === 'malformed_counterpart') {
+  const result = update();
+  assert.equal(result.native.selectedItem.videoId, current);
+  assert.equal(result.savedIndex, 1);
+  assert.equal(result.refresh, 'requested');
+  assert.equal(commands.length, 1);
+} else if (scenario === 'counterpart_refresh') {
   assert.equal(update().refresh, 'requested');
   assert.equal(commands.length, 1);
   const watch = commands[0].queueUpdateCommand.fetchContentsCommand.watchEndpoint;

@@ -4,7 +4,7 @@
 // alters, blocks, or reorders requests, and it fails open: any error means a lost observation,
 // never a broken page. Ratings include the fetch outcome; other events are raw request intent.
 (function () {
-  var REVISION = 2;
+  var REVISION = 3;
   var previous = window.__tcFetchHook;
   if (previous && previous.revision >= REVISION && !previous.stopped) return;
   if (previous && typeof previous.stop === "function") previous.stop();
@@ -45,6 +45,7 @@
           // cannot retag a request that is already in flight.
           observation = Object.assign({kind: PATTERNS[i].kind, url: url.split("?")[0],
                          href: location.href}, account());
+          if (observation.kind === "rate") observation.requestedAt = Date.now();
           // YTM usually passes the JSON body inside a Request object, not as a string init.body;
           // clone() lets us read it without consuming the stream. Async is fine: the server stamps
           // event time at receipt, and a failed read still reports the observation (empty body).

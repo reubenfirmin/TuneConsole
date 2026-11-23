@@ -12,7 +12,6 @@ from uuid import uuid4
 import httpx
 import pytest
 from starlette.concurrency import run_in_threadpool
-from starlette.requests import Request
 
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import home_discovery
@@ -24,13 +23,25 @@ REQUEST_TIMEOUT_SECONDS = 10
 
 @pytest.mark.parametrize('case', ['worker-control', 'directions', 'radio'])
 def test_home_section_readiness_keeps_unrelated_requests_responsive(store, monkeypatch, case, request):
-    from tests.onboarding_support import publish_personal_mix
+    from tests.home_fixture_support import returning_listener
+    from tests.onboarding_support import publish_live_mix_inputs
+    from tests.test_account_growth import ready_radio
     from tests.test_growth_journey import early_journey
+    from yt_playlist.rec import account_growth
 
-    early_journey(store)
-    publish_personal_mix(store)
+    if case == 'directions':
+        reserve = early_journey(store)
+        publish_live_mix_inputs(store, fresh_reserve=reserve)
+    elif case == 'radio':
+        early_journey(store)
+        returning_listener(store, 'mixes')
+        with store._lock:
+            recordings = {row[0] for row in store.conn.execute('SELECT id FROM recordings')}
+            store.enrichment_queue.mark_recordings_enriched(recordings, 1000)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
-    original = home_discovery.growth_state
+    if case == 'radio':
+        monkeypatch.setattr(app.state.ctx.radio, 'bootstrap', lambda **kwargs: ready_radio())
+    original = home_discovery.panel_access
     calls = []
     root = Path(__file__).resolve().parents[2]
     sources = [root / name for name in (
@@ -56,7 +67,7 @@ def test_home_section_readiness_keeps_unrelated_requests_responsive(store, monke
             if not entered.done():
                 entered.set_result(entered_at)
 
-        def held_readiness(*args, **kwargs):
+        def hold():
             thread = threading.get_ident()
             calls.append({'thread': thread, 'on_event_loop': thread == loop_thread})
             loop.call_soon_threadsafe(record_entry, time.monotonic())
@@ -64,17 +75,21 @@ def test_home_section_readiness_keeps_unrelated_requests_responsive(store, monke
             if not release.wait(READINESS_GATE_SECONDS):
                 expired.set()
                 release.set()
-            return original(*args, **kwargs)
 
-        monkeypatch.setattr(home_discovery, 'growth_state', held_readiness)
+        def held_readiness(ctx, panel):
+            assert panel == case
+            hold()
+            return original(ctx, panel)
+
+        monkeypatch.setattr(home_discovery, 'panel_access', held_readiness)
 
         @app.get('/_review865/event-loop')
         async def probe():
             return {'ok': True}
 
         @app.post('/_review865/worker-control')
-        async def worker_control(incoming: Request):
-            await run_in_threadpool(held_readiness, app.state.ctx, incoming)
+        async def worker_control():
+            await run_in_threadpool(hold)
             return {'ok': True}
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
@@ -104,7 +119,18 @@ def test_home_section_readiness_keeps_unrelated_requests_responsive(store, monke
                 release.set()
                 result = await asyncio.wait_for(pending, REQUEST_TIMEOUT_SECONDS)
                 facts['request_status'] = result.status_code
-            assert result.status_code in (200, 204, 409)
+            assert result.status_code == (200 if case == 'worker-control' else 204)
+            if case != 'worker-control':
+                assert store.settings.get_setting('home_last_panel') == case
+
+                def unexpected_access(*args):
+                    pytest.fail('An earned panel revisited current readiness')
+
+                returning_listener(store, 'mixes' if case == 'directions' else 'radio')
+                assert account_growth.retained_access(store, case)
+                monkeypatch.setattr(home_discovery, 'panel_access', unexpected_access)
+                result = await client.post('/home/format', data={'panel': case})
+                assert result.status_code == 204
 
     try:
         asyncio.run(exercise())

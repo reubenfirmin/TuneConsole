@@ -3,17 +3,17 @@ from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.providers.base import LookupUnavailable
 
 
-def summary(policy, search, fetch, kind, display):
+def summary(policy, search, fetch, kind, display, *, select=None):
     try:
-        titles = search(kind, display)
+        titles = list(dict.fromkeys(title for title in search(kind, display)
+                                   if policy.matches_subject(kind, display, title)))
     except (WorkClosing, WorkBudgetExceeded):
         raise
     except Exception as exc:
         raise LookupUnavailable('Wikipedia search unavailable') from exc
     failed = False
+    candidates = {}
     for title in titles:
-        if not policy.matches_subject(kind, display, title):
-            continue
         try:
             result = policy.project_summary(fetch(title), kind, display, title)
         except (WorkClosing, WorkBudgetExceeded):
@@ -22,9 +22,18 @@ def summary(policy, search, fetch, kind, display):
             failed = True
             continue
         if result:
-            return result
+            if select is None:
+                return result
+            candidates[result['title']] = result
     if failed:
         raise LookupUnavailable('Wikipedia summaries unavailable')
+    if select is not None and candidates:
+        try:
+            return select(tuple(candidates.values()), len(titles) > 1)
+        except (WorkClosing, WorkBudgetExceeded):
+            raise
+        except Exception as exc:
+            raise LookupUnavailable('Wikipedia article identity unavailable') from exc
     return None
 
 

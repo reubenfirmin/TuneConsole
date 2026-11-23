@@ -5,18 +5,18 @@ from contextlib import nullcontext
 import pytest
 
 from yt_playlist.core import (choice_learning_state, home_offers, home_outputs,
-    listening_outputs, model_comparison_state, recommendation_requests,
+    listening_outputs, recommendation_requests,
     recommendation_work, tv_recommendation_state)
 
 
 @pytest.mark.parametrize('surface,value,module,reader,empty_present', [
     ('tv_pool', {'at': 10}, tv_recommendation_state, 'read', False),
-    ('model_live_comparison', {'phase': 'preparing'}, model_comparison_state, 'read', False),
     ('choice_bandit', {'rows': []}, choice_learning_state, 'read', False),
     ('home_genre_request', {'epoch': 1, 'held_by_vibe': False}, recommendation_requests, 'read', False),
-    ('album_menu_refresh', {'epoch': 1, 'exclude': []}, recommendation_requests, 'read', False),
+    ('album_menu_refresh', {'epoch': 0, 'exclude': []}, recommendation_requests, 'read', False),
     ('home_shown', {'epoch': 1, 'signatures': []}, home_offers, 'read', False),
     ('tv_preparation', {'failed': False}, recommendation_work, 'read', False),
+    ('daily_model_schedule', {'next_at': 0}, recommendation_work, 'read', False),
     ('listening_edition', {'text': 'Ready'}, listening_outputs, 'encoded', True),
     ('home_prepared', {'tracks': []}, home_outputs, 'encoded', False),
 ])

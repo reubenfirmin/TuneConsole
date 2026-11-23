@@ -43,8 +43,6 @@ def project(record, facts):
     if not record or 'context' not in record:
         return record
     compact = record.get('format') == 'mixes' and record.get('precision') == PRECISION
-    if not facts['installed']:
-        return None if compact else record
     if record.get('format') != 'mixes':
         return {**record, 'context': facts['context']} if facts['context'] is not None else record
     if facts['context'] is None:

@@ -1,28 +1,21 @@
-"""Paid-request rows, guarded updates and immutable result-file references."""
+"""Paid requests, results and usage in one SQLite transaction."""
 from contextlib import contextmanager
 
-from yt_playlist.core import albums
+from yt_playlist.core import albums, paid_description_access
 from yt_playlist.repos.base import Repo, lookup_read, synchronized
-from yt_playlist.repos import description_file_writes
+
+
+REQUEST_COLUMNS = (
+    'id', 'album_id', 'request_key', 'policy_version', 'resolution_status', 'legacy_identity',
+    'status', 'claim_token', 'lease_until', 'attempt_count', 'credential_key', 'authorized_at',
+    'retry_at', 'created_at', 'updated_at', 'outcome_json',
+)
 
 
 class AlbumDescriptionsRepo(Repo):
-    @lookup_read
-    def legacy_record(self, surface):
-        import json
-        row = self.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
-        return json.loads(row[0]) if row else None
-
-    @synchronized
-    def store_legacy_records(self, records, now):
-        import json
-        self.conn.executemany('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
-            'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
-            [(surface, json.dumps(value), now) for surface, value in records])
-
     @contextmanager
     def transaction(self):
-        """Reserve this repository's writer; callers keep file I/O outside it."""
+        """Reserve the writer before making an admission or completion decision."""
         with self._lock:
             if self.conn.in_transaction:
                 raise ValueError('Paid request admission requires its own transaction')
@@ -37,8 +30,8 @@ class AlbumDescriptionsRepo(Repo):
     @lookup_read
     def summary(self, completed_status, pending_states):
         completed = self.conn.execute(
-            'SELECT COUNT(DISTINCT r.album_id) FROM album_description_requests r '
-            'JOIN album_descriptions d ON d.request_id=r.id WHERE r.status=?', (completed_status,)).fetchone()[0]
+            'SELECT COUNT(DISTINCT album_id) FROM album_description_requests WHERE status=?',
+            (completed_status,)).fetchone()[0]
         pending = self.conn.execute('SELECT 1 FROM album_description_requests WHERE status IN ('
             + ','.join('?' for _ in pending_states) + ') LIMIT 1', pending_states).fetchone() is not None
         return completed, pending
@@ -54,7 +47,7 @@ class AlbumDescriptionsRepo(Repo):
 
     @lookup_read
     def canonical_album(self, album_id):
-        row = self.conn.execute('SELECT album_id FROM album_alias_reconciliations WHERE retired_id=?',
+        row = self.conn.execute('SELECT COALESCE(canonical_album_id,id) FROM albums WHERE id=?',
                                 (album_id,)).fetchone()
         return row[0] if row else album_id
 
@@ -64,25 +57,26 @@ class AlbumDescriptionsRepo(Repo):
         ordering = 'CASE status ' + ' '.join('WHEN ? THEN ?' for _ in status_order) + ' ELSE ? END'
         parameters = [value for index, status in enumerate(status_order) for value in (status, index)]
         row = self.conn.execute('SELECT id FROM album_description_requests WHERE policy_version=? AND '
-            'album_id IN (SELECT ? UNION ALL SELECT retired_id FROM album_alias_reconciliations WHERE album_id=?) '
+            'album_id IN (SELECT ? UNION ALL SELECT id FROM albums WHERE canonical_album_id=?) '
             'ORDER BY ' + ordering + ',id LIMIT 1',
             (policy_version, album_id, album_id, *parameters, len(status_order))).fetchone()
         return row[0] if row else None
 
     @lookup_read
     def request(self, request_id):
-        cursor = self.conn.execute('SELECT * FROM album_description_requests WHERE id=?', (request_id,))
-        row = cursor.fetchone()
-        return dict(zip((column[0] for column in cursor.description), row)) if row else None
+        row = self.conn.execute(
+            f'SELECT {", ".join(REQUEST_COLUMNS)} FROM album_description_requests WHERE id=? AND usage_id IS NULL',
+            (request_id,)).fetchone()
+        return dict(zip(REQUEST_COLUMNS, row, strict=True)) if row else None
 
     @lookup_read
-    def successful_reference(self, album_id):
+    def successful_result(self, album_id):
         album_id = self.canonical_album(album_id)
-        row = self.conn.execute('SELECT d.filename,d.content_digest FROM album_description_requests r '
-            'JOIN album_descriptions d ON d.request_id=r.id WHERE r.album_id IN '
-            '(SELECT ? UNION ALL SELECT retired_id FROM album_alias_reconciliations WHERE album_id=?) '
-            'ORDER BY d.created_at DESC,d.id DESC LIMIT 1', (album_id, album_id)).fetchone()
-        return tuple(row) if row else None
+        row = self.conn.execute("SELECT outcome_json FROM album_description_requests WHERE status='ready' AND album_id IN "
+            '(SELECT ? UNION ALL SELECT id FROM albums WHERE canonical_album_id=?) '
+            "AND json_extract(outcome_json,'$.status') IS NOT 'unavailable' "
+            'ORDER BY result_created_at DESC,result_order DESC LIMIT 1', (album_id, album_id)).fetchone()
+        return row[0] if row else None
 
     @lookup_read
     def legacy_request(self, identity):
@@ -92,27 +86,20 @@ class AlbumDescriptionsRepo(Repo):
 
     @lookup_read
     def usage(self, period):
-        return self.conn.execute("SELECT COALESCE(sum(units),0) FROM provider_usage "
-            "WHERE provider='deepseek' AND period=? AND usage_kind='requests'", (period,)).fetchone()[0]
+        return self.conn.execute('SELECT COALESCE(sum(units),0) FROM album_description_requests '
+            "WHERE usage_id IS NOT NULL AND provider='deepseek' AND period=? AND usage_kind='requests'",
+            (period,)).fetchone()[0]
 
     @lookup_read
     def access_rows(self, credential, now, sticky_status):
-        return [{'status': state, 'retry_at': retry} for state, retry in self.conn.execute(
-            "SELECT status,retry_at FROM album_description_access WHERE provider='deepseek' "
-            "AND ((scope='credential' AND credential_key=?) OR scope='host') "
-            'AND (status=? OR retry_at>?)', (credential, sticky_status, now))]
+        states = (paid_description_access.read(self.conn, 'credential', credential),
+                  paid_description_access.read(self.conn, 'host', ''))
+        return [{'status': row['status'], 'retry_at': row['retry_at']} for row in states
+                if row and (row['status'] == sticky_status or row['retry_at'] > now)]
 
     @lookup_read
     def access_state(self, scope, credential):
-        row = self.conn.execute("SELECT status,retry_at,updated_at FROM album_description_access "
-            "WHERE provider='deepseek' AND scope=? AND credential_key=?", (scope, credential)).fetchone()
-        return dict(zip(('status', 'retry_at', 'updated_at'), row)) if row else None
-
-    @lookup_read
-    def legacy_usage(self):
-        row = self.conn.execute('SELECT lease_until,claim_token,send_authorized,status '
-                                'FROM legacy_album_description_usage').fetchone()
-        return dict(zip(('lease_until', 'claim_token', 'send_authorized', 'status'), row)) if row else None
+        return paid_description_access.read(self.conn, scope, credential)
 
     @lookup_read
     def active_request(self, states):
@@ -123,14 +110,14 @@ class AlbumDescriptionsRepo(Repo):
 
     @lookup_read
     def counted_attempt(self, request_id, attempt):
-        row = self.conn.execute('SELECT period,units FROM provider_usage WHERE request_id=? '
+        row = self.conn.execute('SELECT period,units FROM album_description_requests WHERE request_id=? '
             "AND attempt_number=? AND usage_kind='requests'", (request_id, attempt)).fetchone()
         return tuple(row) if row else None
 
     @synchronized
     def expire_request(self, request_id, status, keep_token, now):
         self.conn.execute('UPDATE album_description_requests SET status=?,lease_until=0,'
-            'claim_token=CASE WHEN ? THEN claim_token ELSE NULL END,updated_at=? WHERE id=?',
+            'claim_token=CASE WHEN ? THEN claim_token ELSE NULL END,updated_at=? WHERE id=? AND usage_id IS NULL',
             (status, keep_token, now, request_id))
 
     @synchronized
@@ -147,9 +134,9 @@ class AlbumDescriptionsRepo(Repo):
         return request_id
 
     def _usage(self, request_id, attempt, period, kind, units, now):
-        self.conn.execute('INSERT INTO provider_usage('
-            'request_id,attempt_number,reservation_key,provider,period,usage_kind,units,created_at) '
-            "VALUES (?,?,?,'deepseek',?,?,?,?)",
+        self.conn.execute('INSERT INTO album_description_requests('
+            'usage_id,request_id,attempt_number,reservation_key,provider,period,usage_kind,units,created_at) '
+            "SELECT COALESCE(max(usage_id),0)+1,?,?,?,'deepseek',?,?,?,? FROM album_description_requests",
             (request_id, attempt, f'request:{request_id}:{attempt}:{kind}', period, kind, units, now))
 
     @synchronized
@@ -159,29 +146,16 @@ class AlbumDescriptionsRepo(Repo):
             (status, now, lease_until, now, request_id, token, expected_status)).rowcount == 1
 
     @synchronized
-    def reserve_result(self, request_id, attempt, digest, size):
-        with self.transaction():
-            return description_file_writes.reserve(self.conn, request_id, attempt, digest, size)
-
-    @synchronized
-    def complete(self, request_id, attempt, expected_token, decision, reference, tokens, period, now,
-                 *, file_id, model=None):
-        description_file_writes.complete(self.conn, file_id, request_id, attempt, reference)
-        filename, digest, _size = reference
-        if model is not None:
-            self.conn.execute('INSERT INTO album_descriptions('
-                'request_id,filename,format_version,content_digest,provider,model_version,created_at) '
-                "VALUES (?,?,'album-description-1',?,'deepseek',?,?)", (request_id, filename, digest, model, now))
+    def complete(self, request_id, attempt, expected_token, decision, raw, tokens, period, now):
         for kind, units in tokens.items():
             self._usage(request_id, attempt, period, kind, units, now)
+        result_at = now if decision['status'] == 'ready' else None
         self.conn.execute('UPDATE album_description_requests SET status=?,claim_token=?,lease_until=0,retry_at=?,'
-            'updated_at=?,outcome_filename=?,outcome_digest=?,outcome_format=? WHERE id=? AND claim_token=?',
-            (decision['status'], decision['token'], decision['retry_at'], now, filename, digest,
-             'album-description-1', request_id, expected_token))
+            'updated_at=?,outcome_json=?,result_created_at=?,result_order=CASE WHEN ? IS NOT NULL '
+            'THEN (SELECT COALESCE(MAX(result_order),0)+1 FROM album_description_requests) END '
+            'WHERE id=? AND claim_token=?',
+            (decision['status'], decision['token'], decision['retry_at'], now, raw, result_at, result_at,
+             request_id, expected_token))
         access = decision['access']
         if access is not None:
-            self.conn.execute('INSERT INTO album_description_access('
-                'provider,scope,credential_key,status,retry_at,updated_at) '
-                "VALUES ('deepseek',?,?,?,?,?) ON CONFLICT(provider,scope,credential_key) DO UPDATE SET "
-                'status=excluded.status,retry_at=excluded.retry_at,updated_at=excluded.updated_at',
-                (access['scope'], access['credential'], access['status'], access['retry_at'], access['updated_at']))
+            paid_description_access.write(self.conn, access)

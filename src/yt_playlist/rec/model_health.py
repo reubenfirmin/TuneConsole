@@ -6,7 +6,7 @@ from yt_playlist.controllers.model_health import ModelHealth
 from yt_playlist.rec import embedding_vectors, eval_recs, summary_inputs
 
 SURFACE = 'model_health'
-VERSION = 1
+VERSION = 2
 PROCESS = uuid4().hex
 SECONDS = 20
 MEMORY_BYTES = 256 * 1024 * 1024

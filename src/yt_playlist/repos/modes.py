@@ -9,6 +9,8 @@ import json
 
 import numpy as np
 
+from yt_playlist.core import legacy_mode_payloads, mode_offers, mode_retention, recording_library
+from yt_playlist.core.catalog_query import LIBRARY_TRACKS_SQL
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
 
@@ -29,20 +31,14 @@ class ModesRepo(Repo):
         rows = [(mid, label, families, _centroid_bytes(blob, encoded=True), *rest)
                 for mid, label, families, blob, *rest in rows]
         with self.conn.atomic():
-            self.conn.executemany(
-                'INSERT INTO taste_modes(mode_id,label,families,centroid,size,rep_keys,first_seen,last_seen,space,active) '
-                'VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(mode_id) DO UPDATE SET '
-                'label=excluded.label,families=excluded.families,centroid=excluded.centroid,size=excluded.size,'
-                'rep_keys=excluded.rep_keys,last_seen=excluded.last_seen,space=excluded.space,active=1', rows)
-            self.conn.executemany('UPDATE taste_modes SET active=0 WHERE mode_id=?', [(mid,) for mid in retired])
+            legacy_mode_payloads.publish(self.conn, rows, retired)
 
     @snapshot_read
     def list_modes(self, active_only=True) -> list[dict]:
-        sql = ("SELECT m.*,r.mode_id IS NOT NULL AS payload_retired FROM taste_modes m "
-               "LEFT JOIN taste_mode_retired_payloads r ON r.mode_id=m.mode_id")
+        sql = f"SELECT *,payload_retired_at IS NOT NULL AS payload_retired FROM {legacy_mode_payloads.VIEW}"
         if active_only:
             sql += " WHERE active=1"
-        sql += " ORDER BY size DESC, m.mode_id ASC"
+        sql += " ORDER BY size DESC, mode_id ASC"
         out = []
         for r in self.conn.execute(sql).fetchall():
             out.append({
@@ -62,16 +58,16 @@ class ModesRepo(Repo):
     @snapshot_read
     def list_summaries(self, active_only=False) -> list[dict]:
         """Historical identity/labels without loading centroid or track payloads."""
-        sql = 'SELECT mode_id,label,size,active,first_seen,last_seen,space FROM taste_modes'
+        sql = f'SELECT mode_id,label,size,active,first_seen,last_seen,space FROM {legacy_mode_payloads.VIEW}'
         if active_only:
             sql += ' WHERE active=1'
         return [dict(row) for row in self.conn.execute(sql + ' ORDER BY size DESC,mode_id')]
 
     @synchronized
     def next_mode_id(self) -> int:
-        row = self.conn.execute("SELECT MAX(mode_id) m FROM taste_modes").fetchone()
-        high_water = self.conn.execute('SELECT high_water FROM taste_mode_retention WHERE id=1').fetchone()[0]
-        return max(row["m"] or 0, high_water) + 1
+        row = self.conn.execute('SELECT MAX(legacy_mode_id) m FROM taste_groups').fetchone()
+        high_water = self.conn.execute('SELECT value FROM settings WHERE key=?', (mode_retention.HIGH_WATER,)).fetchone()[0]
+        return max(row["m"] or 0, int(high_water)) + 1
 
     @synchronized
     def replace_modes(self, upserts, retired_ids, now) -> None:
@@ -79,24 +75,11 @@ class ModesRepo(Repo):
         if any(type(row['size']) is not int or row['size']<0 for row in upserts):
             raise ValueError('Mode size must be a nonnegative integer')
         now = float(now)
-        blobs = [_centroid_bytes(u['centroid']) for u in upserts]
-        for u, blob in zip(upserts, blobs):
-            fam = json.dumps([list(f) for f in u["families"]])
-            reps = json.dumps(list(u["rep_keys"]))
-            existing = self.conn.execute(
-                "SELECT first_seen FROM taste_modes WHERE mode_id=?", (u["mode_id"],)).fetchone()
-            first_seen = existing["first_seen"] if existing is not None else now
-            self.conn.execute(
-                "INSERT INTO taste_modes"
-                "(mode_id, label, families, centroid, size, rep_keys, active, first_seen, last_seen, space) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(mode_id) DO UPDATE SET "
-                "label=excluded.label,families=excluded.families,centroid=excluded.centroid,"
-                "size=excluded.size,rep_keys=excluded.rep_keys,active=1,last_seen=excluded.last_seen,space=excluded.space",
-                (u["mode_id"], u["label"], fam, blob, u["size"], reps, first_seen, now,
-                 u.get("space") or ""))
-        for mid in retired_ids:
-            self.conn.execute("UPDATE taste_modes SET active=0 WHERE mode_id=?", (mid,))
-        self.conn.commit()
+        rows = [(u['mode_id'], u['label'], json.dumps([list(f) for f in u['families']]),
+                 _centroid_bytes(u['centroid']), u['size'], json.dumps(list(u['rep_keys'])), now, now, u.get('space') or '')
+                for u in upserts]
+        with self.conn.atomic(join=True):
+            legacy_mode_payloads.publish(self.conn, rows, retired_ids)
 
     @synchronized
     def genres_for(self, keys) -> dict:
@@ -104,7 +87,7 @@ class ModesRepo(Repo):
             return {}
         q = ",".join("?" * len(keys))
         rows = self.conn.execute(
-            f"SELECT identity_key, MIN(genre) genre FROM tracks "
+            f"SELECT identity_key, MIN(genre) genre FROM ({LIBRARY_TRACKS_SQL}) "
             f"WHERE identity_key IN ({q}) AND genre IS NOT NULL AND genre<>'' "
             f"GROUP BY identity_key", list(keys)).fetchall()
         return {r["identity_key"]: r["genre"] for r in rows}
@@ -115,7 +98,7 @@ class ModesRepo(Repo):
             return {}
         q = ",".join("?" * len(keys))
         rows = self.conn.execute(
-            f"SELECT identity_key, MIN(title) title, MIN(artist) artist FROM tracks "
+            f"SELECT identity_key, MIN(title) title, MIN(artist) artist FROM ({LIBRARY_TRACKS_SQL}) "
             f"WHERE identity_key IN ({q}) GROUP BY identity_key", list(keys)).fetchall()
         return {r["identity_key"]: {"title": r["title"], "artist": r["artist"]} for r in rows}
 
@@ -125,30 +108,17 @@ class ModesRepo(Repo):
         if not keys:
             return {}
         q = ",".join("?" * len(keys))
+        library = recording_library.TRACKS_SQL
         rows = self.conn.execute(
-            f"SELECT identity_key, MIN(mb_year) y FROM tracks "
+            f"SELECT identity_key, MIN(mb_year) y FROM ({library}) "
             f"WHERE identity_key IN ({q}) AND mb_year GLOB '[0-9][0-9][0-9][0-9]*' "
             f"GROUP BY identity_key", list(keys)).fetchall()
         return {r["identity_key"]: int(r["y"][:4]) for r in rows}
 
     @synchronized
     def log_impressions(self, epoch, rows, now) -> None:
-        """Record which mode (and, from #57, which in-mode ranker) filled each card lane for this menu
-        epoch. Idempotent per (epoch, lane). Each row is (lane, mode_id) or (lane, mode_id, ranker)."""
-        self.conn.execute('SAVEPOINT mode_impressions')
-        try:
-            for row in rows:
-                lane, mode_id = row[0], row[1]
-                ranker = row[2] if len(row) > 2 else None
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO rec_mode_impressions(epoch, lane, mode_id, ranker, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)", (int(epoch), lane, int(mode_id), ranker, float(now)))
-            self.conn.execute('RELEASE mode_impressions')
-        except BaseException:
-            if self.conn.in_transaction:
-                self.conn.execute('ROLLBACK TO mode_impressions')
-                self.conn.execute('RELEASE mode_impressions')
-            raise
+        """Record the first mode and ranker displayed in each lane for this rotation."""
+        mode_offers.record(self.conn, epoch, rows, now)
 
     @synchronized
     def log_pick(self, membership_ref_id, mode_id, now, ranker=None) -> None:
@@ -164,25 +134,23 @@ class ModesRepo(Repo):
         Do not "fix" this by excluding generated playlists here. Every row in this table is, by
         construction, a play of a generated playlist. Quarantining it would delete the signal entirely.
         """
-        with self.conn:
+        with self.conn.atomic():
             # A historical caller may only retain the local handle. Keep its context
             # unknown; allocating future memberships must never reuse that handle.
-            self.conn.execute('INSERT OR IGNORE INTO main.playlist_membership_refs(id) VALUES (?)',(int(membership_ref_id),))
+            self.conn.execute('INSERT INTO main.playlists(id,is_current) VALUES (?,0) ON CONFLICT(id) DO NOTHING',
+                              (int(membership_ref_id),))
             self.conn.execute(
-                'INSERT OR IGNORE INTO rec_mode_picks(membership_ref_id, mode_id, ranker, created_at) '
-                "VALUES (?, ?, ?, ?)", (int(membership_ref_id), int(mode_id), ranker, float(now)))
+                'UPDATE playlists SET picked_mode_id=?,picked_ranker=?,mode_picked_at=? '
+                'WHERE id=? AND mode_picked_at IS NULL', (int(mode_id), ranker, float(now), int(membership_ref_id)))
 
     @lookup_read
     def epoch_started_at(self, epoch):
         """First display of this menu, used to defer its feedback until the next rotation."""
-        row = self.conn.execute(
-            "SELECT MIN(created_at) started FROM rec_mode_impressions WHERE epoch=?",
-            (int(epoch),)).fetchone()
-        return row["started"]
+        return min((offer[3] for offer in mode_offers.offers(self.conn, int(epoch)).values()), default=None)
 
     @snapshot_read
     def impression_counts(self, since=None, *, before=None) -> dict:
-        sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions WHERE mode_id IS NOT NULL"
+        sql = f"SELECT mode_id, COUNT(*) c FROM {mode_offers.VIEW} WHERE mode_id IS NOT NULL"
         args = []
         if since is not None:
             sql += " AND created_at >= ?"
@@ -197,8 +165,8 @@ class ModesRepo(Repo):
     def pick_counts(self, since=None, *, before=None) -> dict:
         """Compact choice counts for the chart, sampler and measurement snapshots."""
         return {r["mode_id"]: r["n"] for r in self.conn.execute(
-            "SELECT mode_id,COUNT(*) n FROM rec_mode_picks WHERE mode_id IS NOT NULL "
-            "AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<?) GROUP BY mode_id",
+            "SELECT picked_mode_id AS mode_id,COUNT(*) n FROM playlists WHERE picked_mode_id IS NOT NULL "
+            "AND (? IS NULL OR mode_picked_at>=?) AND (? IS NULL OR mode_picked_at<?) GROUP BY picked_mode_id",
             (since, since, before, before))}
 
     @synchronized
@@ -211,14 +179,14 @@ class ModesRepo(Repo):
         """
         rows = self.conn.execute(
             "WITH offers AS (SELECT mode_id, COUNT(*) n, MAX(created_at) at "
-            "FROM rec_mode_impressions GROUP BY mode_id), "
-            "picks AS (SELECT mode_id, COUNT(*) n, MAX(created_at) at "
-            "FROM rec_mode_picks GROUP BY mode_id) "
+            f"FROM {mode_offers.VIEW} GROUP BY mode_id), "
+            "picks AS (SELECT picked_mode_id AS mode_id, COUNT(*) n, MAX(mode_picked_at) at "
+            "FROM playlists WHERE picked_mode_id IS NOT NULL GROUP BY picked_mode_id) "
             "SELECT m.mode_id, m.label, COALESCE(o.n, 0) offered, "
             "COALESCE(p.n, 0) picked, "
             "CASE WHEN p.at IS NULL THEN o.at WHEN o.at IS NULL THEN p.at "
             "ELSE MAX(o.at, p.at) END updated_at "
-            "FROM taste_modes m LEFT JOIN offers o ON o.mode_id=m.mode_id "
+            f"FROM {legacy_mode_payloads.VIEW} m LEFT JOIN offers o ON o.mode_id=m.mode_id "
             "LEFT JOIN picks p ON p.mode_id=m.mode_id "
             "WHERE m.active=1 AND (o.n IS NOT NULL OR p.n IS NOT NULL) "
             "ORDER BY updated_at DESC, m.mode_id").fetchall()

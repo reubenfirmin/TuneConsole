@@ -43,10 +43,10 @@ def file_backed_store(tmp_path, _pristine_current_schema):
 def chart_http(monkeypatch, without_metadata_providers, home_page_bytecode):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, charts
+    from yt_playlist.web.routes import app_update, audio_vibes, charts
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, charts)])
+        for module in (app_update, audio_vibes, charts)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     templates = webapp.Jinja2Templates
@@ -64,7 +64,7 @@ def chart_http(monkeypatch, without_metadata_providers, home_page_bytecode):
 @pytest.fixture
 def library(file_backed_store):
     store = file_backed_store
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     entry = store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 180,
                                      album_browse_id='B', thumbnail='/cover.png')
     playlist = store.playlists.upsert_playlist(account, 'PL', 'Mix', 1, 'h', 0)
@@ -148,7 +148,6 @@ def test_playlist_analytics_in_owned_transaction_see_uncommitted_membership(libr
     monkeypatch.setattr(store, '_make_reader', forbidden)
     with store._lock:
         store.conn.execute('DELETE FROM playlist_items WHERE playlist_id=?', (playlist,))
-        store.conn.execute('DELETE FROM unresolved_playlist_items WHERE playlist_id=?', (playlist,))
         try:
             assert store.charts.playlist_tracks_detail(playlist) == []
         finally:

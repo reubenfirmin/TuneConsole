@@ -1,15 +1,22 @@
 """Recommendation refresh admission over a durable notification and fit version."""
-VERSION = '1'
+VERSION = '3'
 
 
 class RecommendationRefresh:
-    def __init__(self, repository, settings):
+    def __init__(self, repository):
         self.repository = repository
-        self.settings = settings
 
     def has_pending_changes(self):
-        return (self.repository.revision() is not None
-                or self.settings.get_setting('rec_refresh_version') != VERSION)
+        return self.repository.revision() is not None or self.version() != VERSION
+
+    def version(self):
+        return self.repository.version()
+
+    def complete_fit(self, revision):
+        self.repository.complete_fit(VERSION, revision)
+
+    def clear_fit(self):
+        self.repository.save_version(None)
 
     def revision(self):
         return self.repository.revision()

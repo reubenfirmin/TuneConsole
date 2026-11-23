@@ -10,7 +10,8 @@ function createRadioSession({pickTab}) {
     const results = await chrome.scripting.executeScript({
       target: {tabId: tab.id}, world: "MAIN",
       func: frame => window.__tcRadioSession.update(frame),
-      args: [{playlist: frame.playlist, videoIds: frame.videoIds, refresh: !!frame.refresh}],
+      args: [{playlist: frame.playlist, videoIds: frame.videoIds, refresh: !!frame.refresh,
+        removedCurrent: frame.removedCurrent ?? null}],
     });
     return results[0]?.result || {ok: false, error: "The playlist observer returned no result."};
   }

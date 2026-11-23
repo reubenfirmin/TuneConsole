@@ -20,7 +20,7 @@ MAX_STORIES = 9
 MAX_SUMMARY_FETCHES = 3    # network lookups per worker pass; yield between small batches
 MAX_CANDIDATES = 48
 SURFACE = "into_recently"
-SCHEMA = 10
+SCHEMA = 11
 MAX_AGE_S = 1800
 RECENT_WINDOW_S = 14 * 86400
 STORY_COOLDOWN_S = 7 * 86400
@@ -153,7 +153,16 @@ def ranked_subjects(*, leans, activity, favorites, genre_base, axes, taxonomy=EM
         scored.append((score, 'genre', f'genre:{key}', key))
 
     scored.sort(key=lambda item: (-item[0], item[2]))
-    return [{"kind": k, "subject": f, "display": d} for (_s, k, f, d) in scored]
+    recordings = {_norm(name): songs for name, songs in activity.get('recordings', {}).items()}
+    subjects = []
+    for _, kind, facet, display in scored:
+        subject = {'kind': kind, 'subject': facet, 'display': display}
+        if kind == 'artist' and _norm(display) in recordings:
+            genres = {_genre_key(song['genre'], taxonomy=taxonomy) for song in recordings[_norm(display)]
+                      if song['genre'] and not is_remix(song['title'])}
+            subject['recording_genres'] = sorted(genres - _UMBRELLA_GENRES - {'unknown', 'other', 'music'})
+        subjects.append(subject)
+    return subjects
 
 
 def _variety_order(subjects, appearances, now):
@@ -194,6 +203,11 @@ def _genre_can_lead(subject, row, familiar, *, taxonomy=EMPTY_TAXONOMY):
 def _matching_summary(subject, row, *, taxonomy=EMPTY_TAXONOMY):
     if row and row.get('title') and not _usable_article({**row, **subject}, taxonomy=taxonomy):
         return None
+    if row and row.get('extract') and 'recording_genres' in subject:
+        # A missing field is a legacy result. An empty list is a single exact-name article.
+        confirmed = row.get('matched_genres')
+        if not isinstance(confirmed, list) or (confirmed and not set(confirmed).intersection(subject['recording_genres'])):
+            return None
     return row
 
 

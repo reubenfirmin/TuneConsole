@@ -68,9 +68,9 @@ def test_audio_upload_waits_and_response_preparation_keep_serving(
             holder.start()
         else:
             owner, name = ((audio_vibe_prediction, 'predict') if phase == 'response' else
-                           (store.audio_vibes.annotation_files if endpoint == 'feedback'
+                           (store.audio_vibes.repository if endpoint == 'feedback'
                             else store.audio_vibes.sample_files,
-                            'write_reserved' if endpoint == 'feedback' else 'publish_reserved'))
+                            'save_annotation' if endpoint == 'feedback' else 'publish_reserved'))
             original = getattr(owner, name)
 
             def delayed(*args, **kwargs):
@@ -127,41 +127,57 @@ def test_cancelled_audio_upload_remains_tracked_and_retry_is_idempotent(file_bac
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1' if endpoint == 'feedback' else '0')
     value = _upload(store, endpoint)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
-    entered, release = threading.Event(), threading.Event()
-    owner = store.audio_vibes.annotation_files if endpoint == 'feedback' else store.audio_vibes.sample_files
-    name = 'write_reserved' if endpoint == 'feedback' else 'publish_reserved'
+    release = threading.Event()
+    owner = store.audio_vibes.repository if endpoint == 'feedback' else store.audio_vibes.sample_files
+    name = 'save_annotation' if endpoint == 'feedback' else 'publish_reserved'
     publish = getattr(owner, name)
-
-    def delayed(*args, **kwargs):
-        entered.set()
-        assert release.wait(5)
-        return publish(*args, **kwargs)
-
-    monkeypatch.setattr(owner, name, delayed)
+    work = app.state.ctx.work
 
     async def exercise():
+        loop = asyncio.get_running_loop()
+        entered = loop.create_future()
+
+        def delayed(*args, **kwargs):
+            if not release.is_set():
+                loop.call_soon_threadsafe(entered.set_result, None)
+                assert release.wait(10), 'The publication hold expired before cancellation'
+            return publish(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, delayed)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url='http://127.0.0.1') as client:
             request = asyncio.create_task(client.post('/audio-vibes/' + endpoint, json=value))
             try:
-                assert await asyncio.to_thread(entered.wait, 1)
+                await asyncio.wait((entered, request), timeout=10, return_when=asyncio.FIRST_COMPLETED)
+                if request.done():
+                    response = request.result()
+                    phase = 'after reaching the hold' if entered.done() else f'before reaching {name}'
+                    pytest.fail(f'{endpoint} returned HTTP {response.status_code} {phase}: {response.text}')
+                assert entered.done(), f'{endpoint} did not reach {name} in 10 seconds. Active work: {work.active}'
                 request.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await request
-                assert 'persist_audio' in app.state.ctx.work.active
-                app.state.ctx.work.close_admission('restart')
+                assert 'persist_audio' in work.active
+                work.close_admission('restart')
             finally:
                 release.set()
-                assert await asyncio.to_thread(app.state.ctx.work.wait, 5)
-                app.state.ctx.work.resume_restart()
+                if not request.done():
+                    request.cancel()
+                    await asyncio.gather(request, return_exceptions=True)
+                assert await asyncio.to_thread(work.wait, 5)
+                work.resume_restart()
             first = store.audio_vibes.samples(value['run_id'])
             assert len(first) == 1
-            annotations = store.conn.execute('SELECT count(*) FROM audio_annotations').fetchone()[0]
-            assert annotations == int(endpoint == 'feedback')
+            def annotations_by_kind():
+                return dict(store.conn.execute('SELECT kind,count(*) FROM audio_annotations '
+                                               'WHERE run_key=? GROUP BY kind', (value['run_id'],)))
+
+            expected = {'playback': 1, 'session': 1} if endpoint == 'feedback' else {'playback': 1}
+            assert annotations_by_kind() == expected
             retry = await client.post('/audio-vibes/' + endpoint, json=value)
             assert retry.status_code == 200, retry.text
             assert store.audio_vibes.samples(value['run_id']) == first
-            assert store.conn.execute('SELECT count(*) FROM audio_annotations').fetchone()[0] == annotations
+            assert annotations_by_kind() == expected
             if endpoint == 'samples':
                 conflict = await client.post('/audio-vibes/samples', json={**value, 'title': 'Conflicting payload'})
                 assert conflict.status_code == 409

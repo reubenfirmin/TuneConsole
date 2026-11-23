@@ -8,7 +8,7 @@ from yt_playlist.web.app import create_app
 
 def seed_artists(store):
     existing = store.accounts.get_accounts()
-    account = existing[0].id if existing else store.accounts.upsert_account('Main', 'cred', None, True)
+    account = existing[0].id if existing else store.accounts.upsert_account('Main', None, True)
     playlist = store.playlists.upsert_playlist(account, 'PL_same_names', 'Same names', 2, 'h', 0)
     tracks = []
     for video, title, album, browse, channel in (
@@ -75,7 +75,7 @@ def test_album_track_playlist_indexes_and_charts_link_the_credited_identity(stor
 
 
 def test_provisional_and_unknown_provider_artists_never_acquire_a_name_match(store):
-    account = store.accounts.upsert_account('Main', 'cred', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     track = store.tracks.upsert_track('local', 'Local song', 'Same', '', 180)
     playlist = store.playlists.upsert_playlist(account, 'PL', 'Mix', 1, 'h', 0)
     store.playlists.set_playlist_tracks(playlist, [track])

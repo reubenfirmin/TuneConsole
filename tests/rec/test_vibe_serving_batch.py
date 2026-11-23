@@ -4,16 +4,65 @@ from types import SimpleNamespace
 import pytest
 
 from tests.vibe_menu_support import disable_periodic_library_sync, vibe_selection
-from yt_playlist.rec import home_vibe, musical_character, vibe_pools, vibe_serving
+from yt_playlist.rec import group_home, home_vibe, musical_character, rec_params, stored_groups, vibe_pools, vibe_serving
+
+
+@pytest.mark.parametrize('artist_cap,album_cap', [(1, 2), (2, 1)], ids=['artist', 'album'])
+@pytest.mark.parametrize('has_compatible_reserve', [True, False])
+@pytest.mark.parametrize('equivalent_reserves', [False, True], ids=['different-edits', 'same-edit'])
+def test_group_vibe_refill_preserves_variety_when_possible(
+        monkeypatch, artist_cap, album_cap, has_compatible_reserve, equivalent_reserves):
+    same_edit = {'orig_title': 'Song (Beat Edit)', 'artist_browse_id': 'channel', 'duration': 233}
+    first = {'key': 'first-upload', 'artist_ids': [1], 'album': 'album-1', **same_edit}
+    duplicate = {'key': 'duplicate-upload', 'artist_ids': [2 if artist_cap == 1 else 1],
+                 'album': 'album-2', **same_edit}
+    others = [{'key': f'track-{index}', 'artist_ids': [index], 'album': f'album-{index}'}
+              for index in range(3, 13)]
+    blocked = {'key': 'first-reserve', 'artist_ids': [1], 'album': 'album-1'}
+    compatible = {'key': 'second-reserve', 'artist_ids': [2], 'album': 'album-2'}
+    if equivalent_reserves:
+        reserve_edit = {**same_edit, 'orig_title': 'Reserve (Beat Edit)'}
+        blocked.update(reserve_edit)
+        compatible.update(reserve_edit)
+    preferred = [first, duplicate, *others]
+    candidates = [*preferred, blocked]
+    if has_compatible_reserve:
+        candidates.append(compatible)
+    elif equivalent_reserves:
+        candidates.append({**blocked, 'key': 'second-blocked-upload'})
+    for rank, candidate in enumerate(candidates):
+        candidate['pool_rank'] = rank
+
+    group = {'version': 1, 'group_id': 1, 'name': 'Group', 'leaf': True, 'display': True, 'parent_version': None}
+    data = {'by_version': {1: group}, 'meta': {}, 'vibe_rank': SimpleNamespace(preset='uplift'),
+            'preview': {'generation': 1, 'groups': [group]}, 'allocation': {1: 1.0}}
+    selection = SimpleNamespace(
+        preset='uplift',
+        affinities={candidate['key']: .8 for candidate in candidates},
+        load_lanes=lambda *_args, **_kwargs: ({'wheelhouse': candidates}, {}),
+        lane_eligibility=lambda _ranks: None,
+        lane_groups=lambda *_args, **_kwargs: {1: candidates},
+        hydrate=lambda _cards: None,
+    )
+    selection.vibe_tracks = stored_groups.Selection.vibe_tracks.__get__(selection)
+    assert selection.vibe_tracks(candidates, artist_cap, album_cap) == preferred
+    monkeypatch.setattr(group_home, 'library_lanes', lambda *_args: ['wheelhouse'])
+    monkeypatch.setattr(rec_params, 'get_param',
+                        lambda _store, name: {'modes_artist_cap': artist_cap, 'modes_album_cap': album_cap}[name])
+
+    card, = group_home._assemble(None, 0, data, (), (), selection, None)
+    assert card['group_version'] == 1
+    refill = compatible if has_compatible_reserve else blocked
+    assert card['tracks'] == [first, *others, refill]
 
 
 def test_deep_dive_reuses_pinned_plays_and_rechecks_later_listening(file_backed_store, monkeypatch):
     from yt_playlist.rec import home_cards, journeys
-    from yt_playlist.repos.rec_query import RecQueryRepo
+    from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
     from yt_playlist.util.matching import identity_key
 
     store = file_backed_store
-    account = store.accounts.upsert_account('Listening', 'credential', None, True)
+    account = store.accounts.upsert_account('Listening', None, True)
     items = []
     for index in range(12):
         title, artist, video = f'Deep song {index}', f'Deep artist {index}', f'deep-{index}'
@@ -36,18 +85,19 @@ def test_deep_dive_reuses_pinned_plays_and_rechecks_later_listening(file_backed_
             lambda item: {'artist': item['artist'], 'genre': 'Rock', 'family': 'rock',
                           'energy': .5, 'decade': None, 'plays': plays.get(item['key'], 0), 'recency': 0.})]
 
-    original = RecQueryRepo.play_counts
+    original = RecommendationPublicationsRepo.candidate_play_counts
     calls = []
-    def play_counts(repo):
-        calls.append(repo)
-        return original(repo)
-    monkeypatch.setattr(RecQueryRepo, 'play_counts', play_counts)
+    def play_counts(repo, keys):
+        calls.append(set(keys))
+        return original(repo, keys)
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_play_counts', play_counts)
+    expected_keys = {item['key'] for item in items}
     first = expected(counts)
     with store.read_view(tracked=True) as reader:
         for _ in range(4):
             actual = home_cards._order_by_journey(reader, [dict(item) for item in items], 'deep_dive', 7, catalog)
             assert [item['key'] for item in actual] == first
-    assert len(calls) == 1
+    assert calls == [expected_keys]
     for day in range(4):
         store.history.record_play_event(account, items[-1]['key'], items[-1]['video_id'],
                                         100000 + (30 + day) * 86400, source_timezone='UTC')
@@ -57,7 +107,7 @@ def test_deep_dive_reuses_pinned_plays_and_rechecks_later_listening(file_backed_
     with store.read_view(tracked=True) as reader:
         actual = home_cards._order_by_journey(reader, [dict(item) for item in items], 'deep_dive', 7, catalog)
         assert [item['key'] for item in actual] == second
-    assert len(calls) == 2
+    assert calls == [expected_keys, expected_keys]
 
 
 @pytest.mark.parametrize('tracked', [False, True])
@@ -67,7 +117,7 @@ def test_rediscovery_batches_cards_and_shadows_without_reusing_changed_history(
     from yt_playlist.repos.rec_query import RecQueryRepo
 
     store = file_backed_store
-    account = store.accounts.upsert_account('Listening', 'credential', None, True)
+    account = store.accounts.upsert_account('Listening', None, True)
     items = []
     for index in range(24):
         video = f'revisit-{index}'
@@ -147,13 +197,29 @@ def test_all_presets_match_full_profile_selection_and_only_open_selected_profile
         assert len(opened) == len(selected_keys)
         assert all(track['musical']['digest'] == track['serving_context']['musical_digest']
                    and track['serving_context']['vibe'] == preset for card in actual for track in card['tracks'])
+        # Adaptive group mixes select Fresh on its own. Compare its lean read to
+        # the complete profile and independent eligibility reads it replaces.
+        with store.read_view() as reader:
+            previous_fresh = vibe_pools.eligible(reader, vibe_pools.candidates(reader, preset, 'fresh'),
+                                                1000, 'fresh')
+            previous_fresh.sort(key=lambda item: home_vibe.order_key(item, preset))
+            previous_fresh = vibe_pools.diversify(previous_fresh,
+                int(rec_params.get_param(reader, 'modes_artist_cap')),
+                int(rec_params.get_param(reader, 'modes_album_cap')))
+            opened.clear()
+            with monkeypatch.context() as patch:
+                patch.setattr(musical_character, 'load', selected)
+                fresh = vibe_pools.pick(reader, 1000, preset, 'fresh')
+            assert fresh == previous_fresh
+            assert set(opened) == {track['key'] for track in fresh}
         signatures.add(tuple(tuple(track['key'] for track in card['tracks']) for card in actual))
     assert len(signatures) > 1
 
 
-def test_missing_relational_score_uses_existing_profile_fallback(store, monkeypatch, vibe_menus):
+def test_missing_relational_score_ranks_neutrally(store, monkeypatch, vibe_menus):
     with store.conn:
-        store.conn.execute("DELETE FROM recording_vibes WHERE vibe='relax'")
+        store.conn.execute("UPDATE recordings SET acousticbrainz_estimates=json_remove(acousticbrainz_estimates,'$.relax') "
+                           "WHERE json_type(acousticbrainz_estimates,'$.relax') IS NOT NULL")
     stored = vibe_pools._stored_pools
     expected = vibe_serving.assemble(store, 1000, 'relax')
     def full(reader, preset, lanes, include, avoid, **options):
@@ -177,7 +243,7 @@ def test_retained_comfort_rechecks_current_evidence(file_backed_store, vibe_menu
         playlist = store.playlists.get_playlist_for_account(account, 'LM')
         store.playlists.set_playlist_tracks(playlist.id, [])
     else:
-        account = store.accounts.upsert_account('Listening', 'fixture', None, True)
+        account = store.accounts.upsert_account('Listening', None, True)
         for track in lanes['comfort']:
             store.history.record_play_event(account, track['key'], track['video_id'], 1001,
                                             source_timezone='UTC')
@@ -191,7 +257,7 @@ def test_retained_comfort_rechecks_current_evidence(file_backed_store, vibe_menu
 
 
 def test_retained_menus_follow_current_fits_without_republication(file_backed_store, vibe_menu_template):
-    from yt_playlist.core import metadata_evidence
+    from tests.test_growth_readiness import record_vibe_menu_observations
     from yt_playlist.rec import musical_preparation, vibe_preparation, vibe_readiness
     from yt_playlist.rec.progressive import Preparation
 
@@ -201,18 +267,13 @@ def test_retained_menus_follow_current_fits_without_republication(file_backed_st
     with store.read_view(tracked=True) as reader:
         assert vibe_readiness.ready(reader, 1000, 0)
         original = vibe_serving.assemble(reader, 1000, 'relax')
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        for lane, tracks in vibe_menus.items():
-            if lane == 'fresh':
-                continue
-            for index, track in enumerate(tracks):
-                entry = store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
-                                           (track['key'],)).fetchone()[0]
-                for field, value in {'energy': .9 if index % 2 == 0 else .1,
-                                     'mood_relaxed': .1 if index % 2 == 0 else .9,
-                                     'mood_happy': .2 if index % 2 == 0 else .8}.items():
-                    metadata_evidence.choose(store.conn, entry, field, value, now=1001)
+    entries = dict(store.conn.execute('SELECT r.identity_key,e.id FROM track_sources e '
+                                     'JOIN recordings r ON r.id=e.recording_id'))
+    changed_inputs = {track['key']: {'mood_relaxed': .1 if index % 2 == 0 else .9,
+                                    'mood_happy': .2 if index % 2 == 0 else .8}
+                      for lane, tracks in vibe_menus.items() if lane != 'fresh'
+                      for index, track in enumerate(tracks)}
+    record_vibe_menu_observations(store, entries, changed_inputs, now=1001)
     worker = Preparation(store)
     for turn in range(1000):
         if (not store.prepared_content.has_pending() and not musical_preparation.due(store)
@@ -281,7 +342,8 @@ def test_cached_readiness_document_is_immutable_and_rechecks_current_profiles(st
     with pytest.raises(TypeError):
         first['tracks'][0]['order']['relax'] = (0, 0, 0)
     with store.conn:
-        store.conn.execute("DELETE FROM recording_vibes WHERE vibe='relax'")
+        store.conn.execute("UPDATE recordings SET acousticbrainz_estimates=json_remove(acousticbrainz_estimates,'$.relax') "
+                           "WHERE json_type(acousticbrainz_estimates,'$.relax') IS NOT NULL")
     current = vibe_readiness.load(store, (), ())
     assert current is not None
     assert all('relax' not in track['supported'] for track in current['tracks'])
@@ -293,23 +355,23 @@ def test_cached_readiness_document_is_immutable_and_rechecks_current_profiles(st
 
 
 def test_retained_menu_checks_each_presets_current_evidence_policy(file_backed_store, vibe_menu_template):
-    from yt_playlist.core import vibe_versions
     from yt_playlist.rec import vibe_readiness
 
     store = file_backed_store
     vibe_menu_template.restore(store)
     head = store.recommendations.head('home')['id']
-    column = vibe_versions.column(store.conn, 'recording_vibes')
     original = [tuple(row) for row in store.conn.execute(
-        f"SELECT {column},recording_id FROM recording_vibes WHERE vibe='release'")]
+        "SELECT acousticbrainz_estimates->>'$.release[1]',id FROM recordings "
+        "WHERE json_type(acousticbrainz_estimates,'$.release') IS NOT NULL")]
     assert original
     with store.read_view(tracked=True) as before:
         assert vibe_readiness.ready(before, 1000, 0)
         saved = vibe_readiness.load(before, (), ())
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
-            store.conn.execute(f"UPDATE recording_vibes SET {column}=? WHERE vibe='release'",
-                               (vibe_versions.stored(store.conn, 'obsolete-fit-policy'),))
+            store.conn.executemany("UPDATE recordings SET acousticbrainz_estimates="
+                "json_set(acousticbrainz_estimates,'$.release[1]','obsolete-fit-policy') WHERE id=?",
+                [(identity,) for _, identity in original])
         with store.read_view(tracked=True) as obsolete:
             value = vibe_readiness.load(obsolete, (), ())
             assert value is not None
@@ -324,7 +386,8 @@ def test_retained_menu_checks_each_presets_current_evidence_policy(file_backed_s
             with store.conn:
                 store.conn.execute('BEGIN IMMEDIATE')
                 store.conn.executemany(
-                    f"UPDATE recording_vibes SET {column}=? WHERE recording_id=? AND vibe='release'",
+                    "UPDATE recordings SET acousticbrainz_estimates="
+                    "json_set(acousticbrainz_estimates,'$.release[1]',?) WHERE id=?",
                     original)
             with store.read_view(tracked=True) as restored:
                 assert vibe_readiness.ready(restored, 1000, 0)
@@ -379,7 +442,7 @@ def test_tracked_catalog_reuse_rechecks_changed_membership_and_live_feedback(sto
     assert first['key'] not in {item['key'] for card in select(1002) for item in card['tracks']}
     assert first['key'] in {item['key'] for card in select(1004) for item in card['tracks']}
     with store.conn:
-        store.conn.execute('UPDATE youtube_items SET available=0 WHERE video_id=?', (first['video_id'],))
+        store.conn.execute('UPDATE track_sources SET available=0 WHERE video_id=?', (first['video_id'],))
     assert first['key'] not in {item['key'] for card in select(1005) for item in card['tracks']}
 
 
@@ -427,6 +490,22 @@ def test_ordered_selection_stops_after_eligible_diverse_tracks_fill_the_card():
     assert selected == vibe_pools.diversify(vibe_pools.eligible(None, tracks, 0, 'wheelhouse', inputs=inputs), 2, 2)
 
 
+def test_vibe_selection_fills_past_the_same_edit_and_keeps_distinct_edits():
+    edit = {'orig_title': 'A song (Beat Edit)', 'artist_browse_id': 'artist-1', 'duration': 233}
+    tracks = [
+        {'key': 'original-credit', 'artist': 'The Artist', **edit},
+        {'key': 'alternate-credit', 'artist': 'Artist', **edit},
+        {'key': 'radio-edit', **edit, 'orig_title': 'A song (Radio Edit)'},
+        {'key': 'longer-edit', **edit, 'duration': 240},
+        {'key': 'another-artist', **edit, 'artist_browse_id': 'artist-2'},
+        {'key': 'unconfirmed-credit', **edit, 'artist_browse_id': None},
+        {'key': 'unknown-duration', **edit, 'duration': 0},
+        *({'key': str(index)} for index in range(7)),
+    ]
+    selected = vibe_pools.diversify(tracks, 2, 2)
+    assert [track['key'] for track in selected] == [track['key'] for track in tracks if track is not tracks[1]][:12]
+
+
 def test_batched_catalog_matches_separate_upload_metadata_after_corrections(store):
     from tests.conftest import seed_catalog_track
     from yt_playlist.core import metadata
@@ -445,7 +524,7 @@ def test_batched_catalog_matches_separate_upload_metadata_after_corrections(stor
             if change == 'genre':
                 metadata.select(store.conn, entry, 'genre', 'Ambient', 'correction')
             elif change == 'availability':
-                store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='owned'")
+                store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='owned'")
         owned = store.rec_query.tracks_by_keys(keys)
         discoveries = store.discovery.candidate_tracks_by_keys(keys)
         separate = store.rec_eligibility.offer_metadata(
@@ -474,7 +553,7 @@ def test_cached_catalog_cannot_be_changed_by_a_selection_reader(store):
         assert second[3]['owned']['duration'] == 120
 
 
-def test_owned_recordings_skip_discovery_hydration_until_ownership_is_unavailable(store, monkeypatch):
+def test_library_recordings_keep_their_lane_when_playback_uses_another_upload(store, monkeypatch):
     from tests.conftest import seed_catalog_track
     from yt_playlist.core import metadata
     from yt_playlist.repos.discovery import DiscoveryRepo
@@ -485,12 +564,10 @@ def test_owned_recordings_skip_discovery_hydration_until_ownership_is_unavailabl
     # Two uploads of one explicitly established recording, with independent
     # owned and discovery membership. A title match alone is not identity.
     with store.conn:
-        store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist) '
-                           "VALUES ('discovery-upload',?,'Shared','Artist')", (rid,))
-        entry = store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) '
-                                   "VALUES (?,'discovery-upload')", (rid,)).lastrowid
-        store.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,1)',
-                           (rid, entry))
+        entry = store.conn.execute('INSERT INTO track_sources(video_id,recording_id,title,artist) '
+                                   "VALUES ('discovery-upload',?,'Shared','Artist')", (rid,)).lastrowid
+        store.conn.execute('UPDATE recordings SET discovery_entry_id=?,discovery_found_at=1 WHERE id=?',
+                           (entry, rid))
         metadata.select(store.conn, entry, 'genre', 'Rock', 'fixture')
     items = [{'key': key}]
     calls, original = [], DiscoveryRepo.candidate_tracks_by_keys
@@ -509,17 +586,26 @@ def test_owned_recordings_skip_discovery_hydration_until_ownership_is_unavailabl
             reader, items, 1000, 'wheelhouse', inputs=inputs)] == [key]
     assert calls == [[]]
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='owned-upload'")
+        store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='owned-upload'")
     with store.read_view() as reader:
         inputs = vibe_pools.eligibility_inputs(reader, items, 1001)
+        assert inputs[1][key]['video_id'] == 'discovery-upload'
+        assert inputs[2] == {}
+        assert list(vibe_pools.iter_eligible(reader, items, 1001, 'fresh', inputs=inputs)) == []
+        assert [item['video_id'] for item in vibe_pools.iter_eligible(
+            reader, items, 1001, 'wheelhouse', inputs=inputs)] == ['discovery-upload']
+    assert calls == [[], []]
+    with store.conn:
+        store.conn.execute("UPDATE track_sources SET library_origin=NULL,library_added_at=NULL "
+                           "WHERE video_id='owned-upload'")
+    with store.read_view() as reader:
+        inputs = vibe_pools.eligibility_inputs(reader, items, 1002)
         assert inputs[1] == {}
         assert inputs[2][key]['video_id'] == 'discovery-upload'
-        # A current discovery entry remains usable after its owned upload is
-        # lost; normal current-genre checking still applies to the fresh lane.
         current_items = [{'key': key, 'genre': inputs[2][key]['genre']}]
         assert [item['key'] for item in vibe_pools.iter_eligible(
-            reader, current_items, 1001, 'fresh', inputs=inputs)] == [key]
-    assert calls == [[], [key]]
+            reader, current_items, 1002, 'fresh', inputs=inputs)] == [key]
+    assert calls == [[], [], [key]]
 
 
 def test_shared_completion_metadata_matches_separate_cards_and_invalidates_after_corrections(store, monkeypatch):
@@ -550,11 +636,11 @@ def test_shared_completion_metadata_matches_separate_cards_and_invalidates_after
              for index, lane in enumerate(('wheelhouse', 'explore', 'comfort', 'fresh'))]
     monkeypatch.setattr(RecQueryRepo, 'play_counts', lambda _: {item['key']: index for index, item in enumerate(items)})
     monkeypatch.setattr(RecQueryRepo, 'track_last_played', lambda _, keys: {key: index for index, key in enumerate(sorted(keys))})
-    reads, original = [], RecQueryRepo.track_genres
+    reads, original = [], RecQueryRepo.track_genres_and_decades
     def counted(repo, keys):
         reads.append(tuple(keys))
         return original(repo, keys)
-    monkeypatch.setattr(RecQueryRepo, 'track_genres', counted)
+    monkeypatch.setattr(RecQueryRepo, 'track_genres_and_decades', counted)
     for correction in (False, True):
         if correction:
             with store.conn:

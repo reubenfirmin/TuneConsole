@@ -4,17 +4,18 @@ import json
 import logging
 import math
 
-from yt_playlist.core.repair import PHANTOM_PURGE_SEEN, CORROBORATION_TOLERANCE_DAYS
+from yt_playlist.core.repair import CORROBORATION_TOLERANCE_DAYS
+from yt_playlist.core.model_state import ArtistModelUpdate, RecordingModelUpdate
 
 logger = logging.getLogger(__name__)
 
 
 class HistoryMaintenance:
-    def __init__(self, repository, settings, discovery, vectors, selection, proposals, files, guard, calendar):
+    def __init__(self, repository, settings, discovery, vectors, model, selection, proposals, files, guard, calendar, refresh):
         self.repository, self.settings, self.discovery = repository, settings, discovery
-        self.vectors, self.selection, self.proposals = vectors, selection, proposals
+        self.vectors, self.model, self.selection, self.proposals = vectors, model, selection, proposals
         self.files, self.guard = files, guard
-        self.calendar = calendar
+        self.calendar, self.refresh = calendar, refresh
 
     def repair_verified_imports(self):
         with self.guard():
@@ -24,7 +25,7 @@ class HistoryMaintenance:
             # Hash every verified interval: an older import can be verified later.
             evidence = [tuple(row.values()) for row in imports]
             watermark = hashlib.sha256(json.dumps(evidence).encode()).hexdigest()
-            if watermark == self.settings.get_setting(PHANTOM_PURGE_SEEN):
+            if watermark == self.repository.verified_imports_repaired():
                 return
             windows = []
             for row in imports:
@@ -44,7 +45,7 @@ class HistoryMaintenance:
             except Exception:
                 logger.warning('repair skipped; history preserved, no successful purge recorded', exc_info=True)
                 return
-            self.settings.set_setting(PHANTOM_PURGE_SEEN, watermark)
+            self.repository.save_verified_imports_repaired(watermark)
 
     def remove_spotify_history(self):
         with self.guard():
@@ -54,10 +55,11 @@ class HistoryMaintenance:
             self.proposals.discard_learned_outputs()
             self.selection.discard_history_models()
             self.vectors.discard_history_models()
-            for key in ('rec_artist_content_model', 'rec_fit_inputs', 'rec_artist_fit_inputs',
-                        'rec_mode_fit_inputs', 'rec_refresh_version', 'rec_autotune_result',
-                        'trend_spotlight_review_month', 'rec_selection_active_run',
-                        'rec_selection_display_run', 'rec_selection_live_run', 'rec_selection_restore'):
+            self.model.publish_model_state(recording=RecordingModelUpdate(fit_fingerprint=None),
+                                           artist=ArtistModelUpdate(encoder=None, fit_fingerprint=None))
+            self.refresh.clear_fit()
+            for key in ('rec_mode_fit_inputs', 'rec_autotune_result', 'rec_selection_active_run',
+                        'rec_selection_display_run', 'rec_selection_restore'):
                 self.settings.delete_setting(key)
             artists_removed = self.discovery.remove_spotify_origins()
             self.repository.delete_spotify_receipts()

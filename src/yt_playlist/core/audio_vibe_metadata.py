@@ -11,11 +11,11 @@ import math
 from . import metadata_native
 from yt_playlist.util import genre_catalog
 
-VERSION = 'catalog-audio-2/subgenres-only-1/' + genre_catalog.REVISION
-NUMERIC = ('bpm', 'energy', 'danceability', 'mood_happy', 'mood_sad', 'mood_relaxed',
+VERSION = 'catalog-audio-3/subgenres-only-1/' + genre_catalog.REVISION
+NUMERIC = ('bpm', 'danceability', 'mood_happy', 'mood_sad', 'mood_relaxed',
            'mood_acoustic', 'instrumental', 'loudness', 'dynamic_complexity',
            'mood_aggressive', 'mood_party', 'year')
-SELECTED = NUMERIC[:10] + ('music_key', 'music_scale', 'genre', 'mb_year')
+SELECTED = NUMERIC[:-3] + ('music_key', 'music_scale', 'genre', 'mb_year')
 KEYS = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
 SCALES = ('major', 'minor')
 # Broad families and umbrella names have no predictor, including no presence
@@ -59,7 +59,7 @@ def vocabulary(feature_names):
 
 
 def read(conn, video_id):
-    """Compatible offline reader; runtime coordinates these owners in its service."""
+    """Read metadata for offline training from the current library."""
     from . import metadata_delivery_files, metadata_runtime_files
     from .audio_metadata_files import AudioMetadataFiles
     files = AudioMetadataFiles(metadata_runtime_files.directory(conn), metadata_delivery_files.directory(conn))
@@ -75,36 +75,13 @@ def read_facts(conn, video_id):
     if row is None:
         return {'metadata': {}, 'choices': {}, 'sources': []}
     result = dict(zip(('entry_id', 'identity_key', 'recording_id', *SELECTED), row, strict=True))
-    # These native classifiers are retained in provider observations, but are
-    # absent from the legacy selected columns. Never substitute genre priors.
-    choices = dict(conn.execute(
-        "SELECT field,value_json FROM entry_field_choices WHERE entry_id=? "
-        "AND field IN ('mood_aggressive','mood_party')", (result['entry_id'],)))
-    if metadata_native.available(conn):
-        from . import metadata_runtime
-        runtime = metadata_runtime.active(conn)
-        sources = conn.execute('SELECT s.source_key FROM rec_musical_links l '
-            'JOIN rec_musical_sources s ON s.source_key=l.source_key '
-            "WHERE l.recording_id=? AND s.scope='recording' ORDER BY s.source_key LIMIT 64",
-            (result['recording_id'],)).fetchall()
-        references = []
-        for source, in sources:
-            if runtime:
-                references.append(metadata_native.source_reference(conn, source))
-            else:
-                observations = [dict(row) for row in conn.execute(
-                    'SELECT o.*,d.raw_filename,d.raw_digest,d.raw_byte_size,d.raw_offset '
-                    'FROM musical_source_observations s JOIN native_metadata_observations o ON o.id=s.observation_id '
-                    'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? ORDER BY s.field', (source,))]
-                references.append({'observations': observations})
-    else:
-        rows = conn.execute(
-            'SELECT s.payload FROM rec_musical_links l JOIN rec_musical_sources s ON s.source_key=l.source_key '
-            "WHERE l.recording_id=? AND s.scope='recording' "
-            'AND length(CAST(s.payload AS BLOB))<=262144 ORDER BY s.source_key LIMIT 64',
-            (result['recording_id'],))
-        references = [{'raw': row[0]} for row in rows]
-    return {'metadata': result, 'choices': choices, 'sources': references}
+    # These native classifiers are supplied by provider observations.
+    sources = conn.execute('SELECT s.source_key FROM rec_musical_links l '
+        'JOIN rec_musical_sources s ON s.source_key=l.source_key '
+        "WHERE l.recording_id=? AND s.scope='recording' ORDER BY s.source_key LIMIT 64",
+        (result['recording_id'],))
+    references = [metadata_native.source_reference(conn, source) for source, in sources]
+    return {'metadata': result, 'choices': {}, 'sources': references}
 
 
 def assemble(inputs, payloads):
@@ -141,7 +118,7 @@ def vector(metadata=None, *, subgenres=()):
             value = int(raw) if len(raw) == 4 and raw.isdigit() else None
         if type(value) not in (int, float) or not math.isfinite(value):
             value = None
-        elif field.startswith('mood_') or field in ('energy', 'danceability', 'instrumental'):
+        elif field.startswith('mood_') or field in ('danceability', 'instrumental'):
             value = value if 0 <= value <= 1 else None
         elif field == 'bpm':
             value = value if 30 <= value <= 300 else None

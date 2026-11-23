@@ -44,7 +44,7 @@ def test_actual_captured_inputs_have_independent_exact_custody(tmp_path):
             assert list(row[:-1]) == identities[row[0]]
             assert Path(row[-1]).is_relative_to(sample_files.directory(target))
             assert Path(row[-1]).read_bytes() == original[row[0]]
-        repo = AudioVibesRepo(SimpleNamespace(conn=target, _lock=RLock(), _schema_compatibility=False))
+        repo = AudioVibesRepo(SimpleNamespace(conn=target, _lock=RLock()))
         observed = {sample['id']: sample for run in {row['run_id'] for row in rows}
                     for sample in repo.samples(run)}
         assert observed == expected

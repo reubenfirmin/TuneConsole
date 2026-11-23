@@ -117,7 +117,10 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
     response = failure;
     tick(period); await flush();
     assert.equal(replacement.connected, true, 'preserve known connection on a transient failure');
-    assert.equal(replacement.nowPlaying, null);
+    assert.equal(replacement.nowPlaying.video_id, 'two', 'the dock retains the last confirmed song');
+    assert.equal(replacement.statusPending, true);
+    assert.equal(replacement.timing.position, null);
+    assert.equal(window.playbackStatus.snapshot.now_playing, undefined);
     assert(rows.every(r => !r.classList.contains('now-playing')));
     if (home) {
       assert.equal(home.radioPlaybackState, '');
@@ -127,6 +130,8 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   response = () => Promise.resolve({ok: true, json: async () => ({connected: false})});
   tick(period); await flush();
   assert.equal(replacement.connected, false);
+  assert.equal(replacement.nowPlaying, null);
+  assert.equal(replacement.statusPending, false);
   const cells = count('/playlist/7/cells');
   tick(2500); await flush();
   if (location.pathname.startsWith('/playlist/')) assert(count('/playlist/7/cells') > cells,

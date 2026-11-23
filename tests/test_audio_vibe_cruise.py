@@ -3,11 +3,12 @@ import base64
 from copy import deepcopy
 import hashlib
 import json
+from uuid import uuid4
 import zlib
 
 import pytest
 
-from tests.audio_vibe_fixture_support import disable_periodic_library_sync, specialist_store
+from tests.audio_vibe_fixture_support import assert_only_playback_annotations, disable_periodic_library_sync, specialist_store
 from tests.rec.test_vibe_prediction import drain, fits, track
 from tests.test_audio_vibe_embeddings import with_embedding
 from tests.test_audio_vibe_model import excerpts
@@ -78,7 +79,7 @@ def test_bundled_model_changes_only_cruise_suitability(count, monkeypatch):
     original = deepcopy(rows)
     before = baseline(rows, monkeypatch)
     after = predictor.predict(rows, require_complete=False)
-    assert after['arc'] == before['arc']
+    assert after['sample_count'] == before['sample_count'] == count
     assert after['individual_models']['cruise']['sha256'] == '3927a3294ad7a1670ef7f81d5c6119943991a699de60a7d5a60022851ba304eb'
     candidate = cruise.score(cruise.load(cruise.DEFAULT_PATH), [row['embedding']['values'] for row in rows])
     assert after['suitability']['cruise'] == candidate['score']
@@ -98,7 +99,7 @@ def test_shadow_reports_candidate_without_publishing_a_measurement(monkeypatch):
     after = predictor.predict(rows)
     assert after['suitability'] == {r['vibe']: r['score'] for r in before['ranking']}
     assert after['individual_models']['cruise']['mode'] == 'shadow'
-    measured = vibe_preparation.measured({'samples': rows, 'metadata': {}}, [], {}, {})
+    measured = vibe_preparation.measured({'samples': rows, 'metadata': {}}, [], {})
     assert measured is None
 
 
@@ -175,6 +176,44 @@ def test_missing_metadata_does_not_block_audio_model_or_require_labels(store):
     assert fits(store, key)['cruise']['source'] == 'audio_measurement'
 
 
+def test_incompatible_captures_need_fresh_audio_and_do_not_hide_older_usable_excerpts(store):
+    video = 'observed_song'
+    _, key = track(store, video)
+
+    def save_run(timestamp, *, compatible):
+        rows = samples(video)
+        run = str(uuid4())
+        for row in rows:
+            row.update(id=str(uuid4()), run_id=run)
+            if not compatible:
+                del row['embedding']
+            store.audio_vibes.save_sample(row, timestamp)
+        return rows
+
+    old_incompatible = save_run(1, compatible=False)
+    unavailable = store.vibe_predictions.inputs([key])[key]
+    assert unavailable['samples'] == []
+    assert unavailable['needs_fresh_audio']
+
+    first_usable = save_run(2, compatible=True)
+    # More unusable runs than the first query page must still leave the older run visible.
+    for timestamp in range(3, 20):
+        latest_incompatible = save_run(timestamp, compatible=False)
+    selected = store.vibe_predictions.inputs([key])[key]
+    assert {row['id'] for row in selected['samples']} == {row['id'] for row in first_usable}
+    assert not selected['needs_fresh_audio']
+    drain(store, batch=1).close()
+    measurement = fits(store, key)['cruise']
+    assert measurement['source'] == 'audio_measurement'
+    assert measurement['score'] == predictor.predict(first_usable)['suitability']['cruise']
+
+    latest_usable = save_run(20, compatible=True)
+    selected = store.vibe_predictions.inputs([key])[key]
+    assert {row['id'] for row in selected['samples']} == {row['id'] for row in latest_usable}
+    for rows in (old_incompatible, first_usable, latest_incompatible, latest_usable):
+        assert {row['id'] for row in store.audio_vibes.samples(rows[0]['run_id'])} == {row['id'] for row in rows}
+
+
 def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(specialist_store, tmp_path, monkeypatch):
     store = specialist_store
     _tid, own = track(store, 'observed_song')
@@ -182,16 +221,17 @@ def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(s
     rows = samples()
     monkeypatch.setenv(cruise.MODE_KEY, 'off')
     drain(store, batch=1).close()
-    assert fits(store, own)['cruise']['source'] == 'heuristic'
+    assert 'cruise' not in fits(store, own)
     for now, row in enumerate(rows[:2], 1):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1).close()
-    assert fits(store, own)['cruise']['source'] == 'heuristic'
+    assert 'cruise' not in fits(store, own)
     store.audio_vibes.save_sample(rows[2], 3)
     store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['release'], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(rows[0]['run_id'])
     drain(store, batch=1).close()
     before, neighbour_before = fits(store, own), fits(store, neighbour)
+    assert 'cruise' not in before and 'cruise' not in neighbour_before
     stamp = vibe_preparation.version()
     path = controlled(tmp_path, rows)
     monkeypatch.setenv(cruise.ENVIRONMENT_KEY, str(path))
@@ -203,14 +243,11 @@ def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(s
     after, neighbour_after = fits(store, own), fits(store, neighbour)
     assert after['cruise']['source'] == 'audio_measurement'
     assert after['cruise']['score'] == pytest.approx(.9)
-    assert neighbour_after['cruise']['recordings'] == 1
-    assert neighbour_after['cruise']['score'] > neighbour_before['cruise']['score']
-    for vibe in shared.LABELS:
-        if vibe != 'cruise':
-            assert after[vibe] == before[vibe]
-            assert neighbour_after[vibe] == neighbour_before[vibe]
+    assert {vibe: fit for vibe, fit in after.items() if vibe != 'cruise'} == before
+    assert neighbour_after == neighbour_before
     compact = musical_character.load(store, [own, neighbour])
     assert home_vibe.affinity({'key': own}, 'cruise', compact) == after['cruise']['score']
+    assert home_vibe.affinity({'key': neighbour}, 'cruise', compact) == .5
     # The independent Cruise head cannot alter radio's Energize/Release intensity.
     assert musical_character.provenance({'musical': compact[own]})['intensity_ensemble'] is None
     # A replaced artifact invalidates prepared measurements without a new capture.
@@ -219,16 +256,18 @@ def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(s
     assert vibe_preparation.version() != active_stamp
     drain(store, batch=1).close()
     assert fits(store, own)['cruise']['score'] == pytest.approx(.6)
-    assert fits(store, neighbour)['cruise']['recordings'] == 1
-    # Continuing complete captures are still one recording in the cohort.
+    assert 'cruise' not in fits(store, neighbour)
+    # A new complete capture replaces the direct evidence for this recording.
     for now, row in enumerate(samples(), 10):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1).close()
-    assert fits(store, neighbour)['cruise']['recordings'] == 1
+    assert 'cruise' not in fits(store, neighbour)
     monkeypatch.setenv(cruise.MODE_KEY, 'off')
     drain(store, batch=1).close()
     assert fits(store, own) == before
     assert fits(store, neighbour) == neighbour_before
+    restored = musical_character.load(store, [own, neighbour])
+    assert all(home_vibe.affinity({'key': key}, 'cruise', restored) == .5 for key in (own, neighbour))
     store.conn.set_trace_callback(None)
     assert store.audio_vibes.feedback(rows[0]['run_id']) == feedback
-    assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
+    assert_only_playback_annotations(statements)

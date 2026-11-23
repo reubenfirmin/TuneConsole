@@ -1,13 +1,15 @@
 """Compose the documented inventory for the architecture graph, without I/O."""
 from dataclasses import asdict
 
-from yt_playlist.model_catalog import audio, features, services, taste
+from yt_playlist.model_catalog import audio, exploration, features, preparation, services, taste
 from yt_playlist.model_catalog.contracts import PERIODS
 
 
 def graph():
-    definitions = (*taste.MODELS, *audio.MODELS, *services.MODELS, *features.FEATURES)
-    edges = (*taste.EDGES, *audio.EDGES, *services.EDGES, *features.EDGES)
+    definitions = (*taste.MODELS, *audio.MODELS, *services.MODELS, *preparation.MODELS,
+                   *exploration.MODELS, *features.FEATURES)
+    edges = (*taste.EDGES, *audio.EDGES, *services.EDGES, *preparation.EDGES,
+             *exploration.EDGES, *features.EDGES)
     nodes = {node.id: asdict(node) for node in definitions}
     if len(nodes) != len(definitions):
         raise ValueError("Duplicate model inventory identity")

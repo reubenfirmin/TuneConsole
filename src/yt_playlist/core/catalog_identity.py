@@ -7,7 +7,7 @@ import hashlib
 import json
 
 RECORDING_FIELDS = (
-    'genre', 'bpm', 'energy', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
+    'genre', 'bpm', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
     'mood_happy', 'mood_sad', 'mood_relaxed', 'mood_acoustic', 'instrumental',
 )
 ITEM_FIELDS = (

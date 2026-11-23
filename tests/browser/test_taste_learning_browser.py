@@ -45,7 +45,7 @@ def test_learning_cards_search_page_and_explain_real_progress(live_app, store, p
     expect(artists.locator(".learning-selected")).to_contain_text("Evidence toward a boost")
     expect(page.locator(".learning-card--genre .learning-selected h4")).to_have_text("alternative metal")
     expect(page.locator(".learning-card--era .learning-selected h4")).to_have_text("1990s")
-    expect(page.locator(".learning-source")).to_have_count(5)
+    expect(page.locator(".learning-source h3")).to_have_text(["Plays", "Likes", "Mood choices", "Skips"])
     expect(page.locator(".learning-progress-cards .learning-entry")).to_have_count(8)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.screenshot(path=str(tmp_path / f"taste-learning-{width}.png"), full_page=True)
@@ -210,16 +210,26 @@ def test_learning_settings_share_compact_layout_and_preserve_edits(live_app, sto
     page.goto(live_app + "/taste#learning")
     settings = page.locator("#taste-learning-controls-settings")
     navigation = settings.get_by_role("tablist", name="Recent activity and learning settings", exact=True)
-    expect(navigation.get_by_role("tab")).to_have_count(5)
+    expect(navigation.get_by_role("tab")).to_have_count(3)
     expect(settings.locator("details, .card")).to_have_count(0)
     expect(settings.get_by_role("tabpanel")).to_have_count(1)
-    expect(settings.get_by_role("slider")).to_have_count(6)
+    influence_controls = settings.get_by_role("slider")
+    expect(influence_controls).to_have_count(5)
+    assert {control.get_attribute("id") for control in influence_controls.all()} == {
+        "param-skip_transient_w", "param-facet_gain", "param-mood_alpha",
+        "param-facet_mult_min", "param-facet_mult_max",
+    }
     influence = navigation.get_by_role("tab", name="Recent influence", exact=True)
     influence.focus()
     page.keyboard.press("ArrowDown" if width >= 1100 else "ArrowRight")
     memory = navigation.get_by_role("tab", name="Listening memory", exact=True)
     expect(memory).to_be_focused()
-    expect(settings.get_by_role("slider")).to_have_count(6)
+    memory_controls = settings.get_by_role("slider")
+    expect(memory_controls).to_have_count(6)
+    assert {control.get_attribute("id") for control in memory_controls.all()} == {
+        "param-play_halflife_d", "param-mood_halflife_d", "param-like_halflife_d",
+        "param-skip_halflife_d", "param-recent_play_limit", "param-recent_horizon_days",
+    }
     slider = settings.locator("#param-play_halflife_d")
     expect(slider).to_be_visible()
     slider.focus()
@@ -239,11 +249,11 @@ def test_learning_settings_share_compact_layout_and_preserve_edits(live_app, sto
     settings.screenshot(path=str(tmp_path / f"taste-learning-controls-{width}.png"), animations="disabled")
     memory.focus()
     page.keyboard.press("End")
-    expect(navigation.get_by_role("tab", name="Learning rates", exact=True)).to_be_focused()
-    expect(settings.get_by_role("slider")).to_have_count(6)
+    expect(navigation.get_by_role("tab", name="Current session", exact=True)).to_be_focused()
+    expect(settings.get_by_role("slider")).to_have_count(4)
     page.get_by_role("tab", name="Recommendations", exact=True).click()
     page.get_by_role("tab", name="Recent & learning", exact=True).click()
-    expect(navigation.get_by_role("tab", name="Learning rates", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(navigation.get_by_role("tab", name="Current session", exact=True)).to_have_attribute("aria-selected", "true")
     memory.click()
     expect(slider).to_have_value("3.5")
     page.reload()
@@ -253,27 +263,23 @@ def test_learning_settings_share_compact_layout_and_preserve_edits(live_app, sto
         settings.get_by_role("button", name="Reset Play memory half-life (days) to default", exact=True).click()
     expect(slider).to_have_value("3")
     assert rec_params.get_param(store, "play_halflife_d") == 3
-    navigation.get_by_role("tab", name="Saved preferences", exact=True).click()
     expect(settings.get_by_role("checkbox", name="Learning enabled", exact=True)).to_have_count(0)
-    expect(settings.get_by_role("slider", name="Learning threshold", exact=True)).to_be_visible()
-    settings.screenshot(path=str(tmp_path / f"taste-learning-saved-{width}.png"), animations="disabled")
     assert errors == []
 
 
-def test_learning_readings_follow_saved_settings_without_closing_controls(live_app, store, page):
-    store.rec_signals.bump_theme("genre:techno", .6, 1.0)
+def test_recent_readings_follow_saved_settings_without_closing_controls(live_app, page):
     page.goto(live_app + "/taste#learning")
-    reading = page.locator(".learning-card--genre .learning-dial-reading strong")
-    expect(reading).to_have_text("50%")
+    reading = page.locator(".learning-source--play p")
+    expect(reading).to_have_text("Half the influence after 3 days")
     settings = page.locator("#taste-learning-controls-settings")
-    settings.get_by_role("tab", name="Saved preferences", exact=True).click()
-    threshold = page.locator("#param-theme_threshold")
-    threshold.evaluate("el => { el.value = '2.4'; el.dispatchEvent(new Event('change', {bubbles: true})); }")
-    expect(reading).to_have_text("25%")
-    expect(threshold).to_be_visible()
+    settings.get_by_role("tab", name="Listening memory", exact=True).click()
+    half_life = page.locator("#param-play_halflife_d")
+    half_life.evaluate("el => { el.value = '4'; el.dispatchEvent(new Event('change', {bubbles: true})); }")
+    expect(reading).to_have_text("Half the influence after 4 days")
+    expect(half_life).to_be_visible()
     expect(page.locator("#taste-learning-save-status")).to_contain_text("Change saved")
-    page.get_by_role("button", name="Reset Learning threshold to default", exact=True).click()
-    expect(reading).to_have_text("50%")
-    expect(threshold).to_be_visible()
+    page.get_by_role("button", name="Reset Play memory half-life (days) to default", exact=True).click()
+    expect(reading).to_have_text("Half the influence after 3 days")
+    expect(half_life).to_be_visible()
 
 

@@ -60,7 +60,7 @@ def rotation_candidates(rotation_schema):
 
 def test_rotation_inputs_keep_six_real_modes_and_every_lane(rotation_candidates):
     source = rotation_candidates.source
-    assert source.conn.execute('SELECT COUNT(*) FROM library_memberships').fetchone()[0] == 72
+    assert source.conn.execute('SELECT COUNT(*) FROM track_sources WHERE library_origin IS NOT NULL').fetchone()[0] == 72
     assert len(source.modes.list_modes()) == 6
     assert source.recommendations.head('home') is not None
     selections = [(str(mode), lane, -1) for mode in range(6) for lane in mode_surfaces.CARD_SURFACES]

@@ -43,7 +43,7 @@ def album_zip(*titles):
 
 
 def test_album_preview_detects_ambiguity_before_any_save_and_keeps_confirmed_release(store):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = AlbumClient()
     alternate = {**client.results["One Artist"][0], "browseId": "MPRE-alternate"}
     client.results["One Artist"].append(alternate)
@@ -88,8 +88,8 @@ def test_export_release_year_prevents_confident_wrong_year():
 
 
 def test_preview_and_import_deduplicate_only_within_the_destination(store):
-    first = store.accounts.upsert_account("First", "bridge", None, True)
-    second = store.accounts.upsert_account("Second", "bridge", None, False)
+    first = store.accounts.upsert_account("First", None, True)
+    second = store.accounts.upsert_account("Second", None, False)
     client = AlbumClient()
     raw = album_zip("One")
     assert import_spotify_library(store, raw, client, first, 100)["albums_imported"] == 1
@@ -106,7 +106,7 @@ def test_preview_and_import_deduplicate_only_within_the_destination(store):
 @pytest.mark.parametrize("failure", ["lookup", "save"])
 def test_failure_between_successes_is_isolated_and_retry_keeps_successes(store, monkeypatch, failure):
     monkeypatch.setattr("yt_playlist.controllers.spotify_library.with_retry", lambda operation: operation())
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = AlbumClient()
     failed = client.failed_searches if failure == "lookup" else client.failed_saves
     failed.add("Two Artist" if failure == "lookup" else "OLAK-Two")
@@ -121,7 +121,7 @@ def test_failure_between_successes_is_isolated_and_retry_keeps_successes(store, 
 
 
 def test_catalog_fallback_uses_youtube_candidate_and_does_not_fabricate_listens(store):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = AlbumClient()
     del client._albums["MPRE-One"]["title"]
     del client._albums["MPRE-One"]["artists"]
@@ -135,7 +135,7 @@ def test_catalog_fallback_uses_youtube_candidate_and_does_not_fabricate_listens(
 
 
 def test_explicit_album_playlist_uses_destination_journal_and_survives_retry(store):
-    iid = store.accounts.upsert_account("Destination", "bridge", None, True)
+    iid = store.accounts.upsert_account("Destination", None, True)
     client = AlbumClient()
     prepared = prepare_spotify_library(load_spotify_library(album_zip("One")), client)
     prepared["albums"][0]["action"] = "playlist"

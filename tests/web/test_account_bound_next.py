@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.playback_feedback_support import held_copy
+from tests.playback_feedback_support import paused_recording
 from yt_playlist.core import playback_feedback
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.app import create_app
@@ -13,11 +13,11 @@ from yt_playlist.web.routes.bridge import _now_playing_snapshot
 
 
 @pytest.mark.parametrize('capability', [None, False, True])
-@pytest.mark.parametrize('maintenance', ['available', 'cleanup', 'copy'])
+@pytest.mark.parametrize('maintenance', ['available', 'cleanup', 'retirement'])
 def test_skull_requires_this_workers_account_bound_next_capability(file_backed_store, monkeypatch,
                                                                  capability, maintenance):
     store = file_backed_store
-    account = store.accounts.upsert_account('Main', 'bridge', 'main-brand', True)
+    account = store.accounts.upsert_account('Main', 'main-brand', True)
     store.tracks.upsert_track('song', 'Song', 'Artist', None, 180)
     remote = FakeClient()
     app = create_app(store, lambda: {account: remote}, background_work=False)
@@ -32,14 +32,14 @@ def test_skull_requires_this_workers_account_bound_next_capability(file_backed_s
         commands.append(frame)
         return 200, '{"ok":true}'
 
-    def radio_skip(video, *, brand_id):
-        radio_calls.append((video, {'brand_id': brand_id}))
+    def radio_skip(video, *, brand_id, rating_advance):
+        radio_calls.append((video, brand_id, rating_advance))
         return None
 
     monkeypatch.setattr(ctx.bridge, 'request_control', control)
     monkeypatch.setattr(ctx.radio, 'skip', radio_skip)
-    paused = maintenance == 'copy'
-    with held_copy(store) if paused else nullcontext():
+    paused = maintenance == 'retirement'
+    with paused_recording(store) if paused else nullcontext():
         status = ctx.storage_maintenance.status()
         assert store.activity_paused is paused and status['active'] is paused
         assert status['recording'] is not paused
@@ -52,8 +52,8 @@ def test_skull_requires_this_workers_account_bound_next_capability(file_backed_s
         if capability is True:
             assert 'player_error' not in result
             assert [command['type'] for command in commands] == ['rate', 'next']
-            assert commands[-1] == {'type': 'next', 'videoId': 'song', 'brandId': 'main-brand'}
-            assert radio_calls == ([] if paused else [('song', {'brand_id': 'main-brand'})])
+            assert commands[-1] == {'type': 'next', 'videoId': 'song', 'brandId': 'main-brand', 'ratingAdvance': True}
+            assert radio_calls == ([] if paused else [('song', 'main-brand', True)])
         else:
             assert result['player_error'] == 'Rating saved. Some updates are not confirmed; check it in YouTube Music.'
             assert [command['type'] for command in commands] == ['rate']
@@ -84,3 +84,39 @@ def test_reconnect_does_not_inherit_a_previous_workers_account_bound_capability(
     assert bridge.account_bound_next is True
     assert bridge.disconnect(current)
     assert bridge.account_bound_next is None
+
+
+@pytest.mark.parametrize('reports_advance', [False, True])
+def test_native_dislike_can_advance_without_teaching_a_skip(file_backed_store, monkeypatch, reports_advance):
+    from yt_playlist.library.player_events import handle_player_event
+
+    store = file_backed_store
+    account = store.accounts.upsert_account('Main', 'main-brand', True)
+    store.tracks.upsert_track('song', 'Song', 'Artist', None, 180)
+    remote = FakeClient()
+    app = create_app(store, lambda: {account: remote}, now_fn=lambda: 1000, background_work=False)
+    ctx = app.state.ctx
+    ctx.bridge._send = lambda _: None
+    ctx.bridge.account_bound_next = True
+    playing = {'videoId': 'song', 'position': 20, 'duration': 180, 'playlist': 'PL',
+               'brandKnown': True, 'brandId': 'main-brand'}
+    ctx.bridge.now_playing = _now_playing_snapshot(playing)
+    commands = []
+
+    async def control(frame, timeout=10):
+        commands.append(frame['type'])
+        assert handle_player_event(ctx, {**playing, 'kind': 'track_exit'}, 1000)
+        if reports_advance:
+            return 200, '{"ok":true,"advanced":true}'
+        ctx.bridge.now_playing = _now_playing_snapshot({**playing, 'videoId': 'other', 'position': 0})
+        return 200, '{"ok":true}'
+
+    monkeypatch.setattr(ctx.bridge, 'request_control', control)
+    client = TestClient(app, base_url='http://127.0.0.1')
+    result = client.post('/now-playing/rate', json={
+        'videoId': 'song', 'action': 'dislike', 'likeStatus': 'DISLIKE'}).json()
+    assert result == {'ok': True, 'error': ''}
+    assert commands == ['rate']
+    assert store.player_events.recent_skips_with_ts(0) == []
+    assert store.player_events.skip_blackouts(1000) == {}
+    assert store.rec_model.disliked_identity_keys(now=1000) == {'song|artist'}

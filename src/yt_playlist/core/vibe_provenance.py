@@ -8,15 +8,17 @@ import json
 from collections import OrderedDict
 from pathlib import Path
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from . import fao, file_collection, file_pack, vibe_model_files, vibe_models
 from .activity import check_stopping
 from .evidence_ledger import canonical
-from yt_playlist.repos.provenance_file_writes import HEAD_SQL as SQL
+from .file_receipts import PROVENANCE_HEAD as SQL, has_native_provenance_heads, native_provenance_definition
+from .vibe_model_queries import retain_measurements
 
 CHUNK_ROWS = file_pack.MAX_ROWS
 MAX_BYTES = file_pack.MAX_BYTES
+HIGH_WATER = 'vibe_prediction_high_water'
 
 
 class ProvenanceFiles:
@@ -200,18 +202,18 @@ def validate_allocation(conn):
 
 
 def next_id(conn):
-    row = conn.execute('SELECT high_water FROM prediction_id_state WHERE id=1').fetchone()
-    if row is None:
-        raise ValueError('Missing calculation allocation state')
-    return row[0] + 1
+    # Track changes to predictions in the snapshot as well as the sequence.
+    return conn.execute("SELECT max(coalesce((SELECT max(id) FROM predictions),0),"
+                        "coalesce((SELECT seq FROM sqlite_sequence WHERE name='predictions'),0))+1").fetchone()[0]
 
 
 def available(conn):
-    return conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='prediction_provenance'").fetchone() is not None
+    return conn.execute("SELECT 1 FROM main.sqlite_schema "
+                        "WHERE name IN ('prediction_provenance','predictions_provenance_immutable')").fetchone() is not None
 
 
 def install(conn, context=None):
-    if not available(conn):
+    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='prediction_provenance'").fetchone():
         conn.execute(SQL)
 
 
@@ -219,10 +221,19 @@ def validate(conn):
     from .schema_contract import tokens as _tokens
     from .schema_inspection import definitions
     actual = definitions(conn, ['prediction_provenance'])
-    from yt_playlist.repos.provenance_file_writes import native_definition
     if ('prediction_provenance' not in actual
-            or _tokens(actual['prediction_provenance']) not in (_tokens(SQL), _tokens(native_definition(SQL)))):
+            or _tokens(actual['prediction_provenance']) not in (_tokens(SQL), _tokens(native_provenance_definition(SQL)))):
         raise ValueError('Incompatible prediction provenance owner')
+
+
+def current_fit_guard(action, lineage):
+    name = 'recording_vibes_' + action
+    return (f'CREATE TRIGGER {name} BEFORE {action.upper()} ON recording_vibes WHEN '
+            'NEW.measurement_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM measurements m WHERE '
+            'm.id=NEW.measurement_id AND m.source=NEW.source AND m.score=NEW.score AND m.support=NEW.support) '
+            'OR NEW.prediction_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM predictions p WHERE '
+            'p.id=NEW.prediction_id AND p.score=NEW.score AND p.support=NEW.support AND p.kind=NEW.source '
+            f"AND ({lineage})) BEGIN SELECT RAISE(ABORT,'Current vibe does not match its original score'); END")
 
 
 def guards():
@@ -231,13 +242,7 @@ def guards():
                "(EXISTS(SELECT 1 FROM prediction_inputs i WHERE i.prediction_id=p.id) "
                "AND (p.kind='genre' OR EXISTS(SELECT 1 FROM prediction_artists a WHERE a.prediction_id=p.id)))")
     for action in ('insert', 'update'):
-        name = 'recording_vibes_' + action
-        yield name, (f'CREATE TRIGGER {name} BEFORE {action.upper()} ON recording_vibes WHEN '
-            'NEW.measurement_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM measurements m WHERE '
-            'm.id=NEW.measurement_id AND m.source=NEW.source AND m.score=NEW.score AND m.support=NEW.support) '
-            'OR NEW.prediction_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM predictions p WHERE '
-            'p.id=NEW.prediction_id AND p.score=NEW.score AND p.support=NEW.support AND p.kind=NEW.source '
-            f"AND ({lineage})) BEGIN SELECT RAISE(ABORT,'Current vibe does not match its original score'); END")
+        yield 'recording_vibes_' + action, current_fit_guard(action, lineage)
     yield 'prediction_provenance_expiry', ("CREATE TRIGGER prediction_provenance_expiry BEFORE UPDATE OF state "
         "ON prediction_provenance WHEN NEW.state='expired' AND EXISTS(SELECT 1 FROM recording_vibes "
         "WHERE prediction_id=OLD.prediction_id) BEGIN SELECT RAISE(ABORT,'Current provenance is required'); END")
@@ -313,11 +318,12 @@ def file_relative(identity):
 
 def _chunk(conn, pid, *, content=None, file_id=None):
     if file_id is not None:
-        row = conn.execute('SELECT content_digest,byte_size,file_status FROM provenance_file_writes WHERE id=?',
+        row = conn.execute("SELECT content_digest,byte_size,file_status FROM collection_file_writes "
+                           "WHERE kind='prediction-provenance' AND file_address=?",
                            (file_id,)).fetchone()
         if row is None or row[2] != 'ready':
             raise fao.CorruptFile('Required calculation file is not ready')
-        return ProvenanceFiles(directory(conn)).read(pid, file_id, row[0], row[1])
+        return ProvenanceFiles(directory(conn)).read(pid, file_id, bytes.fromhex(row[0]), row[1])
     return _chunk_at(directory(conn), pid, content=content, file_id=file_id)
 
 
@@ -352,16 +358,18 @@ def _model_manifest(conn, generation):
             'recordings': {row['recording'] for row in value['inputs']}}
 
 
-def _read(conn, pid, load, installed, model_load=None, native=False):
-    row = (conn.execute('SELECT input_fingerprint,byte_size,state,' + ('file_id' if native else 'NULL') +
-                       ' FROM prediction_provenance WHERE prediction_id=?', (pid,)).fetchone()
-           if installed else None)
+def _read(conn, pid, load, model_load=None, *, receipt_only=False, legacy=False):
+    if legacy:
+        row = conn.execute('SELECT f.input_fingerprint,f.byte_size,f.state,f.file_id,g.generation '
+                           'FROM prediction_provenance f LEFT JOIN prediction_model_generations g USING(prediction_id) '
+                           'WHERE f.prediction_id=?', (pid,)).fetchone()
+    else:
+        row = conn.execute('SELECT provenance_fingerprint,provenance_bytes,provenance_state,provenance_file_id,'
+                           'model_generation FROM predictions WHERE id=?', (pid,)).fetchone()
     if row is None:
-        if not conn.execute('SELECT 1 FROM predictions WHERE id=?', (pid,)).fetchone():
-            return None  # Retired history is unavailable, not invented empty lineage.
-        # Installed rows remain usable until the explicit conversion reaches them.
-        return {'inputs': [r[0] for r in conn.execute('SELECT measurement_id FROM prediction_inputs WHERE prediction_id=? ORDER BY measurement_id', (pid,))],
-                'artists': [r[0] for r in conn.execute('SELECT artist_id FROM prediction_artists WHERE prediction_id=? ORDER BY artist_id', (pid,))]}
+        return None
+    if row[2] is None:
+        return None if receipt_only else {'inputs': [], 'artists': []}
     if row[2] == 'expired':
         return None
     value = load(pid, row[3]).get(str(pid))
@@ -374,14 +382,18 @@ def _read(conn, pid, load, installed, model_load=None, native=False):
         if normalized != value:
             raise fao.CorruptFile('Invalid shared model receipt conditioning')
         if (len(canonical(value)) != row[1] or hashlib.sha256(canonical(value)).digest() != row[0]
-                or vibe_models.linked(conn, pid) != value['generation']):
+                or row[4] is None or row[4].hex() != value['generation']):
             raise fao.CorruptFile('Required shared model receipt is missing or corrupt')
+        if receipt_only:
+            return normalized
         model = model_load(value['generation']) if model_load else _model_manifest(conn, value['generation'])
         prediction = vibe_models.subject(conn, pid)
         if (not prediction or prediction[0] != model['vibe']
                 or prediction[1] in model['recordings']):
             raise fao.CorruptFile('Shared model does not match its prediction conditioning')
         return {**value, 'inputs': model['inputs']}
+    if receipt_only:
+        return None
     if (not isinstance(value, dict) or set(value) != {'inputs', 'artists'}
             or len(canonical(value)) != row[1] or fingerprint(value['inputs']) != row[0]):
         raise fao.CorruptFile('Required calculation provenance is missing or corrupt')
@@ -389,17 +401,22 @@ def _read(conn, pid, load, installed, model_load=None, native=False):
 
 
 def read(conn, pid):
-    from yt_playlist.repos.provenance_file_writes import native
-    return _read(conn, pid, lambda identity, file_id: _chunk(conn, identity, file_id=file_id),
-                 available(conn), native=native(conn))
+    return _read(conn, pid, lambda identity, file_id: _chunk(conn, identity, file_id=file_id))
+
+
+def conditioning(conn, pid, *, file_reads=nullcontext):
+    """Read the verified target covariates even if its posterior is unavailable."""
+    def load(identity, file_id):
+        with file_reads(file_id):
+            return _chunk(conn, identity, file_id=file_id)
+
+    value = _read(conn, pid, load, receipt_only=True)
+    return value.get('conditioning') if value else None
 
 
 def read_many(conn, identities):
     """Verify each calculation while retaining at most one shared file chunk."""
     chunk, records = None, None
-    installed = available(conn)
-    from yt_playlist.repos.provenance_file_writes import native
-    native_files = native(conn)
     manifests = OrderedDict()
     def model_load(generation):
         if generation not in manifests:
@@ -416,17 +433,17 @@ def read_many(conn, identities):
             chunk = key
         return records
     for pid in identities:
-        yield pid, _read(conn, pid, load, installed, model_load, native=native_files)
+        yield pid, _read(conn, pid, load, model_load)
 
 
 def same_inputs(conn, pid, inputs):
-    row = (conn.execute('SELECT input_fingerprint,state FROM prediction_provenance WHERE prediction_id=?', (pid,)).fetchone()
-           if available(conn) else None)
-    if row is not None:
-        if row[1] != 'ready':
-            raise fao.CorruptFile('Current calculation provenance expired while referenced')
-        return row[0] == fingerprint(inputs)
-    return {r[0] for r in conn.execute('SELECT measurement_id FROM prediction_inputs WHERE prediction_id=?', (pid,))} == set(inputs)
+    row = conn.execute('SELECT provenance_fingerprint,provenance_state FROM predictions WHERE id=? '
+                       'AND provenance_state IS NOT NULL', (pid,)).fetchone()
+    if row is None:
+        return False
+    if row[1] != 'ready':
+        raise fao.CorruptFile('Current calculation provenance expired while referenced')
+    return row[0] == fingerprint(inputs)
 
 
 def same_receipt(conn, pid, receipt):
@@ -466,7 +483,7 @@ def stage_many(conn, values):
             batch = ordered[start:start + 128]
             qs = ','.join('?' for _ in batch)
             existing = {row[0] for row in conn.execute(
-                f'SELECT measurement_id FROM prediction_measurement_roots WHERE measurement_id IN ({qs})', batch)}
+                f'SELECT id FROM measurements WHERE used_by_model=1 AND id IN ({qs})', batch)}
             roots.extend(mid for mid in batch if mid not in existing)
         return staged, markers, roots
     except BaseException:
@@ -475,10 +492,10 @@ def stage_many(conn, values):
         raise
 
 
-def publish_many(conn, values):
+def publish_many(conn, values, *, legacy=False):
     if not conn.in_transaction:
         raise RuntimeError('Provenance publication requires the calculation writer reservation')
-    grouped = {}
+    grouped, originals = {}, set()
     shared = []
     for pid, inputs, artists in values:
         if vibe_model_files.is_receipt(inputs):
@@ -498,7 +515,7 @@ def publish_many(conn, values):
             if original is None or original[0] != prediction[0] or original[1] == prediction[1] or original[1] in subjects:
                 raise ValueError('Prediction inputs require distinct original recordings of the same vibe')
             subjects.add(original[1])
-            conn.execute('INSERT OR IGNORE INTO prediction_measurement_roots VALUES (?)',(mid,))
+            originals.add(mid)
         for aid in value['artists']:
             if not conn.execute('SELECT 1 FROM artists WHERE id=?', (aid,)).fetchone():
                 raise ValueError('Unknown conditioning artist')
@@ -506,61 +523,78 @@ def publish_many(conn, values):
         if str(pid) in pending and pending[str(pid)] != value:
             raise ValueError('Conflicting calculation provenance')
         pending[str(pid)] = value
-    for chunk, values in grouped.items():
+    retain_measurements(conn, originals)
+    markers = ('SELECT prediction_id FROM prediction_provenance WHERE prediction_id=?' if legacy else
+               'SELECT id FROM predictions WHERE id=? AND provenance_state IS NOT NULL')
+    for values in grouped.values():
         pid = int(next(iter(values)))
         records = _chunk(conn, pid)
         for identity, value in values.items():
-            if conn.execute('SELECT 1 FROM prediction_provenance WHERE prediction_id=?', (int(identity),)).fetchone():
-                if read(conn, int(identity)) != value:
+            if conn.execute(markers, (int(identity),)).fetchone():
+                if _read(conn, int(identity), lambda p, f: _chunk(conn, p, file_id=f), legacy=legacy) != value:
                     raise ValueError('Calculation provenance cannot change')
             records[identity] = value
         encoded = canonical({'format': 1, 'calculations': records})
         file_pack.validate(encoded, len(records), max_bytes=MAX_BYTES, max_rows=CHUNK_ROWS)
         fao.write(directory(conn) / relative(pid), encoded)
-        conn.executemany('INSERT INTO prediction_provenance(prediction_id,input_fingerprint,byte_size,state) VALUES (?,?,?,\'ready\') '
-                         'ON CONFLICT(prediction_id) DO NOTHING',
-                         [(int(identity), fingerprint(value['inputs']), len(canonical(value))) for identity, value in values.items()])
+        markers_to_write = [(fingerprint(value['inputs']), len(canonical(value)), int(identity))
+                            for identity, value in values.items()]
+        if legacy:
+            conn.executemany("INSERT INTO prediction_provenance(input_fingerprint,byte_size,prediction_id,state) "
+                             "VALUES (?,?,?,'ready') ON CONFLICT(prediction_id) DO NOTHING", markers_to_write)
+        else:
+            conn.executemany("UPDATE predictions SET provenance_fingerprint=?,provenance_bytes=?,"
+                             "provenance_state='ready' WHERE id=? AND provenance_state IS NULL", markers_to_write)
     if shared:
-        # Rebuilds preserve compact shared identities rather than expanding each
+        # Version changes preserve compact shared identities instead of expanding each
         # manifest into an ordinary contributor graph. Borrowed FAO roots are
         # pinned for the rebuild's full lifetime by file_owners.readers.
         vibe_models.service(conn, ProvenanceFiles(directory(conn))).publish_receipts(shared)
 
 
-def prepare_batch(conn, limit=128):
-    """Explicit resumable conversion; files are verified before removing SQL edges."""
-    rows = conn.execute('SELECT p.id FROM predictions p LEFT JOIN prediction_provenance f ON f.prediction_id=p.id '
-                        'WHERE f.prediction_id IS NULL ORDER BY p.id LIMIT ?', (limit,)).fetchall()
+def has_sql_links(conn):
+    return bool(conn.execute('SELECT 1 FROM prediction_inputs LIMIT 1').fetchone()
+                or conn.execute('SELECT 1 FROM prediction_artists LIMIT 1').fetchone())
+
+
+def convert_sql_links(conn, limit=64):
+    """Move only predictions that still own SQL lineage, before retiring its tables."""
+    rows = conn.execute('SELECT prediction_id FROM prediction_inputs UNION '
+                        'SELECT prediction_id FROM prediction_artists ORDER BY 1 LIMIT ?', (limit,)).fetchall()
     values = []
-    for (pid,) in rows:
-        saved = read(conn, pid)
-        values.append((pid, saved['inputs'], saved['artists']))
-    publish_many(conn, values)
+    for pid, in rows:
+        inputs = [row[0] for row in conn.execute('SELECT measurement_id FROM prediction_inputs '
+                                                'WHERE prediction_id=? ORDER BY measurement_id', (pid,))]
+        artists = [row[0] for row in conn.execute('SELECT artist_id FROM prediction_artists '
+                                                 'WHERE prediction_id=? ORDER BY artist_id', (pid,))]
+        values.append((pid, inputs, artists))
+    publish_many(conn, values, legacy=True)
     for pid, inputs, artists in values:
-        if read(conn, pid) != {'inputs': inputs, 'artists': artists}:
+        if _read(conn, pid, lambda p, f: _chunk(conn, p, file_id=f), legacy=True) != {'inputs': inputs, 'artists': artists}:
             raise fao.CorruptFile('Converted provenance differs from original subjects')
         conn.execute('DELETE FROM prediction_inputs WHERE prediction_id=?', (pid,))
         conn.execute('DELETE FROM prediction_artists WHERE prediction_id=?', (pid,))
-    return len(rows)
+    return len(values)
 
 
 def references(conn):
-    if available(conn):
-        from yt_playlist.repos.provenance_file_writes import native
-        column = 'file_id' if native(conn) else 'NULL'
-        for chunk, identity in conn.execute('SELECT DISTINCT prediction_id/128,' + column +
-                                          " FROM prediction_provenance WHERE state='ready'"):
-            yield directory(conn) / (file_relative(identity) if identity is not None else relative(chunk*CHUNK_ROWS+1))
+    if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='prediction_provenance'").fetchone():
+        column = 'file_id' if has_native_provenance_heads(conn) else 'NULL'
+        sql = 'SELECT DISTINCT prediction_id/128,' + column + " FROM prediction_provenance WHERE state='ready'"
+    else:
+        sql = "SELECT DISTINCT id/128,provenance_file_id FROM predictions WHERE provenance_state='ready'"
+    for chunk, identity in conn.execute(sql):
+        yield directory(conn) / (file_relative(identity) if identity is not None else relative(chunk*CHUNK_ROWS+1))
 
 
 def maintain(conn, now, limit=128):
     """Expire only superseded calculations, thirty days from their saved mtime."""
-    rows = conn.execute("SELECT f.prediction_id FROM prediction_provenance f JOIN predictions p ON p.id=f.prediction_id "
-        "WHERE f.state='ready' AND p.predicted_at<? AND NOT EXISTS(SELECT 1 FROM recording_vibes r "
+    rows = conn.execute("SELECT p.id FROM predictions p "
+        "WHERE p.provenance_state='ready' AND p.predicted_at<? AND NOT EXISTS(SELECT 1 FROM recording_vibes r "
         "WHERE r.recording_id=p.recording_id AND r.vibe=p.vibe AND r.prediction_id=p.id) "
         "ORDER BY p.predicted_at,p.id LIMIT ?", (now-30*86400, limit)).fetchall()
     for pid, in rows:
-        conn.execute("UPDATE prediction_provenance SET state='expired' WHERE prediction_id=?", (pid,))
+        conn.execute("UPDATE predictions SET provenance_state='expired' WHERE id=?", (pid,))
     return len(rows)
 
 

@@ -4,12 +4,14 @@ import sqlite3
 
 import pytest
 
+from tests.store_fixture_support import install_file_receipts
 from yt_playlist.repos import delivery_file_writes as writes
 
 
 @pytest.mark.parametrize('changed', ['id', 'contract', 'digest', 'size', 'filename', 'offset', 'owner'])
 def test_completion_checks_the_receipt_and_the_owning_delivery(changed):
     with closing(sqlite3.connect(':memory:')) as conn:
+        install_file_receipts(conn)
         conn.execute('CREATE TABLE metadata_deliveries(id INTEGER PRIMARY KEY,contract_digest TEXT,'
                      'raw_filename TEXT,raw_digest TEXT,raw_byte_size INTEGER,raw_offset INTEGER)')
         with conn:
@@ -22,14 +24,16 @@ def test_completion_checks_the_receipt_and_the_owning_delivery(changed):
         with pytest.raises(ValueError), conn:
             writes.complete(conn, values['id'], values['contract'], values['owner'],
                             (values['filename'], values['digest'], values['size'], values['offset']))
-        assert conn.execute('SELECT file_status FROM delivery_file_writes').fetchone() == ('pending',)
+        assert conn.execute("SELECT file_status FROM collection_file_writes WHERE kind='metadata-delivery'").fetchone() == ('pending',)
         with conn:
             writes.complete(conn, identity, 'a' * 64, 7, (filename, 'b' * 64, 12, 0))
-        assert conn.execute('SELECT file_status,delivery_id FROM delivery_file_writes').fetchone() == ('ready', 7)
+        assert conn.execute("SELECT file_status,delivery_id FROM collection_file_writes "
+                            "WHERE kind='metadata-delivery'").fetchone() == ('ready', 7)
 
 
 def test_receipt_cannot_adopt_a_delivery_with_different_captured_bytes():
     with closing(sqlite3.connect(':memory:')) as conn:
+        install_file_receipts(conn)
         conn.execute('CREATE TABLE metadata_deliveries(id INTEGER PRIMARY KEY,contract_digest TEXT,'
                      'raw_filename TEXT,raw_digest TEXT,raw_byte_size INTEGER,raw_offset INTEGER)')
         with conn:
@@ -38,4 +42,4 @@ def test_receipt_cannot_adopt_a_delivery_with_different_captured_bytes():
             conn.execute('INSERT INTO metadata_deliveries VALUES (7,?,?,?,?,0)', ('a' * 64, filename, 'c' * 64, 12))
         with pytest.raises(ValueError), conn:
             writes.complete(conn, identity, 'a' * 64, 7, (filename, 'b' * 64, 12, 0))
-        assert conn.execute('SELECT file_status FROM delivery_file_writes').fetchone() == ('pending',)
+        assert conn.execute("SELECT file_status FROM collection_file_writes WHERE kind='metadata-delivery'").fetchone() == ('pending',)

@@ -13,8 +13,8 @@ def test_null_and_blank_are_different_for_every_supported_field(store, field):
 
 @pytest.mark.parametrize('field,value,unit', [
     ('bpm', '120', 'bpm'), ('bpm', True, 'bpm'), ('bpm', 120, None), ('bpm', 120, 'hz'), ('bpm', 0, 'bpm'),
-    ('energy', 2, 'fraction'), ('energy', -.1, 'fraction'), ('energy', float('inf'), 'fraction'),
-    ('energy', float('nan'), 'fraction'), ('energy', 10 ** 400, 'fraction'), ('available', 2, 'boolean'),
+    ('danceability', 2, 'fraction'), ('danceability', -.1, 'fraction'), ('danceability', float('inf'), 'fraction'),
+    ('danceability', float('nan'), 'fraction'), ('danceability', 10 ** 400, 'fraction'), ('available', 2, 'boolean'),
     ('available', True, 'boolean'), ('duration_s', -1, 'seconds'), ('duration_s', 2.0, 'seconds'),
     ('duration_s', 1 << 63, 'seconds'), ('popularity', 2.5, 'provider_score'), ('title', 1, None),
     ('title', 'Song', 'bpm'), ('tags', ['Rock'], None), ('new_attribute', 'arbitrary', None),
@@ -26,7 +26,7 @@ def test_invalid_type_unit_domain_or_attribute_is_rejected(store, field, value, 
 
 
 @pytest.mark.parametrize('field,value,unit', [
-    ('bpm', 120, 'bpm'), ('energy', 0, 'legacy_energy_0_1'), ('energy', 1, 'fraction'),
+    ('bpm', 120, 'bpm'), ('danceability', 0, 'classifier_probability'), ('danceability', 1, 'fraction'),
     ('mood_happy', .5, 'classifier_probability'), ('available', 0, 'boolean'), ('available', 1, 'boolean'),
     ('duration_s', 0, 'seconds'), ('popularity', 100, 'provider_score'), ('gain', -3.2, 'decibels'),
     ('loudness', .82, 'essentia.average_loudness'), ('dynamic_complexity', 4.2, 'essentia.dynamic_complexity'),
@@ -34,6 +34,12 @@ def test_invalid_type_unit_domain_or_attribute_is_rejected(store, field, value, 
 def test_supported_numbers_keep_their_values_and_units(store, field, value, unit):
     prepared = values.prepare(store.conn, field, value, unit=unit)
     assert prepared.number == value and prepared.unit == unit and prepared.selected() == value
+
+
+def test_retired_energy_cannot_be_written_as_metadata(store):
+    with pytest.raises(ValueError, match='Unsupported catalog metadata field: energy'):
+        values.prepare(store.conn, 'energy', .5, unit='fraction')
+    assert 'energy' not in values.RUNTIME_CODES
 
 
 def test_genre_is_bound_only_to_an_established_unambiguous_name_or_alias(store):

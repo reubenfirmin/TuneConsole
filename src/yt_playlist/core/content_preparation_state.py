@@ -1,74 +1,65 @@
-"""Finite, typed checkpoints used to admit content-model preparation work."""
+"""Content preparation checkpoints and input revisions in settings."""
 import json
+from math import isfinite
 
-from .content_checkpoint_contract import KEYS, FIELDS, MODES, CONFIG, PHASES
-
-
-def available(conn):
-    from . import checkpoint_reads as checkpoint_publication
-    return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='content_basis_checkpoint'").fetchone() is not None
-            or checkpoint_publication.installed(conn, 'content-checkpoints'))
+from .content_checkpoint_contract import CONFIG, FIELDS, KEYS, MODES, PHASES
+from .worker_settings import read, save
 
 
-def get(conn,key,default=None):
-    from . import checkpoint_reads as checkpoint_publication
-    revision = checkpoint_publication.selected(conn, 'content-checkpoints')
-    if revision is not None:
-        return checkpoint_publication.read(conn, 'content-checkpoints', revision, key, default)
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='content_basis_checkpoint'").fetchone():
-        return checkpoint_publication.fallback(conn, key, default)
-    row = conn.execute(f'SELECT * FROM {KEYS[key]} WHERE singleton=1').fetchone()
-    if row is None:
-        return default
-    value = {field:row[field] for field in FIELDS[key] if row[field] is not None}
-    if key=='rec_preparation_full':
-        value['at'] = row['at']
-        if row['has_config']:
-            value['config'] = [row[column] for column in CONFIG]
-    if key=='rec_preparation_basis' and row['has_modes']:
-        value['modes'] = [row[column] for column in MODES]
-    if key!='rec_preparation_full' and row['has_phases']:
-        value['phase_bytes'] = {phase:row['bytes_'+phase] for phase in PHASES if row['bytes_'+phase] is not None}
-    return json.dumps(value)
+CHECKPOINTS = {key: f'content_preparation_{phase}' for key, phase in KEYS.items()}
+CONTENT_REVISION = 'content_input_revision'
+EVIDENCE_REVISION = 'recommendation_evidence_revision'
+REFRESH_REVISION = 'recommendation_refresh_revision'
+ACKNOWLEDGED = 'recommendation_refresh_acknowledged'
+FIT_VERSION = 'content_fit_version'
 
 
-def put(conn,values):
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='content_basis_checkpoint'").fetchone():
-        from .checkpoint_reads import retained_write
-        return retained_write(conn, values)
-    for key,raw in values.items():
-        table = KEYS[key]
-        if not raw:
-            conn.execute(f'DELETE FROM {table} WHERE singleton=1')
-            continue
-        value = json.loads(raw)
-        allowed = set(FIELDS[key]) | ({'config'} if key=='rec_preparation_full' else {'phase_bytes'})
-        if key=='rec_preparation_basis':
+def get(conn, key, default=None):
+    return read(conn, CHECKPOINTS[key], default)
+
+
+def _nonnegative(value):
+    return value is None or type(value) is int and 0 <= value < 2 ** 63
+
+
+def put(conn, values):
+    for key, raw in values.items():
+        phase = KEYS[key]
+        value = json.loads(raw) if raw else {}
+        allowed = set(FIELDS[key]) | ({'config'} if phase == 'full' else {'phase_bytes'})
+        if phase == 'basis':
             allowed.add('modes')
-        if not isinstance(value,dict) or set(value)-allowed:
+        if not isinstance(value, dict) or set(value) - allowed:
             raise ValueError('Unsupported content preparation checkpoint')
-        columns = list(FIELDS[key])
-        params = [value.get(field) for field in columns]
-        if key=='rec_preparation_full':
-            config = value.get('config')
-            if config is not None and (not isinstance(config,list) or len(config)!=len(CONFIG)
-                    or any(item is not None and not isinstance(item,str) for item in config)):
-                raise ValueError('Content configuration must retain its seven scalar settings')
-            columns += ['has_config',*CONFIG]
-            params += [int(config is not None),*(config if config is not None else [None]*len(CONFIG))]
-        else:
-            phases = value.get('phase_bytes')
-            if phases is not None and (not isinstance(phases,dict) or set(phases)-set(PHASES)):
+        if not raw:
+            save(conn, CHECKPOINTS[key], None)
+            continue
+        if phase == 'fit' and value.get('state') not in (None, 'ready', 'waiting', 'deferred'):
+            raise ValueError('Unsupported content fit state')
+        for field, field_value in value.items():
+            if field_value is None:
+                continue
+            if field in ('at', 'attempted_at', 'since', 'next_attempt_at'):
+                if type(field_value) not in (int, float) or not isfinite(field_value):
+                    raise ValueError('Content checkpoint time must be finite')
+            elif field in ('reason', 'input_fingerprint', 'state', 'config', 'modes', 'phase_bytes'):
+                continue
+            elif not _nonnegative(field_value):
+                raise ValueError('Content checkpoint counter must be nonnegative')
+        config, modes, phases = (value.get(field) for field in ('config', 'modes', 'phase_bytes'))
+        if config is not None and (not isinstance(config, list) or len(config) != len(CONFIG)
+                or any(item is not None and not isinstance(item, str) for item in config)):
+            raise ValueError('Content configuration must retain its seven scalar settings')
+        if modes is not None and (not isinstance(modes, list) or len(modes) != len(MODES)
+                or any(type(item) is not int or item <= 0 for item in modes[:2])
+                or type(modes[2]) not in (int, float) or not 0 <= modes[2] <= 1):
+            raise ValueError('Content checkpoint requires three valid mode parameters')
+        if phases is not None:
+            if (not isinstance(phases, dict) or set(phases) - set(PHASES)
+                    or not all(map(_nonnegative, phases.values()))):
                 raise ValueError('Unsupported content preparation memory phase')
-            columns += ['has_phases',*('bytes_'+phase for phase in PHASES)]
-            params += [int(phases is not None),*((phases or {}).get(phase) for phase in PHASES)]
-        if key=='rec_preparation_basis':
-            modes = value.get('modes')
-            if modes is not None and (not isinstance(modes,list) or len(modes)!=3):
-                raise ValueError('Content checkpoint requires three mode parameters')
-            columns += ['has_modes',*MODES]
-            params += [int(modes is not None),*(modes if modes is not None else [None]*3)]
-        names = ','.join('"'+column+'"' for column in columns)
-        updates = ','.join('"'+column+'"=excluded."'+column+'"' for column in columns)
-        conn.execute(f'INSERT INTO {table}(singleton,{names}) VALUES (1,{",".join("?" for _ in columns)}) '
-                     f'ON CONFLICT(singleton) DO UPDATE SET {updates}',params)
+            value['phase_bytes'] = {name: size for name, size in phases.items() if size is not None}
+        value = {field: value for field, value in value.items() if value is not None}
+        if phase == 'full':
+            value.setdefault('at', None)
+        save(conn, CHECKPOINTS[key], json.dumps(value, allow_nan=False))

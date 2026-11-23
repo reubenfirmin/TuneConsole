@@ -27,7 +27,7 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
   {"l": "Learned weight", "v": "×" ~ "%.2f"|format(r.permanent_weight), "n": "saved preference learned from repeated activity", "div": true},
   {"l": "Slider adjustment", "v": "×" ~ "%.2f"|format(r.standing_lean), "n": "your active adjustment for this genre, era, or artist"},
   {"l": "= Saved preference", "v": "×" ~ "%.2f"|format(r.lasting), "n": "learned weight multiplied by your slider adjustment", "t": "strong"},
-  {"l": "Recent activity", "v": "%+.2f"|format(r.transient_lean), "n": "recent plays, likes, dislikes, mood choices, and skips; influence fades over time", "div": true},
+  {"l": "Recent activity", "v": "%+.2f"|format(r.transient_lean), "n": "recent plays, likes, mood choices, and skips; influence fades over time", "div": true},
   {"l": "= Recent multiplier", "v": "×" ~ "%.2f"|format(r.transient_mult), "n": "recent activity converted to a bounded score adjustment", "t": tone},
   {"l": "= Combined multiplier", "v": "×" ~ "%.2f"|format(r.effective), "n": "saved preference multiplied by the recent adjustment; used to rank tracks", "t": "strong", "div": true},
 ] -%}
@@ -71,14 +71,14 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {{ _attr(name, rows, accent, '', "Percentages are shares of all plays in each period.") }}
 {%- endmacro %}
 
-{# The two free-direction layers (SESSION, TRANSIENT) projected onto one genre-family centroid. #}
+{# Compare the TODAY and RECENT scores against the same genre-family centroid. #}
 {% macro tilt_tip(f, halflife_h, play_halflife_d) -%}
 {%- set rows = [] -%}
 {%- if f.session is not none -%}
-{%- set rows = rows + [{"l": "Session", "v": "%+.2f"|format(f.session), "n": "this session's sound; influence halves every " ~ "%.0f"|format(halflife_h) ~ "h", "t": ("pos" if f.session > 0 else "neg")}] -%}
+{%- set rows = rows + [{"l": "TODAY", "v": "%+.2f"|format(f.session), "n": "Given today's listening, influence halves every " ~ "%.0f"|format(halflife_h) ~ "h", "t": ("pos" if f.session > 0 else "neg")}] -%}
 {%- endif -%}
 {%- if f.transient is not none -%}
-{%- set rows = rows + [{"l": "Recent", "v": "%+.2f"|format(f.transient), "n": "recent listening sound; play influence halves every " ~ "%.0f"|format(play_halflife_d) ~ " days", "t": ("pos" if f.transient > 0 else "neg")}] -%}
+{%- set rows = rows + [{"l": "RECENT", "v": "%+.2f"|format(f.transient), "n": "Recent play influence halves every " ~ "%.0f"|format(play_halflife_d) ~ " days", "t": ("pos" if f.transient > 0 else "neg")}] -%}
 {%- endif -%}
 {%- set rows = rows + [{"l": "Sound similarity", "v": "−1 to +1", "n": "+1 strongly favors this genre's sound; −1 strongly moves away from it", "div": true}] -%}
 {{ _attr(f.name, rows) }}

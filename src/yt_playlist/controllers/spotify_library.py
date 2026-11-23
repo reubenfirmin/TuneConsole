@@ -398,17 +398,11 @@ def _transfer_playlist(sources, client, account_id, playlist, fingerprint, now):
 
 def _transfer_claimed_playlist(store, client, account_id, playlist, fingerprint, now):
     from yt_playlist.core import workflow_settings
-    state_key, transfers = _playlist_transfers(store, account_id)
-    owned = store.settings.has_transfer_receipts()
-    if owned:
-        transfers = store.settings.spotify_transfer_receipts(account_id)
+    transfers = store.settings.spotify_transfer_receipts(account_id)
     transfer = transfers.get(fingerprint)
     resumed = transfer is not None
     def save():
-        if owned:
-            transfer[workflow_settings.TOKEN] = store.settings.save_spotify_transfer(account_id,fingerprint,transfer)
-        else:
-            store.settings.set_setting(state_key,json.dumps(transfers))
+        transfer[workflow_settings.TOKEN] = store.settings.save_spotify_transfer(account_id, fingerprint, transfer)
     if transfer is None:
         transfer = {"creation_phase": "prepared", "marker": f"TuneConsole Spotify {uuid4().hex}",
                     "complete": False, "updated_at": now, "last_run_added": 0}

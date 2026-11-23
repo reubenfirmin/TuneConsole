@@ -16,8 +16,7 @@ FINISHABLE_STATES = ('claimed', 'sent', 'uncertain')
 PENDING_STATES = ('pending', 'claimed', 'sent')
 
 
-def configuration(*, key, saved, environment, enabled, limit, usage, requests_today, wait, now):
-    from yt_playlist.integrations.deepseek import credential_id
+def configuration(*, key, saved, environment, enabled, limit, requests_today, wait):
     try:
         limit = int(limit)
     except (ValueError, TypeError):
@@ -26,7 +25,7 @@ def configuration(*, key, saved, environment, enabled, limit, usage, requests_to
             'key_source': 'environment' if environment else 'settings' if saved else 'config' if key else None,
             'enabled': enabled == '1', 'daily_limit': max(0, min(MAX_DAILY_LIMIT, limit)),
             'requests_today': requests_today,
-            'status': wait.get('status') or (usage.get('status') if usage.get('credential') == credential_id(key) else None),
+            'status': wait.get('status'),
             'retry_at': wait.get('retry_at', 0)}
 
 
@@ -91,11 +90,10 @@ def availability(rows):
     return max(rows, key=lambda row: (row['status'] == 'auth', row['retry_at']), default={})
 
 
-def legacy_block(legacy, now):
-    if legacy and legacy['lease_until'] > now:
-        return {'status': 'busy', 'retry_at': legacy['lease_until']}
-    if (legacy and legacy['claim_token'] and legacy['send_authorized']
-            and legacy['status'] in (*PENDING_STATES, 'uncertain')):
+def unattributed_request_block(row, now):
+    if row and row['retry_at'] > now:
+        return {'status': 'busy', 'retry_at': row['retry_at']}
+    if row and row['status'] == 'uncertain':
         return {'status': 'uncertain'}
     return None
 

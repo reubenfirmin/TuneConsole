@@ -1,5 +1,4 @@
 """Group read models assembled from SQL facts and immutable file documents."""
-from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core import group_evidence
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.group_storage import policy_version
@@ -14,20 +13,27 @@ class CompactTasteGroups(TasteGroups):
         self.retention = retention
         self.publication = GroupPublication(repository, files, policies)
 
+    def head_id(self):
+        return self.repository.head_id()
+
+    def has_adaptive_head(self):
+        return self.repository.has_adaptive_head()
+
     def head(self, *, members=False):
         with self.files.retained():
             return self._head(self.repository.head(members=members))
 
     def preview_head(self):
         with self.files.retained():
-            return self._head(self.repository.preview_head())
+            head = self._head(self.repository.preview_head())
+            if head is not None:
+                head['payload'].pop('recording_inputs', None)
+            return head
 
     def _head(self, row):
         if row is None:
             return None
         payload = self.files.read(row, 'generation')
-        if 'recording_inputs' in row:
-            payload = {**payload, 'recording_inputs': row['recording_inputs']}
         return {'generation': row['external_key'], 'policy': canonical(self.files.policy(row['policy'])).decode(),
                 'fingerprint': row['input_fingerprint'], 'created_at': row['created_at'],
                 'serial': row['input_serial'], 'payload': payload,
@@ -51,6 +57,9 @@ class CompactTasteGroups(TasteGroups):
         with self.files.retained():
             return [self._definition(row) for row in self.repository.definitions(generation, members=members)]
 
+    def recording_groups(self, generation):
+        return self.repository.recording_groups(generation)
+
     def definition(self, version, *, generation=None):
         with self.files.retained():
             row = self.repository.definition(version, generation=generation)
@@ -65,23 +74,6 @@ class CompactTasteGroups(TasteGroups):
                 {key: group[key] for key in ('group_id', 'version', 'parent_version', 'legacy', 'leaf')}
                 | {'genres': self.files.read(group, 'definition').get('genres', [])}
                 for group in row['groups']]}
-
-    def _lineage(self, row):
-        return {'source': row['source_alias'], 'target': row['target_alias'], 'relation': row['relation'],
-                'payload': self.files.read(row, 'lineage')}
-
-    def successors(self, version, *, limit=512):
-        if type(limit) is not int or not 0 <= limit <= 8192:
-            raise ValueError('Invalid musical group lineage page size')
-        with self.files.retained():
-            rows = self.repository.successors(version, limit=limit)
-            if len(rows) > limit:
-                raise WorkBudgetExceeded('Musical lineage exceeds learning work ceiling')
-            return [self._lineage(row) for row in rows]
-
-    def lineage(self):
-        with self.files.retained():
-            return [self._lineage(row) for row in self.repository.lineage()]
 
     def correction_definition(self, version, *, generation=None):
         return self.repository.correction_definition(version, generation=generation)

@@ -25,7 +25,7 @@ _COVER = '''<svg xmlns="http://www.w3.org/2000/svg" width="900" height="900" vie
 
 @pytest.fixture
 def album_app(store, without_metadata_providers):
-    identity = store.accounts.upsert_account('Main', 'credential', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     album = {'audioPlaylistId': 'ALBUM_QUEUE', 'title': 'Late Night', 'type': 'Album',
         'artists': [{'name': 'The Evening Sessions'}], 'year': '2001',
         'thumbnails': [{'url': '/album-cover.svg', 'width': 900, 'height': 900}],

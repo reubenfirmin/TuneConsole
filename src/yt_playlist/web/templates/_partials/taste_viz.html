@@ -21,21 +21,21 @@
 {# ── The stack, stated once ──────────────────────────────────────────────── #}
 <section class="card card--data viz-dim layer-key">
   <h2 class="section section-flush">The four layers</h2>
-  <p class="section-note">Recommendations combine what you are playing now, this listening session, recent feedback, and saved preferences. Taste profile shows how these affect your music preferences; Recent &amp; learning shows how they change over time.</p>
+  <p class="section-note">Recommendations combine the current session, listening from earlier today, recent feedback, and lasting preferences.</p>
   <ol class="layer-key-list">
-    <li><span class="layer-name">CURRENT</span><span class="layer-scale muted">hours</span>
-      <span class="layer-what">Which listening styles you are playing now. Requires at least
-        {{ viz.modes.min_events }} plays with enough track information. <em>See: Listening styles.</em></span></li>
-    <li><span class="layer-name">SESSION</span><span class="layer-scale muted">a day</span>
-      <span class="layer-what">Music from this listening session. Its influence halves every {{ '%.0f'|format(viz.modes.session.halflife_h) }} hours.
-        <em>See: Listening styles, Recent sound.</em></span></li>
+    <li><span class="layer-name">NOW</span><span class="layer-scale muted">active session</span>
+      <span class="layer-what">Playback and choices guide the active session. Inferred listening styles require at least
+        {{ viz.modes.min_events }} distinct tracks with enough information. Manual steering applies immediately.</span></li>
+    <li><span class="layer-name">TODAY</span><span class="layer-scale muted">local calendar day</span>
+      <span class="layer-what">Listening across today's sessions. Its influence halves every {{ '%.0f'|format(viz.modes.session.halflife_h) }} hours and resets at local midnight.
+        <em>See Listening styles and Recent sound.</em></span></li>
     <li><span class="layer-name">RECENT</span><span class="layer-scale muted">days to weeks</span>
       <span class="layer-what">Recent plays, likes, dislikes, mood taps and skips, each fading on its
         own schedule. These raise or lower scores for genres, eras, and artists.
-        <em>See: Genre families, Eras, Artists, Recent sound.</em></span></li>
-    <li><span class="layer-name">SAVED</span><span class="layer-scale muted">lasting</span>
-      <span class="layer-what">Preferences learned over time, your saved slider settings, and the trained model.
-        <em>Shown throughout Taste profile.</em></span></li>
+        <em>See Genre families, Eras, Artists, and Recent sound.</em></span></li>
+    <li><span class="layer-name">PERMANENT</span><span class="layer-scale muted">lasting</span>
+      <span class="layer-what">Preferences learned from sustained listening and deliberate actions across independent days.
+        <em>See Taste profile and Recent &amp; learning.</em></span></li>
   </ol>
   <p class="section-note flush">Read your preferences in <em>Taste profile</em>, adjust them in
     <em>Recommendations</em>, and control learning in <em>Recent &amp; learning</em>.</p>
@@ -57,7 +57,7 @@
 </details>
 {%- endmacro %}
 
-{# ── Modes axis: the only axis on which NOW and SESSION exist ─────────────── #}
+{# Listening styles show NOW and TODAY balances alongside library coverage. #}
 {% macro mode_ribbon(segments, layer, scale, note) -%}
 <div class="breadth-ribbon layer-ribbon">
   {% for seg in segments %}{% set pc = ROSE_PALETTE[seg.color_idx % ROSE_PALETTE|length] %}<i class="seg"
@@ -67,39 +67,38 @@
 
 {% macro styles() -%}
 <section class="card card--data viz-dim mode-layers">
-  <h2 class="section section-flush">Listening styles <span class="scope-tag">current · session · saved</span></h2>
+  <h2 class="section section-flush">Listening styles</h2>
   <p class="section-note">{% if viz.modes.adaptive %}These are the dynamic music groups used by Home. Tracks connect through supported genre and sound similarities; groups can split or rejoin as details arrive. <a href="#groups" @click.prevent="select('groups')">Explore music groups</a>.{% else %}Styles are groups of similar songs that can span genres. The model automatically groups tracks using genre, release decade and available sound features such as tempo, energy and mood. One genre can contain several styles.{% endif %}</p>
-  {% if viz.modes.modes and not viz.modes.styles_current %}<p class="section-note">The saved grouping is from the previous model. Current and session comparisons are unavailable until the styles are updated for the current model.</p>{% endif %}
+  {% if viz.modes.modes and not viz.modes.styles_current %}<p class="section-note">The groups are from the previous model. Listening comparisons resume when the groups update.</p>{% endif %}
 
   <div class="layer-row">
-    <div class="layer-meta"><span class="layer-name">CURRENT</span><span class="layer-scale muted">last {{ viz.modes.now.window_h }}h · {{ viz.modes.evidence.now.mapped }}/{{ viz.modes.evidence.now.total }} plays matched · minimum {{ viz.modes.min_events }}</span></div>
+    <div class="layer-meta"><span class="layer-name">NOW</span><span class="layer-scale muted">active session · {{ viz.modes.evidence.now.mapped }}/{{ viz.modes.evidence.now.total }} plays matched · minimum {{ viz.modes.min_events }}</span></div>
     <div class="layer-reading">
-      {% if viz.modes.now.segments %}{{ mode_ribbon(viz.modes.now.segments, "Current", "last " ~ viz.modes.now.window_h ~ "h", "each distinct play in this period counts equally") }}
+      {% if viz.modes.now.segments %}{{ mode_ribbon(viz.modes.now.segments, "Now", "active session", "each distinct recording in this session counts once") }}
       {% elif not viz.modes.modes %}<p class="rose-quiet">No listening styles found yet.</p>
       {% elif not viz.modes.styles_current or viz.modes.evidence.now.mapped >= viz.modes.min_events %}<p class="rose-quiet">Comparison unavailable until the style model is ready.</p>
-      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.modes.min_events }} plays with a known sound in the last {{ viz.modes.now.window_h }}h.</p>{% endif %}
+      {% else %}<p class="rose-quiet">The current session has fewer than {{ viz.modes.min_events }} plays with a known sound.</p>{% endif %}
     </div>
   </div>
 
   <div class="layer-row">
-    <div class="layer-meta"><span class="layer-name">SESSION</span><span class="layer-scale muted">last 24h · influence halves every {{ '%.0f'|format(viz.modes.session.halflife_h) }}h · {{ viz.modes.evidence.session.mapped }}/{{ viz.modes.evidence.session.total }} plays matched · minimum {{ viz.modes.min_events }}</span></div>
+    <div class="layer-meta"><span class="layer-name">TODAY</span><span class="layer-scale muted">since local midnight · {{ viz.modes.evidence.session.mapped }}/{{ viz.modes.evidence.session.total }} plays matched · minimum {{ viz.modes.min_events }}</span></div>
     <div class="layer-reading">
-      {% if viz.modes.session.segments %}{{ mode_ribbon(viz.modes.session.segments, "Session", "last 24h", "the same plays, weighted so fresher ones count for more") }}
+      {% if viz.modes.session.segments %}{{ mode_ribbon(viz.modes.session.segments, "Today", "since local midnight", "more recent plays today carry more weight") }}
       {% elif not viz.modes.modes %}<p class="rose-quiet">No listening styles found yet.</p>
       {% elif not viz.modes.styles_current or viz.modes.evidence.session.mapped >= viz.modes.min_events %}<p class="rose-quiet">Comparison unavailable until the style model is ready.</p>
-      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.modes.min_events }} plays with a known sound in the last 24h.</p>{% endif %}
+      {% else %}<p class="rose-quiet">Today has fewer than {{ viz.modes.min_events }} plays with a known sound.</p>{% endif %}
     </div>
   </div>
 
   <div class="layer-row">
-    <div class="layer-meta"><span class="layer-name">SAVED</span><span class="layer-scale muted">lasting</span></div>
+    <div class="layer-meta"><span class="layer-name">Library size</span><span class="layer-scale muted">by listening style</span></div>
     <div class="layer-reading">
-      {% if viz.modes.permanent.segments %}{{ mode_ribbon(viz.modes.permanent.segments, "Saved", "lasting", "each listening style's share of the tracks grouped in your library") }}
+      {% if viz.modes.permanent.segments %}{{ mode_ribbon(viz.modes.permanent.segments, "Library size", "grouped tracks", "each listening style's share of the tracks grouped in your library") }}
       {% else %}<p class="rose-quiet">Listening styles appear once enough tracks have genre, era, and audio information.</p>{% endif %}
     </div>
   </div>
 
-  <p class="vb-legend"><span class="muted">{% if viz.modes.adaptive %}Current and Session compare recent listening with your saved music groups. They describe listening balance; they do not change group boundaries.{% else %}The Current layer only chooses among your existing listening styles. It does not change individual track scores.{% endif %}</span></p>
 </section>
 {%- endmacro %}
 
@@ -163,8 +162,8 @@
     <div class="rose-cap">Saved <span class="muted"> - lasting preferences</span></div>
     {{ rose(rows, 'petal_perm', 'Saved') }}
     {% if not (rows | selectattr('lasting', 'ne', 1.0) | list) %}
-    <p class="rose-quiet">Neutral: no learned or manual adjustments yet.</p>{% endif %}
-    <figcaption class="rose-foot">learned preference × slider setting</figcaption>
+    <p class="rose-quiet">No lasting adjustment yet.</p>{% endif %}
+    <figcaption class="rose-foot">learned baseline and standing preferences</figcaption>
   </figure>
   <figure class="rose">
     <div class="rose-cap">Recent <span class="muted"> - temporary changes</span></div>
@@ -178,7 +177,7 @@
     {{ rose(rows, 'petal_eff', 'Combined') }}
     {% if not (rows | selectattr('effective', 'ne', 1.0) | list) %}
     <p class="rose-quiet">Neutral: no adjustment to {{ unit }} scores.</p>{% endif %}
-    <figcaption class="rose-foot">saved × recent</figcaption>
+    <figcaption class="rose-foot">session or baseline × standing × recent</figcaption>
   </figure>
 </div>
 <p class="vb-legend"><span class="muted">Dashed ring: <strong>×1.00</strong>, neutral. Outside boosts a {{ unit }}; inside lowers it. Saved, Recent, and Combined share one scale. Hover a petal for the calculation.</span></p>
@@ -243,14 +242,19 @@
 {# ── Graduation funnel: how transient becomes permanent ───────────────────── #}
 {% macro learning() -%}
 <section class="card card--data viz-dim">
-  <h2 class="section section-flush">Learning progress <span class="scope-tag">recent activity becomes saved preferences</span></h2>
-  <p class="section-note">Repeated listening and feedback build up here. Once a genre, era, or artist reaches the learning threshold, its saved weight increases or decreases. Likes and dislikes count more than individual plays.</p>
+  <h2 class="section section-flush">Learning progress <span class="scope-tag">PERMANENT</span></h2>
+  {% if viz.dated_support %}<p class="section-note">A lasting preference needs support across at least three separate listening days and episodes, including a deliberate choice or like.</p>
+  {% else %}<p class="section-note">These are the last available readings while dated listening evidence prepares.</p>{% endif %}
   {% if viz.funnel %}
   <div class="viz-bars">
     {% for f in viz.funnel %}
-    <div class="viz-bar-row" {{ vt.tip(f.facet, [
+    <div class="viz-bar-row" {% if viz.dated_support %}{{ vt.tip(f.facet, [
+          {"l": "Listening days", "v": f.days},
+          {"l": "Deliberate days", "v": f.deliberate_days},
+          {"l": "Learned weight", "v": "×" ~ "%.2f"|format(f.weight), "t": "strong", "div": true}]) }}
+        {% else %}{{ vt.tip(f.facet, [
           {"l": "Learning score", "v": "%+.2f"|format(f.score) ~ "  of  ±" ~ "%.2f"|format(f.threshold), "t": ("pos" if f.frac > 0 else "neg")},
-          {"l": "Progress", "v": "%+.0f"|format(f.frac*100) ~ "%", "n": ("toward increasing this saved preference" if f.frac > 0 else "toward decreasing this saved preference"), "t": "strong", "div": true}]) }}>
+          {"l": "Progress", "v": "%+.0f"|format(f.frac*100) ~ "%", "t": "strong", "div": true}]) }}{% endif %}>
       <span class="vb-name">{{ f.facet }}</span>
       <span class="vb-div"><i class="{{ 'pos' if f.frac > 0 else 'neg' }}" style="width:{{ '%.0f'|format(f.frac|abs*50) }}%"></i></span>
       <span class="vb-val mono">{{ '%+.0f'|format(f.frac*100) }}%</span>

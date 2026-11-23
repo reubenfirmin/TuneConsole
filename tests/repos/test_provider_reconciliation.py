@@ -33,7 +33,7 @@ def completed(store, count=2, provider='musicbrainz'):
 
 def jobs(store):
     return {row[0] for row in store.conn.execute(
-        "SELECT recording_id FROM enrichment_provider_jobs WHERE provider='deezer'")}
+        "SELECT recording_id FROM enrichment_provider_state WHERE provider='deezer' AND queued=1")}
 
 
 def test_unchanged_configuration_catches_up_later_recordings_without_rewriting_configuration(database):
@@ -51,7 +51,7 @@ def test_unchanged_configuration_catches_up_later_recordings_without_rewriting_c
     key = database.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (new,)).fetchone()[0]
     database.enrichment_state.record_enrichment_attempt(key, 'musicbrainz', {}, now=30)
     database.enrichment_state.reconcile_provider_configuration(ORIGINAL)
-    rid = database.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (new,)).fetchone()[0]
+    rid = database.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (new,)).fetchone()[0]
     assert jobs(database) == {rid}
 
 
@@ -77,7 +77,7 @@ def test_catchup_revalidates_membership_completion_attempts_and_configuration(da
         else:
             with database.conn:
                 if change == 'removed':
-                    database.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (row['id'],))
+                    database.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?', (row['id'],))
                 elif change == 'disabled':
                     database.conn.execute("UPDATE enrichment_provider_config SET status='disabled'")
                 else:
@@ -146,7 +146,7 @@ def test_refresh_preserves_attempt_and_cooldown_committed_after_configuration_ch
 def test_refresh_intent_survives_temporarily_missing_membership(database):
     row = completed(database, count=1, provider='deezer')[0]
     with database.conn:
-        database.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (row['id'],))
+        database.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?', (row['id'],))
     database.enrichment_state.reconcile_provider_configuration(CHANGED)
     assert jobs(database) == {row['recording_id']}
     assert database.enrichment_reports.queue_remaining() == 0

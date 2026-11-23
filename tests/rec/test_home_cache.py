@@ -6,6 +6,7 @@ import pytest
 from yt_playlist.core import fao, home_outputs, recommendation_outputs as files
 from yt_playlist.rec import home_cache
 from tests.core.test_predecessor_writes import installed
+from tests.file_custody_support import expire_file
 
 
 def test_selection_round_trip_keeps_file_work_outside_repo_and_sql(store, monkeypatch):
@@ -84,11 +85,17 @@ def test_orphan_collection_cannot_remove_files_before_their_sql_commit(file_back
 def test_reader_keeps_its_manifest_when_a_new_head_is_published(file_backed_store):
     store = file_backed_store
     home_cache.put(store, 'home_prepared', {'menu': 'previous'}, 1)
+    original = Path(store.home_cache.document('home_prepared').parts[0][1])
+    expire_file(original)
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
         assert home_cache.read(reader, 'home_prepared') == {'menu': 'previous'}
         home_cache.put(store, 'home_prepared', {'menu': 'replacement'}, 2)
+        assert files.collect_orphans(store.conn) == 0
+        assert original.is_file()
         assert home_cache.read(reader, 'home_prepared') == {'menu': 'previous'}
+    assert files.collect_orphans(store.conn) == 1
+    assert not original.exists()
     assert home_cache.read(store, 'home_prepared') == {'menu': 'replacement'}
 
 
@@ -99,19 +106,17 @@ def test_legacy_written_home_files_remain_readable_and_can_be_replaced(store):
     # Other installed consumers can also read the simple writer's format.
     assert store.rec_proposals.get_proposals('home_prepared') == {'menu': 'replacement'}
     store.rec_proposals.put_proposals('home_prepared', {'menu': 'replacement'}, 3)
-    previous = store.conn.execute('SELECT publication_id FROM home_display_heads '
-                                  "WHERE surface='home_prepared'").fetchone()[0]
+    previous = store.home_cache.document('home_prepared').publication_id
     store.rec_proposals.put_proposals('home_prepared', {'menu': 'replacement'}, 4)
-    assert store.conn.execute('SELECT publication_id FROM home_display_heads '
-                             "WHERE surface='home_prepared'").fetchone()[0] == previous
+    assert store.home_cache.document('home_prepared').publication_id == previous
     assert home_cache.read(store, 'home_prepared') == {'menu': 'replacement'}
 
 
 @pytest.mark.parametrize('damage', ['missing', 'corrupt'])
 def test_unavailable_cache_is_a_miss_and_can_be_rewritten(store, damage):
     home_cache.put(store, 'home_tuned', {'menu': 'useful'}, 1)
-    _, manifest = store.home_cache.document('home_tuned')
-    path = Path(manifest[2][0][1])
+    manifest = store.home_cache.document('home_tuned')
+    path = Path(manifest.parts[0][1])
     if damage == 'missing':
         path.unlink()
     else:
@@ -121,8 +126,8 @@ def test_unavailable_cache_is_a_miss_and_can_be_rewritten(store, damage):
     assert home_cache.read(store, 'home_tuned') == {'menu': 'useful'}
     # Replacement owns a new record file. Damage its current head before the
     # proposal producer coalesces another identical publication.
-    _, manifest = store.home_cache.document('home_tuned')
-    path = Path(manifest[2][0][1])
+    manifest = store.home_cache.document('home_tuned')
+    path = Path(manifest.parts[0][1])
     path.unlink()
     store.rec_proposals.put_proposals('home_tuned', {'menu': 'useful'}, 3)
     assert home_cache.read(store, 'home_tuned') == {'menu': 'useful'}
@@ -147,6 +152,27 @@ def test_response_reuse_returns_detached_values_and_reopens_on_next_request(file
     assert len(calls) == 2
 
 
+def test_current_choice_reuses_the_verified_document_until_its_head_changes(file_backed_store, monkeypatch):
+    store = file_backed_store
+    original, replacement = {'menu': 'original'}, {'menu': 'replacement'}
+    home_cache.put(store, 'home_choice', original, 1)
+    with store.read_view() as reader, home_cache.verified_reads(reader):
+        observed = home_cache.read(reader, 'home_choice')
+        read, calls = home_outputs.read_manifest, []
+
+        def counted(*args):
+            calls.append(True)
+            return read(*args)
+
+        monkeypatch.setattr(home_outputs, 'read_manifest', counted)
+        assert home_cache.matches_current(store, 'home_choice', original, reader=reader, observed=observed)
+        assert not home_cache.matches_current(store, 'home_choice', replacement, reader=reader, observed=observed)
+        assert calls == []
+        home_cache.put(store, 'home_choice', replacement, 2)
+        assert home_cache.matches_current(store, 'home_choice', replacement, reader=reader, observed=observed)
+        assert len(calls) == 1
+
+
 def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roots(file_backed_store, monkeypatch):
     from tests.recommendation_support import seed_compact_group_history
     from tests.repos.test_typed_recommendation_publication import plan, publish
@@ -162,7 +188,7 @@ def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roo
         recommendation_custody.retain(store.conn, 'prepared',
             'proposal:home_prepared:recommendations', published.generation_id)
     group = store.conn.execute('SELECT external_key FROM group_generations LIMIT 1').fetchone()[0]
-    generation = store.conn.execute('SELECT generation_id FROM recommendation_generation_refs LIMIT 1').fetchone()[0]
+    generation = published.generation_id
     store.rec_ledger.evidence().put('artifact', 'home-context', {'group_generation': group})
     resolve = group_evidence.resolve
     resolved = []
@@ -177,7 +203,9 @@ def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roo
         {'serving_context': {'recommendation_generation_id': generation}}]}]}]}
     home_cache.put(store, 'home_prepared', value, 2)
     assert resolved == [True]
-    assert store.conn.execute('SELECT 1 FROM home_display_group_roots').fetchone()
-    assert store.conn.execute('SELECT 1 FROM home_display_recommendation_roots WHERE generation_id=?',
+    assert store.conn.execute("SELECT 1 FROM prepared_display_manifests WHERE key='prepared_home:home_prepared' "
+                              "AND json_array_length(value,'$.group_roots')>0").fetchone()
+    assert store.conn.execute("SELECT 1 FROM prepared_display_manifests p,json_each(p.value,'$.recommendation_roots') r "
+                              "WHERE p.key='prepared_home:home_prepared' AND r.value->>3=?",
                               (generation,)).fetchone()
     assert home_cache.read(store, 'home_prepared') == value

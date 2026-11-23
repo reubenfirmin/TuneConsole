@@ -86,13 +86,22 @@ class MusicSearch:
             future.set_result(rows)
         return rows
 
+    def _pending_saves(self, account):
+        for action in self.actions.get_pending_actions(SAVE_SONG):
+            params = json.loads(action.params_json)
+            if params['account_id'] == account:
+                yield action.id, params
+
     def search(self, query):
         query = query.strip()[:80]
         if len(query) < 2:
             return []
         account, client = self.access.resolve()
+        rows = self._search(account, client, query)
+        pending = {params['song']['video_id']: params.get('saved', True)
+                   for _, params in self._pending_saves(account)}
         results, seen = [], set()
-        for raw in self._search(account, client, query):
+        for raw in rows:
             item = song(raw)
             if item is None or item['video_id'] in seen:
                 continue
@@ -102,6 +111,8 @@ class MusicSearch:
             item['library_saved'] = raw.get('inLibrary')
             item['can_add'] = bool(raw.get('inLibrary') or (raw.get('feedbackTokens') or {}).get('add'))
             item['can_remove'] = bool((raw.get('feedbackTokens') or {}).get('remove')) and not membership['retained']
+            if item['video_id'] in pending:
+                item.update(action_state='pending', pending_saved=pending[item['video_id']])
             results.append(item)
         return sorted(results, key=lambda item: relevance(query, item['title'], item['artist']), reverse=True)[:20]
 
@@ -175,12 +186,8 @@ class MusicSearch:
         # Serialize intent creation and provider writes, without a database lock.
         # An unknown outcome is reconciled on subsequent requests, never replayed.
         with self._write_slot():
-            prior = None
-            for action in self.actions.get_pending_actions(SAVE_SONG):
-                params = json.loads(action.params_json)
-                if params['account_id'] == account and params['song']['video_id'] == video:
-                    prior = (action.id, params)
-                    break
+            prior = next(((action_id, params) for action_id, params in self._pending_saves(account)
+                          if params['song']['video_id'] == video), None)
             if prior:
                 action_id, params = prior
                 query, onboarding = params['query'], params['onboarding']

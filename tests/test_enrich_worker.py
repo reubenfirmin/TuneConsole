@@ -114,7 +114,7 @@ def test_unexpected_sql_failure_still_logs_batch_traceback(store, monkeypatch, c
 
 
 def _unprocessed(store, vid="v1", title="S", artist="A"):
-    store.settings.set_setting("enrich_caught_up_at", "100")        # created_at below -> not "new"
+    store.enrichment_queue.save_caught_up_at(100)
     return store.tracks.upsert_track(vid, title, artist, None, 200, created_at=1.0)
 
 
@@ -124,7 +124,7 @@ def test_drain_processes_batch_and_marks_timestamps(store):
     assert w.drain_once(limit=10) == 1
     assert w.calls == [[t]]                                 # waterfall got the batch
     row = store.conn.execute(
-        "SELECT first_enriched_at f, last_enriched_at l FROM tracks WHERE id=?", (t,)).fetchone()
+        "SELECT first_enriched_at f, last_enriched_at l FROM catalog_tracks WHERE id=?", (t,)).fetchone()
     assert row["f"] == 1000.0 and row["l"] == 1000.0
     assert store.enrichment_reports.queue_remaining() == 0                    # nothing left unprocessed
 
@@ -134,7 +134,7 @@ def test_stamps_caught_up_after_primary_drains(store):
     w = make_worker(store, now=1000.0)
     w.drain_once()                                         # drains the one track (_had_work=True)
     assert w.drain_once() == 0                             # primary empty now
-    assert float(store.settings.get_setting("enrich_caught_up_at")) == 1000.0
+    assert store.enrichment_queue.caught_up_at() == 1000.0
 
 
 @pytest.mark.parametrize('pause', ['setting', 'recommendation-retirement'])
@@ -241,7 +241,7 @@ def test_radio_priority_preserves_provider_retry_deadline(store):
 
 def test_resweep_reprocesses_stale_incomplete(store):
     t = store.tracks.upsert_track("v1", "S", "A", None, 200, created_at=1.0)
-    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.enrichment_queue.save_caught_up_at(100)
     store.settings.set_setting("enrich_resweep_days", "0")          # everything older than 'now' is stale
     complete_entries(store, [t], now=1.0)                      # processed, still missing all fields
     w = make_worker(store, now=1000.0)
@@ -249,7 +249,7 @@ def test_resweep_reprocesses_stale_incomplete(store):
     assert w.drain_once() == 1                             # picked up by re-sweep
     assert w.calls == [[t]]
     assert store.conn.execute(
-        "SELECT last_enriched_at l FROM tracks WHERE id=?", (t,)).fetchone()["l"] == 1000.0
+        "SELECT last_enriched_at l FROM catalog_tracks WHERE id=?", (t,)).fetchone()["l"] == 1000.0
 
 
 def test_enrichment_fills_via_waterfall_are_persisted(store):
@@ -279,9 +279,9 @@ def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
     w.waterfall_fn = lambda *_args, **_kwargs: [first]
     assert w.drain_once(limit=10) == 1
     assert store.conn.execute(
-        "SELECT first_enriched_at FROM tracks WHERE id=?", (first,)).fetchone()[0] == 1000.0
+        "SELECT first_enriched_at FROM catalog_tracks WHERE id=?", (first,)).fetchone()[0] == 1000.0
     assert store.conn.execute(
-        "SELECT first_enriched_at FROM tracks WHERE id=?", (second,)).fetchone()[0] is None
+        "SELECT first_enriched_at FROM catalog_tracks WHERE id=?", (second,)).fetchone()[0] is None
     assert [t["id"] for t in store.enrichment_queue.next_enrich_batch(10)] == [second]
 
 

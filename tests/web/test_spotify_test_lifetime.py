@@ -48,7 +48,7 @@ def _blocked_job(store, open_client, phase):
                 self.block()
             return super().create_playlist(title, description)
 
-    identity = store.accounts.upsert_account('Main', 'bridge', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     remote = BlockingClient(search_results=[_track('yt', 'Song', 'Artist')],
                             catalog={'yt': _track('yt', 'Song', 'Artist')})
     web = open_client(create_app(store, lambda: {identity: remote}, now_fn=lambda: 1000,
@@ -162,7 +162,7 @@ def test_failed_body_drains_spotify_work_and_closes_http_before_store(store, pha
 
 @pytest.mark.parametrize('status', [None, 'queued', 'running'])
 def test_idle_work_tracker_does_not_hide_an_unfinished_or_missing_job(store, spotify_clients, status):
-    identity = store.accounts.upsert_account('Main', 'bridge', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     web = spotify_clients(create_app(store, lambda: {}, background_work=False))
     if status is not None:
         save_job(store, {'status': status, 'account_id': identity, 'started_at': 1000})

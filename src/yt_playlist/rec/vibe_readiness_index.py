@@ -2,6 +2,7 @@
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import home_vibe, musical_character, vibe_recording_rules as vibe_preparation
 from yt_playlist.rec.vibe_pool_contract import POOL_LIMIT
+from yt_playlist.rec.vibe_score_policy import score_patterns
 from yt_playlist.rec.vibe_support import supported
 
 VERSION = 2
@@ -56,10 +57,11 @@ def project(bundle, *, include_genres=True, genre_request=None):
 
 
 def compact(value):
+    patterns = score_patterns()
     for item in value['tracks']:
         check_cancellable_work()
         item['order'] = {preset: home_vibe.order_key(item, preset) for preset in home_vibe.PRESETS}
-        item['supported'] = [preset for preset in home_vibe.PRESETS if supported(item, preset)]
+        item['supported'] = [preset for preset in home_vibe.PRESETS if supported(item, preset, patterns=patterns)]
         item.pop('musical', None)
         item.pop('score', None)
     return value

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from tests import model_support
+from tests.group_support import publish_keyed
 from tests.genre_catalog_support import bound_catalog
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
@@ -32,9 +33,9 @@ def seed_completed_catalog(store):
                                [(i + 1, item['artist'].lower()) for i, item in enumerate(items)])
         store.conn.executemany("INSERT INTO entry_artists VALUES (?,0,?,?,'fixture')",
                                [(i + 1, i + 1, item['artist']) for i, item in enumerate(items)])
-        store.conn.executemany('UPDATE recordings SET bpm=?,energy=? WHERE id=?',
+        store.conn.executemany('UPDATE recordings SET bpm=?,danceability=? WHERE id=?',
                                [(80 + i, (i % 10) / 10, i + 1) for i in range(80)])
-        account = store.accounts.upsert_account('Listener', 'fixture', None, True)
+        account = store.accounts.upsert_account('Listener', None, True)
         tids = [i + 1 for i in range(80)]
         for i in range(8):
             playlist = store.playlists.upsert_playlist(account, f'p{i}', f'Playlist {i}', 20, '', 1)
@@ -87,7 +88,7 @@ def test_catalog_keeps_eighty_tracks_three_genres_and_eight_overlapping_baskets(
     store = parity['store']
     assert len(parity['tids']) == len(store.rec_query.library_keys()) == 80
     assert store.rec_query.track_audio_features() == {
-        f'song {i:03}|artist {i}': {'bpm': 80 + i, 'energy': (i % 10) / 10} for i in range(80)}
+        f'song {i:03}|artist {i}': {'bpm': 80 + i, 'danceability': (i % 10) / 10} for i in range(80)}
     assert {genre for genre, _ in store.rec_query.track_content().values()} == {'Techno', 'Jazz', 'Rock'}
     assert store.conn.execute('SELECT count(*) FROM playlists').fetchone()[0] == 8
     assert [row[0] for row in store.conn.execute(
@@ -146,16 +147,18 @@ def test_established_artist_content_has_real_vectors_for_each_artist(established
 @pytest.fixture(scope='module')
 def established_modes(established_artist_content):
     store = established_artist_content['store']
-    assert model_support.publish_modes(store, 2000) >= 3
+    publish_keyed(store, [(genre, [f'song {i:03}|artist {i}' for i in range(80) if i * 3 // 80 == index],
+                          index * .4) for index, (_, genre) in enumerate(GENRES)])
     established_artist_content['expected'] = {
         space: dict(getattr(store.rec_model, 'get_' + space)()) for space in SPACES}
     return established_artist_content
 
 
-def test_established_modes_retain_the_real_eighty_subject_admission(established_modes):
-    modes = established_modes['store'].modes.list_modes(active_only=True)
-    assert len(modes) >= 3
-    assert sum(mode['size'] for mode in modes) == 80
+def test_established_groups_retain_the_real_eighty_subject_admission(established_modes):
+    groups = established_modes['store'].taste_groups
+    membership = groups.leaf_members(groups.head_generation())
+    assert len(set(membership.values())) >= 3
+    assert len(membership) == 80
 
 
 @pytest.fixture(scope='module')
@@ -181,7 +184,7 @@ def test_established_surface_rankers_return_real_playable_candidates(established
 def capture_plan(store, rankings):
     # Scoring is independently real immediately above/below. Feed that exact
     # detached lower-layer result to the real bucketing/PPR/policy/file owners.
-    def completed_rankings(reader, now, limit):
+    def completed_rankings(reader, now, limit, *, listening):
         assert now == 2000 and limit >= 80
         assert len(reader.rec_query.library_keys()) == 80
         return rankings

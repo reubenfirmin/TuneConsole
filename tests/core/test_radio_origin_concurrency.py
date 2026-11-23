@@ -18,7 +18,7 @@ def test_radio_origins_use_owned_connection_while_enrichment_holds_writer(instal
     with store._lock, store.conn:
         radio_provenance.remember(store.conn, 'known-radio')
     store.transient_radio_playlists.add('unsaved-radio')
-    original = RadioCheckpointRepo.origin_facts.__wrapped__
+    original = RadioCheckpointRepo.playlist_ids.__wrapped__
     connections = []
 
     def owned_read(repository):
@@ -30,7 +30,7 @@ def test_radio_origins_use_owned_connection_while_enrichment_holds_writer(instal
 
     # Instrument inside the read decorator, where SQL actually uses the admitted reader.
     from yt_playlist.repos.base import snapshot_read
-    monkeypatch.setattr(RadioCheckpointRepo, 'origin_facts', snapshot_read(owned_read))
+    monkeypatch.setattr(RadioCheckpointRepo, 'playlist_ids', snapshot_read(owned_read))
     locked, release = threading.Event(), threading.Event()
 
     def enrichment():

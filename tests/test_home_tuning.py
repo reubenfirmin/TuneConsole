@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+from copy import deepcopy
 import re
 
 import pytest
@@ -16,7 +17,7 @@ from tests.test_home_other_genres import (
     template_bytecode,
 )
 from tests.test_mode_cards_route import prepare_home
-from yt_playlist.rec import graduation, mix_tuning, mode_surfaces, rec_params, scoring
+from yt_playlist.rec import graduation, mix_tuning, mode_surfaces, rec_params, scoring, vibe_serving
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'tuning_routes', 'genre_http_inputs',
@@ -40,12 +41,12 @@ def _pristine_current_schema():
 
 
 def prepare_tuning_home(store, now):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     prepare_home(store, now)
 
 
 def client_at(store, clock):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0],
                                  background_work=False),
                       base_url="http://127.0.0.1")
@@ -66,11 +67,10 @@ def home_clients(store):
 
 @pytest.fixture
 def prepared_tuning(store, genre_http_inputs, monkeypatch):
-    # Preserve all six original themes, four lanes and four songs per lane.
-    # Expiry consumes one completed menu; worker alternative enumeration has
-    # separate tests. Keep real genre selection, publication and control SQL.
+    # Keep real genre ranks, preference writes and deadlines. The Vibe
+    # selection itself is covered by the Vibe route and browser tests.
     seed_genres(store, tracks_per_lane=4)
-    store.accounts.upsert_account('main', 'cred', None, True)
+    store.accounts.upsert_account('main', None, True)
     _publish_menu(store, 1000.0)
     payload = store.rec_proposals.get_proposals('home_prepared')
     selected = payload['menus'][0]['protos']
@@ -78,6 +78,9 @@ def prepared_tuning(store, genre_http_inputs, monkeypatch):
     # original HTTP adjustment and real persisted state; genre ranking and
     # breadth-dependent selection retain their own tests.
     monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
+    monkeypatch.setattr(vibe_serving, 'assemble', lambda *args, **kwargs: [
+        {'lane': proto['lane'], 'mode_id': proto.get('mode_id'), 'label': proto['label'],
+         'ranker': 'lane', 'tracks': deepcopy(proto['tracks'])} for proto in selected])
     # Breadth is the scalar this workflow edits. Supply the other registered
     # parameters as completed lower inputs instead of rereading their unchanged
     # settings during every fragment; breadth and all preference writes stay real.
@@ -140,7 +143,7 @@ def test_clear_resets_genre_selections_and_all_biases_together(store, prepared_t
     ("/home/fingerprint/add", {"axis": "genre:gqom"}),
     ("/home/fingerprint/remove", {"axis": "genre:jazz"}),
 ])
-def test_every_control_expires_at_four_hours_without_reads_extending_it(
+def test_waiting_controls_expire_at_idle_limit_without_reads_extending_it(
         store, path, data, prepared_tuning, home_clients):
     clock = [1000.0]
     client = home_clients(clock)
@@ -170,19 +173,52 @@ def test_last_adjustment_extends_window_and_new_session_drops_expired_choices(
     clock = [1000.0]
     client = home_clients(clock)
     client.post("/home/mix-genres", data={"genres": "jazz"})
-    clock[0] += 3600
+    clock[0] += mix_tuning.TTL_S // 2
     client.post("/home/steer", data={"axis": "genre:jazz", "weight": "2"})
     clock[0] = 1000 + mix_tuning.TTL_S
     client.get("/home/cards")
     assert store.rec_model.get_lean("genre:jazz") == 2
     assert store.rec_proposals.get_proposals("home_genre_request")["include_genres"] == ["jazz"]
 
-    clock[0] += 3600
+    clock[0] += mix_tuning.TTL_S
     client.post("/home/breadth", data={"breadth_bias": ".5"})
     assert store.rec_model.get_leans() == {}
     assert store.rec_proposals.get_proposals("home_genre_request") == {}
     assert rec_params.get_param(store, "breadth_bias") == .5
     assert mix_tuning.remaining(store, clock[0]) == mix_tuning.TTL_S
+
+
+@pytest.mark.parametrize('observe_close', [False, True])
+def test_preplay_taste_and_home_steering_belong_to_the_first_session(
+        store, prepared_tuning, home_clients, observe_close):
+    clock = [1000.]
+    client = home_clients(clock)
+    account = store.accounts.upsert_account('main', None, True)
+    rec_params.set_weight(store, 'genre:jazz', 1.7, now=clock[0])
+    response = client.post('/home/vibe', data={'vibe': 'relax'})
+    assert float(response.headers['X-Mix-Tuning-Remaining']) == mix_tuning.TTL_S
+    assert store.rec_model.get_session_weights(clock[0]) == {'genre:jazz': 1.7}
+
+    store.history.record_play_event(account, 'first', 'first', 1060., source_timezone='UTC')
+    clock[0] = 1061.
+    response = client.get('/home/cards')
+    assert float(response.headers['X-Mix-Tuning-Remaining']) == mix_tuning.TTL_S - 1
+    assert store.settings.get_setting('home_mix_vibe') == 'relax'
+    assert store.rec_model.get_session_weights(clock[0]) == {'genre:jazz': 1.7}
+
+    store.player_events.record_player_event(account, 'bye', 'first', 60, 200, None, '{}', 1120.)
+    if observe_close:
+        clock[0] = 1121.
+        response = client.get('/home/cards')
+        assert float(response.headers['X-Mix-Tuning-Remaining']) == 0.
+        assert store.rec_model.get_session_weights(clock[0]) == {}
+
+    store.history.record_play_event(account, 'second', 'second', 1150., source_timezone='UTC')
+    clock[0] = 1151.
+    response = client.get('/home/cards')
+    assert float(response.headers['X-Mix-Tuning-Remaining']) == 0.
+    assert store.settings.get_setting('home_mix_vibe') is None
+    assert store.rec_model.get_session_weights(clock[0]) == {}
 
 
 def test_vibe_expiry_restores_still_active_genre_controls_without_resetting_them(
@@ -191,7 +227,7 @@ def test_vibe_expiry_restores_still_active_genre_controls_without_resetting_them
     clock = [1000.0]
     client = home_clients(clock)
     client.post('/home/vibe', data={'vibe': 'relax'})
-    clock[0] += 3600
+    clock[0] += mix_tuning.TTL_S // 2
     client.post('/home/mix-genres', data={'genres': 'jazz'})
     client.post('/home/steer', data={'axis': 'genre:techno', 'weight': '2'})
     clock[0] = 1000 + mix_tuning.TTL_S
@@ -199,7 +235,7 @@ def test_vibe_expiry_restores_still_active_genre_controls_without_resetting_them
     assert not home_vibe.current(store, clock[0])
     assert store.rec_model.get_lean('genre:techno') == 2
     assert store.rec_proposals.get_proposals('home_genre_request')['include_genres'] == ['jazz']
-    assert mix_tuning.remaining(store, clock[0]) == 3600
+    assert mix_tuning.remaining(store, clock[0]) == mix_tuning.TTL_S // 2
 
 
 def test_ordinary_expiry_keeps_a_newer_vibe_and_clearing_vibe_keeps_newer_controls(store, home_clients):
@@ -207,13 +243,13 @@ def test_ordinary_expiry_keeps_a_newer_vibe_and_clearing_vibe_keeps_newer_contro
     prepare_tuning_home(store, clock[0])
     client = home_clients(clock)
     client.post('/home/steer', data={'axis': 'genre:jazz', 'weight': '2'})
-    clock[0] += 3600
+    clock[0] += mix_tuning.TTL_S // 2
     client.post('/home/vibe', data={'vibe': 'cruise'})
     clock[0] = 1000 + mix_tuning.TTL_S
     client.get('/home/cards')
     assert not store.rec_model.get_leans()
     assert store.settings.get_setting('home_mix_vibe') == 'cruise'
-    assert mix_tuning.remaining(store, clock[0]) == 3600
+    assert mix_tuning.remaining(store, clock[0]) == mix_tuning.TTL_S // 2
     client.post('/home/breadth', data={'breadth_bias': '.8'})
     deadline = store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING)
     client.post('/home/vibe', data={'vibe': ''})

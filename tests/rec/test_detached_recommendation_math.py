@@ -9,7 +9,7 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.rec import (candidate_policy, candidate_refresh, content_model, eval_recs,
-    graduation, layers, model_refresh, musical_preparation, negative, ppr, product_comparison,
+    graduation, layers, model_refresh, musical_preparation, ppr,
     scoring, taste_analysis, transient)
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -24,13 +24,6 @@ def test_centroids_skip_empty_and_opposing_members_and_default_to_uniform_weight
     assert taste.titles == ['east', 'north'] and taste.pids == [2, 3]
     np.testing.assert_allclose(taste.centroids, np.eye(2))
     np.testing.assert_allclose(taste.weights, [.5, .5])
-
-
-def test_dislike_direction_is_bounded_zero_safe_and_opposing_evidence_cancels():
-    candidates = np.array([[2., 0.], [-3., 0.], [0., 1.], [0., 0.]])
-    np.testing.assert_allclose(negative._penalty_from_rows(candidates, candidates, [0], .4), [-.4, 0, 0, 0])
-    np.testing.assert_allclose(negative._penalty_from_rows(candidates, candidates, [0, 1], .4), 0)
-    np.testing.assert_allclose(negative._penalty_from_rows(candidates, candidates, [3], .4), 0)
 
 
 def test_axis_weights_preserve_mutes_and_unknown_metadata_neutrality():
@@ -76,12 +69,12 @@ def test_now_and_session_use_explicit_gates_windows_and_decay():
 def test_transient_decay_preserves_unknown_denominator_and_negative_artist_safety():
     now = 86400.
     facets = transient.facets_from_metadata(['a', 'b', 'unknown'], {'a': 'Jazz'},
-        {'b': '1990'}, {'a': 'artist'}, {'Jazz': ('jazz', 'bebop')})
+        {'b': '1990'}, {'a': 'artist', 'b': 'skipped artist'}, {'Jazz': ('jazz', 'bebop')})
     contributions = transient.signed_contributions(now, [(0, 2., ['a', 'a', 'unknown'])],
-        [], [], [('a', now)], [('b', now)], play_w=1., like_w=1., dislike_w=.25, skip_w=.5,
-        play_hl=1., mood_hl=1., like_hl=1., dislike_hl=1., skip_hl=1.)
+        [], [], [('b', now)], play_w=1., like_w=1., skip_w=.5,
+        play_hl=1., mood_hl=1., like_hl=1., skip_hl=1.)
     leans = transient.facet_leans_from_inputs(contributions, facets, [({'jazz'}, .4), ({'jazz'}, .2)])
-    assert leans == pytest.approx({'genre:jazz': .65, 'genre:bebop': .25,
+    assert leans == pytest.approx({'genre:jazz': .9, 'genre:bebop': .5,
                                  'artist:artist': .5, 'era:1990': -.5})
     assert transient.play_leans_from_inputs([('a', 0), ('unknown', now)], facets, now,
         weight=.8, half_life_d=1) == pytest.approx({'genre:jazz': .4, 'genre:bebop': .4, 'artist:artist': .4})
@@ -106,9 +99,9 @@ def test_detached_walk_conserves_mass_including_isolated_tracks_and_rejects_stal
 
 def test_mood_components_keep_missing_audio_neutral_and_do_not_renormalize_decay():
     matrix = np.array([[2., 0.], [0., 0.]])
-    result = scoring.mood_components_from_inputs([.2, .4], matrix, np.array([-.1, 0.]),
-        np.array([.5, 0.]), None, session_alpha=.8, audio_boost=None, audio_weight=1.)
-    np.testing.assert_allclose(result['combined'], [.2 - .1 + scoring.MOOD_ALPHA * .5, .4])
+    result = scoring.mood_components_from_inputs([.2, .4], matrix, np.array([.5, 0.]),
+        np.array([-.125, 0.]), session_alpha=.8, audio_boost=None, audio_weight=1.)
+    np.testing.assert_allclose(result['combined'], [.2 + scoring.MOOD_ALPHA * .5 - .1, .4])
     assert scoring.discovery_multiplier(0., 2., 2.) is None
     assert graduation.mood_contributions(['a', 'a', 'unknown'], {'genre:jazz': ['a']}, 2.) == {'genre:jazz': 1.}
     assert graduation.mood_contributions(['a'], {'genre:jazz': ['a']}, -2.) == {}
@@ -133,39 +126,34 @@ def test_freshness_tracks_decay_configuration_and_deadlines_without_source_write
 def preparation_inputs():
     content = content_model.ContentInputs(['a', 'b'], {'a': ('Jazz', 1960), 'b': ('Rock', 1990)}, {})
     return model_refresh.PreparationInputs(method='svd', dim=2, baskets=[['a', 'b']], weights=None,
-        fingerprints=dict.fromkeys(('rec_fit_inputs', 'rec_artist_fit_inputs', 'rec_mode_fit_inputs')),
+        recording_fit=None, artist_fit=None,
         content=content, previous={'model': None, 'inputs': None, 'revision': '', 'library': [], 'discovered': []},
         discoveries=[], axes={'Jazz': ('jazz', None), 'Rock': ('rock', None)},
-        artist_profiles={}, artist_baskets=[], mode_params={'modes_k': 2, 'modes_min_members': 2,
-        'modes_match_threshold': .5}, modes=[], next_mode_id=1,
-        genres={'a': 'Jazz', 'b': 'Rock'}, track_count=0)
+        artist_profiles={}, artist_baskets=[], track_count=0)
 
 
 def test_model_fingerprints_chain_through_new_content_and_reuse_unchanged_fits(monkeypatch):
     from yt_playlist.rec import mode_discovery
-    original = mode_discovery.discover_from_inputs
-    discover = Mock(wraps=original)
+    discover = Mock(side_effect=AssertionError('the vector fit must not cluster fixed modes'))
     monkeypatch.setattr(mode_discovery, 'discover_from_inputs', discover)
     captured = preparation_inputs()
     first = model_refresh.calculate(captured, 100, new_generation=lambda: 'first')
-    reference = {'model': first['settings']['rec_content_model'], 'inputs': first['settings']['rec_content_inputs'],
-        'revision': first['settings']['rec_content_genre_revision'], 'library': first['vectors']['rec_content_vectors'],
+    recording = first['recording']
+    reference = {'model': recording.encoder, 'inputs': recording.input_fingerprint,
+        'revision': recording.genre_revision, 'library': first['vectors']['rec_content_vectors'],
         'discovered': first['vectors']['rec_discovered_content_vectors'], 'generation': 'first'}
-    fitted = replace(captured, previous=reference, fingerprints=first['settings'])
+    fitted = replace(captured, previous=reference, recording_fit=recording.fit_fingerprint,
+                     artist_fit=first['artist'].fit_fingerprint)
     assert model_refresh.calculate(fitted, 101)['vectors'] == {}
-    discover.assert_called_once()
     modified = replace(fitted, content=content_model.ContentInputs(['a', 'b'],
-        {'a': ('Jazz', 1960), 'b': ('Jazz', 1990)}, {}), genres={'a': 'Jazz', 'b': 'Jazz'})
+        {'a': ('Jazz', 1960), 'b': ('Jazz', 1990)}, {}))
     changed = model_refresh.calculate(modified, 102, new_generation=lambda: 'changed')
     assert 'rec_vectors' not in changed['vectors']
-    assert changed['settings']['rec_mode_fit_inputs'] != first['settings']['rec_mode_fit_inputs']
-    assert discover.call_count == 2
-    keys, matrix = discover.call_args.args
-    actual = dict(changed['vectors']['rec_content_vectors'])
-    for index, key in enumerate(keys):
-        np.testing.assert_array_equal(matrix[index], np.frombuffer(actual[key], dtype=np.float32))
-    model = json.loads(changed['settings']['rec_content_model'])
-    assert discover.call_args.kwargs['space'] == content_model.content_model_fingerprint(model)
+    assert changed['recording'].input_fingerprint != recording.input_fingerprint
+    assert changed['recording'].generation == 'changed'
+    assert changed['vectors']['rec_content_vectors'] != first['vectors']['rec_content_vectors']
+    assert 'modes' not in changed and 'settings' not in changed
+    discover.assert_not_called()
 
 
 def test_detached_budget_rejection_precedes_numerical_fitting(monkeypatch):
@@ -184,17 +172,6 @@ def test_musical_profiles_require_admitted_inputs_and_keep_unknown_explicit():
         musical_preparation.recordings(rows)
     with pytest.raises(TypeError):
         musical_preparation.masked_recordings(rows)
-
-
-def test_assignment_is_stable_per_day_and_respects_epoch_constraints():
-    current = dict(phase='observing', started_at=0, exposure_until=2 * 86400, constraints='intent',
-        seed='fixed', run_id=7, policy={'version': 'v1'}, generation='generation')
-    first = product_comparison.select_assignment(current, 'mixes', 'one', 100, paused=False, constraints='intent')
-    second = product_comparison.select_assignment(current, 'albums', 'two', 200, paused=False, constraints='intent')
-    assert first['arm'] == second['arm'] and first['unit'] == second['unit']
-    for now, paused, constraints in ((100, True, 'intent'), (100, False, 'changed'), (2 * 86400, False, 'intent')):
-        assert product_comparison.select_assignment(current, 'radio', 'three', now,
-                                                    paused=paused, constraints=constraints) is None
 
 
 def test_detached_evaluation_retains_missing_and_causal_boundaries(monkeypatch):

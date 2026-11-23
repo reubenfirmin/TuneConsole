@@ -1,3 +1,12 @@
+# THERE IS NO LEGACY
+THIS IS NOT AN ENTERPRISE PRODUCT. DO NOT CREATE ENTERPRISE INFRASTRUCTURE. IT IS A PERSONAL DEVICE PRODUCT RUNNING LOCALLY. IT NEEDS TO BE ROBUST, AND HIGH QUALITY, BUT IT DOES NOT NEED BANK LEVEL GUARANTEES. DATA IS ENTIRELY REBUILDABLE FROM YOUTUBE IN THE EVENT OF DISASTER.
+
+- TuneConsole is pre-release. Deliver one cohesive implementation. When replacing
+  a design, move its callers to the replacement and remove the superseded code,
+  storage, views, and compatibility shims in the same delivery.
+- Preserve user data through a complete migration. Keep any code needed to read
+  the old format inside the upgrade path and remove superseded storage at cutover.
+
 # Agent ticket security
 
 - Read the agent queue with `./scripts/agent-tickets.py list --status Ready`
@@ -89,12 +98,15 @@
 
 # Schema changes
 
-- Keep regular schema migrations bounded. Bulk data conversions belong in
-  resumable one-time preparation scripts with separate progress and recovery;
-  they must not hold up regular migrations or ordinary application use.
-- Keep supported installed formats compatible with reads and continuing writes
-  while preparation is incomplete. Retiring old storage and compatibility code
-  belongs to a separately tracked future cleanup after verification and cutover.
+- Get explicit user approval before creating a new database table, including
+  replacing an existing table with a new logical table. Present the proposed
+  schema, what the table would store, and why existing tables cannot hold that
+  data before asking for approval.
+- Use normal SQLite migrations against the installed database. Use pre-migration
+  and post-migration script hooks for work that needs them. Do not build, stage,
+  or swap a replacement database as part of a migration.
+- Complete and verify the migration in the same delivery, including removal of
+  superseded storage and runtime compatibility code.
 - Preserve applied migration history. Do not mark unfinished conversion complete
   to let the migration runner advance.
 
@@ -102,7 +114,8 @@
 
 - Local checks against the actual library use `./scripts/test-library.py`
   to prepare a shared immutable baseline and acquire a private writable snapshot.
-  See `tests/README.md` for setup, refresh, generation selection and cleanup.
+  See [Local actual-library workspaces](tests/README.md#local-actual-library-workspaces)
+  for setup, refresh, generation selection and cleanup.
   Do not repeat SQLite backup or domain export/restore for ordinary implementation
   checks. Explicit export/recovery tests still exercise those operations.
   Read-only inspections can use the frozen baseline directly through the manager.
@@ -174,6 +187,18 @@
 
 These instructions apply to the agent assigned the review role. Implementing
 agents hand their work to the reviewer for independent acceptance.
+
+## Test library maintenance
+
+- The review agent owns baseline freshness. Before using the actual library for
+  acceptance, check `./scripts/test-library.py list`. Run
+  `./scripts/test-library.py prepare --refresh` when the baseline is missing or
+  predates library changes relevant to the review. Confirm the new baseline is
+  ready and record its ID and capture time with the review evidence.
+- Mounting the volume makes its existing contents available. Refresh deletes
+  the old test copy first and reads the live library directly. The app and
+  tests can keep running. Routine refresh runs as the current user. If capture
+  fails, check the error, fix the cause and retry.
 
 ## Responsibility and takeover
 

@@ -70,22 +70,25 @@ def schedule_first_check(store, now):
     Persist the deadline so restarting during onboarding does not reset the delay.
     Existing installations with a checked or cached release keep their schedule.
     """
-    checks(store.settings, AccessState.for_store(store)).schedule_first(now)
+    checks(store).schedule_first(now)
 
 
 def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
     """At most once per interval_s, refresh the cached latest release. Always stamps the check time
     (so a persistent failure retries at most once per interval). Access errors are silent;
     explicit work cancellation propagates without stamping a completed check."""
-    checks(store.settings, AccessState.for_store(store)).check(now, interval_s=interval_s)
+    checks(store).check(now, interval_s=interval_s)
 
 
-def checks(settings, access):
+def checks(store):
     """Bind host metadata and release I/O to the detached command owner."""
+    access = AccessState.for_store(store)
+
     def latest():
         with _github.context(access):
             return _fetch_latest_release()
-    return UpdateChecks(settings, latest, current_version=current_version, install_kind=install_kind)
+    return UpdateChecks(store.enrichment_state, store.settings, latest, current_version=current_version,
+                        install_kind=install_kind)
 
 
 def install_kind() -> str:
@@ -111,4 +114,4 @@ def update_nudge(store):
     A source/editable checkout (is_dev_install) is never nagged: it runs HEAD code, its reported
     version is a stale hatch-vcs snapshot, and it is not managed by any package manager, so 'you are
     behind, reinstall a release' would be both wrong and unactionable."""
-    return checks(store.settings, AccessState.for_store(store)).offer()
+    return checks(store).offer()

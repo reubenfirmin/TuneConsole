@@ -70,8 +70,7 @@ class EnrichWorker:
             self._started = True
             self._shutdown = False
             self._wake.clear()
-        if not self.ctx.store.settings.get_setting("enrich_caught_up_at"):
-            self.ctx.store.settings.set_setting("enrich_caught_up_at", str(self._now()))
+        self.ctx.store.enrichment_queue.save_caught_up_at(self._now(), initialize=True)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 

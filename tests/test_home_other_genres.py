@@ -98,7 +98,7 @@ def test_genre_control_candidates_keep_all_four_lanes_and_the_real_typed_head(ge
     template = genre_control_candidates
     assert template.source.recommendations.head('home')
     assert template.source.rec_proposals.get_proposals(home_prepared.SURFACE) is None
-    assert template.source.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 24
+    assert template.source.conn.execute('SELECT count(*) FROM track_sources WHERE library_origin IS NOT NULL').fetchone()[0] == 24
     for mid in map(str, range(6)):
         assert set(template.bundles[mid]) == set(mode_surfaces.CARD_SURFACES)
         assert {len(items) for items in template.bundles[mid].values()} == {4}
@@ -114,7 +114,7 @@ def genre_controls_template(genre_control_candidates):
 def test_genre_controls_input_keeps_four_real_recordings_per_family_and_prepared_menu(genre_controls_template):
     template = genre_controls_template
     assert home_prepared._valid(home_cache.read(template.source, home_prepared.SURFACE))
-    assert template.source.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 24
+    assert template.source.conn.execute('SELECT count(*) FROM track_sources WHERE library_origin IS NOT NULL').fetchone()[0] == 24
     assert len(template.source.modes.list_modes(active_only=True)) == 6
     for mid in map(str, range(6)):
         assert {len(items) for items in template.bundles[mid].values()} == {4}
@@ -189,12 +189,14 @@ def _publish_menu(store, now):
     home_cache.put(store, home_prepared.SURFACE, payload, now)
     home_cache.put(store, 'home_tuned', {}, now)
     home_cache.put(store, 'home_choice', {}, now)
+    store.rec_proposals.publish_library_taste_summary({**payload['fingerprint'],
+        'genre_options': payload['genre_options'], 'genre_plays': {}}, now)
 
 
 def _client(store, now=1000.0, *, prepare=True):
     from yt_playlist.web.app import create_app
 
-    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     if prepare and not home_prepared._valid(home_cache.read(store, home_prepared.SURFACE)):
         _publish_menu(store, now)
     return TestClient(create_app(store, lambda: {identity: FakeClient()},
@@ -289,12 +291,22 @@ def offered(response):
             for g in json.loads(html.unescape(value))}
 
 
-def test_no_alternative_genres_keeps_usable_mixes_and_explains(store, genre_controls):
-    response = _client(store).post("/home/other-genres", data={
+def test_no_alternative_genres_keeps_usable_mixes_and_explains(store):
+    seed_genres(store, tracks_per_lane=8)
+    client = _client(store)
+    initial = client.get("/home/cards")
+    response = client.post("/home/other-genres", data={
         "genres": json.dumps(["Jazz", "Techno", "Trance", "Indie Rock", "Ambient", "Classical"])})
-    assert response.status_code == 200
+    assert initial.status_code == response.status_code == 200
     assert "No other genre themes are ready yet" in response.text
-    assert len(offered(response)) == 4
+    for fragment in (initial, response):
+        cards = re.findall(r'<section class="gen-card card" id="gen-([^"]+)"[^>]*>(.*?)</section>',
+                           fragment.text, re.S)
+        assert len(cards) == 4
+        assert {lane for lane, _ in cards} == {'wheelhouse', 'explore', 'fresh', 'comfort'}
+        for lane, card in cards:
+            assert 'hx-post="/home/generate"' in card, lane
+            assert re.search(r'\bdata-vid="[^"]+"', card), lane
 
 
 def test_invalid_genre_request_does_not_advance_rotation(store):
@@ -347,7 +359,7 @@ def test_other_genres_uses_current_library_genres_before_rendering(store, genre_
     for item in {item['key']: item for items in bundles["1"].values() for item in items}.values():
         assert item['genre'] == 'Techno'
         entry = store.conn.execute(
-            'SELECT e.id FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id '
+            'SELECT e.id FROM track_sources e JOIN recordings r ON r.id=e.recording_id '
             'WHERE r.identity_key=?', (item['key'],)).fetchone()
         assert entry is not None
         store.tracks.set_track_genre(entry[0], 'Jazz')
@@ -502,7 +514,7 @@ def test_available_genres_follow_current_metadata_and_artist_fallback(store):
 
 
 def test_available_genres_prioritize_listening_over_alphabet_and_candidate_volume(store, genre_candidates):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     for genre, count in {"Trance": 100, "Techno": 60, "Jazz": 20, "Ambient": 1}.items():
         tid = store.tracks.upsert_track(genre, genre, "Artist", None, None)
         store.tracks.set_track_genre(tid, genre)

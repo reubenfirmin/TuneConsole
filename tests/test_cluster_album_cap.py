@@ -10,14 +10,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.core import embeddings
-from yt_playlist.rec import embed
+from yt_playlist.rec import cluster_ranking
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -134,7 +134,7 @@ def test_discovery_exposure_counts_only_returned_ring_tracks(store, monkeypatch,
             "SELECT identity_key,first_shown,last_shown,offered_count FROM discovered_tracks")}
 
     before = exposures()
-    monkeypatch.setattr(embed, "cluster_expand", lambda *args, **kwargs:
+    monkeypatch.setattr(cluster_ranking, "rank_candidates", lambda *args, **kwargs:
                         [(key, 1 - i / 10) for i, key in enumerate(keys)])
     response = client.post("/clusters/expand", json={
         "pos_keys": [], "exclude": excluded, "include_new": True, "k": 1})

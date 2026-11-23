@@ -58,18 +58,19 @@ def test_graduation_never_suppresses(store):
     assert k not in store.rec_model.disliked_identity_keys()
 
 
-def test_recs_mood_route_feeds_graduation(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+def test_recs_mood_route_records_a_temporary_signal(store):
+    iid = store.accounts.upsert_account("main", None, True)
     tid = store.tracks.upsert_track("v1", "S", "Coltrane", None, None, 1)
     store.tracks.set_track_genre(tid, "jazz")
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(pid, [tid])
     c = TestClient_factory(store, iid)
     k = identity_key("S", "Coltrane")
-    c.post("/recs/mood", data={"keys": json.dumps([k]), "dir": "1", "intensity": "lot"})  # signed 2 -> crosses
-    # #85 the route nudged at now_fn()==1.0; read at the same `now` so reversion (vs real wall-clock
-    # time) doesn't erase the nudge before the assertion runs.
-    assert store.rec_model.get_weights(now=1.0).get("artist:Coltrane", 1.0) > 1.0
+    response = c.post("/recs/mood", data={"keys": json.dumps([k]), "dir": "1", "intensity": "lot"})
+    assert response.status_code == 200
+    assert store.rec_signals.recent_mood_events(1) == [(1.0, 2, [k])]
+    assert "artist:Coltrane" not in store.rec_model.weight_records()
+    assert store.rec_signals.get_theme("artist:Coltrane") is None
 
 
 def TestClient_factory(store, iid):

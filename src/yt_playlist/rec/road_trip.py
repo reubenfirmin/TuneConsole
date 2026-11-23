@@ -2,7 +2,7 @@
 from yt_playlist.rec.road_trip_rules import *
 from yt_playlist.rec.road_trip_rules import (_neighborhoods, _refresh_genre_families,
     _repair_artist_clusters, _pool_targets, _axis_genre, _bucket, _mix_source,
-    _quota_weights, _sample_order, _weight)
+    _quota_weights)
 
 
 def add_other_input(state, store, client, item):

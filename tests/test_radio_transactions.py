@@ -15,6 +15,7 @@ from tests.radio_session_support import (
     uncontended_poc as poc, completed_radio_schema, completed_radio_store, play,
 )
 from tests.conftest import FakeClient
+from yt_playlist.core.recommendation_custody import ROOTS as RECOMMENDATION_ROOTS
 from yt_playlist.library import generated_acquisition
 from yt_playlist.library.generated_acquisition import create_generated_playlist
 
@@ -48,11 +49,11 @@ def test_existing_radio_keeps_running_with_discarded_writes_and_resumes_saving(p
 
 
 def test_prepared_radio_starts_readonly_then_retains_its_publication_on_resume(poc, monkeypatch):
-    from tests.test_radio_preparation import prepare_radio_styles
+    from tests.test_radio_preparation import prepare_radio_track_groups
 
     c, _, frames, _, pool = poc
     store = c.ctx.store
-    prepare_radio_styles(c, pool, monkeypatch)
+    prepare_radio_track_groups(c, pool, monkeypatch)
     account = store.accounts.get_master_account().id
     provider = FakeClient(catalog={track['video_id']: {
         'videoId': track['video_id'], 'title': track['title'],
@@ -68,21 +69,168 @@ def test_prepared_radio_starts_readonly_then_retains_its_publication_on_resume(p
         assert result['ok'], result.get('reason')
         assert result['local_id'] is None
         assert len(provider.created) == len(frames) == 1
+        assert c.session.candidates.prepared is None
+        assert not provider.added
+        play(c, 'v1', playlist=result['playlist_id'])
         assert c.session.candidates.prepared.generation == generation
         assert store.conn.total_changes == changes
-        assert not store.conn.execute("SELECT 1 FROM recommendation_generation_refs WHERE kind='pending'").fetchone()
+        assert not store.conn.execute(f"SELECT 1 FROM {RECOMMENDATION_ROOTS} AND root.value->>0='pending'").fetchone()
     finally:
         store.conn.execute('PRAGMA query_only=OFF')
         store.activity_paused = False
     try:
-        c.retain_provenance()
-        c.retain_provenance()
+        play(c, 'v1', playlist=result['playlist_id'])
+        play(c, 'v1', playlist=result['playlist_id'])
         assert [row[0] for row in store.conn.execute(
-            "SELECT generation_id FROM recommendation_generation_refs WHERE kind='pending'")] == [generation]
+            f"SELECT g.id FROM {RECOMMENDATION_ROOTS} AND root.value->>0='pending'")] == [generation]
         assert c.session.candidates.prepared._lifetime.alive
         assert len(provider.created) == len(frames) == 1
     finally:
         c.session.candidates.close()
+
+
+@pytest.mark.parametrize('thin_group', [False, True], ids=['full-leaf', 'singleton-leaf'])
+def test_prepared_radio_records_the_click_before_playback(poc, monkeypatch, thin_group):
+    from tests.recommendation_support import publish_bundles
+    from tests.test_radio_preparation import prepare_radio_track_groups
+    from yt_playlist.rec import choice_evidence
+
+    radio, _, frames, _, pool = poc
+    store = radio.ctx.store
+    prepare_radio_track_groups(radio, pool, monkeypatch)
+    generation = store.taste_groups.head_generation()
+    members = {}
+    leaves = store.taste_groups.leaf_members(generation)
+    for key, group in leaves.items():
+        members.setdefault(group, []).append(key)
+    bundle = dict(store._fixture_bundle_payload)
+    if thin_group:
+        seed = pool[0]['key']
+        members[leaves[seed]] = [seed]
+        bundle['all'] = {'wheelhouse': pool[8:16]}
+    publish_bundles(store, {**bundle,
+        '_radio': {'generation': generation, 'members': members}}, 1234)
+
+    video = pool[0]['video_id']
+    menu = choice_evidence.issue(store, 'radio', [{'id': video, 'tracks': [pool[0]]}], 1200, context={})
+    assert choice_evidence.respond(store, menu, 'visible', 1201, visible=[video], synchronous=True)
+    with radio.launch_request('prepared-click') as launch:
+        monkeypatch.setattr(radio.ctx, 'now_fn', lambda: 1250.)
+        assert radio.start(seed_video_id=video, menu_id=menu, launch=launch)['ok']
+    assert radio.session.seeded_launch
+    assert len(frames) == 1 and radio.ctx.bridge.now_playing is None
+    assert [track['video_id'] for track in radio.session.selected] == [video]
+
+    def responses():
+        return [(row['kind'], row.get('option_id'), row['at'])
+                for row in store.rec_ledger.evidence().records('response')
+                if row['opportunity_id'] == menu and row['kind'] != 'experience']
+
+    click = [('visible', None, 1201), ('choice', video, 1234)]
+    assert responses() == click
+    monkeypatch.setattr(radio.ctx, 'now_fn', lambda: 1264.)
+    play(radio, video)
+    assert responses() == [*click, ('start', video, 1264)]
+
+
+@pytest.mark.parametrize('path', ['selected', 'saved', 'empty-readback', 'cancelled', 'rollback'])
+def test_radio_launch_reuses_one_readback_for_playback_and_undo(poc, monkeypatch, path):
+    c, _, frames, _, pool = poc
+    store = c.ctx.store
+    account = store.accounts.get_master_account().id
+    reads = []
+
+    class Provider(FakeClient):
+        def get_playlist(self, playlistId, limit=100):
+            reads.append((playlistId, limit))
+            detail = super().get_playlist(playlistId, limit=limit)
+            _, title, description = self.created[-1]
+            if path == 'empty-readback':
+                with store.read_view() as reader:
+                    assert reader.playlists.get_playlist_for_account(account, playlistId) is None
+                    assert not reader.actions.get_actions()
+                if len(reads) == 1:
+                    detail = {**detail, 'trackCount': 0, 'tracks': []}
+            return {**detail, 'title': title, 'description': description}
+
+    remote = Provider(catalog={t['video_id']: {'videoId': t['video_id'], 'title': t['title'],
+        'artists': [{'name': t['artist']}], 'duration_seconds': 180,
+        'setVideoId': 'handle-' + t['video_id']} for t in pool})
+    c.ctx.client_provider = lambda: {account: remote}
+    monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create_generated_playlist)
+
+    source = None
+    if path != 'selected':
+        source = store.playlists.upsert_playlist(account, 'SOURCE', 'Source playlist', 3, '', 1234.)
+        ids = store.tracks.track_ids_for_videos(['v1', 'v2', 'v3'])
+        store.playlists.set_playlist_tracks(source, [ids[video] for video in ('v1', 'v2', 'v3')])
+        monkeypatch.setattr(c.work, 'submit', lambda *args, **kwargs: None)
+    if path == 'cancelled':
+        add = remote.add_playlist_items
+
+        def cancel_after_add(*args, **kwargs):
+            result = add(*args, **kwargs)
+            assert c.stop(launch_id='browser-launch')['ok']
+            return result
+
+        monkeypatch.setattr(remote, 'add_playlist_items', cancel_after_add)
+    if path == 'rollback':
+        publish = store.radio_checkpoints.repository.publish
+        attempts = []
+
+        def fail_once(state, *args, **kwargs):
+            attempts.append(state['episode_id'])
+            if len(attempts) == 1:
+                raise ValueError('injected checkpoint failure')
+            with store.read_view() as reader:
+                assert not reader.playlists.get_playlist_for_account(account, state['playlist'])
+                assert not reader.actions.get_actions()
+                assert reader.radio_checkpoints.load() == (None, None)
+            return publish(state, *args, **kwargs)
+
+        monkeypatch.setattr(store.radio_checkpoints.repository, 'publish', fail_once)
+
+    with c.launch_request('browser-launch') as launch:
+        result = c.start(seed_video_id='v1' if source is None else None, playlist_id=source, launch=launch)
+    assert result['ok'] == (path not in ('cancelled', 'rollback')), result
+    if not result['ok']:
+        result = c.status()
+    playlist = result['playlist_id']
+    if path == 'selected':
+        assert not remote.added and not reads
+        assert [track['video_id'] for track in result['tracks']] == ['v1']
+        assert not result['directions'] and result['local_id'] is None
+        assert not store.actions.get_actions()
+        play(c, 'v1', playlist=playlist, paused=True)
+        assert not remote.added and not reads
+        play(c, 'v1', playlist=playlist)
+    state = RadioPersistence(store.radio_checkpoints).load()
+    videos = [track['video_id'] for track in state['tracks'] or state['initial_tracks']]
+    assert len(videos) == 3 and videos[0] == 'v1'
+    if path == 'selected':
+        assert remote.added == [(playlist, [video]) for video in videos[1:]]
+        assert reads == [(playlist, None)] * 4
+    else:
+        assert remote.added == [(playlist, videos)]
+        assert reads == [(playlist, None)] * (2 if path == 'empty-readback' else 1)
+    assert len(frames) == int(path not in ('cancelled', 'rollback'))
+    assert state['local_id'] == c.session.local_id
+    if source is not None:
+        assert state['local_id'] != source
+    assert [row['video_id'] for row in store.charts.playlist_tracks_detail(state['local_id'])] == videos
+    action = store.actions.get_actions()[0]
+    undo = json.loads(action.undo_json)
+    assert undo['new_ytm'] == playlist
+    assert undo['post']['videos'] == videos
+    assert undo['post']['handles'] == ['handle-' + video for video in videos]
+    assert store.playlists.is_quarantined_playlist(playlist)
+    assert playlist in store.playlists.radio_playlist_ids()
+    assert RadioPersistence(store.radio_checkpoints).launch_receipts()['browser-launch'] == state['episode_id']
+    with c.launch_request('browser-launch') as launch:
+        assert launch.replay or path == 'cancelled' and launch.cancelled.is_set()
+        assert c.start(playlist_id=source, launch=launch)['ok'] == (path in ('selected', 'saved', 'empty-readback'))
+    assert len(remote.created) == len(store.actions.get_actions()) == 1
+    assert len(remote.added) == (2 if path == 'selected' else 1)
 
 
 def test_radio_creation_finishing_after_repair_retains_only_source_provenance(poc, monkeypatch):

@@ -1,6 +1,5 @@
 """Home display validation, reference preparation, and file publication."""
 from dataclasses import dataclass
-import json
 
 from yt_playlist.core import home_outputs
 
@@ -25,8 +24,7 @@ class HomeOutputs:
         prepared = raw if isinstance(raw, home_outputs.Prepared) else home_outputs.prepare(surface, raw, now)
         if prepared.surface != surface or prepared.built_at != now:
             raise ValueError('Prepared Home surface or observation time does not match')
-        native = self.repository.native()
-        if native and self.repository.unchanged(prepared):
+        if self.repository.unchanged(prepared):
             try:
                 if self.encoded(surface) == prepared.raw:
                     return Publication(prepared, (), frozenset(), None)
@@ -34,14 +32,13 @@ class HomeOutputs:
                 pass  # A matching SQL digest cannot establish file health.
         roots = self.references.prepare_references(surface, prepared.value, now)
         filenames, file_ids = [], []
-        if native:
-            for position, encoded in enumerate(prepared.parts):
-                key = str(position)
-                integrity = self.files.describe(encoded)
-                identity = self.repository.reserve_file(surface, key, integrity)
-                reference = self.files.publish_reserved(identity, encoded, expected=integrity)
-                file_ids.append(identity)
-                filenames.append((surface, key, *reference))
+        for position, encoded in enumerate(prepared.parts):
+            key = str(position)
+            integrity = self.files.describe(encoded)
+            identity = self.repository.reserve_file(surface, key, integrity)
+            reference = self.files.publish_reserved(identity, encoded, expected=integrity)
+            file_ids.append(identity)
+            filenames.append((surface, key, *reference))
         return Publication(prepared, tuple(filenames), frozenset(home_outputs.policy_references(prepared.value)),
                            roots, tuple(file_ids))
 
@@ -49,13 +46,8 @@ class HomeOutputs:
         return self.repository.publish(publication.prepared, publication.filenames, publication.policies,
                                        publication.roots, input_revision=input_revision, file_ids=publication.file_ids)
 
-    def put(self, surface, raw, now, *, input_revision=None, validate=True):
+    def put(self, surface, raw, now, *, input_revision=None):
         with self.files.retained():
-            if not self.repository.native() and not validate:
-                if self.encoded(surface) == raw:
-                    return
-                roots = self.references.prepare_references(surface, json.loads(raw), now)
-                return self.repository.publish_legacy(surface, raw, now, roots)
             prepared = home_outputs.prepare(surface, raw, now)
             if self.repository.unchanged(prepared):
                 try:
@@ -69,10 +61,20 @@ class HomeOutputs:
     def document(self, surface):
         return self.repository.document(surface)
 
+    def publication_id(self, surface):
+        return self.repository.publication_id(surface)
+
     def encoded(self, surface):
         with self.files.retained():
-            raw, manifest = self.document(surface)
-            return self.read_manifest(surface, *manifest) if manifest is not None else raw
+            manifest = self.document(surface)
+            return None if manifest is None else self.read_manifest(
+                surface, manifest.digest, manifest.size, manifest.parts)
 
     def present(self, surface):
         return self.repository.present(surface)
+
+    def published_after(self, surface, started_at):
+        return self.repository.published_after(surface, started_at)
+
+    def input_revision(self, dependencies):
+        return self.repository.input_revision(dependencies)

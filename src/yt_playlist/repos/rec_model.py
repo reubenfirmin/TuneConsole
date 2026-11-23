@@ -1,10 +1,38 @@
 """SQL records for taste weights, feedback, standing controls and checkpoints."""
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
-from yt_playlist.core import artists, catalog, genre_identity, taste_axes, taste_control_state
+from yt_playlist.core.db_revisions import column_group_reads, setting_reads
+from yt_playlist.core import artists, catalog, genre_identity, model_state, recording_library, taste_axes, taste_control_state
+from yt_playlist.core import recommendation_impressions
 from yt_playlist.repos import collection_file_writes
+from yt_playlist.repos.settings import SettingsRepo
 
 
 class RecModelRepo(Repo):
+    @lookup_read
+    def recording_state(self):
+        return model_state.recording(self.conn)
+
+    @lookup_read
+    def artist_state(self):
+        return model_state.artist(self.conn)
+
+    @synchronized
+    def reserve_encoder(self, owner, integrity):
+        with self.conn.atomic():
+            return collection_file_writes.reserve(self.conn, 'taste-settings', owner, integrity)
+
+    @synchronized
+    def publish_model_state(self, recording, artist, *, file_writes, related_settings):
+        with self.conn.atomic():
+            for identity, owner, reference in file_writes:
+                collection_file_writes.complete(self.conn, identity, 'taste-settings', owner, reference)
+            if recording is not None:
+                model_state.save_recording(self.conn, *recording)
+            if artist is not None:
+                model_state.save_artist(self.conn, *artist)
+            if related_settings:
+                SettingsRepo(self._store).publish_values(related_settings)
+
     @synchronized
     def reserve_checkpoint_file(self, integrity):
         with self.conn.atomic():
@@ -17,78 +45,90 @@ class RecModelRepo(Repo):
             (now,)).fetchone()
         return row[0]
 
+    @snapshot_read
+    def recent_recommendation_feedback(self, start, now):
+        return [dict(row) for row in self.conn.execute(
+            "SELECT surface,item_key,kind,reason,scope,created_at FROM rec_feedback "
+            "WHERE target_type<>'artist' AND kind IN ('more','less','dismiss','not_now') "
+            "AND COALESCE(reason,'')<>'own_it' AND created_at BETWEEN ? AND ? "
+            "ORDER BY created_at DESC, surface, item_key, scope", (start, now))]
+
     @lookup_read
     def weight_records(self):
-        return {row['axis']: dict(row) for row in self.conn.execute(
-            taste_axes.projection(self.conn, 'rec_weights', 'axis,weight,updated_at'))}
+        with column_group_reads(self._store, 'taste_axes', 'weights'):
+            return {row['axis']: dict(row) for row in self.conn.execute(
+                f'SELECT {taste_axes.token_expression()} axis,weight,weight_updated_at updated_at '
+                'FROM taste_axes a WHERE weight IS NOT NULL')}
+
+    @lookup_read
+    def legacy_dislike_weight_events(self):
+        rows = self.conn.execute(f"""
+            WITH events AS MATERIALIZED (SELECT * FROM {taste_axes.GRADUATIONS}), first_dislikes AS (
+                SELECT axis_id, min(id) AS first_id FROM events
+                WHERE source='dislike' GROUP BY axis_id
+            ), recorded_weights AS (
+                SELECT w.id axis_id, w.weight, w.weight_updated_at updated_at, d.first_id, max(e.id) AS last_id
+                FROM first_dislikes d JOIN taste_axes w ON w.id=d.axis_id
+                JOIN events e ON e.axis_id=w.id
+                    AND e.id>=d.first_id AND e.created_at=w.weight_updated_at AND e.new_weight=w.weight
+                WHERE w.weight<>0 AND e.source<>'dated-support'
+                GROUP BY w.id
+            )
+            SELECT e.axis, w.weight, w.updated_at, e.source, e.factor, e.new_weight, e.created_at
+            FROM recorded_weights w JOIN events e ON e.axis_id=w.axis_id
+            WHERE e.id BETWEEN w.first_id AND w.last_id AND e.source<>'dated-support'
+            ORDER BY e.id
+        """)
+        history = {}
+        for axis, weight, updated_at, source, factor, new_weight, at in rows:
+            history.setdefault((axis, weight, updated_at), []).append((source, factor, new_weight, at))
+        return history
 
     @lookup_read
     def weight_record(self, axis):
-        row = taste_axes.lookup(self.conn, 'rec_weights', axis, 'weight,updated_at')
-        return dict(row) if row else None
+        with column_group_reads(self._store, 'taste_axes', 'weights'):
+            row = self.conn.execute('SELECT weight,weight_updated_at updated_at FROM taste_axes '
+                                    'WHERE id=? AND weight IS NOT NULL', (taste_axes.identity(self.conn, axis),)).fetchone()
+            return dict(row) if row else None
 
     @synchronized
     def put_weight(self, axis, weight, now):
         with self.conn.atomic():
-            column = taste_axes.column(self.conn)
-            reference = taste_axes.reference(self.conn, 'rec_weights', axis, create=True)
-            self.conn.execute(f'INSERT INTO rec_weights({column},weight,updated_at) VALUES (?,?,?) '
-                f'ON CONFLICT({column}) DO UPDATE SET weight=excluded.weight,updated_at=excluded.updated_at',
-                (reference, weight, now))
+            reference = taste_axes.identity(self.conn, axis, create=True)
+            self.conn.execute('UPDATE taste_axes SET weight=?,weight_updated_at=? WHERE id=?', (weight, now, reference))
 
     @synchronized
     def reset_weights(self):
-        self.conn.execute('DELETE FROM rec_weights')
+        self.conn.execute('UPDATE taste_axes SET weight=NULL,weight_updated_at=NULL WHERE weight IS NOT NULL')
         self.conn.commit()
 
     @lookup_read
-    def checkpoint_facts(self, key):
-        typed = taste_control_state.available(self.conn)
-        if typed and key != taste_control_state.CHECKPOINT:
-            raise ValueError('Use the retained taste settings checkpoint owner')
-        row = self.conn.execute('SELECT * FROM taste_settings_checkpoints').fetchone() if typed else None
-        weights = [dict(row) for row in self.conn.execute(
-            'SELECT * FROM taste_checkpoint_weights ORDER BY position')] if typed and row else []
-        return {'typed': typed, 'header': dict(row) if row else None, 'weights': weights}
+    def checkpoint_facts(self):
+        return taste_control_state.checkpoint_facts(self.conn)
 
     @lookup_read
     def parameter_values(self, keys):
-        return dict(self.conn.execute('SELECT key,value FROM settings WHERE key IN ('
-                                      + ','.join('?' for _ in keys) + ')', keys))
+        with setting_reads(self._store, keys):
+            return dict(self.conn.execute('SELECT key,value FROM settings WHERE key IN ('
+                                          + ','.join('?' for _ in keys) + ')', keys))
 
     @synchronized
     def publish_checkpoint(self, revision, saved_at, weights, reference, *, file_id):
         with self.conn.atomic():
             collection_file_writes.complete(self.conn, file_id, 'taste-checkpoint', 1, reference)
-            rows = [(1, position, taste_axes.identity(self.conn, row['axis'], create=True),
-                     row['axis'], row['weight'], row['updated_at']) for position, row in enumerate(weights)]
-            self.conn.execute('DELETE FROM taste_settings_checkpoints')
-            self.conn.execute('INSERT INTO taste_settings_checkpoints VALUES (1,?,?,?,?,?)',
-                              (revision, saved_at, *reference))
-            self.conn.executemany('INSERT INTO taste_checkpoint_weights VALUES (?,?,?,?,?,?)', rows)
+            taste_control_state.save_checkpoint(self.conn, revision, saved_at, reference, weights)
 
     @synchronized
     def checkpoint_axes(self, positions):
-        selected, result = set(positions), []
         with self.conn.atomic():
-            for row in self.conn.execute('SELECT w.*,a.kind,a.genre_key FROM taste_checkpoint_weights w '
-                    'JOIN taste_axes a ON a.id=w.axis_id ORDER BY position').fetchall():
-                if row['position'] not in selected:
-                    continue
-                axis = row['axis_id']
-                if row['kind'] == 'genre':
-                    key = genre_identity.current_key(self.conn, row['genre_key'])
-                    axis = taste_axes.identity(self.conn, 'genre:' + key, create=True)
-                result.append((axis, row['weight'], row['updated_at']))
-        return result
+            return taste_control_state.checkpoint_axes(self.conn, positions)
 
     @synchronized
-    def replace_weights(self, weights, *, typed):
+    def replace_weights(self, weights):
         with self.conn.atomic():
-            rows = weights if typed else [(taste_axes.reference(self.conn, 'rec_weights', axis, create=True), value, at)
-                                         for axis, value, at in weights]
-            self.conn.execute('DELETE FROM rec_weights')
-            self.conn.executemany(f'INSERT INTO rec_weights({taste_axes.column(self.conn)},weight,updated_at) VALUES (?,?,?)', rows)
+            self.reset_weights()
+            self.conn.executemany('UPDATE taste_axes SET weight=?,weight_updated_at=? WHERE id=?',
+                                  ((weight, updated_at, axis) for axis, weight, updated_at in weights))
 
     @lookup_read
     def resolve_key(self, key):
@@ -109,24 +149,22 @@ class RecModelRepo(Repo):
     def feedback_suppression(self, surface, scope, now, keys, *, local_kinds, global_kind, artist_kind):
         clause = (' AND item_key IN (' + ','.join('?' for _ in keys) + ')') if keys is not None else ''
         kinds = ','.join('?' for _ in local_kinds)
-        blocked = {row[0] for row in self.conn.execute(
+        return {row[0] for row in self.conn.execute(
             'SELECT item_key FROM rec_feedback WHERE ((surface=? AND (scope=\'\' OR scope=?) '
-            f'AND kind IN ({kinds})) OR kind=?) AND (until IS NULL OR until>?)' + clause,
-            (surface, scope, *local_kinds, global_kind, now, *(keys or [])))}
-        blocked.update(row[0] for row in self.conn.execute(
-            'SELECT DISTINCT r.identity_key FROM rec_feedback f '
+            f'AND kind IN ({kinds})) OR kind=?) AND (until IS NULL OR until>?)' + clause +
+            ' UNION SELECT r.identity_key FROM rec_feedback f '
             f'JOIN {self.entry_artists_table} a ON a.artist_id=f.artist_id '
-            'JOIN catalog_entries e ON e.id=a.entry_id JOIN recordings r ON r.id=e.recording_id '
+            'JOIN track_sources e ON e.id=a.entry_id JOIN recordings r ON r.id=e.recording_id '
             'WHERE f.kind=? AND (f.until IS NULL OR f.until>?)' +
             ((' AND r.identity_key IN (' + ','.join('?' for _ in keys) + ')') if keys is not None else ''),
-            (artist_kind, now, *(keys or []))))
-        return blocked
+            (surface, scope, *local_kinds, global_kind, now, *(keys or []), artist_kind, now, *(keys or [])))}
 
     @snapshot_read
     def genre_rows(self, keys):
         clause = (' AND identity_key IN (' + ','.join('?' for _ in keys) + ')') if keys is not None else ''
+        library = recording_library.TRACKS_SQL
         return [tuple(row) for row in self.conn.execute(
-            "SELECT identity_key,genre FROM tracks WHERE genre<>''" + clause +
+            f"SELECT identity_key,genre FROM ({library}) WHERE genre<>''" + clause +
             " UNION SELECT identity_key,genre FROM discovered_tracks WHERE genre<>''" + clause, (keys or []) * 2)]
 
     @lookup_read
@@ -140,7 +178,7 @@ class RecModelRepo(Repo):
 
     @synchronized
     def publish_ratings(self, deleted, actions, inserted):
-        with self.conn.atomic():
+        with self.conn.atomic(join=True):
             self._publish_ratings(deleted, actions, inserted)
 
     def _publish_ratings(self, deleted, actions, inserted):
@@ -153,7 +191,8 @@ class RecModelRepo(Repo):
     def publish_association_ratings(self, deleted, actions, inserted, ages, guards, *, association=None):
         with self.conn.atomic():
             self._publish_ratings(deleted, actions, inserted)
-            self.conn.executemany("UPDATE rec_feedback SET created_at=?,until=? WHERE surface=? AND item_key=? AND scope=''", ages)
+            self.conn.executemany(
+                "UPDATE rec_feedback SET created_at=?,until=?,reason=? WHERE surface=? AND item_key=? AND scope=''", ages)
             self.conn.executemany('INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) '
                 "VALUES ('like_grad',?,'like_grad',?,'',NULL,?) ON CONFLICT(surface,item_key,scope) "
                 'DO UPDATE SET created_at=excluded.created_at,reason=excluded.reason '
@@ -165,7 +204,7 @@ class RecModelRepo(Repo):
     def unban_facts(self, key):
         key = catalog.resolve_key(self.conn, key) or key
         recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
-        cutoff = self.conn.execute('SELECT MAX(ir.observed_at) FROM item_ratings ir JOIN youtube_items y '
+        cutoff = self.conn.execute('SELECT MAX(ir.observed_at) FROM item_ratings ir JOIN track_sources y '
             'ON y.video_id=ir.video_id JOIN recordings r ON r.id=y.recording_id '
             "WHERE r.identity_key=? AND ir.source='api' AND ir.status='DISLIKE'", (key,)).fetchone()[0]
         return key, recording[0] if recording else None, cutoff
@@ -180,8 +219,19 @@ class RecModelRepo(Repo):
                 (key, cutoff, 'recording' if recording is not None else 'legacy_unresolved', recording))
 
     @lookup_read
-    def disliked_identity_keys(self):
-        return {row[0] for row in self.conn.execute("SELECT item_key FROM rec_feedback WHERE kind='dislike'")}
+    def disliked_identity_keys(self, *, keys=None, now=None):
+        sql = "SELECT item_key FROM rec_feedback WHERE kind='dislike'"
+        args = []
+        if now is not None:
+            sql += ' AND (until IS NULL OR until>?)'
+            args.append(now)
+        if keys is not None:
+            keys = list(dict.fromkeys(keys))
+            if not keys:
+                return set()
+            sql += ' AND item_key IN (' + ','.join('?' for _ in keys) + ')'
+            args.extend(keys)
+        return {row[0] for row in self.conn.execute(sql, args)}
 
     @lookup_read
     def disliked_key_page(self, *, after=None, limit=128):
@@ -227,61 +277,81 @@ class RecModelRepo(Repo):
 
     @synchronized
     def set_lean(self, axis, value, now):
-        column = taste_axes.column(self.conn)
-        reference = taste_axes.reference(self.conn, 'rec_lean', axis, create=True)
-        self.conn.execute(f'INSERT INTO rec_lean({column},value,updated_at) VALUES (?,?,?) '
-            f'ON CONFLICT({column}) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at', (reference, float(value), now))
+        reference = taste_axes.identity(self.conn, axis, create=True)
+        self.conn.execute('UPDATE taste_axes SET lean=?,lean_updated_at=? WHERE id=?', (float(value), now, reference))
         self.conn.commit()
 
     @lookup_read
     def get_leans(self):
-        return {row['axis']: row['value'] for row in self.conn.execute(taste_axes.projection(self.conn, 'rec_lean', 'axis,value'))}
+        with column_group_reads(self._store, 'taste_axes', 'mix_controls'):
+            return dict(self.conn.execute(f'SELECT {taste_axes.token_expression()},lean FROM taste_axes a '
+                                          'WHERE lean IS NOT NULL'))
 
     @lookup_read
     def get_lean(self, axis):
-        row = taste_axes.lookup(self.conn, 'rec_lean', axis, 'value')
-        return row['value'] if row else 1.
+        with column_group_reads(self._store, 'taste_axes', 'mix_controls'):
+            row = self.conn.execute('SELECT lean FROM taste_axes WHERE id=? AND lean IS NOT NULL',
+                                    (taste_axes.identity(self.conn, axis),)).fetchone()
+            return row[0] if row else 1.
 
     @lookup_read
     def lean_rows(self):
-        return self.conn.execute(taste_axes.projection(self.conn, 'rec_lean', 'axis,value,updated_at,last_graduated_day')).fetchall()
+        with column_group_reads(self._store, 'taste_axes', 'mix_controls'):
+            return self.conn.execute(f'SELECT {taste_axes.token_expression()} axis,lean value,'
+                'lean_updated_at updated_at,lean_last_graduated_day last_graduated_day '
+                'FROM taste_axes a WHERE lean IS NOT NULL').fetchall()
 
     @synchronized
     def set_lean_graduated_day(self, axis, day):
-        self.conn.execute(f'UPDATE rec_lean SET last_graduated_day=? WHERE {taste_axes.column(self.conn)}=?',
-                          (day, taste_axes.reference(self.conn, 'rec_lean', axis)))
+        self.conn.execute('UPDATE taste_axes SET lean_last_graduated_day=? WHERE id=? AND lean IS NOT NULL',
+                          (day, taste_axes.identity(self.conn, axis)))
         self.conn.commit()
 
     @synchronized
     def clear_lean(self, axis):
-        self.conn.execute(f'DELETE FROM rec_lean WHERE {taste_axes.column(self.conn)}=?', (taste_axes.reference(self.conn, 'rec_lean', axis),))
+        self.conn.execute('UPDATE taste_axes SET lean=NULL,lean_updated_at=NULL,lean_last_graduated_day=NULL '
+                          'WHERE id=? AND lean IS NOT NULL', (taste_axes.identity(self.conn, axis),))
         self.conn.commit()
 
     @synchronized
     def clear_all_leans(self):
-        self.conn.execute('DELETE FROM rec_lean')
+        self.conn.execute('UPDATE taste_axes SET lean=NULL,lean_updated_at=NULL,lean_last_graduated_day=NULL '
+                          'WHERE lean IS NOT NULL')
         self.conn.commit()
 
     @lookup_read
     def hidden_facets(self):
-        return {row['axis'] for row in self.conn.execute(taste_axes.projection(self.conn, 'home_hidden_facet', 'axis'))}
+        with column_group_reads(self._store, 'taste_axes', 'mix_controls'):
+            return {row[0] for row in self.conn.execute(
+                f'SELECT {taste_axes.token_expression()} FROM taste_axes a WHERE home_hidden=1')}
 
     @synchronized
     def hide_facet(self, axis):
-        self.conn.execute(f'INSERT OR IGNORE INTO home_hidden_facet({taste_axes.column(self.conn)}) VALUES (?)',
-                          (taste_axes.reference(self.conn, 'home_hidden_facet', axis, create=True),))
+        self.conn.execute('UPDATE taste_axes SET home_hidden=1 WHERE id=? AND home_hidden=0',
+                          (taste_axes.identity(self.conn, axis, create=True),))
         self.conn.commit()
 
     @synchronized
     def unhide_facet(self, axis):
-        predicate, args = taste_axes.matches(self.conn, 'home_hidden_facet', axis)
-        self.conn.execute('DELETE FROM home_hidden_facet WHERE ' + predicate, args)
+        self.conn.execute('UPDATE taste_axes SET home_hidden=0 WHERE id=? AND home_hidden=1',
+                          (taste_axes.identity(self.conn, axis),))
         self.conn.commit()
 
     @synchronized
     def clear_hidden_facets(self):
-        self.conn.execute('DELETE FROM home_hidden_facet')
+        self.conn.execute('UPDATE taste_axes SET home_hidden=0 WHERE home_hidden=1')
         self.conn.commit()
+
+    @lookup_read
+    def artist_mute_targets(self, now):
+        ids, unresolved = set(), set()
+        for row in self.conn.execute("SELECT artist_id,item_key FROM rec_feedback WHERE kind='mute' "
+                                     'AND (until IS NULL OR until>?)', (now,)):
+            if row['artist_id'] is not None:
+                ids.add(row['artist_id'])
+            elif row['item_key'].startswith('artist:'):
+                unresolved.add(row['item_key'][7:])
+        return ids, unresolved
 
     @lookup_read
     def muted_album_ids(self, browse_ids, now):
@@ -294,9 +364,10 @@ class RecModelRepo(Repo):
             + ','.join('?' for _ in browse_ids) + ')', (now, *browse_ids))}
 
     @lookup_read
-    def muted_artists(self):
+    def muted_artists(self, now=None):
         result = set()
-        for row in self.conn.execute("SELECT item_key,artist_id FROM rec_feedback WHERE kind='mute'"):
+        for row in self.conn.execute("SELECT item_key,artist_id FROM rec_feedback WHERE kind='mute' "
+                                     'AND (? IS NULL OR until IS NULL OR until>?)', (now, now)):
             if row['artist_id']:
                 name = self.conn.execute('SELECT name FROM artists WHERE id=?', (row['artist_id'],)).fetchone()[0]
                 result.add(name if artists.lookup(self.conn, name) == row['artist_id'] else artists.token(row['artist_id']))
@@ -322,7 +393,7 @@ class RecModelRepo(Repo):
     def clear_feedback(self, *, retained_kinds):
         with self.conn.atomic():
             self.conn.execute('DELETE FROM rec_feedback WHERE kind NOT IN (' + ','.join('?' for _ in retained_kinds) + ')', retained_kinds)
-            self.conn.execute('DELETE FROM rec_impressions')
+            recommendation_impressions.clear(self.conn)
 
     @lookup_read
     def next_feedback_expiry(self, now):

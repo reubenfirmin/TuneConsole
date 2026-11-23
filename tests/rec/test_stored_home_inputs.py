@@ -29,7 +29,7 @@ def disable_periodic_library_sync():
 def home(fresh):
     store, _ = fresh
     original = plan(store, key='home-inputs')
-    ranked = pools.prepare('full-home', original.policy_version, None, '7' * 64, 'card',
+    ranked = pools.prepare('full-home', original.policy_version, '7' * 64, 'card',
                            [pools.Candidate(index + 3, 1 / (index + 1)) for index in range(260)])
     prepared = replace(original, slots=(publication.Slot('home', 'all', 'wheelhouse', ranked),
         publication.Slot('home', 'mode-one', 'wheelhouse', ranked),
@@ -71,7 +71,7 @@ def test_distinct_metadata_pages_advance_once_per_recording_across_shared_slots(
 def test_unavailable_whole_page_still_advances_to_later_metadata(home):
     store, generation, _ = home
     with store.conn:
-        store.conn.execute('UPDATE youtube_items SET available=0 WHERE recording_id BETWEEN 3 AND 130')
+        store.conn.execute('UPDATE track_sources SET available=0 WHERE recording_id BETWEEN 3 AND 130')
     first = store.recommendations.recording_metadata_page('home', generation=generation)
     assert first['tracks'] == [] and first['after'] == 130 and not first['exhausted']
     second = store.recommendations.recording_metadata_page('home', generation=generation, after=first['after'])
@@ -79,17 +79,20 @@ def test_unavailable_whole_page_still_advances_to_later_metadata(home):
 
 
 def test_genre_options_keep_rare_tail_without_duplicate_mode_votes(home, monkeypatch):
-    store, generation, _ = home
+    store, _, _ = home
     forbid_bundle_and_files(monkeypatch)
-    reads, original = [], RecommendationPublications.recording_metadata_page
-    def page(self, *args, **kwargs):
-        value = original(self, *args, **kwargs)
-        reads.append((value['generation'], len(value['tracks'])))
-        return value
+    reads, original = [], RecommendationPublications.home_genre_candidates
+    def candidates(self):
+        rows = original(self)
+        reads.append(len(rows))
+        return rows
+    def page(*args, **kwargs):
+        pytest.fail('Genre options must read the published pools directly')
+    monkeypatch.setattr(RecommendationPublications, 'home_genre_candidates', candidates)
     monkeypatch.setattr(RecommendationPublications, 'recording_metadata_page', page)
     assert home_themes.genre_options(store, genre_plays={}) == [
         {'family': 'rock-classic', 'label': 'rock'}, {'family': 'jazz', 'label': 'jazz'}]
-    assert len(reads) == 3 and all(gen == generation and size <= 128 for gen, size in reads)
+    assert reads == [260]
     assert home_themes.genre_options(store, genre_plays={'jazz': 100})[0]['family'] == 'jazz'
 
 
@@ -102,7 +105,7 @@ def test_genre_options_resolve_current_metadata_after_preparation(home, monkeypa
     assert {option['family'] for option in options} == {'rock-classic', 'ambient'}
 
 
-def test_genre_options_resolve_each_distinct_label_once_across_metadata_pages(home, monkeypatch):
+def test_genre_options_resolve_each_distinct_label_once(home, monkeypatch):
     store, _, _ = home
     original = GenreRepo.axis_matches
     labels = []
@@ -114,21 +117,21 @@ def test_genre_options_resolve_each_distinct_label_once_across_metadata_pages(ho
     assert len(labels) == len(set(labels)) == 2
 
 
-def test_generation_hash_changes_only_when_private_output_becomes_a_head(home, monkeypatch):
+def test_menu_generation_changes_only_when_private_output_becomes_a_head(home, monkeypatch):
     store, _, prepared = home
     forbid_bundle_and_files(monkeypatch)
-    before = home_prepared._proposal_generation(store, None, 10, preview={})
+    before = home_prepared._proposal_generation(store)
     next_plan = replace(prepared, external_key='private-home-inputs')
     build = store.recommendations.claim(next_plan)
     store.recommendations.stage(next_plan, build)
-    assert home_prepared._proposal_generation(store, None, 10, preview={}) == before
+    assert home_prepared._proposal_generation(store) == before
     store.recommendations.publish(build, 12)
-    assert home_prepared._proposal_generation(store, None, 10, preview={}) != before
+    assert home_prepared._proposal_generation(store) != before
 
 
-def test_unprepared_home_hash_and_genres_need_no_bundle(recommendations, monkeypatch):
+def test_unprepared_home_generation_and_genres_need_no_bundle(recommendations, monkeypatch):
     forbid_bundle_and_files(monkeypatch)
-    assert isinstance(home_prepared._proposal_generation(recommendations, None, 10, preview={}), str)
+    assert isinstance(home_prepared._proposal_generation(recommendations), str)
     assert isinstance(home_themes.genre_options(recommendations, genre_plays={}), list)
 
 
@@ -141,7 +144,7 @@ def test_taste_examples_advance_past_an_unavailable_page_without_decoding_candid
         return original(self, surface)
     monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
     with store.conn:
-        store.conn.execute('UPDATE youtube_items SET available=0 WHERE recording_id BETWEEN 3 AND 130')
+        store.conn.execute('UPDATE track_sources SET available=0 WHERE recording_id BETWEEN 3 AND 130')
     examples = taste_viz._stored_examples(store, 10)
     assert examples['wheelhouse']['key'] == 'fresh-128'
     assert examples['wheelhouse']['serving_context']['recommendation_generation_id'] == generation
@@ -153,21 +156,16 @@ def test_tv_seed_interleave_keeps_rare_mode_candidates_without_a_global_head_cut
     from yt_playlist.rec import tv
     store, _ = fresh
     values = candidates(store)
-    generation = publish_bundle(store, {'all': {'wheelhouse': values}, '1': {'wheelhouse': values[258:]}})
+    publish_bundle(store, {'all': {'wheelhouse': values}, '1': {'wheelhouse': values[258:]}})
     original = RecommendationProposals._proposal_json
     def read(self, surface):
         assert surface not in ('mode_bundles', 'fresh_pool')
         return original(self, surface)
     monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
-    page, requests = RecommendationPublications.candidate_page, []
-    def bounded(self, *args, **kwargs):
-        requests.append(kwargs['limit'])
-        return page(self, *args, **kwargs)
-    monkeypatch.setattr(RecommendationPublications, 'candidate_page', bounded)
-    seeds = tv._stored_seeds(store, [[values[0]]], 3)
-    assert [track['key'] for track in seeds] == ['fresh-0', 'fresh-258', 'fresh-259']
-    assert {track['serving_context']['recommendation_generation_id'] for track in seeds[1:]} == {generation}
-    assert requests and max(requests) == 1
+    def forbidden(*args, **kwargs):
+        pytest.fail('TV must read ranking slots together')
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', forbidden)
+    assert tv._ranked_seed_keys(store, 3) == ['fresh-0', 'fresh-258', 'fresh-1']
 
 
 def test_album_companions_find_best_tail_matches_with_artist_caps_and_bounded_pages(home, monkeypatch):
@@ -175,8 +173,8 @@ def test_album_companions_find_best_tail_matches_with_artist_caps_and_bounded_pa
     forbid_bundle_and_files(monkeypatch)
     rec_params.set_param(store, 'modes_artist_cap', 1)
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET artist='Repeated artist' WHERE recording_id>=250")
-        store.conn.execute('UPDATE youtube_items SET available=0 WHERE recording_id=260')
+        store.conn.execute("UPDATE track_sources SET artist='Repeated artist' WHERE recording_id>=250")
+        store.conn.execute('UPDATE track_sources SET available=0 WHERE recording_id=260')
     angles = np.linspace(1.4, 0, 260)
     vectors = np.column_stack((np.cos(angles), np.sin(angles)))
     keys = {f'fresh-{index}': index for index in range(260)}
