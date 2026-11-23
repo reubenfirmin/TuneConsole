@@ -70,17 +70,14 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
     assert store.recommendations.retirement_pending()
     original = publication.cleanup_pools
     reads, failed = [], False
-    if interrupted:
-        # Force an incomplete durable prefix without constructing a giant
-        # fixture. The ordinary variant exercises the larger recovery batch.
-        monkeypatch.setattr(recommendation_retirement, 'BATCH_ROWS', 1024)
 
     def prefix(repo, **kwargs):
         nonlocal failed
         result = original(repo, **kwargs)
         if result:
-            if not interrupted:
-                assert result.rows > 1024
+            assert result.rows <= publication.CLEANUP_ROWS
+            if not reads:
+                assert result.rows == publication.CLEANUP_ROWS
             assert store.activity_paused and not store.conn.in_transaction
             def browse():
                 assert store.settings.get_setting('safe-browse') is None
@@ -108,7 +105,7 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
         # source of truth even when a previous process's flag no longer exists.
         del store._recommendation_retirement_pending
     recommendation_retirement.drain(store, 10000)
-    assert reads and not store.activity_paused
+    assert len(reads) > 1 and not store.activity_paused
     assert not store.recommendations.retirement_pending()
     assert not store.rec_ledger.policy_retirement_pending(10000)
     assert store.rec_ledger.policy_configuration('expired-pool-policy') is None

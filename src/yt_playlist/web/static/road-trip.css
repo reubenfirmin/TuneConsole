@@ -22,7 +22,7 @@
   letter-spacing: .05em; text-transform: uppercase; }
 .rt-artist-suggestion { align-items: center; justify-content: flex-start; }
 .rt-artist-suggestion img { border-radius: 50%; object-fit: cover; flex: none; }
-.rt-artist-suggestion small { display: block; color: var(--dim); font-size: .75rem;
+.rt-artist-suggestion small { display: block; color: var(--dim); font-size: var(--type-xs);
   text-transform: none; letter-spacing: normal; overflow-wrap: anywhere; }
 /* Suggestions use a row highlight instead of the shared secondary-button fill. */
 .rt-suggestion:hover, .rt-suggestion:focus-visible {

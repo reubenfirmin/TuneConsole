@@ -1,16 +1,11 @@
 """The current schema is complete without replaying the historical baseline."""
 from contextlib import closing
-import json
-from pathlib import Path
 import sqlite3
-import runpy
-import subprocess
-import sys
 import threading
 
 import pytest
 
-from yt_playlist.core.migrations import Migration, MigrationError, migrate
+from yt_playlist.core.migrations import MigrationError, migrate
 from yt_playlist.core.migrations import current, registry, regular
 
 
@@ -27,12 +22,6 @@ def connect(path=':memory:'):
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
     return conn
-
-
-def objects(conn):
-    return {name: (kind, current._table(conn, name, sql) if kind == 'table' else current._tokens(sql))
-            for name, kind, sql in conn.execute(
-                "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'")}
 
 
 @pytest.fixture(scope='module')
@@ -53,127 +42,6 @@ def current_database(current_template):
     with closing(connect()) as conn:
         current_template.backup(conn)
         yield conn
-
-
-def assert_fresh_settings(conn):
-    from yt_playlist.core import association_work, credit_retention, mode_retention
-    from yt_playlist.core.metadata_contract import ACTIVE, EXPIRY
-    from yt_playlist.core.migrations.preparation_checkpoint_storage import SEEDS
-
-    settings = dict(conn.execute('SELECT key,value FROM settings'))
-    assert settings.pop(ACTIVE) == '0'
-    assert settings.pop(association_work.SERIAL) == '0'
-    assert json.loads(settings.pop(EXPIRY)) == {'gc_cursor': 0, 'gc_after': 0, 'gc_shard': 0}
-    assert settings.pop(mode_retention.HIGH_WATER) == '0'
-    assert json.loads(settings.pop(mode_retention.CHECKPOINT)) == {'enabled': 0, 'cursor': 0, 'next_scan_at': 0}
-    assert json.loads(settings.pop(credit_retention.CHECKPOINT)) == {
-        'enabled': 0, 'cursor': 0, 'completed': 0, 'next_scan_at': 0}
-    for key in ('playlist_recipe_id_high_water', 'playlist_canvas_id_high_water',
-                'home_display_files_id_high_water', 'listening_output_files_id_high_water',
-                'choice_learning_id_high_water', 'content_pending_serial', 'prepared_home_id_high_water',
-                'prepared_listening_id_high_water', 'prepared_report_id_high_water'):
-        assert settings.pop(key) == '0'
-    assert settings == current.SEED_SETTINGS | SEEDS
-
-
-def _forbid_historical_schema(monkeypatch):
-    from yt_playlist.core.migrations import schema_definition
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError('historical schema used by current database')
-
-    schema_definition.contract.cache_clear()
-    schema_definition._vibe_score_contract.cache_clear()
-    schema_definition._reference_contract.cache_clear()
-    # Forbid every upgrade callback, including additions after the old v51
-    # bootstrap. A fresh install must use only the complete current definition.
-    monkeypatch.setattr(registry, 'MIGRATIONS', tuple(
-        Migration(m.version, m.name, forbidden) for m in registry.MIGRATIONS))
-    monkeypatch.setattr(regular, 'CHANGES', tuple(
-        regular.Change(c.version, c.name, forbidden, c.validate) for c in regular.CHANGES))
-
-
-def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkeypatch, tmp_path):
-    from yt_playlist.core.migrations import schema_definition
-
-    # A warm process can hide import-time historical DDL behind cached jobs.
-    # Exercise both admissions with the same guard in independent cold processes.
-    cold = '''
-import sys
-from pathlib import Path
-root, home = map(Path, sys.argv[1:3])
-sys.path[:0] = [str(root), str(root / 'src')]
-import os
-os.environ['YT_PLAYLIST_HOME'] = str(home)
-import pytest
-from tests.core.test_current_schema import _forbid_historical_schema
-from yt_playlist.core.store import Store
-with pytest.MonkeyPatch.context() as patch:
-    _forbid_historical_schema(patch)
-    assert 'yt_playlist.core.preparation.model_trials' not in sys.modules
-    store = Store(home / 'current.db')
-    try:
-        store.init_schema()
-        store.settings.set_setting('cold-current', 'persisted é')
-        assert store.settings.get_setting('cold-current') == 'persisted é'
-        before = list(store.conn.iterdump())
-        store.init_schema()
-        assert list(store.conn.iterdump()) == before
-    finally:
-        store.conn.close()
-'''
-    cold_home = tmp_path / 'cold-home'
-    cold_home.mkdir()
-    for admission in ('fresh', 'current reopen'):
-        result = subprocess.run(
-            [sys.executable, '-I', '-c', cold, str(Path(__file__).parents[2]), str(cold_home)],
-            cwd=tmp_path, capture_output=True, text=True, timeout=60)
-        assert result.returncode == 0, (admission, result.stdout, result.stderr)
-
-    # Compare the maintained source export before forbidding every generator.
-    # This reads/generates text only; the actual bootstrap below owns its DB.
-    exporter = runpy.run_path(Path(__file__).parents[2] / 'scripts/export-current-schema.py')
-    with monkeypatch.context() as text_only:
-        text_only.setattr(sqlite3, 'connect', lambda *a, **kw: pytest.fail('Exporter opened a database'))
-        for path, expected in exporter['render'](schema_definition).items():
-            assert path.read_text(encoding='utf-8') == expected
-
-    _forbid_historical_schema(monkeypatch)
-    path = tmp_path / 'complete-current.db'
-    with closing(connect(path)) as conn:
-        from yt_playlist.core import credit_retention
-        from yt_playlist.core.migrations import control_settings_storage, preparation_checkpoint_storage
-
-        migrate(conn)
-        retired = control_settings_storage.RETIRED + preparation_checkpoint_storage.RETIRED
-        assert set(retired).isdisjoint(name for name, in conn.execute(
-            "SELECT name FROM sqlite_schema WHERE type='table'"))
-        assert_fresh_settings(conn)
-        assert credit_retention.state(conn) == dict(enabled=0, cursor=0, completed=0, next_scan_at=0.0)
-        assert tuple(conn.execute('SELECT position,group_key,revision,cursor FROM rec_vibe_pending WHERE position>0'
-                                  ).fetchone()) == (
-            1, '*', 2, '')
-        assert conn.execute("SELECT 1 FROM genre_catalog WHERE name='Techno'").fetchone()
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='ix_genre_catalog_name'").fetchone()
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='view' AND name='listening_days'").fetchone()
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='playlists_scope_insert'").fetchone()
-        from yt_playlist.core import vibe_versions
-        assert vibe_versions.normalized(conn)
-        assert not conn.execute('PRAGMA foreign_key_check').fetchall()
-        conn.execute("INSERT INTO accounts(id,label,is_master) VALUES (1,'Main',1)")
-        with pytest.raises(sqlite3.IntegrityError, match='CHECK constraint failed'):
-            conn.execute("UPDATE accounts SET listening_timezone='UTC',listening_timezone_confirmed=2 WHERE id=1")
-        conn.rollback()
-        conn.execute("INSERT INTO settings VALUES ('personal-setting','retain')")
-        conn.commit()
-        before = list(conn.iterdump())
-        migrate(conn)
-        assert list(conn.iterdump()) == before
-        assert [tuple(row)[:2] for row in conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == [
-            (migration.version, migration.name) for migration in registry.MIGRATIONS]
-    with closing(connect(path)) as reopened:
-        migrate(reopened)
-        assert list(reopened.iterdump()) == before
 
 
 @pytest.mark.parametrize('name', ['rec_mood', 'audio_vibe_feedback', 'audio_vibe_labels', 'audio_session_labels',

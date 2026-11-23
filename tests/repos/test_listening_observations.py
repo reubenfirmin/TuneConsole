@@ -210,21 +210,33 @@ def test_reassociation_preserves_completed_listening_changes_when_final_invalida
     assert s.tracks.catalog_subject(first)['recording_id']==s.tracks.catalog_subject(target)['recording_id']
 
 
-def test_import_failure_keeps_calendar_setup_and_rolls_back_event_projection(listening_store,monkeypatch):
+def test_import_failure_keeps_calendar_setup_and_rolls_back_event_projection(listening_store, monkeypatch):
     s = listening_store
+    zone = 'America/Costa_Rica'
+    rows = [('song', None, stamp('2026-10-20T23:30:00', zone))]
     tables = ('play_events', 'play_event_sources', 'play_event_calendar')
     before = {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables}
-    original = s.history.repository.project_event
-    def fail(*args,**kwargs):
-        original(*args,**kwargs)
-        raise RuntimeError('interrupt event projection')
-    monkeypatch.setattr(s.history.repository,'project_event',fail)
-    with pytest.raises(RuntimeError,match='interrupt event projection'):
-        s.history.import_listening_events(1,[('song',None,1000)],source_timezone='America/Costa_Rica')
-    assert s.history.repository.calendar_facts(1) == {'timezone': 'America/Costa_Rica', 'confirmed': 1}
+    original = s.history.repository.append_event
+
+    def fail_after_insert(*args, **kwargs):
+        original(*args, **kwargs)
+        assert s.conn.in_transaction
+        raise RuntimeError('interrupt event insert')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(s.history.repository, 'append_event', fail_after_insert)
+        with pytest.raises(RuntimeError, match='interrupt event insert'):
+            s.history.import_listening_events(1, rows, source_timezone=zone)
+
+    assert not s.conn.in_transaction
+    assert s.history.repository.calendar_facts(1) == {'timezone': zone, 'confirmed': 1}
     assert {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables} == before
-    monkeypatch.setattr(s.history.repository, 'project_event', original)
-    assert s.history.import_listening_events(1, [('song', None, 1000)], source_timezone='America/Costa_Rica') == (1, 1)
+    assert s.history.import_listening_events(1, rows, source_timezone=zone) == (1, 1)
+    assert s.history.event_play_counts(1) == {'song': 1}
+    assert [tuple(row) for row in s.conn.execute('SELECT day, timezone FROM play_event_calendar')] == [
+        ('2026-10-20', zone),
+    ]
+    assert [row[0] for row in s.conn.execute('SELECT source FROM play_event_sources')] == ['takeout']
     assert s.conn.execute('SELECT count(*) FROM accounts WHERE listening_timezone IS NOT NULL').fetchone()[0] == 1
 
 

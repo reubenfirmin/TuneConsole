@@ -149,7 +149,8 @@ class Manager:
             'podman', 'run', '--rm', '--name', name, '--pull=never', '--userns=keep-id',
             '--network=none', '--read-only', '--cap-drop=all', '--security-opt=label=disable',
             '--memory=2g', '--pids-limit=256', '--stop-timeout=0',
-            '--tmpfs', '/tmp:rw,size=256m,mode=1777,nodev,nosuid,notmpcopyup',
+            # Pytest databases here need fixture space above the 256 MiB write reserve.
+            '--tmpfs', '/tmp:rw,size=768m,mode=1777,nodev,nosuid,notmpcopyup',
             '--tmpfs', '/worktree/build:rw,size=256m,mode=1777,nodev,nosuid,notmpcopyup',
             '--volume', str(ROOT) + ':/worktree:ro',
             '--volume', str(library) + ':/library:' + ('ro' if readonly else 'rw'),

@@ -15,7 +15,7 @@ const assert = require('node:assert/strict'), fs = require('node:fs'), vm = requ
 const calls = [];
 const window = {playbackStatus:{snapshot:null},
   playbackControls:{command:action => {calls.push(action); return true;}},
-  tcPlay:url => calls.push(url)};
+  tcPlay:async url => {calls.push(url); return true;}};
 const context = vm.createContext({window,URL,location:new URL('http://localhost/'),
   htmx:{trigger:(button,event) => calls.push(event)}});
 vm.runInContext(fs.readFileSync('src/yt_playlist/web/static/album-player.js','utf8'),context);

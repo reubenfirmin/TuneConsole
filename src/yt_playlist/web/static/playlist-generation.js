@@ -327,8 +327,28 @@ function generationCloseWindow(record) {
 
 function generationReturnFromLaunch(token) {
   const record = Array.from(generationWindows.values()).find(item => item.token === token);
-  if (!record?.context.launchId || !generationOwnsCard(record)) return false;
-  generationFailure(record);
+  if (record) {
+    if (!record.context.launchId || !generationOwnsCard(record)) return false;
+    generationFailure(record);
+    return true;
+  }
+
+  // Reloading Home drops the request object but preserves the launch and the
+  // exact selection that was sent. Require both before restoring its card.
+  let context, key;
+  try {
+    context = JSON.parse(sessionStorage.getItem('tc-mix-launch:' + token));
+    if (context?.launchId !== token || new URL(context.returnUrl).pathname !== location.pathname) return false;
+    key = generationSelectionKey(context.id, context.tracks);
+    if (sessionStorage.getItem(key) !== token) return false;
+  } catch (_) { return false; }
+  const node = document.getElementById(context.id);
+  if (!node || generationTuning(node) !== context.tuning || node.dataset.generationPending ||
+      generationRestoredCards.has(node) || !genReturnToMix(context.id, context)) return false;
+
+  const restored = {node, key, token, sent: true, uncertain: true, context: generationRestoredCards.get(node)};
+  generationWindows.set(node.id, restored);
+  if (!restored.context.saved && !restored.context.recovery) generationCheckReceipt(restored);
   return true;
 }
 

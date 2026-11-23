@@ -321,6 +321,48 @@ def test_lost_mix_save_reply_returns_to_the_selected_card(generation_app, page, 
 
 
 @pytest.mark.parametrize('generation_app', ['board'], indirect=True)
+def test_lost_mix_save_reply_after_home_reload(generation_app, page, output_path):
+    base, provider, _, frames = generation_app
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.clock.install()
+    replies = []
+    session = page.context.new_cdp_session(page)
+    session.on('Fetch.requestPaused', lambda event: replies.append(event['responseStatusCode']))
+    session.send('Fetch.enable', {'patterns': [{'urlPattern': base + '/home/generate', 'requestStage': 'Response'}]})
+
+    card = page.locator('#gen-wheelhouse')
+    card.locator('.gen-poster').click()
+    card.get_by_role('button', name='Remove from this playlist').first.click()
+    selected = card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)')
+    with page.expect_popup() as opened:
+        card.get_by_role('button', name='Save and play this mix').click()
+    popup = opened.value
+    popup.wait_for_url(re.compile(r'^blob:'))
+    expect(popup.get_by_role('status', name='Preparing playlist')).to_be_visible()
+    deadline = time.monotonic() + 5
+    while not replies and time.monotonic() < deadline:
+        page.wait_for_timeout(20)
+    assert replies == [200]
+    assert len(provider.created) == len(frames) == 1
+    playlist = provider.created[0][0]
+    assert [track['videoId'] for track in provider._tracks[playlist]] == selected
+
+    page.reload()
+    popup.clock.fast_forward(91_000)
+
+    status = card.locator('[data-generation-error]')
+    expect(status.get_by_role('link', name='Open saved mix')).to_have_attribute(
+        'href', 'https://music.youtube.com/playlist?list=' + playlist)
+    assert popup.is_closed()
+    expect(status).to_contain_text(f'{len(selected)} songs saved.')
+    expect(card.locator('.gen-play')).to_be_disabled()
+    expect(card.get_by_role('button', name='Back to all mixes')).to_be_visible()
+    assert card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)') == selected
+    assert replies == [200] and len(provider.created) == len(frames) == 1
+    page.screenshot(path=Path(output_path) / 'mix-recovered-after-reload.png')
+
+
+@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
 @pytest.mark.parametrize('failure', ['create', 'addition', 'recipe'])
 def test_mix_recovery_keeps_the_selected_card_and_prevents_duplicate_create(generation_app, page, failure, monkeypatch):
     base, provider, bridge, frames = generation_app
