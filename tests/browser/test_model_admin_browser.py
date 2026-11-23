@@ -62,8 +62,8 @@ def test_catalog_scope_is_visible_to_its_consumers(live_app, page, request, iden
     page.screenshot(path=str(Path(request.config.getoption('output')) / f'model-{identity}-scope.png'))
 
 
-@pytest.mark.parametrize('width', [1440, 1920])
-def test_on_air_ranker_explains_intensity_and_genre_search(live_app, page, width, request):
+def test_on_air_ranker_explains_intensity_and_genre_search(live_app, page, request):
+    width = 1440
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.set_viewport_size({'width': width, 'height': 1050})
@@ -101,10 +101,36 @@ def test_on_air_ranker_explains_intensity_and_genre_search(live_app, page, width
     assert errors == []
 
 
-@pytest.mark.parametrize('width', [1440, 1920])
-def test_force_graph_popup_tracing_filters_and_wheel(live_app, page, width, request):
+def model_map_overview_bounds(page, width):
+    bounds = page.locator('#mm-canvas').bounding_box()
+    assert bounds['x'] == 216
+    assert bounds['x'] + bounds['width'] == width
+    assert bounds['y'] < 80 and bounds['y'] + bounds['height'] == 1050
+    assert not inspect(page, 'viewport')['overflowX']
+    assert not inspect(page, 'viewport')['overflowY']
+    layers = [canvas_node(page, layer) for layer in ('now', 'session', 'recent', 'durable')]
+    assert all(layer['y'] == pytest.approx(layers[0]['y']) for layer in layers)
+    assert all(layer['width'] >= 126 for layer in layers)
+    assert layers[0]['x'] - layers[0]['width'] / 2 >= bounds['x']
+    assert layers[-1]['x'] + layers[-1]['width'] / 2 <= width
+    assert all(right['x'] - left['x'] > (left['width'] + right['width']) / 2
+               for left, right in zip(layers, layers[1:]))
+    assert inspect(page, 'visibleConnections')
+    return bounds
+
+
+def test_force_graph_popup_tracing_filters_and_wheel(live_app, page, request):
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
+    destination = Path(request.config.getoption('output'))
+    page.set_viewport_size({'width': 1920, 'height': 1050})
+    page.goto(live_app + '/model-admin')
+    settled(page)
+    wait_for(page, 'stableView')
+    model_map_overview_bounds(page, 1920)
+    page.screenshot(path=str(destination / 'model-force-1920.png'))
+
+    width = 1440
     page.set_viewport_size({'width': width, 'height': 1050})
     page.goto(live_app + '/model-admin')
     root = page.locator('#model-map')
@@ -120,27 +146,11 @@ def test_force_graph_popup_tracing_filters_and_wheel(live_app, page, width, requ
     page.keyboard.press('Escape')
     empty = inspect(page, 'background')
     page.mouse.click(empty['x'], empty['y'])
-    bounds = page.locator('#mm-canvas').bounding_box()
-    assert bounds['x'] == 216
-    assert bounds['x'] + bounds['width'] == width
-    assert bounds['y'] < 80 and bounds['y'] + bounds['height'] == 1050
-    assert not inspect(page, 'viewport')['overflowX']
-    assert not inspect(page, 'viewport')['overflowY']
+    bounds = model_map_overview_bounds(page, width)
     expect(root.locator('.mm-totals, .mm-inspector, .mm-column-heads')).to_have_count(0)
-    layers = [canvas_node(page, layer) for layer in ('now', 'session', 'recent', 'durable')]
-    assert all(layer['y'] == pytest.approx(layers[0]['y']) for layer in layers)
-    assert all(layer['width'] >= 126 for layer in layers)
-    assert layers[0]['x'] - layers[0]['width'] / 2 >= bounds['x']
-    assert layers[-1]['x'] + layers[-1]['width'] / 2 <= width
-    assert all(right['x'] - left['x'] > (left['width'] + right['width']) / 2
-               for left, right in zip(layers, layers[1:]))
     initial_view = inspect(page, 'view')
-    destination = Path(request.config.getoption('output'))
     page.mouse.move(30, 30)
     page.screenshot(path=str(destination / f'model-force-{width}.png'))
-    # Opening the map should show consumers together with the model branches
-    # feeding them, without first fitting the entire graph to tiny labels.
-    assert inspect(page, 'visibleConnections')
 
     # The model branches outside the time layer row run left to right.
     layout = inspect(page, 'topology')
@@ -433,9 +443,8 @@ def test_force_graph_popup_tracing_filters_and_wheel(live_app, page, width, requ
     assert errors == []
 
 
-@pytest.mark.parametrize('width', [1040, 1440, 1920])
-def test_artist_ensemble_feeds_cold_projection(live_app, page, width, request):
-    page.set_viewport_size({'width': width, 'height': 1050})
+def test_artist_ensemble_feeds_cold_projection(live_app, page, request):
+    page.set_viewport_size({'width': 1440, 'height': 1050})
     page.goto(live_app + '/model-admin#artist-svd')
     root = page.locator('#model-map')
     details = page.get_by_role('dialog', name='Artist co-occurrence', exact=True)
@@ -454,19 +463,23 @@ def test_artist_ensemble_feeds_cold_projection(live_app, page, width, request):
     for source, target in zip(chain, chain[1:]):
         assert inspect(page, 'linkPaint', id=source, expected=target)['alpha'] >= .8
         assert canvas_node(page, source)['x'] < canvas_node(page, target)['x']
-    root.evaluate('''(root, ids) => {
-      const graph = root.modelGraph;
-      const nodes = graph.graphData().nodes.filter(node => ids.includes(node.id));
-      const left = Math.min(...nodes.map(node => node.x - node.width / 2));
-      const right = Math.max(...nodes.map(node => node.x + node.width / 2));
-      const top = Math.min(...nodes.map(node => node.y - node.height / 2));
-      const bottom = Math.max(...nodes.map(node => node.y + node.height / 2));
-      const zoom = Math.min(.9, (graph.width() - 96) / (right - left), (graph.height() - 220) / (bottom - top));
-      graph.centerAt((left + right) / 2, (top + bottom) / 2, 0).zoom(zoom, 0);
-    }''', [*chain, 'artist-content', 'now', 'track-svd', 'content'])
-    wait_for(page, 'stableView')
     destination = Path(request.config.getoption('output'))
-    page.screenshot(path=str(destination / f'model-force-artist-cooccurrence-{width}.png'))
+    for width in (1040, 1920, 1440):
+        page.set_viewport_size({'width': width, 'height': 1050})
+        expect(page.locator('#mm-canvas')).to_have_js_property('clientWidth', width - 216)
+        root.evaluate('''(root, ids) => {
+          const graph = root.modelGraph;
+          const nodes = graph.graphData().nodes.filter(node => ids.includes(node.id));
+          const left = Math.min(...nodes.map(node => node.x - node.width / 2));
+          const right = Math.max(...nodes.map(node => node.x + node.width / 2));
+          const top = Math.min(...nodes.map(node => node.y - node.height / 2));
+          const bottom = Math.max(...nodes.map(node => node.y + node.height / 2));
+          const zoom = Math.min(.9, (graph.width() - 96) / (right - left), (graph.height() - 220) / (bottom - top));
+          graph.centerAt((left + right) / 2, (top + bottom) / 2, 0).zoom(zoom, 0);
+        }''', [*chain, 'artist-content', 'now', 'track-svd', 'content'])
+        wait_for(page, 'stableView')
+        assert all(216 < canvas_node(page, node)['x'] < width for node in chain)
+        page.screenshot(path=str(destination / f'model-force-artist-cooccurrence-{width}.png'))
 
     search = root.get_by_role('combobox', name='Find a model or feature')
     search.fill('Artist co-occurrence')

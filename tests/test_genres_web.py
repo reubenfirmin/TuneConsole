@@ -14,6 +14,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.genre_catalog_support import isolate_catalog_caches
 from tests.store_fixture_support import bounded_consumer_schema, consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core.store import Store
 from yt_playlist.util import genre_catalog
@@ -73,6 +74,7 @@ def store(request, tmp_path, monkeypatch):
         # curation and the full-size render are independent owners.
         monkeypatch.setattr(genre_catalog, 'catalog', lambda: (records, labels))
         monkeypatch.setattr(genre_catalog, 'family_labels', lambda: families)
+        isolate_catalog_caches(monkeypatch)
     database = Store(tmp_path / 'genre-editor.db')
     with closing(database.conn):
         initialize_consumer(database, schema, snapshot_guards=False)

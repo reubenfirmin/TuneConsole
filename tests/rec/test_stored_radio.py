@@ -30,13 +30,6 @@ def disable_periodic_library_sync():
     pass
 
 
-@pytest.fixture(scope='module')
-def _pristine_current_schema():
-    # The empty-reader lifetime test does not depend on genre vocabulary.
-    with bounded_consumer_schema((('rock', 'Rock'),)) as schema:
-        yield schema
-
-
 @pytest.fixture
 def reader_store(tmp_path, native_sql_calls, without_query_timing):
     # Lifetime roots use real writer transactions; only the seed publisher needs
@@ -103,9 +96,7 @@ def test_database_close_releases_radio_readers_when_retirement_cannot_commit(rea
         reopened.conn.close()
 
 
-@pytest.fixture
-def radio(fresh):
-    store, _ = fresh
+def seed_stored_radio(store):
     original = plan(store)
     keys = [f'fresh-{index}' for index in range(260)]
     members = publish_keyed(store, [('Rock', keys, .4)], now=3)
@@ -124,7 +115,13 @@ def radio(fresh):
             presence=sum(1 << bit for bit in (5, 6, 7, 8)), radio_generation=None, radio_space='',
             intensity_version=radio_intensity.VERSION, radio_profile_version=musical_character.VERSION))
     generation = publish(store, prepared).generation_id
-    return store, generation, prepared, group
+    return generation, prepared, group
+
+
+@pytest.fixture
+def radio(tmp_path, stored_radio_template):
+    with stored_radio_template.open(tmp_path / 'recommendations.db') as store:
+        yield store, *stored_radio_template.result
 
 
 def forbid_bundle(monkeypatch):

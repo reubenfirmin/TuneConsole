@@ -35,13 +35,13 @@ def test_explicit_replacement_discards_unsent_genre_draft(
     if replacement == 'reset':
         panel.get_by_role('button', name='Reset mix adjustments', exact=True).click()
         expect(panel.locator('dialog')).not_to_be_visible()
+        launcher.click()
     else:
+        # Home reopens the previously open dialog after loading its fragment.
         page.evaluate("navigation.navigate('/playlists').finished")
         expect(panel).to_have_count(0)
         page.evaluate("navigation.navigate('/').finished")
 
-    if not panel.locator('dialog').is_visible():
-        launcher.click()
     expect(panel.locator('dialog')).to_be_visible()
     expect(panel.get_by_role('searchbox', name='Find a genre for these mixes')).to_have_value('')
     selected = panel.locator('#home-genre-options input:checked').evaluate_all('els => els.map(el => el.value)')

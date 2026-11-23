@@ -1,4 +1,5 @@
 """Cleanup progresses through history larger than one SQL deadline."""
+from math import ceil
 from pathlib import Path
 import time
 
@@ -9,6 +10,7 @@ from yt_playlist.controllers.collection_retention import CollectionCollector
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.store import Store
+from yt_playlist.repos.collection_retention import FILE_OWNERS
 from tests.genre_catalog_support import bound_catalog
 
 
@@ -105,6 +107,10 @@ def test_large_unindexed_owner_history_makes_progress(owner_history, record_prop
     orphan = Path(recovery.publish(store.conn, 'action', f'unowned-{external}', {'orphan': True})[0])
     record_property('orphan_publication_seconds', time.perf_counter() - started)
     turns = []
+    checkpoint = (0, ())
+    # A turn can complete different numbers of pages as the machine load changes.
+    # Allow a turn per page of both action columns, plus table transitions.
+    owner_pages = 2 * ceil(400_000 / CollectionCollector.OWNER_PAGE)
     writer = Store(store._db_path) if external else store
     try:
         if external:
@@ -112,7 +118,7 @@ def test_large_unindexed_owner_history_makes_progress(owner_history, record_prop
             # This private collector fixture checks commit visibility and
             # invalidation, independently of power-loss durability.
             writer.conn.execute('PRAGMA synchronous=NORMAL')
-        for turn in range(12):
+        for turn in range(owner_pages + len(FILE_OWNERS) + 1):
             started = time.monotonic()
             store.retention.collections.maintain()
             turns.append(time.monotonic() - started)
@@ -120,7 +126,13 @@ def test_large_unindexed_owner_history_makes_progress(owner_history, record_prop
             writer.settings.set_setting('between scale cleanup turns', str(turn))
             if not orphan.exists():
                 break
-        assert not orphan.exists(), 'Cleanup must retire a batch across bounded turns'
+            scan = store.retention.database._collection_orphans.owners
+            position = (scan._table_index, scan._after or ())
+            assert position >= checkpoint, (checkpoint, position)
+            checkpoint = position
+        else:
+            pytest.fail(f'Cleanup did not retire the orphan, last owner checkpoint {checkpoint}')
+        assert store.settings.get_setting('between scale cleanup turns') == str(turn)
         record_property('owner_count', 400000)
         record_property('turn_count', len(turns))
         record_property('collector_total_seconds', sum(turns))

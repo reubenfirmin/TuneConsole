@@ -55,8 +55,7 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     assert store.discovery.get_discovered_artists()[0]["offered_count"] == 1
 
 
-@pytest.mark.parametrize("width", [1440, 1920])
-def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, tmp_path):
+def test_pool_shows_metadata_charts_above_tracks(live_app, store, page):
     store.discovery.upsert_discovered_track("cold", "v1", "Cold Song", "Artist", "Album", None,
                                   "House", "2020", "album", 1,
                                   audio={"bpm": 128.0, "danceability": .7})
@@ -64,7 +63,7 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     store.enrichment_state.record_enrichment_attempt("cold", "deezer", {}, retry=True, now=101)
     store.discovery.upsert_discovered_track("unknown", "v2", "Unknown Song", "Artist", None, None,
                                   None, None, "radio:v", 2)
-    page.set_viewport_size({"width": width, "height": 1000})
+    page.set_viewport_size({"width": 1440, "height": 1000})
     page.goto(f"{live_app}/discovery")
     row = page.locator("tr").filter(has_text="Cold Song")
     expect(row).to_contain_text("House · 2020 · 128.0 BPM · Danceability 0.7")
@@ -73,10 +72,12 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     for caption in ("By genre", "By era", "Unenriched"):
         expect(overview.get_by_text(caption, exact=True)).to_be_visible()
     expect(overview.locator(".discovery-chart-total")).to_have_text("1")
-    assert overview.bounding_box()["y"] < row.bounding_box()["y"]
     expect(page.get_by_text("Provider details", exact=False)).to_have_count(0)
-    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    capture(page, path=f'build/test-reports/home-discovery-browser/discovery-pool-{width}.png', full_page=True)
+    for width in (1440, 1920):
+        page.set_viewport_size({"width": width, "height": 1000})
+        assert overview.bounding_box()["y"] < row.bounding_box()["y"]
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        capture(page, path=f'build/test-reports/home-discovery-browser/discovery-pool-{width}.png', full_page=True)
     page.get_by_role("button", name="Albums (0)").click()
     expect(overview).to_be_hidden()
 

@@ -348,8 +348,7 @@ def test_existing_membership_and_sticky_source_tabs(music_app, store, page, widt
     assert not catalog.writes and not catalog.entity_writes and not catalog.rated and not errors
 
 
-@pytest.mark.parametrize('width', [1440, 1920])
-def test_both_sources_share_entity_artwork_and_playback(music_app, store, page, width):
+def test_both_sources_share_entity_artwork_and_playback(music_app, store, page):
     base, catalog = music_app
     original = catalog.search
 
@@ -373,7 +372,7 @@ def test_both_sources_share_entity_artwork_and_playback(music_app, store, page, 
         credits=[{'name': 'Favorite artist', 'id': 'UCfavorite'}])
     playlist = store.playlists.upsert_playlist(1, 'PLlocal', 'Favorite mix', 1, '', 999.)
     store.playlists.set_playlist_tracks(playlist, [track])
-    errors = prepare_page(page, width)
+    errors = prepare_page(page, 1440)
     page.route('**/play', lambda route: route.fulfill(json={'ok': True}))
     page.route('**/album/play', lambda route: route.fulfill(status=204))
     page.goto(base + '/playlists')
@@ -421,17 +420,20 @@ def test_both_sources_share_entity_artwork_and_playback(music_app, store, page, 
                 assert request.value.post_data_json == {'url': 'https://music.youtube.com/' + url}
             expect(search).to_be_visible()
             expect(field).to_have_value('favorite')
-        page.screenshot(path=f'/tmp/tuneconsole-1239-{source}-sections-{width}.png', full_page=True)
+        for width in (1920, 1440):
+            page.set_viewport_size({'width': width, 'height': 1000})
+            assert panel.locator('.pl-cover').evaluate_all(
+                'covers => covers.map(el => [el.clientWidth, el.clientHeight])') == [[58, 58]] * 4
+            page.screenshot(path=f'/tmp/tuneconsole-1239-{source}-sections-{width}.png', full_page=True)
     assert len(search.locator('#music-library-results .omni-section').all()) == 4
     assert not catalog.writes and not catalog.rated
-    if width == 1440:
-        page.evaluate('openMusicSearch({onboarding: true})')
-        choose = search.get_by_role('button', name='Choose Favorite artist', exact=True)
-        expect(choose).to_be_visible()
-        choose.click()
-        expect(search.get_by_role('button', name='Remove Favorite artist', exact=True)).to_have_attribute('aria-pressed', 'true')
-        assert [row['browse_id'] for row in store.discovery.starter_artists()] == ['UCfavorite']
-        expect(field).to_have_value('favorite')
+    page.evaluate('openMusicSearch({onboarding: true})')
+    choose = search.get_by_role('button', name='Choose Favorite artist', exact=True)
+    expect(choose).to_be_visible()
+    choose.click()
+    expect(search.get_by_role('button', name='Remove Favorite artist', exact=True)).to_have_attribute('aria-pressed', 'true')
+    assert [row['browse_id'] for row in store.discovery.starter_artists()] == ['UCfavorite']
+    expect(field).to_have_value('favorite')
     assert not errors
 
 

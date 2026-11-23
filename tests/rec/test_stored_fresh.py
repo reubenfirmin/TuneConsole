@@ -5,6 +5,7 @@ import pytest
 
 from tests.legacy_recommendation_fixture_support import recommendations
 from tests.enrichment_support import seed_discovered_enrichment
+from tests.recommendation_support import seed_compact_group_history
 from tests.store_fixture_support import native_sql_calls
 from tests.repos.test_typed_recommendation_publication import publish, plan
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
@@ -22,9 +23,8 @@ def disable_periodic_library_sync():
     """Synchronous recommendation readers do not construct the web app."""
 
 
-@pytest.fixture
-def fresh(recommendations):
-    store = recommendations
+def seed_stored_fresh(store):
+    seed_compact_group_history(store)
     records = [(index + 3, f'fresh-{index}', 'jazz' if index >= 258 else 'rock')
                for index in range(260)]
     items = [(f'fresh-upload-{index}', recording, key + ' title', f'artist-{index}', 'album')
@@ -44,8 +44,13 @@ def fresh(recommendations):
     ranked = pools.prepare('fresh', original.policy_version, 'c' * 64, 'fresh', candidates)
     prepared = replace(original, slots=(publication.Slot('fresh', 'all', 'fresh', ranked),),
         outputs=(publication.Output('fresh', 'empty', outputs.encode('fresh', 'empty', {})),))
-    generation = publish(store, prepared).generation_id
-    return store, generation
+    return publish(store, prepared).generation_id
+
+
+@pytest.fixture
+def fresh(tmp_path, stored_fresh_template):
+    with stored_fresh_template.open(tmp_path / 'recommendations.db') as store:
+        yield store, stored_fresh_template.result
 
 
 def forbid_legacy(monkeypatch):

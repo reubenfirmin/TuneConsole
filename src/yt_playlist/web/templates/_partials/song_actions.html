@@ -64,7 +64,7 @@
         </div>
       </div>
       <div class="song-dialog-fields" x-show="!result">
-        <fieldset class="song-metadata-fields" x-show="mode === 'metadata'" :disabled="busy || loading || !metadataLoaded">
+        <fieldset class="song-metadata-fields" x-show="mode === 'metadata'" :disabled="busy || loading || !metadataLoaded || metadataNeedsCheck">
           <label class="song-dialog-label">Title
             <input type="text" x-ref="metadataTitle" x-model="metadata.title" maxlength="1000"
                    :required="mode === 'metadata'" autocomplete="off">
@@ -128,13 +128,14 @@
              x-text="query ? 'No matching playlists.' : 'No playlists available. Create one from the song menu.'"></p>
         </div>
       </div>
-      <p class="song-action-error" role="status" x-show="error" x-text="error"></p>
+      <p class="song-action-error" role="status" x-show="error"
+         x-text="metadataSavedValues ? error + ' ' + metadataSavedValues : error"></p>
       <p class="song-dialog-note" x-show="result?.guidance" x-text="result?.guidance"></p>
       <footer class="song-dialog-actions">
         <button type="button" class="btn-ghost" @click="closeDialog()" :disabled="busy && mode !== 'metadata'" x-text="result ? 'Done' : 'Cancel'"></button>
         <button type="submit" class="btn-primary" x-show="!result"
-                :disabled="busy || loading || (mode === 'metadata' ? !metadataLoaded || !metadata.title.trim() : mode === 'create' ? !name.trim() : !selected)"
-                x-text="busy ? 'Saving…' : mode === 'metadata' ? 'Save changes' : mode === 'create' ? 'Create playlist' : 'Add song'"></button>
+                :disabled="busy || loading || (mode === 'metadata' ? !metadataLoaded || (!metadataNeedsCheck && !metadata.title.trim()) : mode === 'create' ? !name.trim() : !selected)"
+                x-text="busy ? (metadataNeedsCheck ? 'Checking…' : 'Saving…') : mode === 'metadata' ? (metadataNeedsCheck ? 'Check saved changes' : 'Save changes') : mode === 'create' ? 'Create playlist' : 'Add song'"></button>
         <a class="btn-ghost" x-show="result?.recovery_url" :href="result?.recovery_url">Action Log and recovery</a>
         <a class="btn btn-primary" x-show="result" x-ref="resultLink" :href="result?.url">
           <span x-text="result?.status === 'partial' ? 'Review playlist' : 'Open playlist'"></span>

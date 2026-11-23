@@ -161,8 +161,7 @@ def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page,
 
 
 
-@pytest.mark.parametrize('failure', ['http', 'lost-receipt'])
-def test_metadata_save_failure_preserves_edits_for_retry(song_app, page, action_evidence, failure):
+def test_metadata_save_failure_preserves_edits_for_retry(song_app, page, action_evidence):
     posts = []
     page.on('request', lambda request: posts.append(request.url)
             if request.method == 'POST' and request.url.endswith('/songs/metadata') else None)
@@ -174,17 +173,12 @@ def test_metadata_save_failure_preserves_edits_for_retry(song_app, page, action_
     title = dialog.get_by_label('Title', exact=True)
     expect(title).to_have_value('Owned Song')
     title.fill('Retry this title')
-    def fail(route):
-        if failure == 'lost-receipt':
-            assert route.fetch().ok
-            route.abort()
-        else:
-            route.fulfill(status=503, json={'detail': 'internal-diagnostic-879: write rejected'})
-    page.route('**/songs/metadata', fail)
+    page.route('**/songs/metadata', lambda route: route.fulfill(
+        status=503, json={'detail': 'internal-diagnostic-879: write rejected'}))
     dialog.get_by_role('button', name='Save changes').click()
     expect(dialog).to_be_visible()
     expect(dialog.get_by_role('status')).to_have_text(
-        'This edit was not confirmed. Review your changes before saving again.')
+        'This edit was not confirmed. Review your changes before saving again. Currently saved title “Owned Song”.')
     expect(title).to_have_value('Retry this title')
     expect(dialog.get_by_role('button', name='Save changes')).to_be_enabled()
     assert len(posts) == 1
@@ -197,10 +191,9 @@ def test_metadata_save_failure_preserves_edits_for_retry(song_app, page, action_
     expect(page.get_by_role('menuitem', name='Edit Metadata')).to_contain_text('Edit not confirmed')
     page.get_by_role('menuitem', name='Edit Metadata').click()
     expect(dialog.get_by_role('status')).to_have_text(
-        'This edit was not confirmed. Review your changes before saving again.')
+        'This edit was not confirmed. Review your changes before saving again. Currently saved title “Owned Song”.')
     expect(title).to_have_value('Retry this title')
-    expected = 'Retry this title' if failure == 'lost-receipt' else 'Owned Song'
-    assert song_app['store'].tracks.metadata_for_video('owned-song')['title'] == expected
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
     assert len(posts) == 1
     page.unroute('**/songs/metadata')
     dialog.get_by_role('button', name='Save changes').click()
@@ -209,6 +202,60 @@ def test_metadata_save_failure_preserves_edits_for_retry(song_app, page, action_
     expect(page.locator('.song-edit-status')).to_have_count(0)
     assert len(posts) == 2
     assert page.evaluate('window.originalPlayer === document.querySelector(".global-now-playing")')
+
+
+@pytest.mark.parametrize('recovery', ['immediate', 'reopen', 'check-button'])
+def test_metadata_lost_receipt_reads_back_without_another_write(song_app, page, recovery):
+    requests = []
+    reads_available = True
+
+    def intercept(route):
+        requests.append(route.request.method)
+        if route.request.method == 'POST':
+            assert route.fetch().ok
+            route.abort()
+        elif reads_available:
+            route.continue_()
+        else:
+            route.abort()
+
+    page.route('**/songs/metadata*', intercept)
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    assert page.evaluate('!!(window.originalPlayer = document.querySelector(".global-now-playing"))')
+    row = page.locator('tr.srow[data-vid="owned-song"]')
+    row.get_by_role('button', name='More actions for Owned Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    title = dialog.get_by_label('Title', exact=True)
+    expect(title).to_have_value('Owned Song')
+    title.fill('  Recovered title  ')
+    reads_available = recovery == 'immediate'
+    dialog.get_by_role('button', name='Save changes').click()
+    expected_requests = ['GET', 'POST', 'GET']
+    if recovery != 'immediate':
+        check = dialog.get_by_role('button', name='Check saved changes')
+        expect(check).to_be_enabled()
+        expect(title).to_have_value('  Recovered title  ')
+        expect(row.locator('.ptitle')).to_have_text('Owned Song')
+        assert requests == expected_requests
+        reads_available = True
+        expected_requests.append('GET')
+        if recovery == 'reopen':
+            dialog.get_by_role('button', name='Cancel').click()
+            row.get_by_role('button', name='More actions for Owned Song').click()
+            page.get_by_role('menuitem', name='Edit Metadata').click()
+            expect(title).to_have_value('Recovered title')
+            expect(dialog.get_by_role('button', name='Save changes')).to_be_enabled()
+        else:
+            check.click()
+    expect(row.locator('.ptitle')).to_have_text('Recovered title')
+    expect(row.locator('.song-edit-status')).to_have_count(0)
+    if recovery != 'reopen':
+        expect(dialog).not_to_be_visible()
+    assert requests == expected_requests
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['title'] == 'Recovered title'
+    assert page.evaluate('window.originalPlayer === document.querySelector(".global-now-playing")')
+    assert_quiet_action(page)
 
 
 @pytest.mark.parametrize('accepted', [True, False])

@@ -23,21 +23,23 @@
       return;
     }
     if (!expired && status?.connected !== false) return;
-    if (!note || !note.isConnected) {
-      const owner = document.querySelector('.pl-headmain, [data-generated-playlist]');
-      if (!owner) return;
-      note = document.createElement('p');
-      note.className = 'section-note'; note.dataset.generatedPlayback = '';
-      note.setAttribute('role', 'status'); owner.append(note);
-    }
-    if (expired || status?.connected === false) {
-      note.replaceChildren(document.createTextNode('Your mix is saved. Playback has not started. ' +
-        (note.closest('.pl-headmain') ? 'Use Play to retry this saved playlist, or ' : 'You can ')));
-      const link = document.createElement('a');
-      link.textContent = 'open it on YouTube Music';
-      link.href = 'https://music.youtube.com/watch?list=' + encodeURIComponent(pending.playlist);
-      link.target = '_blank'; link.rel = 'noopener'; note.append(link);
-    }
+    if (note?.isConnected && note.dataset.generatedPlayback === pending.playlist) return;
+    const owner = document.querySelector('.pl-headmain, [data-generated-playlist]');
+    if (!owner) return;
+
+    note?.remove();
+    note = document.createElement('p');
+    note.className = 'section-note';
+    note.dataset.generatedPlayback = pending.playlist;
+    note.setAttribute('role', 'status');
+    const retry = owner.matches('.pl-headmain') ? 'Use Play to retry this saved playlist, or ' : 'You can ';
+    const link = document.createElement('a');
+    link.textContent = 'open it on YouTube Music';
+    link.href = 'https://music.youtube.com/watch?list=' + encodeURIComponent(pending.playlist);
+    link.target = '_blank';
+    link.rel = 'noopener';
+    note.append('Your mix is saved. Playback has not started. ' + retry, link);
+    owner.insertBefore(note, owner.querySelector(':scope > .pl-actions'));
   }
   load();
   window.addEventListener('generated-playback-pending', () => { load(); update(); });

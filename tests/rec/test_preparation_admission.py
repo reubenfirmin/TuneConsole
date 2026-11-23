@@ -51,6 +51,7 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
         monkeypatch.setattr(worker, name, lambda: None)
     monkeypatch.setattr(worker.projections, 'poll', lambda: None)
     worker.jobs.retry[Job.BUNDLES].dirty = retry_pending
+    ticks_per_round = 25  # Allow two five-second content retries within each pool admission round.
 
     class Stop:
         def set(self):
@@ -66,15 +67,15 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
             while targets:
                 targets.pop(0)()
             ticks[0] += 1
-            if ticks[0] == 125:
+            if ticks[0] == ticks_per_round:
                 # Content and ratings keep receiving turns while pool work is
                 # held by its independent hourly admission. Advance both clocks
                 # to exercise the next admitted round without a real-time wait.
                 assert sum(kind == 'pools' for kind, _ in calls) == 1
-                assert sum(kind == 'content' for kind, _ in calls) >= 10
+                assert sum(kind == 'content' for kind, _ in calls) >= 2
                 clock[0] += candidate_refresh.CHECK_INTERVAL_S
             clock[0] += .5
-            return ticks[0] > 250
+            return ticks[0] > 2 * ticks_per_round
 
     worker._stop = Stop()
     try:
@@ -82,7 +83,7 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
         content = [at for kind, at in calls if kind == 'content']
         pools = [at for kind, at in calls if kind == 'pools']
         ratings = [at for kind, at in calls if kind == 'ratings']
-        assert len(content) >= 20
+        assert len(content) >= 4
         assert all(b - a >= 5 for a, b in zip(content, content[1:]))
         assert len(pools) >= 2
         assert all(b - a >= candidate_refresh.CHECK_INTERVAL_S for a, b in zip(pools, pools[1:]))

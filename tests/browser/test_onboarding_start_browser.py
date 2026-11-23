@@ -152,8 +152,7 @@ def live_initial_sync(monkeypatch, request):
 
 
 
-@pytest.mark.parametrize(('width', 'height'), [(1280, 1000), (960, 540)])
-def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, store, page, width, height, tmp_path):
+def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, store, page, tmp_path):
     from urllib.parse import parse_qs
     from tests.browser.test_album_listening_browser import _COVER
 
@@ -162,7 +161,8 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
                                       'artist': 'An artist', 'year': '2001'})
     status = {'connected': True, 'now_playing': {'video_id': 'other', 'title': 'Other song',
         'artist': 'Another artist', 'paused': False, 'playlist_ytm_id': 'OTHER'}}
-    page.set_viewport_size({'width': width, 'height': height})
+    viewports = [(1280, 1000), (960, 540)]
+    page.set_viewport_size({'width': 1280, 'height': 1000})
     page.route('**/bridge/status', lambda route: route.fulfill(json=status))
     page.route('**/onboarding-album-cover.svg', lambda route: route.fulfill(body=_COVER, content_type='image/svg+xml'))
     page.route('**/album/play', lambda route: route.fulfill(status=204, headers={'HX-Trigger': json.dumps({
@@ -172,8 +172,10 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_app)
     welcome = page.get_by_role('dialog', name='A better way to listen to music.')
-    expect(welcome).to_be_visible()
-    page.screenshot(path='/tmp/tuneconsole-1259-welcome.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        expect(welcome).to_be_visible()
+        page.screenshot(path=str(tmp_path / f'onboarding-welcome-{width}.png'))
     page.get_by_role('button', name='Explore my festival', exact=True).click()
     expect(welcome).to_be_hidden()
     card = page.locator('.starter-album')
@@ -186,11 +188,13 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     expect(page.locator('.starter-mix')).to_have_count(0)
     expect(page.locator('.arrival-progress')).to_be_hidden()
     play = card.get_by_role('button', name='Play The first record', exact=True)
-    assert play.evaluate("el => getComputedStyle(el, '::after').animationName") == 'onboarding-orbit, onboarding-breathe'
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     card.evaluate('''el => Promise.all(el.getAnimations({subtree:true})
         .filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))''')
-    page.screenshot(path=str(tmp_path / f'onboarding-first-album-{width}.png'), full_page=True)
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        assert play.evaluate("el => getComputedStyle(el, '::after').animationName") == 'onboarding-orbit, onboarding-breathe'
+        page.screenshot(path=str(tmp_path / f'onboarding-first-album-{width}.png'), full_page=True)
     player = page.locator('.global-now-playing')
     with page.expect_request('**/album/play') as request:
         play.click()
@@ -219,7 +223,10 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     expect(tour).to_be_visible()
     assert tour.evaluate('el => !!el.closest("dialog.album-listening[open]")')
     expect(dialog.locator('.album-listening-cover')).to_have_js_property('naturalWidth', 900)
-    page.screenshot(path=f'/tmp/tuneconsole-1259-album-tour-{width}.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        expect(tour).to_be_in_viewport()
+        page.screenshot(path=f'/tmp/tuneconsole-1259-album-tour-{width}.png')
     # Exercise the actual first-play screen before closing its artwork.
     tour.get_by_role('button', name='Next', exact=True).click()
     expect(page.get_by_role('region', name='Keep listening', exact=True)).to_be_visible()
@@ -234,9 +241,13 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     page.get_by_role('region', name='Keep listening', exact=True).get_by_role('button', name='Next').click()
     ratings_tour = page.get_by_role('region', name='Make it yours', exact=True)
     expect(ratings_tour).to_contain_text('Dislike skips a song')
-    page.screenshot(path=f'/tmp/tuneconsole-1259-album-ratings-tour-{width}.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        dismiss = ratings_tour.get_by_role('button', name='Dismiss tour' if width == 960 else 'Got it', exact=True)
+        expect(dismiss).to_be_in_viewport()
+        page.screenshot(path=f'/tmp/tuneconsole-1259-album-ratings-tour-{width}.png')
     with page.expect_response('**/onboard/player-tour/dismiss'):
-        ratings_tour.get_by_role('button', name='Dismiss tour' if width == 960 else 'Got it', exact=True).click()
+        dismiss.click()
     expect(page.locator('.onboarding-player-tour')).to_have_count(0)
     page.keyboard.press('Escape')
     page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()

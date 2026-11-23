@@ -13,10 +13,10 @@ def use_shipped_catalog(patch):
     """Build shared genuine history independently of a consumer's vocabulary."""
     for name, function in _SHIPPED_CATALOG.items():
         patch.setattr(genre_catalog, name, function)
-    _isolate_catalog_caches(patch)
+    isolate_catalog_caches(patch)
 
 
-def _isolate_catalog_caches(patch):
+def isolate_catalog_caches(patch):
     """Derived values must have the same lifetime as the patched vocabulary."""
     from yt_playlist.rec import musical_profiles
     from yt_playlist.util import genre_family_data, genre_map
@@ -41,7 +41,7 @@ def bound_shipped_catalog(patch, keys):
     patch.setattr(genre_catalog, 'builtin_names', lambda: list(names))
     patch.setattr(genre_catalog, 'legacy_names', lambda: list(names))
     patch.setattr(genre_catalog, 'legacy_entries', lambda: [(name, []) for name in names])
-    _isolate_catalog_caches(patch)
+    isolate_catalog_caches(patch)
 
 
 def bound_catalog(patch, *, entries=(('rock', 'Rock'), ('jazz', 'Jazz'))):
@@ -54,4 +54,4 @@ def bound_catalog(patch, *, entries=(('rock', 'Rock'), ('jazz', 'Jazz'))):
     patch.setattr(genre_catalog, 'builtin_names', lambda: [name for _key, name in entries])
     patch.setattr(genre_catalog, 'legacy_names', lambda: [name for _key, name in entries])
     patch.setattr(genre_catalog, 'legacy_entries', lambda: [(name, []) for _key, name in entries])
-    _isolate_catalog_caches(patch)
+    isolate_catalog_caches(patch)

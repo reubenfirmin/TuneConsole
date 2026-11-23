@@ -321,6 +321,9 @@
   align-items: stretch;
   gap: 1rem;
 }
+.page-playlist .release-hero:has(> .pl-headmain > [data-generated-playback]) {
+  grid-template-rows: auto minmax(min-content, 1fr) auto auto;
+}
 .page-playlist .release-hero .pl-headmain {
   display: grid;
   grid-column: 1 / -1;
@@ -345,8 +348,22 @@
 }
 .page-playlist .release-hero .pl-actions {
   grid-column: 1 / -1;
-  grid-row: 3;
+  grid-row: -2;
   margin: 0;
+}
+.page-playlist .release-hero .pl-headmain > [data-generated-playback] {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  justify-self: start;
+  margin: 0;
+  padding: .5rem .75rem;
+  border-radius: .45rem;
+  background: color-mix(in srgb, var(--shadow-ink) 80%, transparent);
+  color: var(--light-source);
+  line-height: 1.4;
+}
+.page-playlist .release-hero [data-generated-playback] a {
+  text-decoration: underline;
 }
 .page-playlist .release-hero .head-tools {
   position: relative;

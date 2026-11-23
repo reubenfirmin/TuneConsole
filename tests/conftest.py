@@ -101,6 +101,32 @@ def store(_pristine_current_schema, request):
 
 
 @pytest.fixture(scope='session')
+def stored_fresh_template(_pristine_current_schema, tmp_path_factory):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.rec.test_stored_fresh import seed_stored_fresh
+    from tests.store_fixture_support import use_native_sql_calls
+
+    def seed(source):
+        with pytest.MonkeyPatch.context() as patch:
+            use_native_sql_calls(patch)
+            return seed_stored_fresh(source)
+
+    database = tmp_path_factory.mktemp('stored-fresh') / 'source.db'
+    with prepared_template(_pristine_current_schema, seed, database=database) as template:
+        yield template
+
+
+@pytest.fixture(scope='session')
+def stored_radio_template(stored_fresh_template, tmp_path_factory):
+    from tests.prepared_fixture_support import capture_template
+    from tests.rec.test_stored_radio import seed_stored_radio
+
+    database = tmp_path_factory.mktemp('stored-radio') / 'source.db'
+    with stored_fresh_template.open(database) as source:
+        yield capture_template(source, seed_stored_radio(source))
+
+
+@pytest.fixture(scope='session')
 def vibe_menu_template(_pristine_current_schema, tmp_path_factory):
     from tests.prepared_fixture_support import prepared_template
     from tests.store_fixture_support import reuse_reporting_reader
@@ -119,6 +145,28 @@ def vibe_menu_template(_pristine_current_schema, tmp_path_factory):
 @pytest.fixture
 def vibe_menus(store, vibe_menu_template):
     return vibe_menu_template.restore(store)
+
+
+@pytest.fixture(scope='session')
+def recent_growth_vibes(tmp_path_factory):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.store_fixture_support import reuse_reporting_reader
+    from tests.test_growth_readiness import publish_vibe_menus
+
+    def seed(source):
+        source.accounts.upsert_account('main', None, True)
+        with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+            publish_vibe_menus(source, genre_reserves=False, retain_payload=False)
+
+    database = tmp_path_factory.mktemp('recent-growth-vibes') / 'source.db'
+    with consumer_schema() as schema, prepared_template(schema, seed, database=database) as template:
+        yield template
+
+
+@pytest.fixture
+def recent_growth_store(tmp_path, recent_growth_vibes):
+    with recent_growth_vibes.open(tmp_path / 'growth.db') as store:
+        yield store
 
 
 @pytest.fixture(scope='session')

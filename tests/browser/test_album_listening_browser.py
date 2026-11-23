@@ -56,10 +56,8 @@ def _player(page):
     return status
 
 
-@pytest.mark.parametrize('viewport', [(1440, 900), (1920, 1080), (960, 540)])
-def test_album_cover_primary_and_shared_controls_return_to_tracks(album_app, page, viewport):
-    width, height = viewport
-    page.set_viewport_size({'width': width, 'height': height})
+def test_album_cover_primary_and_shared_controls_return_to_tracks(album_app, page):
+    page.set_viewport_size({'width': 1440, 'height': 900})
     status = _player(page)
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -80,14 +78,18 @@ def test_album_cover_primary_and_shared_controls_return_to_tracks(album_app, pag
         pass
     expect(dialog).to_be_hidden()
     status['now_playing']['paused'] = False
+    page.evaluate('window.playbackStatus.refresh()')
     expect(dialog).to_be_visible(timeout=6000)
     cover = dialog.locator('.album-listening-cover')
     expect(cover).to_have_js_property('naturalWidth', 900)
     expect(cover).to_have_attribute('src', '/album-cover.svg')
-    box = dialog.bounding_box()
-    assert box == {'x': 0, 'y': 0, 'width': width, 'height': height}
-    assert cover.bounding_box()['height'] > height * .68
-    page.screenshot(path=f'/tmp/tuneconsole-1262-album-{width}.png')
+    for width, height in ((1920, 1080), (960, 540), (1440, 900)):
+        page.set_viewport_size({'width': width, 'height': height})
+        assert dialog.bounding_box() == {'x': 0, 'y': 0, 'width': width, 'height': height}
+        assert cover.bounding_box()['height'] > height * .68
+        expect(dialog.get_by_role('link', name='Back to tracks', exact=True)).to_be_in_viewport()
+        expect(dialog.get_by_role('button', name='Pause', exact=True)).to_be_in_viewport()
+        page.screenshot(path=f'/tmp/tuneconsole-1262-album-{width}.png')
 
     def toggle(route):
         status['now_playing']['paused'] = not status['now_playing']['paused']
@@ -115,6 +117,7 @@ def test_album_cover_primary_and_shared_controls_return_to_tracks(album_app, pag
     assert [rating['likeStatus'] for rating in ratings] == ['LIKE', 'INDIFFERENT']
 
     status['now_playing'].update(video_id='two', title='After Hours', thumbnail='/different-track-cover.svg')
+    page.evaluate('window.playbackStatus.refresh()')
     expect(dialog.locator('.album-listening-track a')).to_have_text('After Hours', timeout=6000)
     expect(cover).to_have_attribute('src', '/album-cover.svg')
     # Reload keeps an explicitly opened album view, without sending playback again.
@@ -123,8 +126,7 @@ def test_album_cover_primary_and_shared_controls_return_to_tracks(album_app, pag
     assert len(album_app.sent) == 1
     page.keyboard.press('Escape')
     expect(dialog).to_be_hidden()
-    with page.expect_response('**/bridge/status'):
-        pass
+    page.evaluate('window.playbackStatus.refresh()')
     expect(dialog).to_be_hidden()
     page.reload()
     expect(dialog).to_be_hidden()
@@ -141,15 +143,15 @@ def test_album_cover_primary_and_shared_controls_return_to_tracks(album_app, pag
     expect(dialog).to_be_visible()
     # A missing status sample keeps the cover and its exit available.
     song = status.pop('now_playing')
-    with page.expect_response('**/bridge/status'):
-        pass
+    page.evaluate('window.playbackStatus.refresh()')
+    assert page.evaluate('window.playbackStatus.snapshot?.now_playing ?? null') is None
     expect(dialog).to_be_visible()
     expect(dialog.get_by_role('link', name='Back to tracks', exact=True)).to_be_visible()
     status['now_playing'] = song
-    with page.expect_response('**/bridge/status'):
-        pass
+    page.evaluate('window.playbackStatus.refresh()')
     status['now_playing'].update(playlist_ytm_id='RADIO',
         source={'kind': 'radio', 'url': '/#radio', 'title': 'On Air'})
+    page.evaluate('window.playbackStatus.refresh()')
     expect(dialog).to_be_hidden(timeout=6000)
     expect(page.get_by_role('button', name='Show album artwork')).to_be_hidden()
     assert errors == []

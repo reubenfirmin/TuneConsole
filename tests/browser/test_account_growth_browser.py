@@ -25,6 +25,9 @@ def growth_catalog(store):
 
 @pytest.fixture
 def store(store, request):
+    if request.node.originalname in ('test_direct_recent_page_waits_for_ordinary_mixes',
+                                     'test_into_recently_loads_magazine_styles_and_records_visible_stories'):
+        return request.getfixturevalue('recent_growth_store')
     if request.node.originalname in ('test_festival_states_notices_home_choice_and_bonus_details',
                                      'test_home_keeps_earlier_tabs_visible_while_checking_later_tabs'):
         # This interaction-only journey repeatedly serves the same prepared
@@ -35,11 +38,9 @@ def store(store, request):
 
 def test_direct_recent_page_waits_for_ordinary_mixes(live_app, store, page, monkeypatch):
     from tests.test_growth_destinations import publish_destinations
-    from tests.test_growth_readiness import publish_vibe_menus
     from yt_playlist.rec import tv
 
     store.settings.set_setting('last_sync_at', '1')
-    publish_vibe_menus(store, genre_reserves=False)
     publish_destinations(store, now=1)
     store.tv_preparation.record_draw([entry['video_id'] for entry in tv.queue(store, 1)])
     mixes_ready = False
@@ -53,24 +54,29 @@ def test_direct_recent_page_waits_for_ordinary_mixes(live_app, store, page, monk
     expect(landmark).to_have_class(re.compile(r'\bis-untouched\b'))
     expect(page.get_by_role('tab', name='Into recently', exact=True)).to_be_hidden()
 
-    page.goto(live_app + '/?panel=recent#recent')
+    recent_url = live_app + '/?panel=recent'
+    locked = page.goto(recent_url + '#recent')
+    assert locked and locked.ok
     stories = page.get_by_role('region', name='Into recently')
     expect(stories).to_be_hidden()
     mixes_ready = True
     store.settings.set_setting('last_sync_at', '2')  # Invalidate the cached growth projection.
-    page.goto(live_app + '/?panel=recent#recent')
+    # Leave the locked document before following the direct link again. A hash
+    # change can reuse it, and a reload can retain the fallback Unlocks hash.
+    page.goto(live_app + '/playlists')
+    reopened = page.goto(recent_url + '#recent')
+    assert reopened and reopened.ok and reopened.url == recent_url
     expect(stories).to_be_visible()
+    expect(stories.locator('.into-card')).to_have_count(3)
     page.screenshot(path='/tmp/tuneconsole-1489-recent.png')
 
 
 @pytest.mark.parametrize('entry', ['direct', 'tab'])
 def test_into_recently_loads_magazine_styles_and_records_visible_stories(live_app, store, page, entry):
     from tests.test_growth_destinations import publish_destinations
-    from tests.test_growth_readiness import publish_vibe_menus
     from yt_playlist.rec import into_recently, tv
 
     returning_listener(store, 'vibes')
-    publish_vibe_menus(store, genre_reserves=False)
     publish_destinations(store, now=1)
     publish_personal_mix(store, now=1)
     store.tv_preparation.record_draw([item['video_id'] for item in tv.queue(store, 1)])

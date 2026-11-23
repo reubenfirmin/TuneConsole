@@ -374,14 +374,13 @@ def test_tv_history_keeps_prefix_but_never_invents_vibe_output(vibe_journey, mon
 @pytest.mark.parametrize(('mixes_ready', 'prior_vibe', 'expected'), [
     (False, False, False), (True, False, True), (False, True, True),
 ])
-def test_direct_recent_links_follow_vibe_progression(store, monkeypatch, mixes_ready, prior_vibe, expected):
-    from tests.test_growth_readiness import publish_vibe_menus
+def test_direct_recent_links_follow_vibe_progression(recent_growth_store, monkeypatch, mixes_ready, prior_vibe, expected):
     from tests.test_onboarding_routes import _client
 
+    store = recent_growth_store
     _, client = _client(store)
     with client:
         store.settings.set_setting('last_sync_at', '1')
-        publish_vibe_menus(store, genre_reserves=False)
         publish_destinations(store)
         store.tv_preparation.record_draw([entry['video_id'] for entry in tv.queue(store, 1000)])
         # Control the ordinary Mix Tapes producer, keeping real Vibe menus,

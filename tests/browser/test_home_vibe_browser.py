@@ -415,23 +415,28 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(prepared_vibe_ap
     assert not errors
 
 
-@pytest.mark.parametrize('width,height', [(1440, 1000), (1920, 1080)])
 def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(
-        live_app, store, page, width, height, published_vibe_controls, stalled_routes):
-    page.set_viewport_size({'width': width, 'height': height})
+        live_app, page, published_vibe_controls, stalled_routes):
+    viewports = [(1440, 1000), (1920, 1080)]
+    page.set_viewport_size({'width': 1440, 'height': 1000})
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.route('**/home/vibe', lambda route: stalled_routes.append(route))
     page.goto(live_app)
     page.get_by_role('button', name='Tune these mixes', exact=True).click()
     dialog = page.get_by_role('dialog', name='Tune these mixes', exact=True)
-    capture(page, path=f'build/test-reports/home-discovery-browser/vibe-controls-{width}.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        expect(dialog).to_be_in_viewport()
+        capture(page, path=f'build/test-reports/home-discovery-browser/vibe-controls-{width}.png')
     dialog.get_by_role('radio', name='Relax', exact=True).check()
     expect(dialog).not_to_be_visible()
     feedback = page.locator('#home-vibe-feedback')
-    expect(feedback).to_be_in_viewport()
     expect(feedback).to_have_attribute('data-state', 'saving')
     expect(page.locator('#home-vibe-feedback-title')).to_have_text('Adjusting your mixes for Relax…')
-    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        expect(feedback).to_be_in_viewport()
+        assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     # Exercise a ready card while the vibe POST is still held at the network boundary.
     card = page.locator('#home-mode-cards .gen-card').first
     card.locator('.gen-poster').click()
@@ -453,7 +458,10 @@ def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(
     card.get_by_role('button', name='Back to all mixes', exact=True).click()
     expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', 'relax')
     expect(feedback).not_to_be_visible()
-    capture(page, path=f'build/test-reports/home-discovery-browser/home-ready-{width}.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        expect(card.locator('.gen-poster')).to_be_visible()
+        capture(page, path=f'build/test-reports/home-discovery-browser/home-ready-{width}.png')
 
 
 def test_vibe_response_excludes_a_dislike_confirmed_before_selection_arrives(
