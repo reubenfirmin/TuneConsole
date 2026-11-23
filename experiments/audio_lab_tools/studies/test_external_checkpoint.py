@@ -1,6 +1,7 @@
 """Focused checks for frozen inputs and original-vote ranking diagnostics."""
 import csv
 import json
+import shutil
 import sqlite3
 
 import numpy as np
@@ -10,12 +11,23 @@ from experiments.audio_lab_tools.studies import external_checkpoint as checkpoin
 from experiments.audio_lab_tools.evaluation import external_ranking as ranking
 from experiments.audio_lab_tools.evaluation import external_transfer
 from experiments.audio_lab_tools.support.external_experiment import digest, save
+from tests.rec.test_vibe_prediction import capture, controlled_measurements, drain, qualified_candidate, track
+from tests.repos.test_recording_vibes import normalized_vibe_schema, versioned_store
+from yt_playlist.core import vibe_models, vibe_provenance
 
 
-def test_freeze_preserves_source_database_and_detects_changed_inputs(store, tmp_path, monkeypatch):
+def test_freeze_preserves_source_database_and_detects_changed_inputs(
+        versioned_store, tmp_path, monkeypatch, qualified_candidate):
+    store = versioned_store
+    track(store, 'original')
+    track(store, 'target')
+    capture(store, 'original')
+    drain(store).close()
     database = tmp_path / 'source.db'
     with sqlite3.connect(database) as destination:
         store.conn.backup(destination)
+        for owner in (vibe_provenance, vibe_models):
+            shutil.copytree(owner.directory(store.conn), owner.directory(destination))
     before = digest(database)
     out = tmp_path / 'research'
     out.mkdir()
@@ -30,6 +42,18 @@ def test_freeze_preserves_source_database_and_detects_changed_inputs(store, tmp_
     frozen = checkpoint.freeze(database)
     assert digest(database) == before
     assert frozen['human_rows_with_embeddings'] == 0
+    library = json.loads((out / 'checkpoint-1/inputs/library.json').read_text())
+    recordings = {row['title']: row['id'] for row in library['recordings']}
+    original = next(row for row in library['recording_vibes']
+                    if row['recording_id'] == recordings['original'] and row['vibe'] == 'relax')
+    target = next(row for row in library['predictions']
+                  if row['recording_id'] == recordings['target'] and row['vibe'] == 'relax')
+    assert target['lineage_complete'] and isinstance(target['policy_version'], str)
+    assert [row['measurement_id'] for row in library['prediction_inputs']
+            if row['prediction_id'] == target['id']] == [original['measurement_id']]
+    assert any(row['prediction_id'] == target['id'] for row in library['prediction_artists'])
+    measurement = next(row for row in library['measurements'] if row['id'] == original['measurement_id'])
+    assert measurement['model_version'] == original['inputs_version']
     assert checkpoint.freeze(database) == frozen
     groups_path = out / 'checkpoint-1/inputs/external-groups.json'
     groups = json.loads(groups_path.read_text())

@@ -427,6 +427,29 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
     assert store.road_trip.get_road_trip_draft(rid)["saved_playlist_id"] is None
 
 
+def test_artist_search_distinguishes_same_name_channels(live_road_trip_app, page, monkeypatch):
+    base_url, store = live_road_trip_app
+    channels = ('UCTwinsNorth', 'UCTwinsSouth')
+    store.artists.ensure_artist('Twins', provider='youtube', provider_id=channels[0])
+    monkeypatch.setattr(FakeClient, 'search', lambda self, query, filter='songs': [
+        {'artist': 'Twins', 'browseId': channel} for channel in channels
+    ] if filter == 'artists' and query == 'Twins' else [])
+
+    page.goto(f'{base_url}/road_trip')
+    page.get_by_role('textbox', name='Route name').fill('Passenger Twins')
+    page.get_by_role('button', name='Choose passenger music').click()
+    page.locator('input[x-model=artistQuery]').fill('Twins')
+    for channel in channels:
+        expect(page.get_by_role('button', name=f'Twins {channel}', exact=True)).to_be_visible()
+    page.get_by_role('button', name=f'Twins {channels[1]}', exact=True).click()
+    expect(page.get_by_role('button', name='Remove Twins', exact=True)).to_be_visible()
+
+    page.get_by_role('button', name='Save recipe', exact=True).click()
+    expect(page.locator('.rt-recipe')).to_have_count(1)
+    recipe = store.road_trip.list_road_trip_recipes()[0]
+    assert list(recipe['artist_refs'].values()) == [{'name': 'Twins', 'browse_id': channels[1]}]
+
+
 
 
 @pytest.mark.parametrize("addition", ["artist", "canonical-artist"])

@@ -11,7 +11,7 @@ from threading import RLock
 from types import SimpleNamespace
 
 from experiments.audio_lab_tools.studies.provider_pilot import connect, digest, save
-from yt_playlist.core import profile_files
+from yt_playlist.core import profile_files, vibe_provenance
 
 ROOT = Path(__file__).resolve().parents[3]
 OUTPUT = ROOT / 'experiments/audio_lab/local/evidence-586'
@@ -32,9 +32,24 @@ FOLLOWUP_CHECKS = [
 ]
 
 
+def contributors(conn, prediction_id, *, limit):
+    if prediction_id is None:
+        return []
+    provenance = vibe_provenance.read(conn, prediction_id)
+    inputs = provenance['inputs'] if provenance else []
+    if not inputs:
+        return []
+    marks = ','.join('?' for _ in inputs)
+    return [dict(row) for row in conn.execute(f'''
+        SELECT m.id,m.recording_id,m.source,v.value AS model_version,m.input_digest
+        FROM measurements m JOIN vibe_versions v ON v.id=m.model_version_id
+        WHERE m.id IN ({marks}) ORDER BY m.recording_id,m.id LIMIT ?''', (*inputs, limit))]
+
+
 def snapshot(db, output):
     from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
     from yt_playlist.controllers.vibe_predictions import overlay_profiles
+    from yt_playlist.rec.vibe_score_policy import score_patterns
 
     counts, versions, cases = Counter(), Counter(), {}
     with closing(connect(db)) as conn:
@@ -43,10 +58,11 @@ def snapshot(db, output):
         # pinned, query-only connection. This facade cannot initialize a Store
         # or run migrations against the account.
         overlay = VibePredictionsRepo(SimpleNamespace(conn=conn, _lock=RLock()))
-        for row in conn.execute('''SELECT p.identity_key,p.payload,r.title,r.artist
-                FROM rec_musical_profiles p JOIN recordings r ON r.identity_key=p.identity_key ORDER BY r.id'''):
+        patterns = score_patterns()
+        for row in conn.execute('''SELECT id,identity_key,title,artist FROM recordings
+                WHERE musical_profile_version IS NOT NULL ORDER BY id'''):
             profile = json.loads(profile_files.read(conn, 'recording', row['identity_key']))
-            overlay_profiles({row['identity_key']: profile}, overlay.overlay_rows([row['identity_key']]))
+            overlay_profiles({row['identity_key']: profile}, overlay.overlay_rows([row['identity_key']], patterns=patterns))
             counts['profiles'] += 1
             versions[profile['version']] += 1
             flags = {f"vibe:{fit['source']}" for fit in profile.get('vibes', {}).get('fits', {}).values()}
@@ -59,13 +75,12 @@ def snapshot(db, output):
                 flags.add('sparse_attributes')
             counts.update(flags)
             for flag in flags - cases.keys():
-                sources, missing = [], False
+                sources = []
                 expected = set(profile.get('source_versions', []))
                 found = set()
-                for source in conn.execute('''SELECT p.source_key,p.digest FROM rec_musical_source_profiles p
-                        JOIN rec_musical_links l ON l.source_key=p.source_key
-                        JOIN recordings r ON r.id=l.recording_id WHERE r.identity_key=? ORDER BY p.source_key''',
-                        (row['identity_key'],)):
+                for source in conn.execute('''SELECT p.source_key,p.musical_profile_digest AS digest
+                        FROM rec_musical_links l JOIN rec_musical_sources p ON p.source_key=l.source_key
+                        WHERE l.recording_id=? ORDER BY p.source_key''', (row['id'],)):
                     if source['digest'] in expected:
                         sources.append(json.loads(profile_files.read(conn, 'source', source['source_key'])))
                         found.add(source['digest'])
@@ -83,24 +98,25 @@ def snapshot(db, output):
                 fit['sample_ids'] = [row[0] for row in conn.execute(
                     'SELECT sample_id FROM measurement_samples WHERE measurement_id=? ORDER BY sample_id',
                     (fit['measurement_id'],))]
-                fit['contributors'] = [dict(row) for row in conn.execute('''
-                    SELECT m.id,m.recording_id,m.source,version.value AS model_version,m.input_digest
-                    FROM prediction_inputs i JOIN measurements m ON m.id=i.measurement_id
-                    JOIN vibe_versions version ON version.id=m.model_version_id
-                    WHERE i.prediction_id=? ORDER BY m.recording_id LIMIT 32''', (fit['prediction_id'],))]
+                fit['contributors'] = contributors(conn, fit['prediction_id'], limit=32)
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         lineage = {name: conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
-                   for name in ('recording_vibes', 'measurements', 'measurement_samples', 'predictions', 'prediction_inputs',
+                   for name in ('recording_vibes', 'measurements', 'measurement_samples', 'predictions',
                                 'play_events', 'play_event_sources', 'listening_observations') if name in tables}
-        lineage_examples = [dict(row) for row in conn.execute('''
-            SELECT p.id AS prediction_id,p.recording_id,p.vibe,p.kind,p.policy_version,p.lineage_complete,
-                   m.id AS measurement_id,m.recording_id AS contributor_recording_id,
-                   m.source,version.value AS model_version,m.input_digest,
-                   (SELECT COUNT(*) FROM measurement_samples s WHERE s.measurement_id=m.id) AS sample_count
-            FROM vibe_predictions p JOIN prediction_inputs i ON i.prediction_id=p.id
-            JOIN measurements m ON m.id=i.measurement_id
-            JOIN vibe_versions version ON version.id=m.model_version_id
-            ORDER BY p.id DESC,m.id LIMIT 24''')]
+        lineage_examples = []
+        for prediction in conn.execute('''
+                SELECT p.id AS prediction_id,p.recording_id,p.vibe,p.kind,p.policy_version,p.lineage_complete
+                FROM predictions state JOIN vibe_predictions p ON p.id=state.id
+                WHERE state.provenance_state='ready' ORDER BY p.id DESC'''):
+            for measurement in contributors(conn, prediction['prediction_id'], limit=24 - len(lineage_examples)):
+                measurement['measurement_id'] = measurement.pop('id')
+                measurement['contributor_recording_id'] = measurement.pop('recording_id')
+                measurement['sample_count'] = conn.execute(
+                    'SELECT COUNT(*) FROM measurement_samples WHERE measurement_id=?',
+                    (measurement['measurement_id'],)).fetchone()[0]
+                lineage_examples.append({**prediction, **measurement})
+            if len(lineage_examples) == 24:
+                break
     # Immutable account files are observed directly; absent historical coverage
     # stays absent. Do not issue synthetic actions into the account ledger.
     directory = db.parent / (db.name + '.evidence')

@@ -358,6 +358,53 @@ def test_capture_keeps_wikipedia_cards_for_offline_story_preparation(file_backed
         assert [(card['subject'], card['extract']) for card in cards] == [(subject['subject'], summary['extract'])]
 
 
+def test_capture_keeps_spotify_reports_and_receipts_without_the_donor(file_backed_store, tmp_path):
+    from tests.library_image.capture import capture, rebase, relocate
+    from yt_playlist.core import collection_recovery, spotify_records
+    from yt_playlist.core.store import Store
+
+    source = file_backed_store
+    account = source.accounts.upsert_account('Owner', None, True)
+    source.settings.save_spotify_import_job({'status': 'complete', 'account_id': account,
+                                          'report': {'imported': ['Mix']}})
+    source.settings.save_spotify_transfer(account, 'transfer', {
+        'complete': True, 'creation_phase': 'created', 'ytm_playlist_id': 'destination',
+        'source_video_ids': ['first', None, 'last'],
+    })
+    job = source.settings.spotify_import_job()
+    receipts = source.settings.spotify_transfer_receipts(account)
+    original_records = {key: spotify_records.read(source.conn, key)
+        for key in (spotify_records.IMPORT + '1', spotify_records.transfer_key('playlist', account, 'transfer'))}
+    originals = {Path(row['recovery_filename']): Path(row['recovery_filename']).read_bytes()
+                 for row in original_records.values()}
+
+    target = tmp_path / 'captured'
+    target.mkdir()
+    capture(source._db_path, target)
+    database = target / 'state.db'
+    logical = Path('/library/state.db')
+    private = Store(database)
+    with closing(private.conn):
+        for key, row in original_records.items():
+            original = Path(row['recovery_filename'])
+            assert spotify_records.read(private.conn, key)['recovery_filename'] == str(
+                relocate(original, source._db_path, logical))
+            assert relocate(original, source._db_path, database).read_bytes() == originals[original]
+            assert spotify_records.read(source.conn, key) == row
+            assert original.read_bytes() == originals[original]
+
+        # Use the physical test directory in place of the container's /library mount.
+        rebase(private.conn, logical, database)
+        donor_files = collection_recovery.directory(source.conn)
+        unavailable = donor_files.rename(tmp_path / 'offline-donor-files')
+        try:
+            private.init_schema()
+            assert private.settings.spotify_import_job() == job
+            assert private.settings.spotify_transfer_receipts(account) == receipts
+        finally:
+            unavailable.rename(donor_files)
+
+
 @pytest.mark.parametrize('publish_after_sql', [False, True], ids=['before-sql', 'after-sql'])
 def test_capture_keeps_only_numeric_evidence_selected_by_sql(tmp_path, monkeypatch, publish_after_sql):
     from tests.library_image import capture

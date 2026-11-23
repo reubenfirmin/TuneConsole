@@ -31,7 +31,7 @@ MODELS = (
     Node("road-trip-ranker", "Road Trip track ranker", PREPARATION, "Ranking policy",
          "Rank driver, passenger and crossover candidates",
          "Weight available passenger seed similarity alongside familiarity, provider popularity and repeat avoidance. Apply shared personalized taste to driver and Blend picks. Passenger relevance uses the stated requests.",
-         "Eligible library and acquired passenger tracks, recording credits, related artists, content vectors, played and liked songs, provider popularity and shared personalized track scoring. The saved recipe holds the ordered artist and genre choices, their identities and captured labels.",
+         "Eligible library and acquired passenger tracks, recording credits, related artists, content vectors, played and liked songs, provider popularity and shared personalized track scoring. Saving a YouTube Music artist suggestion captures its exact channel identity, including artists new to the library, alongside the ordered recipe choices and labels.",
          "Use the same weighting for initial builds, redraws and individual replacements. Missing seed vectors and unavailable driver taste leave the existing signals usable.",
          "Trip-specific intent and the driver's effective taste at draft preparation.",
          ("src/yt_playlist/rec/road_trip_ranking.py", "src/yt_playlist/library/road_trip_composition.py",

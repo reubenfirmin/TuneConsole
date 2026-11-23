@@ -121,11 +121,16 @@ class AlbumCommands:
     def admit_play(self):
         return self.player().begin_playback_intent()
 
+    def play_is_current(self, intent):
+        return self.player().playback_intent_current(intent)
+
     def play(self, browse, opportunity, action_id, intent):
         player = self.player()
         if not player.connected:
             raise ValueError('Connect the TuneConsole extension to play this album.')
         album = self.acquire(browse)
+        if not player.playback_intent_current(intent):
+            return None
         playlist, tracks = album.get('audioPlaylistId'), album.get('tracks') or []
         video = next((t.get('videoId') for t in tracks if t.get('videoId')), None)
         if not playlist or not video:
@@ -138,8 +143,9 @@ class AlbumCommands:
                         key=self.tracks.identity_key_for_video(t['videoId'])) for t in tracks if t.get('videoId')]))
                 self.ledger.remember_album_playback_context(dict(opportunity_id=opportunity, browse=browse,
                     playlist=playlist, at=self.now(), action_id=action_id, videos=[t['videoId'] for t in tracks if t.get('videoId')]))
-        player.send_control(dict(type='navigate', url='https://music.youtube.com/watch?v=' +
-            quote(video, safe='') + '&list=' + quote(playlist, safe='')), intent=intent)
+        url = 'https://music.youtube.com/watch?v=' + quote(video, safe='') + '&list=' + quote(playlist, safe='')
+        if not player.send_control(dict(type='navigate', url=url), intent=intent):
+            return None
         thumbnail = best_thumb(album.get('thumbnails'))
         return dict(browse=browse, playlist=playlist, title=album.get('title') or '',
             artist=', '.join(a.get('name', '') for a in album.get('artists') or []),

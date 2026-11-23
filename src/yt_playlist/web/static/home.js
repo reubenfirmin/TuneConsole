@@ -31,6 +31,7 @@ function loadHomeArea(element) {
 }
 
 function cancelHomeArea(element) {
+  if (element.hasAttribute('data-refresh-on-open')) delete element.dataset.loaded;
   const load = homeAreaLoads.get(element);
   if (!load) return;
   homeAreaLoads.delete(element);

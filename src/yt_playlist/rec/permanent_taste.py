@@ -7,7 +7,7 @@ from yt_playlist.core.listening_calendar import day_at
 from yt_playlist.core.rec_model_policy import CHOICE_SUPPORT_SURFACE, PERMANENT_SURFACE, PERMANENT_WORK
 from yt_playlist.rec import layers, transient
 
-POLICY = 'dated-episode-support-v4'
+POLICY = 'dated-episode-support-v5'
 PAGE_SIZE = 512
 MIN_DAYS = 3
 MAX_DAYS = 16
@@ -86,9 +86,15 @@ def _collect(reader, work, page_size):
     return len(page) >= page_size
 
 
-def inputs(reader):
-    return [POLICY, *reader.prepared_content.counters(), reader.history.taste_rating_revision(),
-            (reader.rec_proposals.get_proposals(CHOICE_SUPPORT_SURFACE) or {}).get('version')]
+def _inputs(reader, through):
+    content, evidence = reader.prepared_content.counters()
+    total, covered, next_play = reader.history.taste_play_extent(through)
+    # Each new play adds one row and one evidence revision. Subtract the insertions
+    # so the revision still detects edits and deletions, even when a play changes date.
+    # Keep the number of plays through the cutoff to detect late historical inserts.
+    version = [POLICY, content, evidence - total, covered, reader.history.taste_rating_revision(),
+               (reader.rec_proposals.get_proposals(CHOICE_SUPPORT_SURFACE) or {}).get('version')]
+    return version, next_play
 
 
 def _merge_choices(reader, facets):
@@ -114,27 +120,34 @@ def _merge_choices(reader, facets):
                     add_support(units, day, episode, strength)
 
 
-def _current(reader, document, version, now):
+def _current(reader, document, now):
+    if document.get('policy') != POLICY:
+        return False
+    version, next_play = _inputs(reader, document['through'])
     next_at = document.get('next_at')
     return (document.get('inputs') == version and (next_at is None or now < next_at)
+            and (next_play is None or now < next_play)
             and not reader.player_events.activity_added_before(*document['playback']))
 
 
 def _checkpoint(work):
-    return tuple(work.get(key) for key in ('inputs', 'after', 'ratings_after', 'playback'))
+    return tuple(work.get(key) for key in ('inputs', 'until', 'after', 'ratings_after', 'playback'))
 
 
 def prepare(store, now, *, page_size=PAGE_SIZE):
     """Resume one page, then atomically replace the baseline after a consistent replay."""
     with store.read_view(pinned=True) as reader:
-        version = inputs(reader)
         published = reader.rec_proposals.get_proposals(PERMANENT_SURFACE) or {}
-        if _current(reader, published, version, now):
+        if _current(reader, published, now):
             return False
         work = reader.rec_proposals.get_proposals(PERMANENT_WORK) or {}
         expected = _checkpoint(work)
+        cutoff = work.get('until', now)
+        version, _ = _inputs(reader, cutoff)
         if (work.get('inputs') != version
                 or reader.player_events.activity_added_before(*work['playback'])):
+            if cutoff != now:
+                version, _ = _inputs(reader, now)
             work = {'inputs': version, 'until': now, 'facets': {}, 'sessions': {},
                     'after': [-1, -1], 'ratings_after': [-1, -1]}
         player_event_id = reader.player_events.latest_id()
@@ -146,27 +159,30 @@ def prepare(store, now, *, page_size=PAGE_SIZE):
         if not more:
             _merge_choices(reader, work['facets'])
             completed = {axis: reading(units) for axis, units in work['facets'].items()}
-            next_at = reader.history.next_taste_evidence(work['until'])
+            next_like = reader.history.next_taste_like(work['until'])
     with atomic_write(store):
-        if inputs(store) != version or store.player_events.activity_added_before(*work['playback']):
+        latest_version, next_play = _inputs(store, work['until'])
+        if latest_version != version or store.player_events.activity_added_before(*work['playback']):
             return True
         previous = store.rec_proposals.get_proposals(PERMANENT_SURFACE) or {}
-        if _current(store, previous, version, now):
-            return False
+        if previous != published:
+            return not _current(store, previous, now)
         latest = store.rec_proposals.get_proposals(PERMANENT_WORK) or {}
         if _checkpoint(latest) != expected:
             return True
         if more:
             store.rec_proposals.put_proposals(PERMANENT_WORK, work, now)
-        else:
-            weights = {axis: row['weight'] for axis, row in completed.items() if row['weight'] != 1.}
-            store.rec_proposals.put_proposals(PERMANENT_SURFACE, {
-                'inputs': version, 'policy': POLICY, 'through': work['until'], 'next_at': next_at,
-                'weights': weights, 'facets': completed, 'playback': work['playback']}, now)
-            for axis in sorted(previous.get('weights', {}).keys() | weights.keys()):
-                old, new = previous.get('weights', {}).get(axis, 1.), weights.get(axis, 1.)
-                if old != new:
-                    store.rec_signals.log_graduation(axis, 'dated-support',
-                        completed.get(axis, {}).get('support', 0.), new / old, new, now)
-            store.rec_proposals.put_proposals(PERMANENT_WORK, {}, now)
-    return more
+            return True
+
+        next_at = min((at for at in (next_play, next_like) if at is not None), default=None)
+        weights = {axis: row['weight'] for axis, row in completed.items() if row['weight'] != 1.}
+        store.rec_proposals.put_proposals(PERMANENT_SURFACE, {
+            'inputs': version, 'policy': POLICY, 'through': work['until'], 'next_at': next_at,
+            'weights': weights, 'facets': completed, 'playback': work['playback']}, now)
+        for axis in sorted(previous.get('weights', {}).keys() | weights.keys()):
+            old, new = previous.get('weights', {}).get(axis, 1.), weights.get(axis, 1.)
+            if old != new:
+                store.rec_signals.log_graduation(axis, 'dated-support',
+                    completed.get(axis, {}).get('support', 0.), new / old, new, now)
+        store.rec_proposals.put_proposals(PERMANENT_WORK, {}, now)
+    return next_at is not None and next_at <= now

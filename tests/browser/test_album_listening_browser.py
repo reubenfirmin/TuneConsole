@@ -1,5 +1,6 @@
 """Album playback makes its cover primary without creating a second player."""
 import socket
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,8 @@ from playwright.sync_api import expect
 
 from tests.conftest import FakeClient
 from tests.live_server import LiveServer
+from yt_playlist.core.bridge import Bridge
+from yt_playlist.library.album_fetch import UPLOAD_RELEASE_PREFIX
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.browser
@@ -24,7 +27,7 @@ _COVER = '''<svg xmlns="http://www.w3.org/2000/svg" width="900" height="900" vie
 
 
 @pytest.fixture
-def album_app(store, without_metadata_providers):
+def album_app(store, without_metadata_providers, monkeypatch):
     identity = store.accounts.upsert_account('Main', None, True)
     album = {'audioPlaylistId': 'ALBUM_QUEUE', 'title': 'Late Night', 'type': 'Album',
         'artists': [{'name': 'The Evening Sessions'}], 'year': '2001',
@@ -32,17 +35,19 @@ def album_app(store, without_metadata_providers):
         'tracks': [{'videoId': 'one', 'title': 'Opening', 'duration': '3:20',
                     'artists': [{'name': 'The Evening Sessions'}]},
                    {'videoId': 'two', 'title': 'After Hours', 'duration': '3:00'}]}
-    client = FakeClient(albums={'MPRE_album': album})
+    upload = {**album, 'audioPlaylistId': None, 'title': 'Private release'}
+    client = FakeClient(albums={'MPRE_album': album}, uploads={UPLOAD_RELEASE_PREFIX + '_album': upload})
     sent = []
-    bridge = SimpleNamespace(connected=True, begin_playback_intent=lambda: 1,
-        send_control=lambda message, **kwargs: sent.append(message))
+    bridge = Bridge()
+    bridge.connect(lambda message: None, None)
+    monkeypatch.setattr(bridge, '_queue_control', sent.append)
     app = create_app(store, lambda: {identity: client}, bridge=bridge, background_work=False)
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
         server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
         with LiveServer(server, sockets=[sock]):
-            yield SimpleNamespace(base=f'http://127.0.0.1:{port}', sent=sent, bridge=bridge)
+            yield SimpleNamespace(base=f'http://127.0.0.1:{port}', sent=sent, bridge=bridge, client=client)
 
 
 def _player(page):
@@ -167,7 +172,7 @@ def test_failed_album_start_and_missing_artwork_keep_playback_usable(album_app, 
             if response.url.endswith('/album-cover.svg') else None)
     page.goto(album_app.base + '/album?browse=MPRE_album')
     dialog = page.get_by_role('dialog', name='Late Night', exact=True)
-    album_app.bridge.connected = False
+    album_app.bridge.disconnect()
     with page.expect_response('**/album/play') as response:
         page.get_by_role('button', name='Play Late Night', exact=True).click()
     assert response.value.status == 503
@@ -179,7 +184,7 @@ def test_failed_album_start_and_missing_artwork_keep_playback_usable(album_app, 
     # Start a new album request, then let its exact queue arrive without artwork.
     status['now_playing']['playlist_ytm_id'] = 'OTHER_QUEUE'
     expect(page.get_by_role('button', name='Play Late Night', exact=True)).to_be_visible(timeout=6000)
-    album_app.bridge.connected = True
+    album_app.bridge.connect(lambda message: None, None)
     with page.expect_response('**/album/play') as response:
         page.get_by_role('button', name='Play Late Night', exact=True).click()
     assert response.value.status == 204
@@ -190,6 +195,86 @@ def test_failed_album_start_and_missing_artwork_keep_playback_usable(album_app, 
     expect(dialog.get_by_role('button', name='Pause', exact=True)).to_be_enabled()
     dialog.get_by_role('link', name='Back to tracks', exact=True).click()
     expect(dialog).to_be_hidden()
+
+
+def test_superseded_album_play_does_not_open_artwork_for_a_stale_queue(album_app, page, monkeypatch):
+    status = _player(page)
+    page.goto(album_app.base + '/album?browse=MPRE_album')
+    expect(page.locator('.hs-now-title')).to_have_text('Opening')
+    dialog = page.locator('dialog.album-listening')
+    expect(dialog).to_be_hidden()
+    entered, release = threading.Event(), threading.Event()
+    get_album = album_app.client.get_album
+
+    def delayed_lookup(browse):
+        entered.set()
+        assert release.wait(8)
+        return get_album(browse)
+
+    monkeypatch.setattr(album_app.client, 'get_album', delayed_lookup)
+    newer = 'https://music.youtube.com/watch?v=new-song'
+    with page.expect_response('**/album/play') as response:
+        page.get_by_role('button', name='Play Late Night', exact=True).click()
+        try:
+            assert entered.wait(4)
+            status['now_playing']['playlist_ytm_id'] = 'ALBUM_QUEUE'
+            page.evaluate('window.playbackStatus.refresh()')
+            page.wait_for_function("window.playbackStatus.snapshot.now_playing.playlist_ytm_id === 'ALBUM_QUEUE'")
+            assert page.request.post(album_app.base + '/play', data={'url': newer}).json()['ok']
+        finally:
+            release.set()
+    assert response.value.status == 204
+    assert 'hx-trigger' not in response.value.headers
+    assert album_app.sent == [{'type': 'navigate', 'url': newer}]
+    expect(dialog).to_be_hidden()
+    expect(page.get_by_role('button', name='Show album artwork')).to_be_hidden()
+
+
+def test_delayed_album_reply_cannot_open_artwork_after_a_newer_song(album_app, page):
+    status = _player(page)
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.goto(album_app.base + '/album?browse=MPRE_album')
+    dialog = page.locator('dialog.album-listening')
+    expect(page.locator('.hs-now-title')).to_have_text('Opening')
+    expect(dialog).to_be_hidden()
+    newer = 'https://music.youtube.com/watch?v=new-song'
+
+    def delay_play_response(route):
+        completed = route.fetch()
+        assert completed.status == 204 and 'album-play-started' in completed.headers['hx-trigger']
+        status['now_playing']['playlist_ytm_id'] = 'ALBUM_QUEUE'
+        page.evaluate('window.playbackStatus.refresh()')
+        page.wait_for_function("window.playbackStatus.snapshot.now_playing.playlist_ytm_id === 'ALBUM_QUEUE'")
+        assert page.evaluate('(url) => window.tcPlay(url)', newer)
+        route.fulfill(response=completed)
+
+    page.route('**/album/play', delay_play_response)
+    button = page.get_by_role('button', name='Play Late Night', exact=True)
+    with page.expect_response('**/album/play') as response:
+        button.click()
+    assert response.value.status == 204
+    expect(page.locator('[hx-post="/album/play"]')).to_be_enabled()
+    assert len(album_app.sent) == 2 and album_app.sent[-1]['url'] == newer
+    expect(dialog).to_be_hidden()
+    expect(page.get_by_role('button', name='Show album artwork')).to_be_hidden()
+
+
+def test_private_album_play_opens_artwork_when_observed(album_app, page):
+    status = _player(page)
+    browse = UPLOAD_RELEASE_PREFIX + '_album'
+    album_url = '/album?browse=' + browse
+    page.goto(album_app.base + album_url)
+    dialog = page.locator('dialog.album-listening')
+    expect(dialog).to_be_hidden()
+    with page.expect_response('**/play') as response:
+        page.get_by_role('button', name='Play Private release', exact=True).click()
+    assert response.value.json()['ok']
+    assert album_app.sent == [{'type': 'navigate', 'url': 'https://music.youtube.com/browse/' + browse}]
+    expect(dialog).to_be_hidden()
+    status['now_playing'].update(album_browse_id=browse, playlist_ytm_id='',
+                                 source={'kind': 'album', 'url': album_url, 'title': 'Private release'})
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(page.get_by_role('dialog', name='Private release', exact=True)).to_be_visible()
 
 
 @pytest.mark.parametrize('source', ['library', 'catalog'])

@@ -5,6 +5,9 @@ The routes now do their YouTube/store work and return an empty 200 with HX-Refre
 location.reload()), and surface failures via the standard 422 OOB error toast, instead of
 the old JSON payloads.
 """
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -112,6 +115,39 @@ def deadline_library(tmp_path):
     with bounded_consumer_schema((('house', 'House'),)) as schema:
         with _file_consumer_store(tmp_path, schema) as store:
             yield store
+
+
+def test_saved_album_listing_and_owners_read_while_writer_is_held(
+        deadline_library, monkeypatch, without_metadata_providers):
+    from yt_playlist.repos.collection import CollectionRepo
+
+    store = deadline_library
+    owner = store.accounts.upsert_account('Album owner', None, True)
+    album = {'browse': 'MPRE_saved', 'title': 'Saved album', 'artist': 'Artist'}
+    store.collection.add_saved_album(album, account_id=owner)
+    reads_finished = Event()
+    owners = CollectionRepo.saved_album_owners
+
+    def observe_owners(repo, *args, **kwargs):
+        rows = owners(repo, *args, **kwargs)
+        reads_finished.set()
+        return rows
+
+    monkeypatch.setattr(CollectionRepo, 'saved_album_owners', observe_owners)
+    app = create_app(store, lambda: {}, background_work=False)
+    with (TestClient(app, base_url='http://127.0.0.1') as client,
+          ThreadPoolExecutor(1) as worker):
+        with store._lock, store.conn:
+            store.conn.execute('UPDATE albums SET title=? WHERE title=?', ('Uncommitted', album['title']))
+            response_future = worker.submit(client.get, '/albums')
+            completed_while_locked = reads_finished.wait(2)
+            store.conn.rollback()
+        response = response_future.result(timeout=3)
+    assert completed_while_locked, 'Saved albums and owners waited for the shared writer'
+    assert response.status_code == 200
+    assert [(row['browse'], row['title']) for row in response.context['saved']] == [
+        (album['browse'], album['title'])]
+    assert f'<input type="hidden" name="identity_id" value="{owner}">' in response.text
 
 
 @pytest.fixture

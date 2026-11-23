@@ -263,6 +263,64 @@ def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(ge
 
 
 @pytest.mark.parametrize('generation_app', ['board'], indirect=True)
+@pytest.mark.parametrize('outcome', ['saved', 'saved-with-delayed-readback', 'unknown'])
+def test_lost_mix_save_reply_returns_to_the_selected_card(generation_app, page, output_path, outcome):
+    base, provider, _, frames = generation_app
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    saves = []
+
+    def lose_reply(route):
+        if outcome != 'unknown':
+            saves.append(route.fetch().status)
+        else:
+            saves.append(None)
+        route.abort('failed')
+
+    page.route(base + '/home/generate', lose_reply)
+    if outcome == 'saved-with-delayed-readback':
+        page.route(base + '/home/generate/reconcile', lambda route: route.fulfill(status=503), times=1)
+    card = page.locator('#gen-wheelhouse')
+    card.locator('.gen-poster').click()
+    selected = card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)')
+    card.evaluate('(card) => { window.selectedMix = card; }')
+    with page.expect_popup() as opened:
+        card.get_by_role('button', name='Save and play this mix').click()
+    popup = opened.value
+    if not popup.is_closed():
+        popup.wait_for_event('close', timeout=5000)
+    assert popup.is_closed()
+    status = card.locator('[data-generation-error]')
+    expect(status).to_be_visible()
+    expect(card.locator('.gen-play')).to_be_disabled()
+    assert card.evaluate('(card) => window.selectedMix === card')
+    assert card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)') == selected
+    expect(page.locator('.mix-launch-view, #navigation-error, .toast-err')).to_have_count(0)
+
+    if outcome != 'saved':
+        expect(status).to_contain_text('This mix may already be saved.')
+        expect(status.get_by_role('link', name='Find mix in YouTube Music')).to_be_visible()
+        status.get_by_role('button', name='Check saved mix').click()
+
+    if outcome == 'unknown':
+        expect(status.get_by_role('button', name='Check saved mix')).to_be_enabled()
+        expect(status).to_contain_text('This mix may already be saved.')
+        assert saves == [None] and not provider.created and not frames
+    else:
+        expect(status).to_contain_text(f'{len(selected)} songs saved.')
+        assert saves == [200] and len(provider.created) == len(frames) == 1
+        playlist = provider.created[0][0]
+        expect(status.get_by_role('link', name='Open saved mix')).to_have_attribute(
+            'href', 'https://music.youtube.com/playlist?list=' + playlist)
+        assert [track['videoId'] for track in provider._tracks[playlist]] == selected
+        assert playlist in frames[0]['url']
+        page.screenshot(path=Path(output_path) / 'mix-recovered.png')
+        page.reload()
+        expect(status).to_contain_text(f'{len(selected)} songs saved.')
+        assert card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)') == selected
+        assert saves == [200] and len(provider.created) == len(frames) == 1
+
+
+@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
 @pytest.mark.parametrize('failure', ['create', 'addition', 'recipe'])
 def test_mix_recovery_keeps_the_selected_card_and_prevents_duplicate_create(generation_app, page, failure, monkeypatch):
     base, provider, bridge, frames = generation_app

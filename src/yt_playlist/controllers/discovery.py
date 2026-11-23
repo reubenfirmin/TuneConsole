@@ -84,8 +84,10 @@ class Discovery:
         return self.repository.interested_artists(weights=policy.INTEREST_WEIGHTS, limit=limit)
 
     def artists_due_for_scan(self, now, ttl_days=policy.SCAN_DAYS, budget=policy.SCAN_BUDGET,
-                             artist_limit=None, *, with_ids=False):
+                             artist_limit=None, *, with_ids=False, require_channel=False):
         artists = self.interested_artists(limit=artist_limit)
+        if require_channel:
+            artists = [artist for artist in artists if artist.get('browse_id')]
         scanned = self.repository.artist_scan_times([artist['artist_id'] for artist in artists])
         due = policy.scans_due(artists, scanned, now, ttl_days, budget)
         return due if with_ids else [artist['artist'] for artist in due]

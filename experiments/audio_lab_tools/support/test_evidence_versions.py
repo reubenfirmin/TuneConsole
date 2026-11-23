@@ -1,4 +1,4 @@
-"""Read-only reports retain exact version text in both admitted layouts."""
+"""Read-only reports retain exact version text from the current schema."""
 from contextlib import closing
 import hashlib
 import json
@@ -8,8 +8,8 @@ import sqlite3
 from experiments.audio_lab_tools.support import evidence_audit
 from experiments.audio_lab_tools.training import emotify_input_comparison as comparison
 from tests.rec.test_vibe_prediction import capture, controlled_measurements, drain, fits, qualified_candidate, track
-from tests.repos.test_recording_vibes import installed_v107_template, normalized_vibe_schema, versioned_store
-from yt_playlist.core import profile_files, vibe_versions
+from tests.repos.test_recording_vibes import normalized_vibe_schema, versioned_store
+from yt_playlist.core import profile_files, vibe_models, vibe_provenance, vibe_versions
 from experiments.audio_lab_tools.legacy import audio_vibe_model
 from yt_playlist.rec import vibe_preparation
 from yt_playlist.rec import audio_vibe_specialists
@@ -35,7 +35,8 @@ def test_readonly_reports_resolve_versions_and_preserve_saved_state(
     database = tmp_path / 'readonly.db'
     with closing(sqlite3.connect(database)) as copy:
         store.conn.backup(copy)
-        shutil.copytree(profile_files.directory(store.conn), profile_files.directory(copy))
+        for owner in (profile_files, vibe_provenance, vibe_models):
+            shutil.copytree(owner.directory(store.conn), owner.directory(copy))
     before = database.read_bytes()
 
     audit = tmp_path / 'audit'
@@ -54,6 +55,8 @@ def test_readonly_reports_resolve_versions_and_preserve_saved_state(
     assert {row['vibe'] for row in predicted} == expected_channels
     assert all(isinstance(row['policy_version'], str) and model_hash in row['policy_version']
                for row in predicted)
+    assert {row['measurement_id'] for row in measured} == {
+        input_['id'] for fit in predicted for input_ in fit['contributors']}
 
     output = tmp_path / 'comparison'
     output.mkdir()

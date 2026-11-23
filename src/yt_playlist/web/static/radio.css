@@ -73,7 +73,6 @@ body:has(.home-dashboard.is-radio) > :not(main) { flex-shrink: 0; }
 .radio-launch.gen-stage { position: relative; inset: auto; height: 100%; min-height: 0; border: 1px solid var(--border); border-radius: 12px; animation: radio-arrive .35s ease both; }
 .radio-launch .gen-copy { max-width: none; left: 2rem; right: 2rem; bottom: 2rem; }
 .radio-launch .gen-sub { max-width: none; overflow-wrap: anywhere; }
-.radio-launch-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .8rem; }
 @keyframes radio-arrive { from { opacity: 0; transform: translateY(.4rem); } to { opacity: 1; transform: translateY(0); } }
 .radio-session { position: relative; display: grid; grid-template-rows: minmax(0, var(--radio-history-height, 40%)) var(--radio-junction-height) minmax(0, 1fr); height: var(--radio-session-height); }
 .radio-playlist { position: relative; isolation: isolate; display: flex; min-width: 0; min-height: 0; }

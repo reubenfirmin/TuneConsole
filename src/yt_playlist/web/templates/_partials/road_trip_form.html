@@ -48,8 +48,15 @@
           <div class="rt-picker-card">
             <div class="rt-genre-add">
               <label>Add an artist<input type="text" x-model="artistQuery" @input="searchArtists()" placeholder="Search artists…"></label>
-              <div class="rt-suggestions" x-show="artistSuggestions.length" x-cloak><template x-for="a in artistSuggestions" :key="a.key"><button type="button" class="rt-suggestion" @click="addArtist(a)" x-text="a.name"></button></template></div>
-              <p class="rt-picker-hint">Their genre is added with them. Your picks lead each genre, with related artists filling it out.</p>
+              <div class="rt-suggestions" x-show="artistSuggestions.length" x-cloak>
+                <template x-for="a in artistSuggestions" :key="a.key">
+                  <button type="button" class="rt-suggestion rt-artist-suggestion" @click="addArtist(a)">
+                    <template x-if="a.thumbnail"><img :src="a.thumbnail" alt="" width="32" height="32"></template>
+                    <span><span x-text="a.name"></span><small x-show="a.channel" x-text="a.channel"></small></span>
+                  </button>
+                </template>
+              </div>
+              <p class="rt-picker-hint">Available genres are added with your artists. Related artists help fill out each genre.</p>
               <div class="rt-picked-links"><template x-for="a in artists" :key="a"><button type="button" class="rt-picked-link is-artist genre-chip" @click="removeArtist(a)" :aria-label="'Remove ' + artistLabel(a)"><span x-text="artistLabel(a)"></span><span aria-hidden="true">×</span></button></template></div>
             </div>
           </div>

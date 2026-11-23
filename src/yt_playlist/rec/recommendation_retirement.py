@@ -8,8 +8,6 @@ from yt_playlist.core.group_admission import source
 from yt_playlist.rec import group_roots, measurement
 
 log = logging.getLogger(__name__)
-BATCH_ROWS = 32768
-BATCH_POOLS = 512
 
 
 def drain(store, now):
@@ -45,9 +43,8 @@ def drain(store, now):
         checkpoint_at = started + 1
         while True:
             check_cancellable_work()
-            generation = store.recommendations.cleanup_generations(checkpoint=False, row_limit=BATCH_ROWS)
-            pool = store.recommendations.cleanup_pools(
-                checkpoint=False, row_limit=BATCH_ROWS, pool_limit=BATCH_POOLS)
+            generation = store.recommendations.cleanup_generations(checkpoint=False)
+            pool = store.recommendations.cleanup_pools(checkpoint=False)
             for result in (generation, pool):
                 progress['generations'] += result.generations
                 progress['pools'] += result.pools

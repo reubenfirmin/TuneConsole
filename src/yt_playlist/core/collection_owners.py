@@ -18,3 +18,8 @@ OWNERS = {'road_trip_recipes':'road-trip-draft','radio_sessions':'radio-session'
 OWNER_KEYS = {'road_trip_recipes':'draft_id','discovered_artists':'artist_id','sync_cursors':'recovery_owner'}
 PLAYLIST_DOCUMENTS = {'rec_recipes': 'recipe', 'cluster_canvas': 'canvas'}
 PREDECESSOR_CLEANUP = 'playlist_gc_attempts', 'playlist-gc'
+PREDECESSOR_OWNERS = {
+    'road_trip_drafts': 'road-trip-draft',
+    'action_drafts': 'action-draft',
+    'sync_attempts': 'library-sync',
+}

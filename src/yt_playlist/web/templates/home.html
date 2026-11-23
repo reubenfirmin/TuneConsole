@@ -145,16 +145,18 @@
     {% for area in ('unlocks', 'radio', 'album-choices', 'tv', 'directions', 'rediscover', 'recent', 'discover', 'notices') %}
     <section class="dash-panel dash-{{ area }}{% if area in ('recent', 'discover') %} dash-async{% endif %}"
              data-dash="{{ area }}" role="tabpanel" x-show="panel === '{{ area }}'"{% if area != home_default_panel %} x-cloak{% endif %}>
-      {% if area == home_default_panel %}
+      {% if area == home_default_panel and area != 'notices' %}
       {% include '_partials/home_panel.html' %}
       {% else %}
       <div hx-get="/?panel={{ area }}&amp;fragment=1" hx-trigger="home-area-open" hx-swap="innerHTML"
+           {% if area == 'notices' %}data-refresh-on-open{% endif %}
+           {% if area == home_default_panel %}data-loaded="1"{% endif %}
            x-effect="if (panel === '{{ area }}') $nextTick(() => { if (panel === '{{ area }}') loadHomeArea($el); }); else cancelHomeArea($el)"
            @app-page-leaving.window="cancelHomeArea($el)"
            @pagehide.window="cancelHomeArea($el)"
            @pageshow.window="if ($event.persisted && panel === '{{ area }}') loadHomeArea($el)"
            {% if area == 'tv' %}@htmx:after-swap.camel="mountHomeTv($el)"{% endif %}
-           @htmx:after-request.camel="homeAreaLoaded($el, $event, '{{ area }}')"></div>
+           @htmx:after-request.camel="homeAreaLoaded($el, $event, '{{ area }}')">{% if area == home_default_panel %}{% include '_partials/home_panel.html' %}{% endif %}</div>
       {% endif %}
     </section>
     {% endfor %}

@@ -446,6 +446,14 @@ class TrackRepo(Repo):
         return dict(row) if row else None
 
     @lookup_read
+    def effective_genre_key(self, track_id):
+        row = self.conn.execute(
+            'SELECT COALESCE(g.redirect_key,r.effective_genre_key) FROM track_sources t '
+            'JOIN recordings r ON r.id=t.recording_id '
+            'LEFT JOIN genre_catalog g ON g.key=r.effective_genre_key WHERE t.id=?', (track_id,)).fetchone()
+        return row[0] if row else None
+
+    @lookup_read
     def original_metadata(self, track_id):
         row = self.conn.execute('SELECT id,orig_title,orig_artist FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
         return dict(row) if row is not None else None

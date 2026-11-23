@@ -170,11 +170,12 @@ class Ctx:
             account=lambda: client_for(self.store, self.client_provider()),
             rating=lambda *args, **kw: self.ops().set_rating(*args, **kw), logger=self.logger)
 
-    def collection_commands(self):
+    def collection_commands(self, *, reader=None):
         from yt_playlist.controllers.collection_commands import CollectionCommands
         from yt_playlist.core.accounts import AccountAccess
         from yt_playlist.rec import choice_evidence
-        return CollectionCommands(self.store.collection,
+        collection = self.store.collection if reader is None else reader.collection
+        return CollectionCommands(collection,
             AccountAccess(self.store.accounts, self.store.playlists, self.client_provider()),
             now=getattr(self, 'now_fn', time.time),
             respond=lambda *args, **kwargs: choice_evidence.safe_respond(self.store, *args, **kwargs),

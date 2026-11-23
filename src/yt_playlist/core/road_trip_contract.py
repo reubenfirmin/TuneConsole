@@ -1,8 +1,23 @@
 """Persisted Road Trip recipe units and supported user controls."""
+import re
 
 DEFAULT_FAMILIARITY_PCT = 50
 MIN_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 12 * 60
+YOUTUBE_ARTIST_PREFIX = '@youtube-artist:'
+
+
+def youtube_artist_choice(channel, label):
+    if isinstance(channel, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', channel) and label.strip():
+        return f'{YOUTUBE_ARTIST_PREFIX}{channel}:{label.strip()}'
+    return None
+
+
+def parse_youtube_artist_choice(value):
+    channel, _, label = value.removeprefix(YOUTUBE_ARTIST_PREFIX).partition(':')
+    if value.startswith(YOUTUBE_ARTIST_PREFIX) and youtube_artist_choice(channel, label):
+        return channel, label.strip()
+    return None
 
 
 def validate_recipe_values(own_pct, familiarity_pct, target_minutes, now):

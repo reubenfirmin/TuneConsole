@@ -257,17 +257,20 @@ function songActions() {
       }
     },
     async readMetadata(videoId, current, edit, { acknowledged = false, closeOnMatch = false } = {}) {
+      const query = new URLSearchParams({video_id: videoId});
+      if (!acknowledged && edit?.changes.genre !== undefined) query.set('proposed_genre', edit.changes.genre);
       let data;
       try {
-        data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(videoId));
+        data = await this.json('/songs/metadata?' + query);
       } catch (error) {
         if (!edit) throw error;
       }
       if (!closeOnMatch && current !== request) return;
       const track = data?.metadata;
       const values = metadataValues(track ?? (edit?.song ?? this.song));
-      const confirmed = edit && track && (acknowledged || Object.entries(edit.changes)
-        .every(([field, value]) => values[field] === value));
+      const pending = Object.fromEntries(Object.entries(edit?.changes ?? {}).filter(([field, value]) =>
+        !track || (field === 'genre' ? !data.genre_matches : values[field] !== value)));
+      const confirmed = edit && track && (acknowledged || !Object.keys(pending).length);
       if (edit) {
         if (confirmed) metadataEdits.delete(videoId);
         else metadataEdits.set(videoId, edit);
@@ -284,7 +287,7 @@ function songActions() {
       this.metadataNeedsCheck = !data;
       if (data) {
         this.initialMetadata = values;
-        this.metadata = { ...values, ...(confirmed ? {} : edit?.changes) };
+        this.metadata = { ...values, ...(confirmed ? {} : pending) };
         this.originals = { title: track?.orig_title, artist: track?.orig_artist };
         this.trackId = track?.track_id;
         this.genreOptions = data.genre_options; this.genres = data.genres;

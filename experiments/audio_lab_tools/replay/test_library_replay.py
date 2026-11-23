@@ -117,9 +117,12 @@ def test_paired_resume_rejects_changed_summary_and_path_escape(tmp_path):
 
 
 def test_consumer_comparison_keeps_unknown_intensity_distinct_from_known_midpoint(tmp_path):
+    from yt_playlist.rec.vibe_score_policy import serving_prefix
+
     output = tmp_path / 'checkpoint'
     output.mkdir()
-    tracks = [{'key': 'known', 'musical': {'vibes': {'intensity_fits': {
+    tracks = [{'key': 'known', 'musical': {'vibes': {'inputs_version': serving_prefix() + 'test-capture',
+        'intensity_fits': {
         'energize': {'score': .5, 'support': .8, 'source': 'audio_measurement'}}}}},
               {'key': 'unknown', 'musical': {}}]
     (output / 'candidate-mixes.json').write_text(json.dumps({

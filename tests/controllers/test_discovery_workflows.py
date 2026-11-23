@@ -114,7 +114,8 @@ def test_discovery_pass_bounds_scan_rotates_owned_albums_and_preserves_held_trac
         store.eligibility, store.history, parameter=lambda name: 1, artist_info=info,
         new_artists=lambda: [{'artist': 'New artist', 'score': .8}], populate=populate, radio=radio, logger=Mock())
     assert command.run(1000, budget=2) == {'scanned': 1}
-    store.discovery.artists_due_for_scan.assert_called_once_with(1000, budget=2, artist_limit=1, with_ids=True)
+    store.discovery.artists_due_for_scan.assert_called_once_with(
+        1000, budget=2, artist_limit=1, with_ids=True, require_channel=True)
     info.assert_called_once_with('Artist', 'channel')
     assert store.discovery.upsert_discovered_album.call_args.args[0] == 'new'
     assert store.discovery.upsert_discovered_album.call_count == 1

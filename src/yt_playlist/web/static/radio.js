@@ -37,12 +37,12 @@ function radioHome(initial = {}) {
     playlistRequest: null,
     busyAction: '', seedMenu: initial.seedMenu || cached.seedMenu, seenMenu: null, currentVideo: null, requestSerial: 0,
     recordPlayback: null, pendingRecord: null, recordCoverUrl: '',
-    launchSong: pendingLaunch?.song || initial.launchPlaylist || (state.active && state.starting ? state.tracks?.[0] || {} : null),
-    launchPlaylist: pendingLaunch ? (pendingLaunch.fromPlaylist ? pendingLaunch.song : null) : initial.launchPlaylist || null,
+    launchSong: pendingLaunch ? null : initial.launchPlaylist || (state.active && state.starting ? state.tracks?.[0] || {} : null),
+    launchPlaylist: initial.launchPlaylist || null,
     launchPreviousId: pendingLaunch?.previousId ?? null,
     launchAttempt: pendingLaunch?.id || null,
     launchRequest: pendingLaunch?.request || null,
-    launchPhase: pendingLaunch ? 'unknown' : '',
+    launchUncertain: !!pendingLaunch,
     launchSerial: 0,
     recoverySong: pendingLaunch?.song || null,
     recoveryFromPlaylist: pendingLaunch?.fromPlaylist || false,
@@ -327,20 +327,7 @@ function radioHome(initial = {}) {
     get sessionStarting() { return !!(this.state.starting && this.playlistSessionId !== this.sessionId()); },
     get preparingSession() { return !!(this.state.active && this.sessionId() && this.playlistSessionId !== this.sessionId()); },
     get restoring() { return (this.resolving || this.preparingSession) && !this.launchSong && !this.sessionStarting && this.busyAction !== 'start'; },
-    get launching() { return !!this.launchPhase || this.resolving || this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.sessionStarting) || this.preparingSession; },
-    get launchUncertain() { return this.launchPhase === 'unknown'; },
-    get recoveryTitle() { return this.recoverySong?.title || 'Your Radio Session'; },
-    get recoveryArtist() { return this.recoverySong?.artist || (this.recoveryFromPlaylist ? 'Radio from your playlist' : ''); },
-    get recoveryUrl() {
-      if (this.recoveryFromPlaylist) return playlistUrl(this.recoverySong.id);
-      return 'https://music.youtube.com/watch?v=' + encodeURIComponent(this.recoverySong?.video_id || '');
-    },
-    get recoveryMessage() {
-      if (this.busyAction === 'end-launch') return 'Ending this attempt…';
-      if (this.launchUncertain) return 'We couldn’t confirm playback. Try this selection again or check playback.';
-      if (this.launchPhase === 'disconnected') return 'Open YouTube Music and connect its extension, then try this selection again.';
-      return 'This Radio Session didn’t start. Try this selection again, or play it directly.';
-    },
+    get launching() { return this.resolving || this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.sessionStarting) || this.preparingSession; },
     get showSeeds() { return !this.state.active && !this.launching; },
     get launchTracks() {
       const pending = this.busyAction === 'start' || this.launchSong;
@@ -432,23 +419,17 @@ function radioHome(initial = {}) {
         playlist: this.state.playlist_id || null});
     },
     finishLaunch() {
-      if (!this.launchSong || this.busyAction === 'start' || this.busyAction === 'end-launch' || this.resolving) return;
+      if ((!this.launchSong && !this.launchUncertain) || this.busyAction === 'start' || this.resolving) return;
       // An inactive or previous-session snapshot cannot settle a lost POST.
-      // Keep the original attempt available for an explicit retry.
+      // A second click on the same selection reuses the original attempt.
       if (this.launchUncertain && (!this.state.active || this.sessionId() === this.launchPreviousId)) return;
       if (!this.state.active) {
         console.debug('[Radio] launch returned to song choices', this.state.error);
-        this.launchPhase = 'rejected';
-        this.launchSong = null;
-        this.launchPlaylist = null;
         this.clearLaunch();
       } else if (this.state.playlist_id && (!this.sessionStarting ||
           (this.sessionId() !== this.launchPreviousId && this.recordPlayback?.paused === false &&
            this.recordPlayback.playlist_ytm_id === this.state.playlist_id))) {
         this.playlistSessionId = this.sessionId();
-        this.launchPhase = '';
-        this.launchSong = null;
-        this.launchPlaylist = null;
         this.clearLaunch();
       }
     },
@@ -464,6 +445,14 @@ function radioHome(initial = {}) {
       } catch (_) {}
       this.launchAttempt = null;
       this.launchRequest = null;
+      this.launchUncertain = false;
+      this.launchSong = null;
+      this.launchPlaylist = null;
+    },
+    deferLaunch() {
+      this.launchUncertain = true;
+      this.launchSong = null;
+      this.launchPlaylist = null;
     },
     init() {
       this.syncRecordPlayback(window.playbackStatus?.snapshot);
@@ -474,7 +463,7 @@ function radioHome(initial = {}) {
         url.searchParams.delete('radio_playlist');
         history.replaceState(null, '', url.pathname + url.search + url.hash);
       }
-      if (this.launchPlaylist && !this.launchUncertain) {
+      if (this.launchPlaylist) {
         this.$nextTick(() => this.start(this.launchPlaylist, true));
         return;
       }
@@ -617,9 +606,6 @@ function radioHome(initial = {}) {
         }
       });
     },
-    retryLaunch() {
-      return this.start(this.recoverySong, this.recoveryFromPlaylist, this.launchUncertain);
-    },
     focusSeedWhenReady(previousFocus) {
       cancelSeedFocus?.();
       const seeds = this.$refs.seeds;
@@ -648,38 +634,35 @@ function radioHome(initial = {}) {
       document.addEventListener('focusin', focus);
       focus();
     },
-    async chooseAnotherSong() {
+    async cancelUnconfirmedLaunch() {
       const launchId = this.launchAttempt;
-      if (this.busy || !this.launchUncertain || !launchId) return;
-      const previousFocus = document.activeElement;
-      let stopped = false;
       ++this.requestSerial;
       this.busy = true;
-      this.busyAction = 'end-launch';
       try {
         const state = await this.json('stop', {method: 'POST', signal: AbortSignal.timeout(8000),
           headers: {'Content-Type': 'application/json'}, body: JSON.stringify({launch_id: launchId})});
-        if (this.destroyed || this.launchAttempt !== launchId) return;
+        if (this.destroyed || this.launchAttempt !== launchId) return false;
         if (state?.ok !== true || typeof state.active !== 'boolean') throw new Error('Missing Radio stop receipt');
-        this.launchPhase = '';
-        this.launchSong = null;
-        this.launchPlaylist = null;
         this.clearLaunch();
         this.applyState(state);
-        stopped = !state.active;
+        return true;
       } catch (error) {
         console.debug('[Radio] end attempt not confirmed', error);
+        return false;
       } finally {
-        if (!this.destroyed) {
-          this.busy = false;
-          this.busyAction = '';
-          if (stopped) this.focusSeedWhenReady(previousFocus);
-          await this.refresh().catch(error => console.debug('[Radio] refresh deferred', error));
-        }
+        this.busy = false;
       }
     },
-    async start(song, fromPlaylist = false, retry = false) {
-      if (this.busy || (this.launchUncertain && !retry)) return;
+    async start(song, fromPlaylist = false) {
+      if (this.busy || this.destroyed) return;
+      const previousFocus = document.activeElement;
+      const sameSelection = this.recoveryFromPlaylist === fromPlaylist &&
+        (fromPlaylist ? this.recoverySong?.id === song.id : this.recoverySong?.video_id === song.video_id);
+      const retry = this.launchUncertain && sameSelection;
+      if (this.launchUncertain && !retry && !await this.cancelUnconfirmedLaunch()) {
+        if (!this.destroyed) await this.refresh().catch(error => console.debug('[Radio] refresh deferred', error));
+        return;
+      }
       cancelSeedFocus?.();
       const clickedAt = Date.now();
       const serial = ++this.launchSerial;
@@ -699,7 +682,7 @@ function radioHome(initial = {}) {
       }
       this.launchPlaylist = fromPlaylist ? song : null;
       this.launchSong = song;
-      this.launchPhase = '';
+      this.launchUncertain = false;
       this.recoverySong = {...song}; this.recoveryFromPlaylist = fromPlaylist;
       // Preserve the request across reloads so a retry can only use its original launch ID.
       this.rememberLaunch();
@@ -711,14 +694,11 @@ function radioHome(initial = {}) {
         if (this.destroyed || serial !== this.launchSerial) return;
         if (typeof result?.ok !== 'boolean') throw new Error('Missing Radio start receipt');
         if (result.launch_outcome === 'uncertain') {
-          this.launchPhase = 'unknown';
+          this.deferLaunch();
           return;
         }
         if (!result.ok) {
           console.debug('[Radio] launch returned to song choices', result.reason);
-          this.launchPhase = result.reason === 'Connect the YouTube Music extension first.' ? 'disconnected' : 'rejected';
-          this.launchSong = null;
-          this.launchPlaylist = null;
           this.clearLaunch();
           if (result.refresh_seeds) { this.loaded = false; this.loadSeeds(); }
           return;
@@ -727,13 +707,14 @@ function radioHome(initial = {}) {
       } catch (error) {
         if (this.destroyed || serial !== this.launchSerial) return;
         console.debug('[Radio] launch request interrupted', error);
-        this.launchPhase = 'unknown';
+        this.deferLaunch();
         this.$nextTick(() => this.fitSpace());
       } finally {
         if (!this.destroyed && serial === this.launchSerial) {
           this.busy = false;
           this.busyAction = '';
           this.finishLaunch();
+          if (this.showSeeds) this.focusSeedWhenReady(previousFocus);
           await this.refresh().catch(error => console.debug('[Radio] refresh deferred', error));
         }
       }
@@ -841,20 +822,19 @@ function radioHome(initial = {}) {
       }
     },
     async newRadio() {
-      if (this.busy || this.launchUncertain) return;
+      if (this.busy) return;
       this.selectionError = '';
       this.selectionSlot = null;
       ++this.requestSerial;
       this.switchChoice = null; this.selectedSlot = null; this.pendingSong = null; ++this.switchSerial;
       this.busy = true;
       try {
-        const state = await this.json('stop', {method: 'POST'});
+        const state = await this.json('stop', {method: 'POST', signal: AbortSignal.timeout(8000)});
+        if (state?.ok !== true || typeof state.active !== 'boolean') throw new Error('Missing Radio stop receipt');
         if (state.ok === true && state.active === false) {
           this.tuningIntent = null;
           this.saveTuningIntent();
         }
-        this.launchSong = null;
-        this.launchPlaylist = null;
         this.clearLaunch();
         this.applyState(state);
       }

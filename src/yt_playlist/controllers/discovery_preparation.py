@@ -88,7 +88,9 @@ class DiscoveryPreparation:
         self.logger = logger
 
     def scan(self, artist, info, owned, saved, genre, now, per, rng, *, artist_id=None):
-        albums = (info or {}).get('albums') or []
+        albums = (info or {}).get('albums')
+        if albums is None:
+            return
         identities = {row['browse_id']: self.collection.album_id(row['browse_id'])
                       for row in albums if row.get('browse_id') and row['browse_id'] not in saved
                       and (row.get('title') or '').strip()}
@@ -117,7 +119,8 @@ class DiscoveryPreparation:
         genres = self.query.artist_genres(canonical=True)
         limit, per = self.parameter('discovery_artist_limit'), self.parameter('discovery_albums_per_artist')
         rng = random.Random(int(now))
-        due = self.discovery.artists_due_for_scan(now, budget=budget, artist_limit=limit, with_ids=True)
+        due = self.discovery.artists_due_for_scan(now, budget=budget, artist_limit=limit, with_ids=True,
+                                                 require_channel=True)
         for reference in due:
             check_stopping()
             try:
@@ -126,9 +129,10 @@ class DiscoveryPreparation:
                 raise
             except Exception:
                 info = None
-            self.scan(reference['artist'], info, owned, saved, genres.get(self.artists.key(reference['artist_id'])),
-                      now, per, rng, artist_id=reference['artist_id'])
-            self.discovery.mark_scanned(reference['artist_id'], now)
+            artist_id = reference['artist_id']
+            self.scan(reference['artist'], info, owned, saved, genres.get(self.artists.key(artist_id)),
+                      now, per, rng, artist_id=artist_id)
+            self.discovery.mark_scanned(artist_id, now)
         spotify = self.history.spotify_history_stats()
         source = 'spotify_model' if any(spotify.get(key) for key in ('events', 'days', 'artists')) else 'discovery'
         for row in self.new_artists():

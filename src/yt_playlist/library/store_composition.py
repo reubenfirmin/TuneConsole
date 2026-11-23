@@ -170,7 +170,8 @@ def bind(self):
         self.playlist_recipes = PlaylistRecipes(PlaylistRecipesRepo(self), PlaylistFiles(
             collection_recovery.root_for_database(self._db_path, self._evidence_key)), lambda: self._lock)
         self.road_trip = RoadTrips(RoadTripRepo(self),
-            collection_recovery.RecoveryFiles(collection_recovery.root_for_database(self._db_path, self._evidence_key)))
+            collection_recovery.RecoveryFiles(collection_recovery.root_for_database(self._db_path, self._evidence_key)),
+            self.artists)
         from yt_playlist.controllers.recording_keys import RecordingKeys
         from yt_playlist.repos.recording_keys import RecordingKeysRepo
         from yt_playlist.controllers.listening_calendar import ListeningCalendar

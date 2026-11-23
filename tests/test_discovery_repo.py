@@ -2,6 +2,10 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
+import pytest
+
+from tests.conftest import FakeClient
+
 
 def _artist_with(store, iid, name, plays=0, playlists=0, saved=0):
     t = store.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
@@ -114,7 +118,8 @@ def test_run_discovery_accumulates_and_skips_fresh(store, monkeypatch):
     from yt_playlist.rec import discover
     iid = store.accounts.upsert_account("main", None, True)
     for n in ("A", "B"):
-        t = store.tracks.upsert_track(f"v{n}", f"S{n}", n, None, None)
+        t = store.tracks.upsert_track(f"v{n}", f"S{n}", n, None, None,
+                                      credits=[{'name': n, 'id': f'UC_{n}'}])
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"P{n}", "p", 1, "h", 0.0), [t])
     # fake the network: each artist has one unowned album; no new-artist fetch
     artist_info = Mock(side_effect=lambda name, browse_id: {"albums": [
@@ -127,7 +132,7 @@ def test_run_discovery_accumulates_and_skips_fresh(store, monkeypatch):
     discover.run_discovery(ctx, now=1.0e9, budget=10)
     got = {a["browse_id"] for a in store.discovery.get_discovered_albums()}
     assert got == {"alb_A", "alb_B"}                       # both scanned, albums pooled
-    artist_info.assert_has_calls([call('A', None), call('B', None)], any_order=True)
+    artist_info.assert_has_calls([call('A', 'UC_A'), call('B', 'UC_B')], any_order=True)
     assert artist_info.call_count == 2
     artist_query.assert_called_once_with(15, 30)
     assert set(store.discovery.artists_due_for_scan(1.0e9, budget=10)) == set()   # both now fresh
@@ -138,3 +143,40 @@ def test_run_discovery_accumulates_and_skips_fresh(store, monkeypatch):
     discover.run_discovery(ctx, now=1.0e9 + 6 * 86400, budget=10)
     assert len(store.discovery.get_discovered_albums()) == 2          # accumulate, not duplicate
     assert artist_info.call_count == 4
+
+
+@pytest.mark.parametrize(('channel', 'profile', 'expected_album', 'scanned'), [
+    pytest.param(None, {}, 'MPRE_retained', 0, id='missing-channel'),
+    pytest.param('UC_Artist', None, 'MPRE_retained', 1, id='provider-failure'),
+    pytest.param('UC_Artist', {}, 'MPRE_retained', 1, id='missing-album-shelf'),
+    pytest.param('UC_Artist', {'albums': {'results': [{}]}}, 'MPRE_retained', 1, id='incomplete-album'),
+    pytest.param('UC_Artist', {'albums': {'results': []}}, None, 1, id='confirmed-empty'),
+    pytest.param('UC_Artist', {'albums': {'results': [{'browseId': 'MPRE_new', 'title': 'New album'}]}},
+                 'MPRE_new', 1, id='confirmed-replacement'),
+])
+def test_run_discovery_only_rotates_confirmed_discographies(store, channel, profile, expected_album, scanned):
+    from yt_playlist.rec import discover
+
+    ctx = _Ctx(store)
+    now = ctx.now_fn()
+    account = store.accounts.upsert_account('main', None, True)
+    credit = {'name': 'Artist', 'id': channel}
+    track = store.tracks.upsert_track('track', 'Owned track', 'Artist', None, None, credits=[credit])
+    playlist = store.playlists.upsert_playlist(account, 'PL_Artist', 'Owned', 1, 'hash', 0.0)
+    store.playlists.set_playlist_tracks(playlist, [track])
+    artist = store.discovery.artists_due_for_scan(now, with_ids=True)[0]
+    store.discovery.upsert_discovered_album('MPRE_retained', 'Artist', 'Retained album', '2020',
+                                           None, now - 1, artist_id=artist['artist_id'])
+
+    client = FakeClient()
+    client.get_artist = Mock(return_value=profile, side_effect=ConnectionError() if profile is None else None)
+    ctx.client_provider = lambda: {account: client}
+
+    assert discover.run_discovery(ctx, now, budget=1) == {'scanned': scanned}
+    assert [album['browse_id'] for album in store.discovery.get_discovered_albums()] == (
+        [expected_album] if expected_album else [])
+    assert store.discovery.artists_due_for_scan(now) == ([] if scanned else ['Artist'])
+    if channel:
+        client.get_artist.assert_called_once_with(channel)
+    else:
+        client.get_artist.assert_not_called()

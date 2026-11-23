@@ -12,7 +12,7 @@ import pytest
     "counterpart_refresh", "counterpart_confirmed", "counterpart_trimmed", "counterpart_repeat",
     "unrelated_selected", "counterpart_other_playlist", "counterpart_wrong_index", "counterpart_stale_endpoint",
     "removed_current", "missing_row", "missing_row_repeat", "missing_row_wrong_playlist",
-    "malformed_automix", "malformed_counterpart",
+    "malformed_automix", "malformed_counterpart", "playability_identity",
 ])
 def test_radio_native_refresh_and_playlist_view(scenario):
     node = shutil.which("node")
@@ -174,6 +174,31 @@ if (scenario === 'removed_current') {
   assert.equal(result.savedIndex, 1);
   assert.equal(result.refresh, 'requested');
   assert.equal(commands.length, 1);
+} else if (scenario === 'playability_identity') {
+  const status = 'CONTENT_CHECK_REQUIRED';
+  const response = {playabilityStatus: {status}, videoDetails: {videoId: current}};
+  api.getPlayerResponse = () => response;
+  const canRecover = () => observer.recoveryCurrent('PLSESSION', initialVideo);
+  const watchUrl = 'https://music.youtube.com/watch?v=v2&list=PLSESSION';
+  context.location.href = watchUrl;
+  assert.equal(canRecover(), false, 'an already playing track must keep playing');
+  video.paused = true;
+  assert.equal(canRecover(), true);
+  response.videoDetails.videoId = 'v1';
+  assert.equal(canRecover(), false, 'a response naming a different video is stale');
+  response.videoDetails.videoId = current;
+  context.location.href = watchUrl.replace('v2', 'v3');
+  assert.equal(canRecover(), false, 'a newly selected track may still be loading');
+  context.location.href = watchUrl.replace('PLSESSION', 'OTHER');
+  assert.equal(canRecover(), false, 'the same video can play in another playlist');
+  context.location.href = 'https://music.youtube.com/playlist?list=OTHER';
+  assert.equal(canRecover(), true, 'browsing keeps the loaded player and its endpoint');
+  context.location.href = watchUrl;
+  for (const ordinaryStatus of ['OK', undefined, '', {code: status}]) {
+    response.playabilityStatus.status = ordinaryStatus;
+    assert.equal(canRecover(), false, 'an ordinary pause needs no recovery');
+  }
+  video.paused = false;
 } else if (scenario === 'counterpart_refresh') {
   assert.equal(update().refresh, 'requested');
   assert.equal(commands.length, 1);

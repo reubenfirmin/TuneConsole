@@ -7,6 +7,7 @@ from experiments.audio_lab_tools.relax import relax_consensus as models
 from experiments.audio_lab_tools.relax import relax_experiment as experiment
 from experiments.audio_lab_tools.focus.focus_experiment import arrays, check_receipt, load
 from experiments.audio_lab_tools.studies.mapped_vibe_rules import apply, labels
+from experiments.audio_lab_tools.support.external_experiment import digest, save
 
 
 def synthetic():
@@ -20,6 +21,21 @@ def synthetic():
                      'groups': np.repeat(np.arange(18), 2),
                      'ids': np.array([s + ':' + str(i) for i in range(36)])}
     return result
+
+
+def test_moved_emotify_reference_still_requires_the_pinned_bytes(tmp_path, monkeypatch):
+    former = tmp_path / 'src/yt_playlist/rec/data/emotify-vibes.json'
+    current = tmp_path / 'emotify-vibes.json'
+    current.write_text('{"version": 1}')
+    plan = {'inputs': {}, 'code': {}, 'references': {str(former): digest(current)}}
+    save(tmp_path / 'plan.json', plan)
+    monkeypatch.setattr(experiment, 'ROOT', tmp_path)
+    monkeypatch.setattr(experiment.audio_vibe_model, 'DEFAULT_PATH', current)
+
+    assert experiment.validate(tmp_path) == plan
+    current.write_text('{"version": 2}')
+    with pytest.raises(ValueError, match='Referenced artifact changed'):
+        experiment.validate(tmp_path)
 
 
 def test_connected_cross_source_recording_title_and_artist_paths_stay_together():

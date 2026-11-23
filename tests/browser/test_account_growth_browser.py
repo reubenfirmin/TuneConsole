@@ -2,6 +2,7 @@
 from tests.enrichment_support import complete_entries, complete_discovered
 import json
 import re
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
@@ -191,6 +192,48 @@ def test_home_keeps_earlier_tabs_visible_while_checking_later_tabs(
     expect(page.get_by_role('tab', name='Long play')).to_have_attribute('aria-selected', 'true')
     expect(page.get_by_role('heading', name='Your next record')).to_be_visible()
     assert len(destination_requests) == 1
+
+
+@pytest.mark.parametrize('initial_panel', ['album-choices', 'notices'])
+def test_reopening_needs_attention_shows_new_recap(live_app, store, page, request, initial_panel):
+    from tests.test_trends_recap_route import _STORY
+    from yt_playlist.rec.trend_statistics import last_complete_month
+
+    returning_listener(store, 'albums')
+    publish_personal_album(store, now=1, count=2)
+    store.settings.set_setting('last_sync_at', '1')
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.route('https://**', lambda route: route.abort())
+    notice_fragment = '**/?panel=notices&fragment=1'
+    notice_reads = []
+    page.on('request', lambda req: notice_reads.append(req.url)
+            if req.url.endswith('/?panel=notices&fragment=1') else None)
+    page.goto(f'{live_app}/?panel={initial_panel}')
+
+    notices = page.get_by_role('tab', name='Needs attention')
+    albums = page.get_by_role('tab', name='Long play')
+    if initial_panel != 'notices':
+        with page.expect_response(notice_fragment):
+            notices.click()
+    expect(notices).to_have_attribute('aria-selected', 'true')
+    expect(page.locator('[data-dash=notices] [data-loaded="1"]')).to_have_count(1)
+    expect(page.locator('#recap-nudge')).to_have_count(0)
+    albums.click()
+    expect(albums).to_have_attribute('aria-selected', 'true')
+
+    store.rec_proposals.put_proposals('trend_rollups', {'story': {
+        **_STORY, 'month': last_complete_month(1), 'month_name': 'December',
+    }}, now=1)
+    with page.expect_response('**/home/growth?navigation=true') as navigation:
+        page.evaluate("Alpine.$data(document.querySelector('.home-growth')).refresh(false)")
+    assert navigation.value.json()['has_action_notices'] is True
+    assert len(notice_reads) == (initial_panel != 'notices')
+
+    with page.expect_response(notice_fragment) as refreshed:
+        notices.click()
+    assert refreshed.value.ok
+    expect(page.get_by_role('link', name='Play your December')).to_be_visible()
+    page.screenshot(path=Path(request.config.getoption('output')) / f'notices-reopened-{initial_panel}.png')
 
 
 def test_integration_notices_and_highlighted_setup_destinations(live_app, store, page, monkeypatch):

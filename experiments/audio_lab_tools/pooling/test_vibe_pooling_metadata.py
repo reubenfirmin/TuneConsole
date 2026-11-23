@@ -409,11 +409,13 @@ def test_selection_summary_reports_the_loaded_candidate_policy(tmp_path):
     assert not report['complete']
 
 
-def test_product_metadata_model_matches_the_development_recipe_without_patches():
+def test_product_metadata_model_matches_the_development_recipe_for_full_audio():
+    # The pinned recipe fits audio measurements at full weight. The product's
+    # partial-excerpt weighting is covered separately in test_vibe_prediction.py.
     training = [{'recording': i, 'measurement': i, 'artists': [1 + (i - 1) // 4],
         'genre': ('ambient', 'techno')[i % 2], 'album': str(i // 3),
         'source': 'audio_measurement/control' if i % 5 == 0 else 'provider_measurement/control',
-        'support': (1., .4, .8)[i % 3], 'metadata_prior': .3 + .3 * (i % 2),
+        'support': 1. if i % 5 == 0 else (1., .4, .8)[i % 3], 'metadata_prior': .3 + .3 * (i % 2),
         'score': .35 + .3 * (i % 2) + .1 * math.sin(i)} for i in range(1, 49)]
     product = joint.Posterior(joint.fit(training, 'relax'))
     assert product.value['format'] == 4

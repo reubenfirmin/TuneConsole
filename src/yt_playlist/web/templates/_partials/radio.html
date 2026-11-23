@@ -1,6 +1,5 @@
 <div class="radio-home" x-ref="fieldContent" x-data="radioHome({{ radio_bootstrap|default({})|tojson|forceescape }})" x-effect="setVisible(panel === 'radio')"
      :class="{'is-artwork-paused': !artworkRunning}"
-     @radio-choose-another="chooseAnotherSong()"
      @bridge-status.window="syncRecordPlayback($event.detail)"
      @playback-requested.window="previewRecord($event.detail)"
      @playback-settled.window="settleRecord($event.detail)"
@@ -15,7 +14,7 @@
   <div class="radio-seeds" x-ref="seeds" x-show="showSeeds && seeds.length" :aria-busy="busy || loading">
     <template x-for="song in seeds" :key="song.video_id">
       <div class="radio-seed">
-      <button type="button" class="radio-seed-start" :disabled="busy || launchUncertain" @click="start(song)"
+      <button type="button" class="radio-seed-start" :disabled="busy" @click="start(song)"
               :data-choice-opportunity="seedMenu" :data-choice-option="song.video_id"
               :aria-label="'Start radio with ' + song.title + ' by ' + song.artist">
         <span class="radio-seed-art">

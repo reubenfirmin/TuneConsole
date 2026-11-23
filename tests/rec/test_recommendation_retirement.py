@@ -12,6 +12,7 @@ from tests.repos.test_typed_recommendation_publication import plan, publish
 from tests.test_mode_refresh_worker import scheduled
 from yt_playlist.core import file_collection, recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core.migrations.recommendation_chunk_receipts import POOL_LOOKUP_INDEX
 from yt_playlist.rec import choice_evidence, group_roots, rec_worker
 from yt_playlist.rec.worker_queue import Job
 from yt_playlist.repos.group_retention import GroupRetentionRepo
@@ -33,6 +34,10 @@ def test_generation_backlog_cannot_starve_orphan_pools(recommendations, monkeypa
     first = publish(store, plan(store))
     publish(store, plan(store, 'second'))
     abandoned = orphan(store)
+    receipt_lookup = [detail for _, _, _, detail in store.conn.execute(
+        'EXPLAIN QUERY PLAN DELETE FROM recommendation_pools WHERE id=?', (abandoned,))]
+    assert any(POOL_LOOKUP_INDEX in detail for detail in receipt_lookup)
+    assert 'SCAN collection_file_writes' not in receipt_lookup
     # Pass the collector budgets explicitly: function defaults were bound when
     # the module loaded, so replacing CLEANUP_ROWS cannot constrain this turn.
     monkeypatch.setattr(publication, 'cleanup_generations',

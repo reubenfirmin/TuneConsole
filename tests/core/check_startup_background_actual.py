@@ -139,8 +139,6 @@ async def radio_launches(client, ctx, store, bridge, report, *, tuning_and_vibes
         bridge.now_playing_seen_at = time.monotonic()
         vibe = None
         if index == 1:
-            offer = (await client.get('/radio/seeds')).json()
-            source = {'video_id': offer['tracks'][0]['video_id'], 'menu_id': offer['menu_id']}
             vibe = asyncio.create_task(select_vibe('relax'))
             await asyncio.sleep(0)
         sync = asyncio.create_task(asyncio.to_thread(sync_identity, store, sync_account, sync_client, now=time.time()))
@@ -190,22 +188,28 @@ async def radio_launches(client, ctx, store, bridge, report, *, tuning_and_vibes
                   'queue': remote, 'probes': probes, 'vibe_phase_at_start': vibe_phase,
                   'provider_operations': dict(provider.operations)}
         report['radio_launches'].append(launch)
-        session = ctx.radio.session
         if not tuning_and_vibes:
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 state = (await client.get('/radio/status')).json()
-                if len(state['directions']) == 4:
+                directions = state['directions']
+                if len(directions) == 4 and not any(branch['filling'] for branch in directions):
                     break
                 await asyncio.sleep(.1)
-            directions = state['directions']
+            else:
+                raise AssertionError(f'Radio did not fill four directions for {source}')
             remote = [row['videoId'] for row in provider._tracks[state['playlist_id']]]
             launch['queue'] = remote
             assert [track['video_id'] for track in state['tracks']] == remote
             launch['menu_seconds'] = time.monotonic() - before
             launch['groups'] = [branch['cluster_id'] for branch in directions]
             launch['stream_lengths'] = [len(branch['tracks']) for branch in directions]
-            assert len(set(launch['groups'])) == 4, launch
+            groups = set(launch['groups'])
+            local_fallback = groups == {'local'}
+            launch['menu_source'] = 'local' if local_fallback else 'prepared'
+            if not local_fallback:
+                assert len(groups) == 4 and 'local' not in groups and None not in groups, launch
+            assert all(branch['tracks'] for branch in directions), launch
             active = next(branch for branch in directions if branch['active'])
             assert [track['video_id'] for track in active['tracks'][:len(remote) - 1]] == remote[1:]
             assert len(active['tracks']) == 6

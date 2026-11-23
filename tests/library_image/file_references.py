@@ -55,7 +55,7 @@ def description_access_receipts(conn, *, provider_row):
 
 
 def setting_file_references(conn):
-    from yt_playlist.core import collection_owners, model_state, policy_bodies, recommendation_outputs
+    from yt_playlist.core import collection_owners, model_state, policy_bodies, recommendation_outputs, spotify_records
 
     if 'settings' not in tables(conn):
         return
@@ -70,6 +70,10 @@ def setting_file_references(conn):
                                       (*collection_owners.TASTE_CONTROLS.values(), ATTEMPT)):
         if filename is not None:
             yield key, '$.recovery_filename', Path(filename)
+    for prefix in spotify_records.ARCHIVE_PREFIXES.values():
+        for key, _, filename, _, _ in spotify_records.references(conn, prefix):
+            if filename is not None:
+                yield key, '$.recovery_filename', Path(filename)
     for key, filename in conn.execute("SELECT key,value->>'$[0]' FROM settings WHERE key GLOB ?",
                                       (policy_bodies.PATTERN,)):
         yield key, '$[0]', Path(filename)

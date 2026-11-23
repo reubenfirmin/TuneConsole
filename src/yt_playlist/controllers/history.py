@@ -118,9 +118,9 @@ class History:
                         row = latest
                 generated = int(bool(quarantined or context_choice or transient))
                 if row is None:
-                    event = self.repository.append_event(account_id, identity_key, played_at, video_id=video_id,
+                    self.repository.append_event(account_id, identity_key, played_at, video_id=video_id,
                         playlist_ytm_id=playlist_ytm_id, like_status=like_status, is_generated=generated,
-                        subject=subject, recording=recording)
+                        subject=subject, recording=recording, day=day_at(played_at, calendar), source='live')
                     timestamp = played_at
                 else:
                     event, timestamp = row['id'], row['played_at']
@@ -131,7 +131,7 @@ class History:
                                 and row['playlist_ytm_id'] is None else playlist_ytm_id)
                     self.repository.update_event(event, account_id, video_id, playlist, like_status, generated,
                                                  context_choice=corroborated)
-                self.repository.project_event(event, day_at(timestamp, calendar), 'live')
+                    self.repository.project_event(event, day_at(timestamp, calendar), 'live')
             self.calendar.reconcile(account_id, events={(subject, timestamp)})
             new = row is None
             return (new, new or not row['live']) if report_observation else new
@@ -154,11 +154,12 @@ class History:
     def _import_event(self, account, key, subject, recording, video, timestamp, source, calendar):
         row = self.repository.matching_event(account, subject, video, timestamp, EXACT_TOLERANCE_S)
         if row is None:
-            event = self.repository.append_event(account, key, timestamp, video_id=video, subject=subject, recording=recording)
+            event = self.repository.append_event(account, key, timestamp, video_id=video, subject=subject,
+                recording=recording, day=day_at(timestamp, calendar), source=source)
         else:
             event, timestamp = row['id'], row['played_at']
             self.repository.update_event(event, account, video, None, None, None)
-        self.repository.project_event(event, day_at(timestamp, calendar), source)
+            self.repository.project_event(event, day_at(timestamp, calendar), source)
         return event, timestamp, row is None
 
     def import_plays(self, account_id, plays, *, source='takeout', source_timezone=None):
@@ -253,8 +254,11 @@ class History:
     def taste_rating_revision(self):
         return self.repository.taste_rating_revision()
 
-    def next_taste_evidence(self, after):
-        return self.repository.next_taste_evidence(after)
+    def taste_play_extent(self, through):
+        return self.repository.taste_play_extent(through)
+
+    def next_taste_like(self, after):
+        return self.repository.next_taste_like(after)
 
     def record_takeout_import(self, fingerprint, account_id, imported_at, parsed, unparsed_dates):
         return self.repository.record_takeout_import(fingerprint, account_id, imported_at,

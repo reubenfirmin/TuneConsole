@@ -36,7 +36,8 @@ function generationRememberReturn(context, focus = false) {
     const previous = JSON.parse(sessionStorage.getItem(key));
     // A popup may only know the initial selection. Keep a destination already
     // confirmed for that selection by the save response.
-    if (previous?.recovery && !context.recovery &&
+    if ((previous?.recovery || previous?.saved) && !context.recovery && !context.saved &&
+        (!context.launchId || previous.launchId === context.launchId) &&
         generationSelectionKey(previous.id, previous.tracks) === generationSelectionKey(context.id, context.tracks)) {
       context = previous;
     }
@@ -231,25 +232,59 @@ function generationNote(node) {
   return note;
 }
 
+function generationOwnsCard(record) {
+  return record.node.isConnected && (!record.key || generationKey(record.node) === record.key);
+}
+
+function generationReceiptStatus(record) {
+  const {node, context} = record;
+  if (context.recovery) {
+    generationSavedStatus(node, context);
+    return;
+  }
+  const note = generationNote(node);
+  const link = document.createElement('a');
+  link.className = 'btn btn-sm';
+  link.target = '_blank'; link.rel = 'noopener';
+  if (context.saved) {
+    link.href = 'https://music.youtube.com/playlist?list=' + encodeURIComponent(context.saved);
+    link.textContent = 'Open saved mix';
+    const count = context.added;
+    note.replaceChildren(link, `${count} ${count === 1 ? 'song' : 'songs'} saved.`);
+    return;
+  }
+  link.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(context.name);
+  link.textContent = 'Find mix in YouTube Music';
+  note.replaceChildren(link, 'This mix may already be saved.');
+  if (context.launchId) {
+    const check = document.createElement('button');
+    check.type = 'button'; check.className = 'btn-ghost btn-sm';
+    check.disabled = !!record.checkingReceipt;
+    check.textContent = record.checkingReceipt ? 'Checking saved mix…' : 'Check saved mix';
+    check.onclick = () => generationCheckReceipt(record);
+    note.append(check);
+  }
+}
+
 function generationFailure(record) {
   record.uncertain = true;
-  // A card can now show a deliberately different selection. A late failure
-  // still belongs to its original popup, not the newer card or request.
-  if (!record.key || generationKey(record.node) === record.key) {
+  clearTimeout(record.timer);
+  // A late failure belongs to the attempted selection even if the card has changed.
+  if (generationOwnsCard(record)) {
     generationSettled(record.node);
-    if (record.context.recovery) {
-      generationSavedStatus(record.node, record.context);
-    } else {
-      const note = generationNote(record.node);
-      const link = document.createElement('a');
-      link.className = 'btn btn-sm';
-      link.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(record.context.name);
-      link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Find mix in YouTube Music';
-      note.replaceChildren(link, 'This mix may already be saved.');
-    }
+    const focused = record.node.classList.contains('is-focused');
+    if (record.context.launchId) record.context = generationRememberReturn(record.context, focused);
+    generationReceiptStatus(record);
     record.node.querySelectorAll('[hx-post="/home/generate"], .gen-refresh, .gen-rm').forEach(button => {
       button.disabled = true;
     });
+    if (record.context.launchId) {
+      if (record.tab && !record.tab.closed && focused) window.focus();
+      generationCloseWindow(record);
+      if (record.token === record.context.launchId && !record.checkedReceipt &&
+          !record.context.saved && !record.context.recovery) generationCheckReceipt(record);
+      return;
+    }
   }
   try {
     const tab = record.tab;
@@ -260,6 +295,41 @@ function generationFailure(record) {
       tab.postMessage({type: 'generation-failed', token: record.token}, location.origin);
     }
   } catch (_) {}
+}
+
+async function generationCheckReceipt(record) {
+  if (record.checkingReceipt || !generationOwnsCard(record)) return;
+  record.checkedReceipt = record.checkingReceipt = true;
+  generationReceiptStatus(record);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch('/home/generate/reconcile', {method: 'POST', signal: controller.signal,
+      body: new URLSearchParams({launch_id: record.context.launchId})});
+    const receipt = response.ok && await response.json();
+    if (!receipt || !generationOwnsCard(record)) return;
+    if (receipt.saved) Object.assign(record.context, {saved: receipt.saved, added: receipt.added});
+    if (receipt.recovery) Object.assign(record.context, {recovery: receipt.recovery, recoveryTracks: receipt.tracks});
+    generationRememberReturn(record.context);
+  } catch (error) { console.debug('saved mix receipt check deferred', error); }
+  finally {
+    clearTimeout(timer);
+    record.checkingReceipt = false;
+    if (generationOwnsCard(record)) generationReceiptStatus(record);
+  }
+}
+
+function generationCloseWindow(record) {
+  try { if (record.tab && !record.tab.closed) record.tab.close(); } catch (_) {}
+  if (record.popupUrl) URL.revokeObjectURL(record.popupUrl);
+  if (window.__ytTab === record.tab) window.__ytTab = null;
+}
+
+function generationReturnFromLaunch(token) {
+  const record = Array.from(generationWindows.values()).find(item => item.token === token);
+  if (!record?.context.launchId || !generationOwnsCard(record)) return false;
+  generationFailure(record);
+  return true;
 }
 
 function generationSavedStatus(node, context) {
@@ -335,6 +405,7 @@ function genOpenYT(id) {
   let unresolved = false;
   try { unresolved = generationUnresolved(node, key); } catch (_) {}
   const record = {node, key, context: generationContext(node), token: crypto.randomUUID(), sent: unresolved, uncertain: unresolved};
+  if (!unresolved && node.matches('.gen-card')) record.context.launchId = record.token;
   generationWindows.set(id, record);
   if (unresolved) { generationFailure(record); return; }
   try {
@@ -414,6 +485,7 @@ document.addEventListener('htmx:afterRequest', event => {
   if (!record) return;
   if (event.detail.xhr.getResponseHeader('X-Mix-Recovery') === '1') {
     const {recovery, tracks} = JSON.parse(event.detail.xhr.responseText);
+    delete record.context.launchId;
     genComplete(record.token, null, true, true, false, recovery, tracks);
     generationFailure(record);
     // HTMX restores disabled elements after dispatching its lifecycle events.
@@ -454,10 +526,8 @@ function genComplete(token, playlist, error, uncertain = false, redirecting = fa
         }
       } catch (_) {}
     }
-    try { if (record.tab && !record.tab.closed) record.tab.close(); } catch (_) {}
-    if (record.popupUrl) URL.revokeObjectURL(record.popupUrl);
+    generationCloseWindow(record);
     if (generationWindows.get(record.node.id) === record) generationWindows.delete(record.node.id);
-    if (window.__ytTab === record.tab) window.__ytTab = null;
   } else if (!token && !Array.from(generationWindows.values()).some(item => item.tab === window.__ytTab)) {
     // Clusters also uses this receipt with its untokened loading window.
     // An unmatched mix token must never close another selection's popup.

@@ -65,6 +65,8 @@ def build(ctx):
         except Exception:
             ctx.logger.exception('Album playback failed: %s', browse)
             return Response(status_code=503, headers={'HX-Reswap': 'none'})
+        if listening is None or not commands.play_is_current(intent):
+            return Response(status_code=204)
         return Response(status_code=204, headers={'HX-Trigger': json.dumps({'album-play-started': listening})})
 
     @router.get('/album/{browse}/share.txt')

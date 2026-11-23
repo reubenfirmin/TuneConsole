@@ -48,11 +48,18 @@ class YouTubeMusicAccess:
 
     def artist_profile(self, browse_id):
         data = self.get_artist(browse_id)
-        releases = (data.get('albums') or {}).get('results') or []
+        shelf = data.get('albums')
+        releases = shelf.get('results') if isinstance(shelf, dict) else None
+        albums = None
+        if isinstance(releases, list) and all(
+            isinstance(row, dict) and (row.get('title') or '').strip() and (row.get('browseId') or '').strip()
+            for row in releases
+        ):
+            albums = [dict(title=row['title'], year=row.get('year'), browse_id=row['browseId'],
+                           thumbnail=best_thumb(row.get('thumbnails'))) for row in releases]
         return dict(bio=data.get('description'), thumbnail=best_thumb(data.get('thumbnails')),
                     subscribers=data.get('subscribers'), name=data.get('name'), browse_id=browse_id,
-                    albums=[dict(title=row.get('title'), year=row.get('year'), browse_id=row.get('browseId'),
-                                 thumbnail=best_thumb(row.get('thumbnails'))) for row in releases])
+                    albums=albums)
 
     def get_album(self, browse_id):
         return self._provider.get_album(browse_id)

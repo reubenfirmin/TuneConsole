@@ -198,33 +198,32 @@ def test_radio_seed_exposure_requires_positive_visible_area(page, radio_ui, live
 
 @pytest.mark.parametrize('interruption', ['network', 'provider'])
 def test_interrupted_start_retries_same_selection_after_reload(page, radio_ui, interruption):
+    seed = page.locator('.radio-seed-start').first
     with page.expect_request("**/radio/start"):
-        page.locator(".radio-seed-start").first.click()
+        seed.click()
     first = radio_ui.starts[0].request.post_data_json
     if interruption == 'network':
         radio_ui.starts[0].abort("failed")
     else:
         radio_ui.starts[0].fulfill(json={"ok": False, "launch_outcome": "uncertain"})
 
-    recovery = page.get_by_role("status", name="Starting radio")
-    retry = recovery.get_by_role("button", name="Try this selection again")
-    expect(retry).to_be_visible()
+    loader = page.get_by_role('status', name='Starting radio')
+    expect(seed).to_be_visible()
+    expect(loader).to_be_hidden()
     page.reload()
-    check = recovery.get_by_role("button", name="Check playback")
-    with page.expect_response("**/radio/status"):
-        check.click()
-    expect(retry).to_be_visible()
+    expect(seed).to_be_enabled()
+    expect(loader).to_be_hidden()
     assert len(radio_ui.starts) == 1
 
     with page.expect_request("**/radio/start"):
-        retry.click()
+        seed.click()
     assert len(radio_ui.starts) == 2
     second = radio_ui.starts[1].request.post_data_json
     assert {**second, "clicked_at_ms": first["clicked_at_ms"]} == first
     radio_ui.state = {**radio_ui.ready, "launch_id": first["launch_id"]}
     radio_ui.starts[1].fulfill(json={"ok": True, **radio_ui.state})
     expect(page.locator(".radio-session")).to_be_visible()
-    expect(recovery).to_be_hidden()
+    expect(loader).to_be_hidden()
     assert page.evaluate('sessionStorage.getItem("radio-launch")') is None
 
 
@@ -296,63 +295,50 @@ def test_uncertain_launch_can_choose_another_song(page, radio_ui, uncontended_po
         first, second = [page.get_by_role('button', name=f"Start radio with {song['title']} by {song['artist']}")
                          for song in offer['tracks'][:2]]
         first.click()
-        retry = page.get_by_role('button', name='Try this selection again')
-        expect(retry).to_be_visible()
+        loader = page.get_by_role('status', name='Starting radio')
+        expect(first).to_be_visible()
+        expect(loader).to_be_hidden()
         page.reload()
         with page.expect_response('**/radio/start') as response:
-            retry.click()
+            first.click()
         assert response.value.json()['launch_outcome'] == 'uncertain'
-        with page.expect_response('**/radio/status'):
-            page.get_by_role('button', name='Check playback').click()
+        expect(second).to_be_visible()
         launch_id = starts[0]['launch_id']
         assert [request['launch_id'] for request in starts] == [launch_id, launch_id]
         assert len(provider.creations) == 1 and not frames
 
-        choose_another = page.get_by_role('button', name='Choose another song')
-        expect(second).to_be_hidden()
-        with page.expect_request('**/radio/stop'):
-            choose_another.click()
         expected_stops = [{'launch_id': launch_id}]
         if first_stop != 'confirmed':
-            expect(choose_another).to_be_visible()
-            expect(second).to_be_hidden()
+            with page.expect_request('**/radio/stop'):
+                second.click()
+            expect(second).to_be_enabled()
+            expect(loader).to_be_hidden()
             assert page.evaluate('JSON.parse(sessionStorage.getItem("radio-launch")).id') == launch_id
             assert (checkpoints.pending_seeded_launch() is None) == (first_stop == 'lost-response')
             assert len(stops) == 1 and not frames
+            assert len(starts) == 2 and len(provider.creations) == 1
             page.reload()
-            choose_another.click()
             expected_stops.append({'launch_id': launch_id})
-        expect(second).to_be_visible()
-        expect(first).to_be_focused()
-        assert stops == expected_stops and checkpoints.pending_seeded_launch() is None
-        assert page.evaluate('sessionStorage.getItem("radio-launch")') is None
-        assert len(starts) == 2 and len(provider.creations) == 1 and not frames
-
-        page.reload()
         with page.expect_response('**/radio/start') as response:
             second.click()
         assert response.value.json()['ok'] is True
+        assert stops == expected_stops
         assert len(starts) == 3 and starts[-1]['launch_id'] != launch_id
         seed = offer['tracks'][1]['video_id']
         assert len(provider.creations) == 2 and provider.ids == [seed]
         assert len(frames) == 1 and f'v={seed}&list=PLSESSION' in frames[0]['url']
 
 
-def test_choose_another_song_focuses_picker_after_delayed_reveal(page, radio_ui):
+def test_rejected_launch_returns_keyboard_focus_to_picker(page, radio_ui):
     first = page.locator('.radio-seed-start').first
     with page.expect_request('**/radio/start'):
         first.press('Enter')
-    radio_ui.starts[0].abort('failed')
-    choose_another = page.get_by_role('button', name='Choose another song')
-    expect(choose_another).to_be_visible()
     page.evaluate('''() => {
       const grid = document.querySelector('.radio-seeds');
       const reveal = grid._x_doShow;
       grid._x_doShow = () => { window.revealRadioSeeds = reveal; };
     }''')
-
-    with page.expect_response('**/radio/stop'):
-        choose_another.press('Enter')
+    radio_ui.starts[0].fulfill(json={'ok': False, 'reason': 'Connect the YouTube Music extension first.'})
     page.wait_for_function("typeof window.revealRadioSeeds === 'function'")
     page.evaluate('() => Alpine.nextTick()')
     expect(first).to_be_hidden()
@@ -362,9 +348,27 @@ def test_choose_another_song_focuses_picker_after_delayed_reveal(page, radio_ui)
     expect(first).to_be_visible()
     expect(first).to_be_enabled()
     expect(first).to_be_focused()
-    assert radio_ui.stops == ['POST']
+    assert radio_ui.stops == []
     assert len(radio_ui.starts) == 1
     assert page.evaluate('sessionStorage.getItem("radio-launch")') is None
+
+
+def test_unconfirmed_launch_picks_up_late_playback_automatically(page, radio_ui):
+    seed = page.locator('.radio-seed-start').first
+    with page.expect_request('**/radio/start'):
+        seed.click()
+    attempt = radio_ui.starts[0].request.post_data_json['launch_id']
+    radio_ui.starts[0].abort('failed')
+    expect(seed).to_be_enabled()
+    expect(page.locator('.radio-launch')).to_be_hidden()
+    page.screenshot(path='/tmp/tuneconsole-radio-launch-unconfirmed.png')
+
+    radio_ui.state = {**radio_ui.ready, 'launch_id': attempt}
+    expect(page.locator('.radio-session')).to_be_visible()
+    expect(page.locator('.radio-launch')).to_be_hidden()
+    assert page.evaluate('sessionStorage.getItem("radio-launch")') is None
+    assert len(radio_ui.starts) == 1
+    assert radio_ui.stops == []
 
 
 def test_resuming_session_waits_for_history_and_keeps_it_visible_during_refresh(page, radio_ui):

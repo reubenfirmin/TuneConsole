@@ -1,5 +1,7 @@
 """Listening days, exact plays, and retained source evidence."""
+import json
 from contextlib import contextmanager
+
 from yt_playlist.core import catalog_keys, listening, rating_actions, worker_settings
 from yt_playlist.core import listening_views
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
@@ -206,12 +208,14 @@ class HistoryRepo(Repo):
         return dict(row) if row else None
 
     @synchronized
-    def append_event(self, account, key, timestamp, *, subject, recording, video_id=None,
+    def append_event(self, account, key, timestamp, *, subject, recording, day, source, video_id=None,
                      playlist_ytm_id=None, like_status=None, is_generated=None):
         return self.conn.execute('INSERT INTO play_events(account_id,raw_identity_key,'
-            'recording_id,unresolved_subject_key,video_id,played_at,playlist_ytm_id,like_status,is_generated,membership_ref_id) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?)', (account,key,recording,None if recording else subject,video_id,timestamp,
-                playlist_ytm_id,like_status,is_generated,listening.membership_reference(self.conn,account,playlist_ytm_id))).lastrowid
+            'recording_id,unresolved_subject_key,video_id,played_at,playlist_ytm_id,like_status,is_generated,'
+            'membership_ref_id,day,sources) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            (account, key, recording, None if recording else subject, video_id, timestamp,
+             playlist_ytm_id, like_status, is_generated, listening.membership_reference(self.conn, account, playlist_ytm_id),
+             day, json.dumps([] if source is None else [source]))).lastrowid
 
     @synchronized
     def update_event(self, event, account, video, playlist, rating, generated, *, context_choice=False):
@@ -348,11 +352,17 @@ class HistoryRepo(Repo):
         return self.conn.execute(f'SELECT MAX(id) FROM {rating_actions.VIEW}').fetchone()[0]
 
     @snapshot_read
-    def next_taste_evidence(self, after):
+    def taste_play_extent(self, through):
+        total = self.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0]
+        later, next_at = self.conn.execute(
+            'SELECT COUNT(*),MIN(played_at) FROM play_events WHERE played_at>?', (through,)).fetchone()
+        return total, total - later, next_at
+
+    @snapshot_read
+    def next_taste_like(self, after):
         return self.conn.execute(
-            'SELECT MIN(at) FROM (SELECT MIN(played_at) AS at FROM play_event_subjects WHERE played_at>? '
-            f"UNION ALL SELECT MIN(at) FROM {rating_actions.VIEW} WHERE status='LIKE' "
-            "AND source IN ('api','action') AND at>?)", (after, after)).fetchone()[0]
+            f"SELECT MIN(at) FROM {rating_actions.VIEW} WHERE status='LIKE' "
+            "AND source IN ('api','action') AND at>?", (after,)).fetchone()[0]
 
     @synchronized
     def record_takeout_import(self, fingerprint, account_id, imported_at, observed_start, observed_end, unparsed_dates) -> int:

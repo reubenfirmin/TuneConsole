@@ -56,7 +56,8 @@ class DiscoveryCatalog:
             if client is None:
                 return None
             profile = client.artist_profile(browse_id)
-            self.aliases(client, name, profile['albums'])
+            if profile['albums']:
+                self.aliases(client, name, profile['albums'])
             return {**profile, 'name': profile['name'] or name}
         except WorkClosing:
             raise

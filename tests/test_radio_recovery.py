@@ -75,7 +75,7 @@ if (navigation) {
 
 
 @pytest.mark.parametrize('outcome', [
-    'repaired', 'counterpart', 'ended', 'unplayable', 'unplayable_tail', 'unmapped_unplayable',
+    'repaired', 'counterpart', 'ended', 'unplayable', 'unplayable_tail', 'unfamiliar_status', 'unmapped_unplayable',
     'unmapped_ended', 'unmapped_paused', 'paused', 'superseded', 'native_advanced',
 ])
 def test_on_air_continues_from_the_confirmed_queue(poc, monkeypatch, outcome):
@@ -86,6 +86,8 @@ def test_on_air_continues_from_the_confirmed_queue(poc, monkeypatch, outcome):
     bridge = controller.ctx.bridge
     provider, fetches = {}, []
     send = bridge.send_control
+    blocking_status = 'CONTENT_CHECK_REQUIRED' if outcome == 'unfamiliar_status' else 'UNPLAYABLE'
+    blocked_current = outcome in {'unplayable', 'unplayable_tail', 'unfamiliar_status'}
 
     def provider_call(**message):
         result = subprocess.run([node, '-e', _PROVIDER_OBSERVER, json.dumps({'provider': provider, **message})],
@@ -111,9 +113,8 @@ def test_on_air_continues_from_the_confirmed_queue(poc, monkeypatch, outcome):
                 return sent
             provider.clear()
             provider.update(video=video, ids=[] if video == 'v1' else list(remote.ids))
-            if (outcome in {'unplayable', 'unplayable_tail'} and video == 'v2'
-                    or outcome == 'unplayable_tail' and video == 'v3'):
-                provider.update(status='UNPLAYABLE', paused=True, ids=[])
+            if blocked_current and video == 'v2' or outcome == 'unplayable_tail' and video == 'v3':
+                provider.update(status=blocking_status, paused=True, ids=[])
         return sent
 
     async def observe(frame):
@@ -158,9 +159,10 @@ def test_on_air_continues_from_the_confirmed_queue(poc, monkeypatch, outcome):
             tick(2)
         assert [t['video_id'] for t in session.heard] == ['v1', 'v30' if outcome == 'counterpart' else 'v2']
         assert len(frames) == 1
-    elif outcome in {'unplayable', 'unplayable_tail'}:
-        provider.update(video='v2', status='UNPLAYABLE', paused=True)
+    elif blocked_current:
+        provider.update(video='v2', status=blocking_status, paused=True)
         tick(2)
+        assert session.browser['player']['error'] == blocking_status
         tick(4)
         assert frames[-1]['url'].endswith('v=v2&list=PLSESSION'), 'retry the current track first'
         assert len(frames) == 2

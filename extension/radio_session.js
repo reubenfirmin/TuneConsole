@@ -1,7 +1,7 @@
 // MAIN-world companion for saved-playlist Radio Sessions.
 // Ask Music to fetch the saved playlist; never supply playback items ourselves.
 (() => {
-  const VERSION = 12;
+  const VERSION = 13;
   if (window.__tcRadioSession?.version === VERSION) {
     window.__tcPlaylistPoc = window.__tcRadioSession;
     return;
@@ -72,23 +72,28 @@
     let playlist = api?.getPlaylistId?.() || "";
     let ended = !!video?.ended, error = video?.error ? `media error ${video.error.code}` : null;
     try {
-      ended ||= api?.getPlayerState?.() === 0;
+      const state = api?.getPlayerState?.();
+      ended ||= state === 0;
       const response = api?.getPlayerResponse?.();
-      const status = response?.playabilityStatus?.status;
+      const rawStatus = response?.playabilityStatus?.status;
+      const status = typeof rawStatus === "string" ? rawStatus.trim() : "";
       const responseId = response?.videoDetails?.videoId;
-      if (video?.paused !== false && (!responseId || !videoId || responseId === videoId) &&
-          ["ERROR", "UNPLAYABLE", "LOGIN_REQUIRED", "AGE_CHECK_REQUIRED"].includes(status)) error = status;
-      if ((error || ended) && (!videoId || !playlist)) {
-        // An unavailable video can have no loaded player identity. Bind the
-        // failure to the watch endpoint only while that watch page is open.
+      const blocked = status && status !== "OK" && (video ? video.paused : state !== 1);
+      if (blocked || ((error || ended) && (!videoId || !playlist))) {
+        // An unavailable video may have no loaded player identity. Anchor the
+        // response to the current watch endpoint and the URL, or to the
+        // loaded player when browsing away from the watch page.
         const watch = currentEndpoint()?.watchEndpoint;
         const url = new URL(location.href);
-        if (url.pathname === "/watch" && watch?.videoId === url.searchParams.get("v") &&
-            watch.playlistId === url.searchParams.get("list") &&
+        const currentWatch = url.pathname === "/watch"
+          ? watch?.videoId === url.searchParams.get("v") && watch?.playlistId === url.searchParams.get("list")
+          : videoId && playlist;
+        if (currentWatch && watch?.videoId && watch.playlistId &&
             (!videoId || videoId === watch.videoId) && (!playlist || playlist === watch.playlistId) &&
             (!responseId || responseId === watch.videoId)) {
           videoId = watch.videoId;
           playlist = watch.playlistId;
+          if (blocked) error = status;
         }
       }
     } catch (_) {}

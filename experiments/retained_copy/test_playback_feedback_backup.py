@@ -43,7 +43,7 @@ def digest(path):
 def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(source, tmp_path, monkeypatch, compressed):
     store, account = source
     queue = playback_feedback.inbox(store)
-    playback_feedback.capture(store, 'player', account, event(10), 100)
+    interrupted_capture = playback_feedback.capture(store, 'player', account, event(10), 100)
     acknowledge = queue.acknowledge
 
     def interrupted(_capture):
@@ -53,8 +53,8 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
     with pytest.raises(OSError, match='after main receipt commit'):
         playback_feedback.drain(store)
     monkeypatch.setattr(queue, 'acknowledge', acknowledge)
-    playback_feedback.capture(store, 'rating', account, {'video_id': 'song', 'status': 'LIKE'}, 101)
-    playback_feedback.capture(store, 'player', account, event(30), 102)
+    rating_capture = playback_feedback.capture(store, 'rating', account, {'video_id': 'song', 'status': 'LIKE'}, 101)
+    latest_capture = playback_feedback.capture(store, 'player', account, event(30), 102)
     assert queue.pending() == 3
     assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
     encoded = fao.read(queue.path).bytes
@@ -92,9 +92,11 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
             assert not database.with_name(database.name + '.playback-feedback.sqlite3').exists()
             assert playback_feedback.drain(candidate) == 3
             assert playback_feedback.drain(candidate) == 0
-            assert candidate.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 2
+            events = candidate.conn.execute('SELECT kind, position FROM player_events ORDER BY at, id')
+            assert [tuple(row) for row in events] == [('next', 10), ('confirmed_rating', None), ('next', 30)]
             assert candidate.tracks.item_rating(account, 'song')['status'] == 'LIKE'
-            assert candidate.conn.execute('SELECT count(*) FROM playback_feedback_receipts').fetchone()[0] == 3
+            receipts = candidate.conn.execute('SELECT capture_id, kind FROM playback_feedback_receipts')
+            assert dict(receipts) == {interrupted_capture: 'player', rating_capture: 'rating', latest_capture: 'player'}
         finally:
             candidate.conn.close()
 

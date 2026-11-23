@@ -24,8 +24,11 @@ def build(ctx) -> APIRouter:
 
     @router.get("/albums")
     def albums_page(request: Request):
-        view = "playlists" if request.query_params.get("view") == "playlists" else "saved"
-        data = Ctx.collection_commands(ctx).albums(view)
+        if request.query_params.get("view") == "playlists":
+            data = Ctx.collection_commands(ctx).albums("playlists")
+        else:
+            with store.read_view(pinned=True) as reader:
+                data = Ctx.collection_commands(ctx, reader=reader).albums("saved")
         return templates.TemplateResponse(request, "albums.html", data)
 
     @router.get("/artists")

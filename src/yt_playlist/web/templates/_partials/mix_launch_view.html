@@ -114,6 +114,7 @@ function startMixLaunch(mix, token) {
     finished = true;
     clearTimeout(timer);
     loader?.destroy();
+    try { if (window.opener?.generationReturnFromLaunch(token)) return; } catch (_) {}
     try {
       const key = 'tc-generation:' + mix.id + ':' + JSON.stringify(mix.tracks.map(track => track.video_id).sort());
       sessionStorage.setItem(key, token);

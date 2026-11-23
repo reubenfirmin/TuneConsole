@@ -95,6 +95,32 @@ def tv_ui(store, live_app, page, monkeypatch):
     assert not errors
 
 
+@pytest.mark.parametrize('entry', ['direct', 'mix-tapes'])
+def test_tv_settings_is_visible_beside_the_tabs_without_long_play(page, live_app, store, entry):
+    returning_listener(store, 'mixes', 'vibes', now=1)
+    store.settings.set_setting('last_sync_at', '1')
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.route('https://**', lambda route: route.abort())
+    if entry == 'direct':
+        page.goto(live_app + '/?panel=tv#tv')
+    else:
+        page.goto(live_app + '/?panel=directions#directions')
+        expect(page.get_by_role('tab', name='Mix tapes')).to_have_attribute('aria-selected', 'true')
+        page.get_by_role('tab', name='TV', exact=True).click()
+
+    tab = page.get_by_role('tab', name='TV', exact=True)
+    expect(tab).to_have_attribute('aria-selected', 'true')
+    control = page.get_by_role('button', name='Adjust TV parameters')
+    expect(control).to_be_visible()
+    expect(page.locator('link[href*="/album-choices.css"]')).to_have_count(0)
+    assert control.locator('svg').evaluate('icon => getComputedStyle(icon).stroke') != 'none'
+    nav, button = page.get_by_role('tablist', name='Home areas').bounding_box(), control.bounding_box()
+    assert button['x'] >= nav['x'] + nav['width']
+    assert abs((button['y'] + button['height'] / 2) - (nav['y'] + nav['height'] / 2)) < 2
+    control.click()
+    expect(page.get_by_role('dialog', name='TV parameters')).to_be_visible()
+
+
 
 
 

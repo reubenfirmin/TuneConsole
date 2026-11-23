@@ -14,6 +14,8 @@ from time import monotonic
 from typing import Protocol
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core.artist_policy import token
+from yt_playlist.core.road_trip_contract import YOUTUBE_ARTIST_PREFIX, parse_youtube_artist_choice
 from yt_playlist.providers import deezer, genres, lastfm, musicbrainz
 from yt_playlist.integrations.base import IntegrationUnavailable
 from yt_playlist.rec import artist_model
@@ -146,6 +148,12 @@ def track_facts(store, title, artist):
 def artist_genre(store, artist):
     if not artist:
         return None
+    if artist.startswith(YOUTUBE_ARTIST_PREFIX):
+        choice = parse_youtube_artist_choice(artist)
+        identity = store.artists.provider_identity(choice[0]) if choice else None
+        if identity is None:
+            return None
+        artist = token(identity)
     if artist.startswith('@artist:'):
         counts = Counter(row['genre'] for row in store.rec_query.tracks_by_artists([artist]) if row['genre'])
         return counts.most_common(1)[0][0] if counts else None

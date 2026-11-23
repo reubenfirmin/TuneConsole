@@ -881,6 +881,8 @@ CHANGES = (
     Change(226, group_evidence_settings.NAME, group_evidence_settings.install, group_evidence_settings.validate),
     Change(227, legacy_mode_storage.NAME, legacy_mode_storage.install, legacy_mode_storage.validate,
            True, foreign_key_owners=('playlists', 'taste_modes', 'taste_groups')),
+    Change(228, recommendation_chunk_receipts.POOL_LOOKUP_NAME, recommendation_chunk_receipts.install_pool_lookup,
+           recommendation_chunk_receipts.validate_pool_lookup),
 )
 
 

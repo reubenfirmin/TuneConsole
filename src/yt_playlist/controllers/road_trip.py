@@ -7,8 +7,9 @@ from yt_playlist.util.genre_catalog import normalize
 
 
 class RoadTrips:
-    def __init__(self, repository, recovery):
+    def __init__(self, repository, recovery, artists):
         self.repository, self.recovery = repository, recovery
+        self.artists = artists
 
     def list_road_trip_recipes(self):
         return self.repository.list_road_trip_recipes()
@@ -27,6 +28,14 @@ class RoadTrips:
         with self.repository.transaction():
             resolved_artists = []
             for label in artists:
+                if label.startswith(policy.YOUTUBE_ARTIST_PREFIX):
+                    choice = policy.parse_youtube_artist_choice(label)
+                    if choice is None:
+                        raise ValueError('Invalid YouTube artist selection')
+                    channel, name = choice
+                    identity = self.artists.ensure_artist(name, provider='youtube', provider_id=channel)
+                    resolved_artists.append((name, identity))
+                    continue
                 identity = None
                 if label.startswith('@artist:'):
                     try:

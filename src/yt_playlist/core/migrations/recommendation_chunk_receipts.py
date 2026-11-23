@@ -180,3 +180,21 @@ def validate(conn):
     names = {chunks.VIEW, POINT, RANK, 'frozen_recommendation_chunk_receipt_update'}
     if set(definitions(conn, (*names, RETIRED))) != names:
         raise MigrationError('Recommendation chunks were not moved to their file receipts')
+
+
+POOL_LOOKUP_NAME = 'index_recommendation_chunk_pool_foreign_keys'
+POOL_LOOKUP_INDEX = 'ix_recommendation_chunk_receipt_pool_fk'
+POOL_LOOKUP_SQL = (f'CREATE INDEX {POOL_LOOKUP_INDEX} ON {chunks.RECEIPTS}(chunk_pool_id) '
+                   'WHERE chunk_pool_id IS NOT NULL')
+
+
+def install_pool_lookup(conn, _context):
+    # A SQLite foreign-key probe only filters on chunk_pool_id. The old
+    # chunk_id predicate forced a receipt table scan for every deleted pool.
+    conn.execute('DROP INDEX ix_recommendation_chunk_receipt_pool')
+    conn.execute(POOL_LOOKUP_SQL)
+
+
+def validate_pool_lookup(conn):
+    if definitions(conn, (POOL_LOOKUP_INDEX,)).get(POOL_LOOKUP_INDEX) != POOL_LOOKUP_SQL:
+        raise MigrationError('Missing indexed recommendation chunk pool lookup')

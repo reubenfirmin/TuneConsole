@@ -70,7 +70,9 @@ def test_live_provenance_and_replay_windows_are_controller_policy(history, playl
     history.repository.playlist_quarantined.return_value = quarantined
     history.record_play_event(3, 'song', 'video', 100, playlist, 'LIKE', context_choice=context)
     history.repository.append_event.assert_called_once_with(3, 'song', 100, video_id='video',
-        playlist_ytm_id=playlist, like_status='LIKE', is_generated=expected, subject='song', recording=None)
+        playlist_ytm_id=playlist, like_status='LIKE', is_generated=expected, subject='song', recording=None,
+        day='1970-01-01', source='live')
+    history.repository.project_event.assert_not_called()
     history.repository.matching_event.assert_called_once_with(
         3, 'song', 'video', 100, 2.0, verified_playlist=None, selected_at=None)
 
@@ -105,7 +107,8 @@ def test_unknown_provenance_is_never_assigned_to_a_removable_import(history, sou
 def test_compatibility_imports_return_the_requested_measurement(history):
     history.repository.day_count.side_effect = [1, 3, 3, 4]
     assert history.import_plays(3, [('song', 100)]) == 2
-    history.repository.append_event.assert_called_once_with(3, 'song', 100, video_id=None, subject='song', recording=None)
+    history.repository.append_event.assert_called_once_with(3, 'song', 100, video_id=None,
+        subject='song', recording=None, day='1970-01-01', source='takeout')
     assert history.import_play_events(3, [('song', 'video', 100)]) == 1
 
 

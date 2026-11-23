@@ -772,13 +772,16 @@ def test_autocomplete_artists(store):
     c, _ = _app(store, client)
     r = c.get("/road_trip/autocomplete/artists?q=Tame")
     assert r.status_code == 200
-    assert r.json()["results"] == ["Tame Impala"]     # deduped
+    assert r.json()["results"] == [{'key': '@youtube-artist:UC1:Tame Impala', 'name': 'Tame Impala'}]
+    assert store.artists.provider_identity('UC1') is None
 
 
-def test_same_name_passenger_edit_preserves_exact_artist_through_build(store, monkeypatch):
+@pytest.mark.parametrize('selected_known', [True, False], ids=['both-known', 'second-channel-new'])
+def test_same_name_passenger_edit_preserves_exact_artist_through_build(store, monkeypatch, selected_known):
     channels = ['UCLeftArtist', 'UCRightArtist']
-    artist_keys = [f'@artist:{store.artists.ensure_artist("Twins", provider="youtube", provider_id=channel)}'
-                   for channel in channels]
+    left_artist = store.artists.ensure_artist('Twins', provider='youtube', provider_id=channels[0])
+    right_artist = (store.artists.ensure_artist('Twins', provider='youtube', provider_id=channels[1])
+                    if selected_known else None)
 
     class Provider(FakeClient):
         def __init__(self):
@@ -804,19 +807,29 @@ def test_same_name_passenger_edit_preserves_exact_artist_through_build(store, mo
     provider = Provider()
     client, _ = _app(store, provider, monkeypatch)
     suggestions = client.get('/road_trip/autocomplete/artists?q=Twins').json()['results']
-    assert suggestions == [{'key': key, 'name': 'Twins'} for key in artist_keys]
+    assert [(item['name'], item['channel']) for item in suggestions] == [('Twins', channel) for channel in channels]
+    assert suggestions[0]['key'] == f'@artist:{left_artist}'
+    assert store.artists.provider_identity(channels[1]) == right_artist
     fields = {'name': 'Passenger Twins', 'own_pct': 0, 'target_minutes': 15}
-    saved = client.post('/road_trip/recipes', data={**fields, 'artists': json.dumps([artist_keys[1]])})
+    saved = client.post('/road_trip/recipes', data={**fields, 'artists': json.dumps([suggestions[1]['key']])})
     assert saved.status_code == 200
     recipe_id = _editor_recipe_id(saved.text)
+    right_artist = store.artists.provider_identity(channels[1])
+    assert right_artist and right_artist != left_artist
+    selected_key = f'@artist:{right_artist}'
+    reloaded = client.post(f'/road_trip/recipes/{recipe_id}/edit')
+    assert reloaded.status_code == 200 and selected_key in reloaded.text
+    assert store.road_trip.get_road_trip_recipe(recipe_id)['artist_refs'] == {
+        selected_key: {'name': 'Twins', 'browse_id': channels[1]},
+    }
     assert client.post(f'/road_trip/recipes/{recipe_id}/build').status_code == 200
     assert provider.requested == [channels[1]]
     state = store.road_trip.get_road_trip_draft(recipe_id)
     assert state['picks'] == [f'guest-{channels[1]}']
-    assert state['inputs']['artists'] == [artist_keys[1]]
+    assert state['inputs']['artists'] == [selected_key]
 
     updated = client.post('/road_trip/recipes', data={**fields, 'id': recipe_id,
-                          'artists': json.dumps([artist_keys[0]])})
+                          'artists': json.dumps([suggestions[0]['key']])})
     assert updated.status_code == 200
     assert provider.requested == channels[::-1]
     state = store.road_trip.get_road_trip_draft(recipe_id)

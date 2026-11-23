@@ -452,14 +452,23 @@ def test_unsaved_album_shows_full_live_tracks_not_incidental_library_subset(stor
     assert 'aria-label="Save album to library"' in r.text
 
 
-def test_album_play_requires_connection_and_confirms_exact_queue_separately(store):
+def _album_bridge(sent, *, connected=True):
     from types import SimpleNamespace
+
+    def send(message, **kwargs):
+        sent.append(message)
+        return True
+
+    return SimpleNamespace(connected=connected, begin_playback_intent=lambda: len(sent) + 1,
+                           playback_intent_current=lambda _: True, send_control=send)
+
+
+def test_album_play_requires_connection_and_confirms_exact_queue_separately(store):
     c, fc, _iid = _client(store)
     fc._albums['MPREb_x']['audioPlaylistId'] = 'OLAK5uy_album'
     oid = choice_evidence.issue(store, 'albums', [{'id': 'MPREb_x', 'score': 1}], 0, context={})
     sent = []
-    bridge = SimpleNamespace(connected=False, begin_playback_intent=lambda: 1,
-                             send_control=lambda message, **kwargs: sent.append(message))
+    bridge = _album_bridge(sent, connected=False)
     c.app.state.ctx.bridge = bridge
     response = c.post('/album/play', data={'browse_id': 'MPREb_x', 'opportunity_id': oid})
     assert response.status_code == 503 and response.content == b''
@@ -483,15 +492,13 @@ def test_album_play_requires_connection_and_confirms_exact_queue_separately(stor
 
 
 def test_successive_deliberate_album_selections_from_one_menu_are_retained(store):
-    from types import SimpleNamespace
     c, fc, _iid = _client(store)
     fc._albums['MPREb_x']['audioPlaylistId'] = 'OLAK-one'
     fc._albums['MPREb_other'] = {**fc._albums['MPREb_x'], 'audioPlaylistId': 'OLAK-two'}
     oid = choice_evidence.issue(store, 'albums', [
         {'id': 'MPREb_x', 'keys': ['one|artist'], 'score': 1},
         {'id': 'MPREb_other', 'keys': ['two|artist'], 'score': .9}], 0, context={})
-    c.app.state.ctx.bridge = SimpleNamespace(connected=True, begin_playback_intent=lambda: 1,
-                                            send_control=lambda message, **kwargs: None)
+    c.app.state.ctx.bridge = _album_bridge([])
     for browse, action, queue in [('MPREb_x', 'first', 'OLAK-one'),
                                   ('MPREb_other', 'second', 'OLAK-two'),
                                   ('MPREb_x', 'third', 'OLAK-one')]:
@@ -522,7 +529,6 @@ def test_successive_deliberate_album_selections_from_one_menu_are_retained(store
         'browse-to-same-exact'])
 def test_like_credits_the_verified_album_queue_even_when_the_upload_repeats(
         store, first_report, second_report, second_start):
-    from types import SimpleNamespace
     from yt_playlist.core import playback_feedback
     from yt_playlist.library import live_plays, player_events
 
@@ -539,8 +545,7 @@ def test_like_credits_the_verified_album_queue_even_when_the_upload_repeats(
     now = 1
     ctx = client.app.state.ctx
     ctx.now_fn = lambda: now
-    ctx.bridge = SimpleNamespace(connected=True, begin_playback_intent=lambda: len(sent) + 1,
-                                 send_control=lambda message, **kwargs: sent.append(message))
+    ctx.bridge = _album_bridge(sent)
 
     def select(album, queue, action):
         assert client.post('/album/play', data={'browse_id': album, 'opportunity_id': opportunity,

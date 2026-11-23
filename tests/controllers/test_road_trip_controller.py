@@ -5,6 +5,7 @@ from unittest.mock import Mock, create_autospec
 import pytest
 
 from tests.repository_mock_support import no_database
+from yt_playlist.controllers.artists import Artists
 from yt_playlist.controllers.road_trip import RoadTrips
 from yt_playlist.core.collection_files import RecoveryFiles
 from yt_playlist.repos.road_trip import RoadTripRepo
@@ -54,7 +55,7 @@ def trips():
     files.publish_reserved.side_effect = publish
     files.read.side_effect = read
     files.describe.return_value = ('digest', 50)
-    return RoadTrips(repository, files)
+    return RoadTrips(repository, files, create_autospec(Artists, instance=True, spec_set=True))
 
 
 def test_catalog_rekey_preserves_exact_draft_selections_and_compares_the_current_revision(trips):

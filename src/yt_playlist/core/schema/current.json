@@ -1338,6 +1338,10 @@
     [
       227,
       "fold_legacy_mode_payloads_into_groups"
+    ],
+    [
+      228,
+      "index_recommendation_chunk_pool_foreign_keys"
     ]
   ],
   "installed_statements": [
@@ -3981,7 +3985,7 @@
     "CREATE INDEX ix_recommendation_build_expiry ON recommendation_generations(build_expires_at,id) WHERE build_expires_at IS NOT NULL",
     "CREATE INDEX ix_recommendation_candidate_recording ON recommendation_candidates(recording_id,pool_id)",
     "CREATE INDEX ix_recommendation_chunk_receipt_path ON collection_file_writes(chunk_filename) WHERE chunk_id IS NOT NULL",
-    "CREATE INDEX ix_recommendation_chunk_receipt_pool ON collection_file_writes(chunk_pool_id) WHERE chunk_id IS NOT NULL AND chunk_pool_id IS NOT NULL",
+    "CREATE INDEX ix_recommendation_chunk_receipt_pool_fk ON collection_file_writes(chunk_pool_id) WHERE chunk_pool_id IS NOT NULL",
     "CREATE UNIQUE INDEX ix_recommendation_file_identity ON collection_file_writes(json_extract(owner_id,'$[0]')) WHERE kind='recommendation-output'",
     "CREATE INDEX ix_recommendation_generation_group ON recommendation_generations(group_generation_id,id) WHERE group_generation_id IS NOT NULL",
     "CREATE INDEX ix_recommendation_generation_policy ON recommendation_generations(policy_version,id)",

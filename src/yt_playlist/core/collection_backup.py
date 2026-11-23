@@ -1,6 +1,6 @@
 """Collection backup validation over supplied documents and ownership facts."""
 from .collection_files import MAX_BYTES
-from .collection_owners import OWNERS, PREDECESSOR_CLEANUP
+from .collection_owners import OWNERS, PREDECESSOR_CLEANUP, PREDECESSOR_OWNERS
 from .evidence_ledger import canonical
 
 FORMAT = 'collection-recovery-backup-1'
@@ -19,30 +19,34 @@ def chunks(document):
     return document['chunks']
 
 
+def owner_key(table, identity):
+    """Match both archive names for the same library sync attempt."""
+    return ('sync_cursors' if table == 'sync_attempts' else table), identity
+
+
 def add_records(records, chunk):
     if (not isinstance(chunk, dict) or set(chunk) != {'format', 'type', 'records'}
             or chunk['format'] != FORMAT or chunk['type'] != 'chunk'
             or not isinstance(chunk['records'], list) or not 1 <= len(chunk['records']) <= 512):
         raise ValueError('Invalid collection backup chunk')
     for record in chunk['records']:
-        if isinstance(record, dict) and (record.get('table'), record.get('kind'), record.get('id')) == (
-                'sync_attempts', 'library-sync', 1):
-            record = {**record, 'table': 'sync_cursors'}
         if (not isinstance(record, dict) or set(record) != {'table', 'id', 'kind', 'digest', 'bytes', 'relative_filename'}
+                or not isinstance(record['table'], str)
                 or not (record['table'] in OWNERS and record['kind'] == OWNERS[record['table']]
+                        or record['table'] in PREDECESSOR_OWNERS and record['kind'] == PREDECESSOR_OWNERS[record['table']]
                         or (record['table'], record['kind']) == PREDECESSOR_CLEANUP
                         or record['table'] == 'actions' and record['kind'] == 'action-draft')
                 or not isinstance(record['id'], (str, int)) or isinstance(record['id'], bool)
                 or not digest(record['digest']) or type(record['bytes']) is not int
                 or not 0 < record['bytes'] <= MAX_BYTES
                 or record['relative_filename'] != record['digest'][:2] + '/' + record['digest'] + '.json'
-                or (record['table'], record['id']) in records):
+                or owner_key(record['table'], record['id']) in records):
             raise ValueError('Invalid collection backup owner')
-        records[record['table'], record['id']] = record
+        records[owner_key(record['table'], record['id'])] = record
 
 
 def validate_owners(records, retained):
-    actual = {(table, identity): (kind, digest, size) for table, identity, kind, _, digest, size in retained}
+    actual = {owner_key(table, identity): (kind, digest, size) for table, identity, kind, _, digest, size in retained}
     expected = {key: (r['kind'], r['digest'], r['bytes']) for key, r in records.items()}
     if actual != expected:
         raise ValueError('Collection backup does not match database owners')

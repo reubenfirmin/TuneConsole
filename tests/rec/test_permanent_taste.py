@@ -73,6 +73,57 @@ def test_recent_preserves_day_precision_and_removes_the_exact_play_shadow(store)
     assert plays[older].confidence < 1.
 
 
+def test_forward_plays_leave_the_replay_cutoff_in_place(file_backed_store):
+    store = file_backed_store
+    account = store.accounts.upsert_account('listener', None, True)
+    track = _track(store, 'techno', 'Techno song', 'Techno artist', 'techno')
+    other = _track(store, 'encore', 'Encore', 'Techno artist', 'techno')
+    start = 20 * DAY
+    for days in range(1, 6):
+        store.history.record_play_event(account, track, 'techno', start + days * DAY, source_timezone='UTC')
+    store.tracks.record_item_ratings(account, {'techno': 'LIKE'}, source='api', now=start + DAY + 30)
+    previous = _complete(store, start + 3 * DAY, page_size=2)
+    assert previous['weights']['artist:Techno artist'] > 1.
+
+    cutoff = start + 6 * DAY - 600
+    assert permanent_taste.prepare(store, cutoff, page_size=2)
+    for page in range(1, 4):
+        now = start + 6 * DAY + page * 180
+        key, video = (track, 'techno') if page % 2 else (other, 'encore')
+        assert store.history.record_play_event(account, key, video, now)
+        assert permanent_taste.prepare(store, now, page_size=2)
+        if page < 3:
+            assert store.rec_proposals.get_proposals(PERMANENT_WORK)['until'] == cutoff
+            assert store.rec_proposals.get_proposals(PERMANENT_SURFACE) == previous
+            assert store.rec_model.baseline_weights(now) == previous['weights']
+
+    first = store.rec_proposals.get_proposals(PERMANENT_SURFACE)
+    assert first['through'] == cutoff
+    assert first['facets']['artist:Techno artist']['days'] == 5
+    current = _complete(store, now, page_size=2)
+    assert current['through'] == now
+    assert current['facets']['artist:Techno artist']['days'] == 6
+
+
+def test_replay_restarts_if_an_earlier_play_moves_past_the_cutoff(file_backed_store):
+    store = file_backed_store
+    account = store.accounts.upsert_account('listener', None, True)
+    track = _track(store, 'techno', 'Techno song', 'Techno artist', 'techno')
+    start = 20 * DAY
+    for days in range(1, 4):
+        store.history.record_play_event(account, track, 'techno', start + days * DAY, source_timezone='UTC')
+    cutoff = start + 4 * DAY
+    assert permanent_taste.prepare(store, cutoff, page_size=1)
+    assert store.rec_proposals.get_proposals(PERMANENT_WORK)['after'][0] == start + DAY
+
+    # A correction removes a row from the completed portion without changing the total count.
+    store.conn.execute('UPDATE play_events SET played_at=?,day=? WHERE account_id=? AND played_at=?',
+                       (cutoff + DAY, '1970-01-26', account, start + DAY))
+    store.conn.commit()
+    result = _complete(store, cutoff, page_size=1)
+    assert result['facets']['artist:Techno artist']['days'] == 2
+
+
 @pytest.mark.parametrize('page_size', [1, 2, 8])
 @pytest.mark.parametrize('close_before_like', [False, True])
 def test_midnight_like_strengthens_the_playback_episode_across_replay_pages(

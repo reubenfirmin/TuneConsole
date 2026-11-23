@@ -258,6 +258,48 @@ def test_metadata_lost_receipt_reads_back_without_another_write(song_app, page, 
     assert_quiet_action(page)
 
 
+@pytest.mark.parametrize('submitted, saved, commits', [
+    ('house', 'House', True), ('rap', 'Hip Hop', True), ('house', 'Techno', False),
+])
+def test_metadata_lost_genre_receipt_uses_catalog_identity(song_app, page, submitted, saved, commits):
+    store = song_app['store']
+    tid = store.tracks.metadata_for_video('owned-song')['track_id']
+    store.tracks.set_track_genre(tid, 'Techno')
+    posts = []
+
+    def intercept(route):
+        if route.request.method != 'POST':
+            route.continue_()
+            return
+        posts.append(route.request.post_data_json['genre'])
+        if commits:
+            assert route.fetch().ok
+        route.abort()
+
+    page.route('**/songs/metadata*', intercept)
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    row = page.locator('tr.srow[data-vid="owned-song"]')
+    row.get_by_role('button', name='More actions for Owned Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    genre = dialog.get_by_label('Genre', exact=True)
+    expect(genre).to_have_value('Techno')
+    genre.fill(submitted)
+    dialog.get_by_role('button', name='Save changes').click()
+
+    if commits:
+        expect(dialog).to_be_hidden()
+        expect(row.locator('.song-edit-status')).to_have_count(0)
+    else:
+        expect(dialog.get_by_role('status')).to_contain_text('Currently saved genre “Techno”.')
+        expect(genre).to_have_value(submitted)
+        expect(dialog.get_by_role('button', name='Save changes')).to_be_enabled()
+    expect(row.locator('.gtag')).to_have_text(saved)
+    assert store.tracks.metadata_for_video('owned-song')['genre'] == saved
+    assert posts == [submitted]
+    assert_quiet_action(page)
+
+
 @pytest.mark.parametrize('accepted', [True, False])
 def test_metadata_pending_save_cannot_retire_a_replacement_dialog(
         song_app, page, monkeypatch, action_evidence, accepted):

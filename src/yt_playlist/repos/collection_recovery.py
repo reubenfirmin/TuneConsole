@@ -2,18 +2,30 @@
 from contextlib import contextmanager
 
 from yt_playlist.core import model_state, spotify_records
-from yt_playlist.core.collection_owners import OWNERS, OWNER_KEYS, PLAYLIST_DOCUMENTS, PREDECESSOR_CLEANUP, SYNC_ATTEMPT, TASTE_CONTROLS
+from yt_playlist.core.collection_owners import (
+    OWNERS, OWNER_KEYS, PLAYLIST_DOCUMENTS, PREDECESSOR_CLEANUP, PREDECESSOR_OWNERS, SYNC_ATTEMPT, TASTE_CONTROLS,
+)
 from yt_playlist.repos.connection import ConnectionRepo
 
 
 INLINE_WORKFLOWS = ('tv_append_intents', 'experiment_decisions')
-WORKFLOW_PREDECESSORS = {'sync_cursors', *INLINE_WORKFLOWS, *spotify_records.ARCHIVE_PREFIXES}
+PREDECESSOR_TABLES = {'road_trip_recipes': 'road_trip_drafts', 'sync_cursors': 'sync_attempts'}
+WORKFLOW_PREDECESSORS = {'sync_cursors', 'discovered_artists', *PREDECESSOR_OWNERS,
+                         *INLINE_WORKFLOWS, *spotify_records.ARCHIVE_PREFIXES}
 
 
 def references(conn, *, predecessor_model_state=False, predecessor_playlist_documents=False,
                predecessor_playlist_cleanup=False, predecessor_taste_controls=False, predecessor_workflows=frozenset()):
-    owners = (*OWNERS.items(), PREDECESSOR_CLEANUP) if predecessor_playlist_cleanup else OWNERS.items()
+    owners = list(OWNERS.items())
+    if predecessor_playlist_cleanup:
+        owners.append(PREDECESSOR_CLEANUP)
+    separate_action_drafts = 'action_drafts' in predecessor_workflows
+    if separate_action_drafts:
+        owners.append(('action_drafts', PREDECESSOR_OWNERS['action_drafts']))
     for table, kind in owners:
+        predecessor = PREDECESSOR_TABLES.get(table)
+        if predecessor in predecessor_workflows:
+            table = predecessor
         if table == 'sync_cursors' and table not in predecessor_workflows:
             row = conn.execute("""SELECT value->>'recovery_filename',value->>'recovery_digest',
                 value->>'recovery_bytes' FROM settings WHERE key=?""", (SYNC_ATTEMPT,)).fetchone()
@@ -45,8 +57,9 @@ def references(conn, *, predecessor_model_state=False, predecessor_playlist_docu
                 yield table, identity, kind, filename, digest, size
             continue
         key = OWNER_KEYS.get(table, 'id')
-        owner_kind = "CASE WHEN kind='merge_draft' THEN 'action-draft' ELSE 'action' END" if table == 'actions' else '?'
-        parameters = () if table == 'actions' else (kind,)
+        folded_actions = table == 'actions' and not separate_action_drafts
+        owner_kind = "CASE WHEN kind='merge_draft' THEN 'action-draft' ELSE 'action' END" if folded_actions else '?'
+        parameters = () if folded_actions else (kind,)
         for identity, kind, filename, digest, size in conn.execute(
                 f'SELECT {key},{owner_kind},recovery_filename,recovery_digest,recovery_bytes FROM {table} '
                 f'WHERE recovery_filename IS NOT NULL ORDER BY {key}', parameters):
@@ -99,9 +112,10 @@ class CollectionRecovery(ConnectionRepo):
             if not self.conn.in_transaction:
                 raise ValueError('Coordinate relocation requires a restore transaction')
             for (table, identity), filename in files.items():
-                if table not in OWNERS and not (self._predecessor_playlist_cleanup and table == PREDECESSOR_CLEANUP[0]):
+                if (table not in OWNERS and not (table in PREDECESSOR_OWNERS and table in self._predecessor_workflows)
+                        and not (self._predecessor_playlist_cleanup and table == PREDECESSOR_CLEANUP[0])):
                     raise ValueError('Unknown collection recovery owner')
-                if table == 'discovered_artists':
+                if table == 'discovered_artists' and table not in self._predecessor_workflows:
                     self.conn.execute('UPDATE artists SET discovery_recovery_filename=? '
                                       'WHERE id=? AND discovery_candidate=1', (filename, identity))
                 elif table == 'taste_model_state' and not self._predecessor_model_state:

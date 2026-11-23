@@ -177,6 +177,9 @@ class Tracks:
     def metadata_for_video(self, video_id):
         return self.repository.metadata_for_video(video_id)
 
+    def effective_genre_key(self, track_id):
+        return self.repository.effective_genre_key(track_id)
+
     def update_metadata(self, video_id, values, *, observation):
         current = self.repository.metadata_for_video(video_id)
         if current is None:
