@@ -16,6 +16,7 @@ node_modules/
 dist/
 build/
 docs/
+/.codex/
 
 # Local app data (personal DB, backups, logs), e.g. when run with YT_PLAYLIST_HOME set to the repo
 *.db*

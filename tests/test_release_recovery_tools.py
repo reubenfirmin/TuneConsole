@@ -33,7 +33,7 @@ class Runs:
         (directory / "release-provenance.json").write_text(json.dumps({
             "schema": 1, "tag": "v1.2.3", "version": "1.2.3", "revision": "a" * 40,
             "source_run": "123", "repository": self.repository,
-            "sha256": {f"macos-notarization-{arch}.json": "b" * 64 for arch in ("arm64", "x86_64")},
+            "sha256": {f"TuneConsole-macos-{arch}.dmg": "b" * 64 for arch in ("arm64", "x86_64")},
             "architectures": {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                               "container": ["amd64", "arm64"]},
         }))

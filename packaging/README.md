@@ -245,21 +245,25 @@ export SPARKLE_PUBLIC_ED_KEY="<your Sparkle public key>"
 ./smoke.sh
 ```
 
-The local build embeds Python and dependencies and defaults to ad-hoc signing.
-Release downloads use Developer ID signing and Apple notarization.
+The build embeds Python and its dependencies. CI and releases use ad-hoc signing
+until [Developer ID rollout](https://github.com/reubenfirmin/TuneConsole/issues/343).
 `TuneConsole-macos.dmg` is the Apple Silicon download. Intel Macs use
 `TuneConsole-macos-x86_64.dmg`. Open the download, drag TuneConsole to
 **Applications**, eject the disk image, and open TuneConsole from Applications.
-macOS may show its usual confirmation for an app downloaded from the internet.
+Gatekeeper may block the first launch of the ad-hoc build.
 
 The app menu provides **Check for Updates…** and **Quit TuneConsole**. Sparkle
 verifies Ed25519 updates and relaunches after active jobs drain. Each architecture
-has its own appcast. For a manual upgrade from an older ad-hoc build, quit
-TuneConsole and replace `TuneConsole.app` in Applications with the signed copy.
+has its own appcast. For a manual upgrade, quit TuneConsole and replace
+`TuneConsole.app` in Applications with the new copy.
 Keep `~/Library/Application Support/TuneConsole` to retain your library,
 settings and browser pairing.
 
-### Set up Apple signing
+The candidate runners build on Apple Silicon and Intel and Sparkle signs the
+exact DMG for each tagged candidate. Promotion verifies the prepared downloads
+and their appcasts before publishing.
+
+### Prepare credentials for Developer ID rollout
 
 1. On a Mac, sign in with the maintainer’s own Apple Account and enable
    two-factor authentication. [Enroll in the Apple Developer Program](https://developer.apple.com/programs/enroll/).
@@ -288,10 +292,10 @@ settings and browser pairing.
    | `MACOS_CERTIFICATE_PASSWORD` | Secret | Password used when exporting the `.p12` |
    | `MACOS_NOTARY_APPLE_ID` | Secret | Apple Account email for notarization |
    | `MACOS_NOTARY_APP_PASSWORD` | Secret | App-specific password for that account |
-   | `SPARKLE_PUBLIC_ED_KEY` | Variable | Existing Sparkle Ed25519 public key |
-   | `SPARKLE_PRIVATE_ED_KEY` | Secret | Existing Sparkle Ed25519 private key |
 
-For a new setup, generate Sparkle keys once using the pinned Sparkle tools:
+The current build uses `SPARKLE_PUBLIC_ED_KEY` and tagged candidates also use
+`SPARKLE_PRIVATE_ED_KEY`. For a new setup, generate Sparkle keys once using the
+pinned Sparkle tools:
 
 ```sh
 packaging/macos/.sparkle/bin/generate_keys
@@ -301,25 +305,19 @@ packaging/macos/.sparkle/bin/generate_keys -p
 Export the Keychain private key with `generate_keys -x <secure-file>`. Keep
 the Sparkle key stable across releases, including the first Developer ID release.
 
-### Prepare and verify a release
-
-The trusted release-candidate workflow builds on Apple Silicon and Intel runners.
-Each runner uses a temporary keychain, signs the app and its dependencies
-and signs the DMG. It submits the DMG to Apple, requires an Accepted result,
-staples and validates the ticket on the DMG, then verifies Gatekeeper acceptance
-for the image and its embedded app. Sparkle signs the exact stapled DMG.
-Promotion checks the notarization receipts and reuses the prepared downloads.
+For a separate signing rehearsal, `packaging/macos/build-release.sh` uses a
+temporary keychain, signs the app, its dependencies and the DMG, then submits
+the DMG to Apple. It staples and validates the ticket and verifies Gatekeeper
+acceptance for the DMG and its app.
 [Apple distribution packaging](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)
 and [GitHub runner certificate setup](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)
 describe these steps.
 
-The workflow logs the submission ID before waiting up to six minutes for Apple.
-Look in the `macos-notary-logs-*` artifacts for Apple’s inspection log. For a
-rejection, fix the reported files before rebuilding. For a timeout, use
+The signing script logs the submission ID before waiting up to six minutes for
+Apple. For a rejection, fix the files reported by Apple before rebuilding. For
+a timeout, use
 `xcrun notarytool info <submission-id> --keychain-profile <local-profile>` on a
-Mac with the same Apple team configured. Retry a failed candidate job once Apple
-is reachable and any signing issue is resolved. If candidates are complete
-and only publication failed, retry publication using the original Actions run.
+Mac with the same Apple team configured.
 
 For initial verification, use the available Mac to download the DMG through
 a browser and follow the installation steps above with quarantine enabled.
@@ -327,5 +325,4 @@ Record the macOS version and CPU architecture. Confirm that TuneConsole opens
 the browser and stops the local server when quit. Test Sparkle between two
 successive signed releases and confirm the library and browser pairing survive.
 Try the update from an ad-hoc installation as well and record whether manual
-replacement is needed. The runner’s signature checks and PR smoke tests are
-separate from these checks on an installed copy.
+replacement is needed.

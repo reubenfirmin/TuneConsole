@@ -7,11 +7,9 @@ from pathlib import Path
 import tarfile
 
 from promote_release import classify, release_payload_names, validate
-from macos.notarize import ARCHITECTURES as MACOS_ARCHITECTURES, receipt_name
 
 
 REPOSITORY_ARCHIVES = {"flatpak-repo-x86_64.tar", "flatpak-repo-aarch64.tar", "flatpak-repository.tar"}
-MACOS_NOTARIZATION_RECEIPTS = {receipt_name(arch) for arch in MACOS_ARCHITECTURES}
 
 
 def digest(path):
@@ -26,7 +24,6 @@ def create(root, tag, revision, run_id, repository, *, tree=None, original_run=N
     root = Path(root)
     release, _, manifest = validate(root, tag, "ghcr.io/" + repository.lower(), require_repository=False)
     files = dict(manifest["sha256"])
-    files.update({name: digest(root / name) for name in sorted(MACOS_NOTARIZATION_RECEIPTS)})
     for arch in ("x86_64", "aarch64"):
         name = f"flatpak-repo-{arch}.tar"
         with tarfile.open(root / name) as archive:
@@ -58,19 +55,16 @@ def check_identity(provenance, tag, revision, run_id, repository, *, tree=None):
     if provenance.get("architectures") != {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                                           "container": ["amd64", "arm64"]}:
         raise ValueError("Candidate provenance is missing a supported architecture")
-    hashes = provenance.get("sha256")
-    if not isinstance(hashes, dict) or not MACOS_NOTARIZATION_RECEIPTS.issubset(hashes):
-        raise ValueError("Candidate provenance is missing macOS notarization receipts. Prepare signed release assets.")
+    if not isinstance(provenance.get("sha256"), dict):
+        raise ValueError("Candidate provenance contains no payload hashes")
 
 
 def verify(root, tag, revision, run_id, repository, *, tree=None):
     root = Path(root)
     provenance = json.loads((root / "release-provenance.json").read_text())
     check_identity(provenance, tag, revision, run_id, repository, tree=tree)
-    hashes = provenance.get("sha256")
-    if not isinstance(hashes, dict):
-        raise ValueError("Candidate provenance contains no payload hashes")
-    required = release_payload_names(provenance["version"]) | REPOSITORY_ARCHIVES | MACOS_NOTARIZATION_RECEIPTS
+    hashes = provenance["sha256"]
+    required = release_payload_names(provenance["version"]) | REPOSITORY_ARCHIVES
     if missing := required.difference(hashes):
         raise ValueError(f"Candidate provenance is missing payload hashes: {', '.join(sorted(missing))}")
     for name, expected in hashes.items():

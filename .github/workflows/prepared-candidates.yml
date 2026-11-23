@@ -19,14 +19,6 @@ on:
         required: true
       SPARKLE_PRIVATE_ED_KEY:
         required: true
-      MACOS_CERTIFICATE_P12:
-        required: false
-      MACOS_CERTIFICATE_PASSWORD:
-        required: false
-      MACOS_NOTARY_APPLE_ID:
-        required: false
-      MACOS_NOTARY_APP_PASSWORD:
-        required: false
 jobs:
   wheel:
     if: inputs.source-run == ''
@@ -74,10 +66,6 @@ jobs:
     uses: ./.github/workflows/macos.yml
     secrets:
       SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
-      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
-      MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
     with:
       version: ${{ inputs.version }}
       tag: ${{ inputs.tag }}
@@ -194,7 +182,6 @@ jobs:
             candidate/*.flatpak
             candidate/*.dmg
             candidate/appcast-*.xml
-            candidate/macos-notarization-*.json
             candidate/yt_playlist-*.whl
             candidate/container-*.json
             candidate/flatpak-repo-*.tar

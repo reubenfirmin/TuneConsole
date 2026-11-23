@@ -17,7 +17,8 @@ policy = importlib.import_module("release_policy")
 def metadata():
     return {"schema": 1, "tag": "v1.2.3", "version": "1.2.3", "revision": "a" * 40,
             "source_run": "123", "repository": "owner/repo",
-            "sha256": dict.fromkeys(provenance.MACOS_NOTARIZATION_RECEIPTS, "b" * 64),
+            "sha256": dict.fromkeys(provenance.release_payload_names("1.2.3") | provenance.REPOSITORY_ARCHIVES,
+                                    "b" * 64),
             "architectures": {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                               "container": ["amd64", "arm64"]}}
 
@@ -32,23 +33,23 @@ def test_different_revision_version_run_or_repository_cannot_reuse_candidates(fi
         provenance.check_identity(data, "v1.2.3", "a" * 40, "123", "owner/repo")
 
 
-def test_tampered_payload_cannot_pass_handoff(tmp_path):
+@pytest.mark.parametrize("name", ["TuneConsole.flatpak", "TuneConsole-macos-x86_64.dmg"])
+def test_tampered_payload_cannot_pass_handoff(tmp_path, name):
     data = metadata()
-    names = (provenance.release_payload_names(data["version"]) | provenance.REPOSITORY_ARCHIVES
-             | provenance.MACOS_NOTARIZATION_RECEIPTS)
+    names = provenance.release_payload_names(data["version"]) | provenance.REPOSITORY_ARCHIVES
     data["sha256"] = {}
     for name in names:
         payload = tmp_path / name
         payload.write_bytes(b"recorded build bytes")
         data["sha256"][name] = provenance.digest(payload)
-    name = "TuneConsole.flatpak"
-    (tmp_path / name).write_bytes(b"changed after the release build")
     (tmp_path / "release-provenance.json").write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="recorded bytes"):
+    assert provenance.verify(tmp_path, "v1.2.3", "a" * 40, "123", "owner/repo") == data
+    (tmp_path / name).write_bytes(b"modified build bytes")
+    with pytest.raises(ValueError, match=f"recorded bytes: {name}"):
         provenance.verify(tmp_path, "v1.2.3", "a" * 40, "123", "owner/repo")
     del data["sha256"][name]
     (tmp_path / "release-provenance.json").write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="missing payload hashes: TuneConsole.flatpak"):
+    with pytest.raises(ValueError, match=f"missing payload hashes: {name}"):
         provenance.verify(tmp_path, "v1.2.3", "a" * 40, "123", "owner/repo")
 
 
@@ -56,13 +57,6 @@ def test_missing_architecture_cannot_pass_handoff():
     data = metadata()
     data["architectures"]["container"].pop()
     with pytest.raises(ValueError, match="architecture"):
-        provenance.check_identity(data, "v1.2.3", "a" * 40, "123", "owner/repo")
-
-
-def test_candidate_from_before_macos_notarization_cannot_pass_handoff():
-    data = metadata()
-    del data["sha256"]["macos-notarization-arm64.json"]
-    with pytest.raises(ValueError, match="missing macOS notarization receipts"):
         provenance.check_identity(data, "v1.2.3", "a" * 40, "123", "owner/repo")
 
 

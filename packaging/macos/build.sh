@@ -7,7 +7,7 @@
 #   dist/TuneConsole.app
 #   dist/TuneConsole-<version>.dmg   (version comes from the git tag)
 #
-# Local builds use ad-hoc signing unless a Developer ID identity is supplied.
+# Builds use ad-hoc signing unless a Developer ID identity is supplied.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
@@ -45,9 +45,6 @@ fi
 if [[ "${1:-}" == --prepare-only ]]; then exit 0; fi
 : "${SPARKLE_PUBLIC_ED_KEY:?Set SPARKLE_PUBLIC_ED_KEY to the release signing public key}"
 export SPARKLE_PUBLIC_ED_KEY
-if [[ -n "${RELEASE_TAG:-}" ]]; then
-  : "${MACOS_SIGNING_IDENTITY:?A Developer ID Application identity is required for release builds}"
-fi
 # shellcheck disable=SC1091
 . "$UV_PROJECT_ENVIRONMENT/bin/activate"
 

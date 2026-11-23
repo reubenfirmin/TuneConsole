@@ -171,7 +171,11 @@ def test_platform_ci_exercises_release_build_and_packaged_smoke_on_both_architec
                     for entry in job["strategy"]["matrix"]["include"]} == {
                         "arm64": "macos-15", "x86_64": "macos-15-intel"}
             assert 'test "$(uname -m)" = "${{ matrix.arch }}"' in commands
-            assert "packaging/macos/build.sh" in commands
+            build = next(step for step in job["steps"]
+                         if "packaging/macos/build.sh --build-only" in step.get("run", ""))
+            assert "if" not in build
+            assert "build-release.sh" not in commands
+            assert "bin/sign_update" in commands
             assert "packaging/macos/smoke.sh" in commands
         else:
             assert {entry["arch"]: entry["runner"] for entry in job["strategy"]["matrix"]["include"]} == {
@@ -188,6 +192,20 @@ def test_platform_ci_exercises_release_build_and_packaged_smoke_on_both_architec
     assert "permissions" not in workflow("container")["jobs"]["build"]
     assert workflow("prepared-candidates")["jobs"]["provenance"]["runs-on"] == "ubuntu-24.04"
     assert workflow("release")["jobs"]["promote"]["runs-on"] == "ubuntu-24.04"
+
+
+def test_tagged_macos_build_starts_without_an_apple_identity(tmp_path):
+    macos = tmp_path / "packaging/macos"
+    prepared = macos / ".build-venv/bin"
+    prepared.mkdir(parents=True)
+    (prepared / "activate").write_text("printf 'prepared environment loaded\\n'\nexit 0\n")
+    script = macos / "build.sh"
+    script.write_bytes((ROOT / "packaging/macos/build.sh").read_bytes())
+    completed = subprocess.run(["bash", script, "--build-only"], capture_output=True, text=True,
+                               env={"PATH": os.environ["PATH"], "RELEASE_TAG": "v1.2.3",
+                                    "SPARKLE_PUBLIC_ED_KEY": "configured"})
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "prepared environment loaded\n"
 
 
 def test_publisher_rehearsal_is_trusted_isolated_and_cleans_up_after_failure():

@@ -15,7 +15,6 @@ import urllib.request
 import zipfile
 
 from release_policy import classify
-from macos.notarize import ARCHITECTURES as MACOS_ARCHITECTURES, verify_receipt
 from macos.verify_appcast import verify
 
 RECOVERY_ASSET = "channel-recovery.json"
@@ -81,13 +80,9 @@ def validate(directory, tag, image, *, require_repository=True):
         if f"\nVersion: {release.version}\n" not in metadata:
             raise ValueError("Wheel metadata version does not match")
     checksums = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
-    signing_teams = set()
-    for arch in MACOS_ARCHITECTURES:
+    for arch in ("arm64", "x86_64"):
         dmg_name = f"TuneConsole-macos-{arch}.dmg"
-        signing_teams.add(verify_receipt(root, arch, checksums[dmg_name]))
         verify(root / f"appcast-macos-{arch}.xml", root / dmg_name, tag, arch)
-    if len(signing_teams) != 1:
-        raise ValueError("Both macOS downloads must use the same Apple signing team")
     if checksums["TuneConsole-macos.dmg"] != checksums["TuneConsole-macos-arm64.dmg"]:
         raise ValueError("Default macOS download must match the validated ARM64 archive")
     digests = []
