@@ -5,6 +5,7 @@ __pycache__/
 # Local pytest reports and temporary test workspaces.
 .pytest-*.xml
 .pytest-tmp-*/
+/test-results/
 .coverage
 .coverage.*
 htmlcov/
