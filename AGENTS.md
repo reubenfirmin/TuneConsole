@@ -88,6 +88,9 @@ THIS IS NOT AN ENTERPRISE PRODUCT. DO NOT CREATE ENTERPRISE INFRASTRUCTURE. IT I
 
 # Command approvals
 
+- Use the approved `gh api` prefix for GitHub polling. For a known Actions run,
+  use `gh api repos/reubenfirmin/TuneConsole/actions/runs/RUN_ID/jobs`. Use the
+  ticket reader commands above for review queue and ticket contents.
 - Do not use shell redirection. Use the command's output-file option instead;
   ticket reads and listings support `--output PATH`.
 - Do not prefix `uv` commands with environment variable assignments; they defeat

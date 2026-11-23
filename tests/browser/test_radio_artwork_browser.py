@@ -1,5 +1,6 @@
 """The composed starting landscape stays ordered at desktop sizes."""
 from io import BytesIO
+from time import monotonic
 
 import pytest
 from PIL import Image
@@ -14,25 +15,39 @@ def _assert_loaded_record_pixels(page, url, color):
     # This attribute is set by the native SVG load event, not the preloader.
     expect(cover).to_have_attribute('data-loaded', url)
     expect(cover).to_be_visible()
-    box = cover.bounding_box()
-    copies = page.locator('.radio-record-echo').evaluate_all('''nodes => nodes
-      .filter(el => getComputedStyle(el).display !== 'none' && +el.getAttribute('opacity') > .08)
-      .map(el => { const r = el.getBoundingClientRect();
-        return {x: r.x + r.width * .6, y: r.y + r.height / 2, width: r.width}; })
-      .filter(p => p.width > 25 && p.x > 0 && p.x < innerWidth && p.y > 0 && p.y < innerHeight)''')
-    screenshot = Image.open(BytesIO(page.screenshot(
-        path=f'/tmp/tuneconsole-radio-297-pixels-{color}-{page.viewport_size["width"]}.png'))).convert('RGB')
 
-    def painted(x, y):
-        red, green, blue = screenshot.getpixel((round(x), round(y)))
+    def painted(pixel):
+        red, green, blue = pixel
         if color == 'pink':
             return red > green + 10 and blue > green + 10
         return green > red + 10 and green > blue + 10
 
-    assert painted(box['x'] + box['width'] * .7, box['y'] + box['height'] / 2), 'main label is not painted'
-    assert copies and any(painted(p['x'], p['y']) for p in copies), {
-        'message': 'recursive labels are not painted', 'copies': copies,
-        'pixels': [screenshot.getpixel((round(p['x']), round(p['y']))) for p in copies]}
+    # SVG load can precede a painted frame, including during Home's entrance.
+    # Read fresh geometry on every capture because the record echoes keep moving.
+    deadline = monotonic() + 5
+    while True:
+        points = page.evaluate('''url => {
+          const cover = document.querySelector('.radio-record-cover');
+          if (cover?.dataset.loaded !== url) return [];
+          const point = (el, fraction) => {
+            const r = el.getBoundingClientRect();
+            return [Math.round(r.x + r.width * fraction), Math.round(r.y + r.height / 2)];
+          };
+          const echoes = [...document.querySelectorAll('.radio-record-echo')]
+            .filter(el => +el.getAttribute('opacity') > .08 && el.getBoundingClientRect().width > 25);
+          return [point(cover, .7), ...echoes.map(el => point(el, .6))];
+        }''', url)
+        screenshot = Image.open(BytesIO(page.screenshot(scale='css'))).convert('RGB')
+        pixels = [screenshot.getpixel((x, y)) if 0 <= x < screenshot.width and 0 <= y < screenshot.height
+                  else (0, 0, 0) for x, y in points]
+        main_painted = bool(pixels and painted(pixels[0]))
+        echoes_painted = any(painted(pixel) for pixel in pixels[1:])
+        if (main_painted and echoes_painted) or monotonic() >= deadline:
+            break
+
+    screenshot.save(f'/tmp/tuneconsole-radio-297-pixels-{color}-{page.viewport_size["width"]}.png')
+    assert main_painted, ('main label is not painted', points[:1], pixels[:1])
+    assert echoes_painted, ('recursive labels are not painted', points[1:], pixels[1:])
 
 
 @pytest.mark.parametrize('width', [1440])
